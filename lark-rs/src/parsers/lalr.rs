@@ -279,6 +279,13 @@ pub fn build_lalr_table(grammar: &Grammar) -> Result<ParseTable, GrammarError> {
     };
     let analysis = GrammarAnalysis::compute(&aug_grammar);
 
+    // Build a lookup set of terminal names for correct SHIFT vs GOTO classification.
+    // We cannot rely on naming conventions (e.g. anonymous non-terminals use "__anon_"
+    // which clashes with the "__RSQB" naming of literal terminals).
+    let terminal_names: HashSet<&str> = grammar.terminals.iter()
+        .map(|t| t.name.as_str())
+        .collect();
+
     // LR(0) state construction
     let mut builder = LR0Builder::new(&rules);
     let start_states = builder.build(&grammar.start);
@@ -291,9 +298,10 @@ pub fn build_lalr_table(grammar: &Grammar) -> Result<ParseTable, GrammarError> {
 
     // Fill SHIFT and GOTO from transitions
     for ((state_id, sym_name), &next_state) in &transitions {
-        // Determine if it's a terminal (SHIFT) or non-terminal (GOTO)
-        let is_terminal = sym_name.chars().next().map_or(false, |c| c.is_uppercase())
-            || sym_name.starts_with('$') || sym_name.starts_with("__");
+        // Use the grammar's terminal list to determine SHIFT vs GOTO.
+        // Augmented start rules ($root_X) and $END are always terminals.
+        let is_terminal = terminal_names.contains(sym_name.as_str())
+            || sym_name.starts_with('$');
         if is_terminal {
             action[*state_id].insert(sym_name.clone(), Action::Shift(next_state));
         } else {
@@ -423,7 +431,7 @@ impl LalrParser {
                     for _ in 0..len { state_stack.pop(); }
 
                     let tree_name = rule.tree_name().to_string();
-                    let tree = apply_rule_options(tree_name, children, rule);
+                    let child = apply_rule_options(tree_name, children, rule);
                     let top_state = *state_stack.last().unwrap();
                     let next_state = self.table.goto[top_state]
                         .get(&rule.origin.name)
@@ -435,7 +443,10 @@ impl LalrParser {
                             expected: vec![rule.origin.name.clone()],
                         })?;
                     state_stack.push(next_state);
-                    value_stack.push(StackValue::Tree(tree));
+                    value_stack.push(match child {
+                        Child::Tree(t) => StackValue::Tree(t),
+                        Child::Token(t) => StackValue::Token(t),
+                    });
                 }
                 Some(Action::Accept) => {
                     return value_stack.pop().map(|sv| match sv {
@@ -492,14 +503,42 @@ impl LalrParser {
         loop {
             let current_state = *state_stack.last().unwrap();
 
-            // Get next token from contextual lexer if we don't have one
+            // Get next token from contextual lexer if we don't have one.
+            // Ignored terminals (whitespace etc.) are transparently consumed.
             if current_token.is_none() {
-                current_token = Some(if lex_state.is_done() {
-                    Token::new("$END", "").with_position(lex_state.line, lex_state.col, lex_state.pos, lex_state.pos)
-                } else {
-                    lexer.next_token(lex_state.text, lex_state.pos, current_state, lex_state.line, lex_state.col)?
-                        .unwrap_or_else(|| Token::new("$END", "").with_position(lex_state.line, lex_state.col, lex_state.pos, lex_state.pos))
-                });
+                loop {
+                    if lex_state.is_done() {
+                        current_token = Some(Token::new("$END", "").with_position(
+                            lex_state.line, lex_state.col, lex_state.pos, lex_state.pos,
+                        ));
+                        break;
+                    }
+                    match lexer.next_token(lex_state.text, lex_state.pos, current_state, lex_state.line, lex_state.col)? {
+                        Some(tok) => {
+                            if lexer.ignore().contains(&tok.type_) {
+                                // Consume the ignored token and loop to get the next real one
+                                lex_state.advance_by_lines(tok.value.len(), &tok.value);
+                                continue;
+                            }
+                            current_token = Some(tok);
+                            break;
+                        }
+                        None => {
+                            // No token matched at current position; nothing valid here.
+                            let expected: Vec<String> = self.table.action.get(current_state)
+                                .map(|m| m.keys().cloned().collect())
+                                .unwrap_or_default();
+                            let ch: String = lex_state.text[lex_state.pos..].chars().take(1).collect();
+                            return Err(ParseError::UnexpectedToken {
+                                token: ch,
+                                token_type: String::new(),
+                                line: lex_state.line,
+                                col: lex_state.col,
+                                expected,
+                            });
+                        }
+                    }
+                }
             }
             let token = current_token.as_ref().unwrap().clone();
 
@@ -527,7 +566,7 @@ impl LalrParser {
                     for _ in 0..len { state_stack.pop(); }
 
                     let tree_name = rule.tree_name().to_string();
-                    let tree = apply_rule_options(tree_name, children, rule);
+                    let child = apply_rule_options(tree_name, children, rule);
                     let top_state = *state_stack.last().unwrap();
                     let next_state = self.table.goto[top_state]
                         .get(&rule.origin.name)
@@ -539,7 +578,10 @@ impl LalrParser {
                             expected: vec![rule.origin.name.clone()],
                         })?;
                     state_stack.push(next_state);
-                    value_stack.push(StackValue::Tree(tree));
+                    value_stack.push(match child {
+                        Child::Tree(t) => StackValue::Tree(t),
+                        Child::Token(t) => StackValue::Token(t),
+                    });
                     // Don't advance lexer — same token may be consumed next
                 }
                 Some(Action::Accept) => {
@@ -579,7 +621,7 @@ enum StackValue {
     Tree(Tree),
 }
 
-fn apply_rule_options(name: String, mut children: Vec<Child>, rule: &Rule) -> Tree {
+fn apply_rule_options(name: String, mut children: Vec<Child>, rule: &Rule) -> Child {
     // Filter punctuation (unnamed/anonymous terminals) unless keep_all_tokens
     if !rule.options.keep_all_tokens {
         children.retain(|c| match c {
@@ -588,14 +630,40 @@ fn apply_rule_options(name: String, mut children: Vec<Child>, rule: &Rule) -> Tr
         });
     }
 
-    // expand1: if there's exactly one child tree, inline it
-    if rule.options.expand1 && children.len() == 1 {
-        if matches!(&children[0], Child::Tree(_)) {
-            if let Child::Tree(inner) = children.remove(0) {
-                return inner;
-            }
-        }
+    // Inline children of anonymous/transparent rules (those whose name starts
+    // with "__anon_" or is a _private_rule starting with "_").
+    // These are EBNF expansion helpers that should be invisible in the final tree.
+    let children = inline_anonymous_trees(children);
+
+    // expand1: if exactly one child and no alias, return that child directly.
+    // This handles both Tree and Token children — a ?rule matching a single
+    // terminal should yield the token itself, not a tree wrapping it.
+    let has_alias = rule.alias.is_some();
+    if rule.options.expand1 && !has_alias && children.len() == 1 {
+        return children.into_iter().next().unwrap();
     }
 
-    Tree::new(name, children)
+    Child::Tree(Tree::new(name, children))
+}
+
+/// Recursively flatten anonymous rule trees into their parent's child list.
+/// Anonymous rules are those named `__anon_*` (EBNF helpers) or `_name` (transparent rules).
+fn inline_anonymous_trees(children: Vec<Child>) -> Vec<Child> {
+    let mut result = Vec::with_capacity(children.len());
+    for child in children {
+        match child {
+            Child::Tree(ref t) if is_anonymous_rule(&t.data) => {
+                // Inline this node's children (already processed when the node was built)
+                if let Child::Tree(t) = child {
+                    result.extend(t.children);
+                }
+            }
+            other => result.push(other),
+        }
+    }
+    result
+}
+
+fn is_anonymous_rule(name: &str) -> bool {
+    name.starts_with("__anon_")
 }

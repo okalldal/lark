@@ -182,6 +182,8 @@ impl ContextualLexer {
         Ok(ContextualLexer { state_lexers, always_accept, ignore: conf.ignore.clone() })
     }
 
+    pub fn ignore(&self) -> &[String] { &self.ignore }
+
     /// Lex the next token at `pos` given the current parser state.
     pub fn next_token(
         &self,
@@ -262,10 +264,20 @@ fn build_combined_regex(
     terminals: &[TerminalDef],
     _global_flags: u32,
 ) -> Result<(Regex, Vec<String>), crate::error::GrammarError> {
+    // Sort: higher priority first, then longer pattern string first, then name ascending.
+    // This mirrors Python Lark's terminal ordering so longer/more-specific patterns win.
+    let mut sorted: Vec<&TerminalDef> = terminals.iter().collect();
+    sorted.sort_by(|a, b| {
+        let pa = a.pattern.as_regex_str().len();
+        let pb = b.pattern.as_regex_str().len();
+        b.priority.cmp(&a.priority)
+            .then(pb.cmp(&pa))
+            .then(a.name.cmp(&b.name))
+    });
+
     let mut parts = Vec::new();
     let mut names = Vec::new();
-    for term in terminals {
-        // Sanitize the name so it is valid as a regex group name
+    for term in sorted {
         let safe_name = term.name.replace('$', "DOLLAR").replace('-', "_");
         parts.push(format!("(?P<{}>{})", safe_name, term.pattern.as_regex_str()));
         names.push(term.name.clone());
@@ -282,9 +294,19 @@ fn build_state_lexer(
     terminals: &[&TerminalDef],
     _global_flags: u32,
 ) -> Result<StateLexer, crate::error::GrammarError> {
+    // Same sort order as build_combined_regex.
+    let mut sorted: Vec<&&TerminalDef> = terminals.iter().collect();
+    sorted.sort_by(|a, b| {
+        let pa = a.pattern.as_regex_str().len();
+        let pb = b.pattern.as_regex_str().len();
+        b.priority.cmp(&a.priority)
+            .then(pb.cmp(&pa))
+            .then(a.name.cmp(&b.name))
+    });
+
     let mut parts = Vec::new();
     let mut names = Vec::new();
-    for term in terminals {
+    for term in sorted {
         let safe_name = term.name.replace('$', "DOLLAR").replace('-', "_");
         parts.push(format!("(?P<{}>{})", safe_name, term.pattern.as_regex_str()));
         names.push(term.name.clone());
@@ -318,6 +340,14 @@ impl<'a> LexerState<'a> {
 
     pub fn advance_by(&mut self, n: usize) {
         for ch in self.text[self.pos..self.pos + n].chars() {
+            if ch == '\n' { self.line += 1; self.col = 1; } else { self.col += 1; }
+        }
+        self.pos += n;
+    }
+
+    /// Advance by `n` bytes, using `value` to track line/col correctly.
+    pub fn advance_by_lines(&mut self, n: usize, value: &str) {
+        for ch in value.chars() {
             if ch == '\n' { self.line += 1; self.col = 1; } else { self.col += 1; }
         }
         self.pos += n;

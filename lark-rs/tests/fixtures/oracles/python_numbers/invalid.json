@@ -1,0 +1,37 @@
+[
+  {
+    "input": "0x",
+    "should_pass": false,
+    "ok": false,
+    "tree": null,
+    "error": "No terminal matches 'x' in the current parser context, at line 1 col 2\n\n0x\n ^\nExpected one of: \n\t* BIN\n\t* FLOAT\n\t* HEX\n\t* IMAG\n\t* INT\n\t* OCT\n\nPrevious tokens: Token('INT', '0')\n"
+  },
+  {
+    "input": "0o9",
+    "should_pass": false,
+    "ok": false,
+    "tree": null,
+    "error": "No terminal matches 'o' in the current parser context, at line 1 col 2\n\n0o9\n ^\nExpected one of: \n\t* BIN\n\t* FLOAT\n\t* HEX\n\t* IMAG\n\t* INT\n\t* OCT\n\nPrevious tokens: Token('INT', '0')\n"
+  },
+  {
+    "input": "0b2",
+    "should_pass": false,
+    "ok": false,
+    "tree": null,
+    "error": "No terminal matches 'b' in the current parser context, at line 1 col 2\n\n0b2\n ^\nExpected one of: \n\t* BIN\n\t* FLOAT\n\t* HEX\n\t* IMAG\n\t* INT\n\t* OCT\n\nPrevious tokens: Token('INT', '0')\n"
+  },
+  {
+    "input": "._4",
+    "should_pass": false,
+    "ok": false,
+    "tree": null,
+    "error": "No terminal matches '.' in the current parser context, at line 1 col 1\n\n._4\n^\nExpected one of: \n\t* BIN\n\t* FLOAT\n\t* HEX\n\t* IMAG\n\t* INT\n\t* OCT\n"
+  },
+  {
+    "input": "3e",
+    "should_pass": false,
+    "ok": false,
+    "tree": null,
+    "error": "No terminal matches 'e' in the current parser context, at line 1 col 2\n\n3e\n ^\nExpected one of: \n\t* BIN\n\t* FLOAT\n\t* HEX\n\t* IMAG\n\t* INT\n\t* OCT\n\nPrevious tokens: Token('INT', '3')\n"
+  }
+]

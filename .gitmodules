@@ -1,3 +1,6 @@
 [submodule "tests/test_nearley/nearley"]
 	path = tests/test_nearley/nearley
 	url = https://github.com/Hardmath123/nearley
+[submodule "lark-rs/tests/corpora/JSONTestSuite"]
+	path = lark-rs/tests/corpora/JSONTestSuite
+	url = https://github.com/nst/JSONTestSuite

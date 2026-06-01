@@ -1,0 +1,261 @@
+[
+  {
+    "input": "1 + 2",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "add",
+      "children": [
+        {
+          "type": "token",
+          "token_type": "NUMBER",
+          "value": "1"
+        },
+        {
+          "type": "token",
+          "token_type": "NUMBER",
+          "value": "2"
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "1 + 2 * 3",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "add",
+      "children": [
+        {
+          "type": "token",
+          "token_type": "NUMBER",
+          "value": "1"
+        },
+        {
+          "type": "tree",
+          "data": "mul",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "2"
+            },
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "3"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "(1 + 2) * 3",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "mul",
+      "children": [
+        {
+          "type": "tree",
+          "data": "add",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "1"
+            },
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "2"
+            }
+          ]
+        },
+        {
+          "type": "token",
+          "token_type": "NUMBER",
+          "value": "3"
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "-1",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "neg",
+      "children": [
+        {
+          "type": "token",
+          "token_type": "NUMBER",
+          "value": "1"
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "--1",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "neg",
+      "children": [
+        {
+          "type": "tree",
+          "data": "neg",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "1"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "a + b",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "add",
+      "children": [
+        {
+          "type": "token",
+          "token_type": "NAME",
+          "value": "a"
+        },
+        {
+          "type": "token",
+          "token_type": "NAME",
+          "value": "b"
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "a * b + c * d",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "add",
+      "children": [
+        {
+          "type": "tree",
+          "data": "mul",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NAME",
+              "value": "a"
+            },
+            {
+              "type": "token",
+              "token_type": "NAME",
+              "value": "b"
+            }
+          ]
+        },
+        {
+          "type": "tree",
+          "data": "mul",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NAME",
+              "value": "c"
+            },
+            {
+              "type": "token",
+              "token_type": "NAME",
+              "value": "d"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "1 + 2 + 3 + 4",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "add",
+      "children": [
+        {
+          "type": "tree",
+          "data": "add",
+          "children": [
+            {
+              "type": "tree",
+              "data": "add",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NUMBER",
+                  "value": "1"
+                },
+                {
+                  "type": "token",
+                  "token_type": "NUMBER",
+                  "value": "2"
+                }
+              ]
+            },
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "3"
+            }
+          ]
+        },
+        {
+          "type": "token",
+          "token_type": "NUMBER",
+          "value": "4"
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "",
+    "should_pass": false,
+    "ok": false,
+    "tree": null,
+    "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* LPAR\n\t* MINUS\n\t* NAME\n\t* NUMBER\n\t* PLUS\n"
+  },
+  {
+    "input": "1 +",
+    "should_pass": false,
+    "ok": false,
+    "tree": null,
+    "error": "Unexpected token Token('$END', '') at line 1, column 3.\nExpected one of: \n\t* LPAR\n\t* MINUS\n\t* NAME\n\t* NUMBER\n\t* PLUS\n"
+  },
+  {
+    "input": "( 1 + 2",
+    "should_pass": false,
+    "ok": false,
+    "tree": null,
+    "error": "Unexpected token Token('$END', '') at line 1, column 7.\nExpected one of: \n\t* MINUS\n\t* PLUS\n\t* RPAR\n"
+  }
+]

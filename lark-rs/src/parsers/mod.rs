@@ -64,7 +64,8 @@ pub fn build_frontend(
                 }
                 LexerType::Contextual | LexerType::Auto => {
                     let state_terminals = parser.state_terminals();
-                    let lexer = ContextualLexer::new(&lexer_conf, &state_terminals, vec![])?;
+                    let always_accept = grammar.ignore.clone();
+                    let lexer = ContextualLexer::new(&lexer_conf, &state_terminals, always_accept)?;
                     FrontendKind::LalrContextual { parser, lexer }
                 }
                 _ => {

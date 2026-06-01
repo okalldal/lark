@@ -1,0 +1,22 @@
+// Tests the contextual lexer's ability to distinguish keywords from identifiers.
+// "if", "else", "while" are reserved but "iffy" or "elsewhere" are identifiers.
+
+start : stmt+
+
+?stmt  : if_stmt
+       | while_stmt
+       | assign_stmt
+
+if_stmt     : "if" expr "then" stmt ("else" stmt)?
+while_stmt  : "while" expr "do" stmt
+assign_stmt : NAME "=" expr ";"
+
+?expr  : NAME
+       | NUMBER
+       | expr "+" expr -> add
+       | "(" expr ")"
+
+%import common.CNAME -> NAME
+%import common.INT   -> NUMBER
+%import common.WS
+%ignore WS

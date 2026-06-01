@@ -568,10 +568,12 @@ impl<'a> GrammarParser<'a> {
     }
 
     fn consume_newline(&mut self) -> Result<(), GrammarError> {
-        match self.lexer.peek_tok()? {
-            Some(Tok::Newline) | None => { self.lexer.next_tok()?; Ok(()) }
-            Some(_) => Err(self.err("Expected newline")),
+        // Consume a newline if present; it may have already been consumed by
+        // parse_expansions() when handling multi-line alternatives.
+        if let Some(Tok::Newline) = self.lexer.peek_tok()? {
+            self.lexer.next_tok()?;
         }
+        Ok(())
     }
 
     fn parse_rule(&mut self) -> Result<RawRule, GrammarError> {
@@ -669,6 +671,25 @@ impl<'a> GrammarParser<'a> {
                         self.lexer.next_tok()?;
                     }
                     alts.push(self.parse_alias()?);
+                }
+                Some(Tok::Newline) => {
+                    // Continuation: newline followed by | on the next line.
+                    // Consume the newline speculatively; if the next token is
+                    // not Or, break and leave the cursor after the newline
+                    // (consume_newline in the caller becomes a no-op).
+                    self.lexer.next_tok()?;
+                    if let Some(Tok::Or) = self.lexer.peek_tok()? {
+                        self.lexer.next_tok()?; // consume |
+                        // Allow another newline immediately after |
+                        if let Some(Tok::Newline) = self.lexer.peek_tok()? {
+                            self.lexer.next_tok()?;
+                        }
+                        alts.push(self.parse_alias()?);
+                    } else {
+                        // No continuation — the newline is already consumed;
+                        // caller's consume_newline() is now optional.
+                        break;
+                    }
                 }
                 _ => break,
             }
@@ -1167,7 +1188,8 @@ impl GrammarCompiler {
 
     fn compile_term(&mut self, raw: RawTerm) -> Result<(), GrammarError> {
         // A terminal's expansion must resolve to a single pattern (or alternative of patterns).
-        // We concatenate alternatives with |.
+        // Sort alternatives longest-first to mirror Python Lark's ordering so that
+        // more-specific patterns (e.g. decimal+exponent) beat their prefixes.
         let mut patterns = Vec::new();
         for alt in raw.expansions {
             let pat = self.expansion_to_pattern(&alt.expansion)?;
@@ -1176,6 +1198,7 @@ impl GrammarCompiler {
         let combined = if patterns.len() == 1 {
             patterns.remove(0)
         } else {
+            patterns.sort_by(|a, b| b.len().cmp(&a.len()));
             patterns.into_iter().map(|p| format!("(?:{})", p)).collect::<Vec<_>>().join("|")
         };
         let pat = Pattern::Re(PatternRe::new(&combined, 0)?);
@@ -1247,6 +1270,16 @@ impl GrammarCompiler {
             Expr::Maybe(alts) => {
                 let inner_pat = self.expansion_to_pattern(&alts[0].expansion)?;
                 Ok(Pattern::Re(PatternRe::new(&format!("(?:{})?", inner_pat.as_regex_str()), 0)?))
+            }
+            // Terminal reference in %ignore — look up the terminal's pattern
+            Expr::Value(Value::Terminal(name)) => {
+                if let Some(td) = self.terminals.iter().find(|t| &t.name == name) {
+                    Ok(td.pattern.clone())
+                } else if let Some(&(_, pat_str)) = COMMON_TERMINALS.iter().find(|(n, _)| *n == name.as_str()) {
+                    Ok(Pattern::Re(PatternRe::new(pat_str, 0)?))
+                } else {
+                    Err(GrammarError::Other { msg: format!("Unknown terminal in ignore: {name}") })
+                }
             }
             _ => Err(GrammarError::Other { msg: format!("Cannot convert {:?} to pattern", expr) }),
         }
@@ -1328,23 +1361,27 @@ impl GrammarCompiler {
         //
         // Two forms:
         //   %import common.WORD              → path=["common","WORD"], no name list
+        //   %import common.WS -> _WS         → path=["common","WS"], alias=Some("_WS")
         //   %import common (WORD, INT, ...)  → path=["common"], names=[...]
-        let names_to_import: Vec<String> = if let Some(names) = spec.names {
-            names
+        let names_to_import: Vec<(String, Option<String>)> = if let Some(names) = spec.names {
+            // Name list form: no per-name aliases
+            names.into_iter().map(|n| (n, None)).collect()
         } else if spec.path.len() > 1 {
-            // Last path element is the symbol name; rest is the module path.
-            vec![spec.path.last().cloned().unwrap_or_default()]
+            // Single import: last path element is the symbol name; alias may override it.
+            let original = spec.path.last().cloned().unwrap_or_default();
+            vec![(original, spec.alias)]
         } else {
             return Ok(()); // nothing to import
         };
 
         let is_common = spec.path.first().map(String::as_str) == Some("common");
         if is_common {
-            for name in &names_to_import {
+            for (name, alias) in &names_to_import {
                 if let Some(td) = COMMON_TERMINALS.iter().find(|(n, _)| *n == name.as_str()) {
+                    let registered_name = alias.as_deref().unwrap_or(name.as_str());
                     let pat = Pattern::Re(PatternRe::new(td.1, 0)?);
-                    if !self.terminals.iter().any(|t| &t.name == name) {
-                        self.terminals.push(TerminalDef::new(name, pat, 0));
+                    if !self.terminals.iter().any(|t| t.name == registered_name) {
+                        self.terminals.push(TerminalDef::new(registered_name, pat, 0));
                     }
                 }
                 // Rules from common (e.g., %import common.list) are silently skipped for now.
@@ -1425,7 +1462,7 @@ static COMMON_TERMINALS: &[(&str, &str)] = &[
     ("FLOAT",           r"(?i)(\d+e[+-]?\d+|\d+\.\d*e[+-]?\d+|\d*\.\d+e[+-]?\d+|\d+\.\d*|\d*\.\d+)"),
     ("SIGNED_FLOAT",    r"[+-]?(\d+e[+-]?\d+|\d+\.\d*e[+-]?\d+|\d*\.\d+e[+-]?\d+|\d+\.\d*|\d*\.\d+)"),
     ("NUMBER",          r"(\d+\.?\d*|\.\d+)([Ee][+-]?\d+)?"),
-    ("SIGNED_NUMBER",   r"[+-]?(\d+\.?\d*|\.\d+)([Ee][+-]?\d+)?"),
+    ("SIGNED_NUMBER",   r"[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([Ee][+-]?[0-9]+)?"),
     ("LETTER",          r"[a-zA-Z]"),
     ("WORD",            r"[a-zA-Z]+"),
     ("CNAME",           r"[_a-zA-Z][_a-zA-Z0-9]*"),
@@ -1435,8 +1472,8 @@ static COMMON_TERMINALS: &[(&str, &str)] = &[
     ("SH_COMMENT",      r"#[^\n]*"),
     ("CPP_COMMENT",     r"//[^\n]*"),
     ("C_COMMENT",       r"/\*.*?\*/"),
-    ("STRING",          r#""(\\"|\\\\|[^"\n])*?""#),
-    ("ESCAPED_STRING",  r#""(\\\\|\\"|[^"\n])*""#),
+    ("STRING",          r#""([^"\\\n\r]|\\.)*?""#),
+    ("ESCAPED_STRING",  r#""([^"\\\n\r]|\\.)*""#),
     ("LCASE_LETTER",    r"[a-z]"),
     ("UCASE_LETTER",    r"[A-Z]"),
 ];

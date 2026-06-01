@@ -1,0 +1,589 @@
+[
+  {
+    "input": "0",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "INT",
+              "value": "0"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "1",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "INT",
+              "value": "1"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "42",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "INT",
+              "value": "42"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "1000000",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "INT",
+              "value": "1000000"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "0x0",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "HEX",
+              "value": "0x0"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "0xDEADBEEF",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "HEX",
+              "value": "0xDEADBEEF"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "0xdeadbeef",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "HEX",
+              "value": "0xdeadbeef"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "0XABCDEF",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "HEX",
+              "value": "0XABCDEF"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "0X0",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "HEX",
+              "value": "0X0"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "0o0",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "OCT",
+              "value": "0o0"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "0o777",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "OCT",
+              "value": "0o777"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "0O123",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "OCT",
+              "value": "0O123"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "0b0",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "BIN",
+              "value": "0b0"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "0b101010",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "BIN",
+              "value": "0b101010"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "0B1111",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "BIN",
+              "value": "0B1111"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "3.14",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "FLOAT",
+              "value": "3.14"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "3.",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "FLOAT",
+              "value": "3."
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": ".14",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "FLOAT",
+              "value": ".14"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "3.14e10",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "FLOAT",
+              "value": "3.14e10"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "3.14e+10",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "FLOAT",
+              "value": "3.14e+10"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "3.14e-10",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "FLOAT",
+              "value": "3.14e-10"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "3j",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "IMAG",
+              "value": "3j"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "3.14j",
+    "should_pass": true,
+    "ok": false,
+    "tree": null,
+    "error": "No terminal matches 'j' in the current parser context, at line 1 col 5\n\n3.14j\n    ^\nExpected one of: \n\t* BIN\n\t* FLOAT\n\t* HEX\n\t* IMAG\n\t* INT\n\t* OCT\n\nPrevious tokens: Token('FLOAT', '3.14')\n"
+  },
+  {
+    "input": ".5j",
+    "should_pass": true,
+    "ok": false,
+    "tree": null,
+    "error": "No terminal matches 'j' in the current parser context, at line 1 col 3\n\n.5j\n  ^\nExpected one of: \n\t* BIN\n\t* FLOAT\n\t* HEX\n\t* IMAG\n\t* INT\n\t* OCT\n\nPrevious tokens: Token('FLOAT', '.5')\n"
+  },
+  {
+    "input": "1_000_000",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "INT",
+              "value": "1_000_000"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "1_0",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "INT",
+              "value": "1_0"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "0x_1A",
+    "should_pass": true,
+    "ok": false,
+    "tree": null,
+    "error": "No terminal matches 'x' in the current parser context, at line 1 col 2\n\n0x_1A\n ^\nExpected one of: \n\t* BIN\n\t* FLOAT\n\t* HEX\n\t* IMAG\n\t* INT\n\t* OCT\n\nPrevious tokens: Token('INT', '0')\n"
+  },
+  {
+    "input": "0b_1010",
+    "should_pass": true,
+    "ok": false,
+    "tree": null,
+    "error": "No terminal matches 'b' in the current parser context, at line 1 col 2\n\n0b_1010\n ^\nExpected one of: \n\t* BIN\n\t* FLOAT\n\t* HEX\n\t* IMAG\n\t* INT\n\t* OCT\n\nPrevious tokens: Token('INT', '0')\n"
+  },
+  {
+    "input": "0o_17",
+    "should_pass": true,
+    "ok": false,
+    "tree": null,
+    "error": "No terminal matches 'o' in the current parser context, at line 1 col 2\n\n0o_17\n ^\nExpected one of: \n\t* BIN\n\t* FLOAT\n\t* HEX\n\t* IMAG\n\t* INT\n\t* OCT\n\nPrevious tokens: Token('INT', '0')\n"
+  }
+]
