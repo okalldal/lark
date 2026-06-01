@@ -1,0 +1,24 @@
+[package]
+name = "lark-rs"
+version = "0.1.0"
+edition = "2021"
+description = "A Rust implementation of the Lark parsing toolkit"
+license = "MIT"
+repository = "https://github.com/lark-parser/lark"
+
+[dependencies]
+regex = "1.10"
+indexmap = "2"
+thiserror = "1"
+smallvec = "1"
+
+[dev-dependencies]
+pretty_assertions = "1"
+
+[[example]]
+name = "json_parser"
+path = "examples/json_parser.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
