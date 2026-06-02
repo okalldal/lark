@@ -324,13 +324,24 @@ impl ContextualLexer {
 
         if let Some((name, value)) = scanner.match_at(text, pos) {
             let end = pos + value.len();
-            let end_column = col + value.chars().count();
+            // End position is char-based and newline-aware: a token spanning a
+            // newline (e.g. a multi-line comment/string) advances the line and
+            // resets the column, mirroring LexerState::advance_by.
+            let (mut end_line, mut end_column) = (line, col);
+            for ch in value.chars() {
+                if ch == '\n' {
+                    end_line += 1;
+                    end_column = 1;
+                } else {
+                    end_column += 1;
+                }
+            }
             return Ok(Some(Token {
                 type_: name,
                 value,
                 line,
                 column: col,
-                end_line: line,
+                end_line,
                 end_column,
                 start_pos: pos,
                 end_pos: end,

@@ -203,7 +203,7 @@ oracle. Three correctness bugs need fixing before Phase 2 starts (see Known Bugs
 | Transparent `_rule` inlining | ✅ | `is_anonymous_rule` flattens `__anon_*` and `_name` rules; alias exempt |
 | `keep_all_tokens` | ✅ | |
 | Aliases (`-> name`) | ✅ | Correctly overrides `expand1` |
-| Token positions (line/col) | ⚠️ | Byte-based columns; end_line wrong for tokens spanning newlines |
+| Token positions (line/col) | ✅ | Char-based columns; end_line/end_column newline-aware |
 | Oracle test harness | ✅ | arithmetic, JSON, python_numbers, lalr_core |
 | JSONTestSuite corpus | ✅ | 293/293 oracle agreement |
 | Compliance bank | ✅ | 257 grammars strip-mined from Python Lark's suite; 338/508 ≈ 66% agree (XFAIL-gated) |
@@ -211,11 +211,12 @@ oracle. Three correctness bugs need fixing before Phase 2 starts (see Known Bugs
 
 ### ⬜ Phase 2 — Earley + SPPF
 
-**Phase 2 stays frozen** until the compliance-bank parity climbs (it is currently
-350/512 ≈ 68%) and the remaining Phase-1 bug (BUG-5, cosmetic) is scheduled. The
-conflict-critical blockers (BUG-1/2/6), the keyword lexer (BUG-3), transparent
-`_rule` inlining (BUG-4), and recursive templates (BUG-7) are now fixed, so the core
-fails loudly instead of silently mis-resolving.
+**Phase 2 stays frozen** until the compliance-bank parity climbs further (it is
+currently 350/512 ≈ 68%). All Phase-1 correctness bugs (BUG-1 through BUG-7) are now
+fixed: true LALR(1) lookaheads, fail-loud conflicts, the keyword lexer (BUG-3),
+transparent `_rule` inlining (BUG-4), char-based positions (BUG-5), the Earley
+fail-loud guard (BUG-6), and recursive templates (BUG-7). The core now fails loudly
+instead of silently mis-resolving.
 
 Earley is the second USP. It handles grammars LALR cannot (ambiguous, non-deterministic).
 Requesting `ParserAlgorithm::Earley` now returns an explicit error (was a silent
@@ -322,16 +323,17 @@ into `row`. `_anything`'s alternatives overlap on bare letter runs
 explicit `.2` priority so the choice is deterministic (see the tie-break rule under
 Testing Philosophy).
 
-### BUG-5 🟠 Token positions: byte-based columns, wrong end_line for multi-line tokens
+### BUG-5 ✅ FIXED — Token positions are char-based and newline-aware
 
-**File:** `src/lexer.rs:215–216` (ContextualLexer::next_token)
+**File:** `src/lexer.rs` (ContextualLexer::next_token)
 
-`end_column: col + value.len()` uses byte length, not char count — wrong for
-non-ASCII input. `end_line: line` is set unconditionally with no newline scan inside
-the token value — wrong for multi-line tokens (e.g. `NEWLINE`, multi-line strings).
+`next_token` now walks `value.chars()` to compute `end_line`/`end_column`, so columns
+count characters (not bytes — correct for non-ASCII) and a token spanning a newline
+advances the line and resets the column, mirroring `LexerState::advance_by`.
 
-**Fix:** walk `value.chars()` after a match to compute correct `end_line`/`end_column`,
-mirroring `LexerState::advance_by_lines` which already does this correctly.
+**Oracle:** `tests/test_positions.rs` — expectations taken from Python Lark (a
+multi-line `BLOCK` ending at line 2 col 4; `café` ending at col 5), since the tree
+oracles do not capture positions.
 
 ### BUG-6 ✅ FIXED — Earley errors instead of silently falling back
 
@@ -407,15 +409,12 @@ wild rely on these. Document as a known parity gap when adding Phase-3 grammar l
 
 ## Recommended Work Order (Next Sessions)
 
-BUG-1 through BUG-4 and BUG-6/BUG-7 are **done** (the core now fails loudly, the
-lexer matches Python's keyword/identifier behavior, transparent rules inline, and
-recursive templates work). Remaining, with a failing-first oracle. The compliance
-bank (below) is the regression net: fixing a bug should flip XFAIL entries to passing
-— regenerate `xfail.json` and watch parity rise (BUG-3 flipped 3, BUG-7 flipped 8,
-lifting the bank to ~68%).
-
-1. **BUG-5** Token position correctness (lower urgency — cosmetic for most grammars)
-2. Then, with bank parity high, start Phase 2 — Earley + SPPF
+All Phase-1 correctness bugs (BUG-1 through BUG-7) are **done**. The compliance bank
+is the regression net: fixing a bug flips XFAIL entries to passing — regenerate
+`xfail.json` and watch parity rise (BUG-3 flipped 3, BUG-7 flipped 8, lifting the bank
+to ~68%). Next: keep widening compliance parity (the remaining XFAILs are unimplemented
+features and structural bugs — measure with the divergence breakdown), then start
+Phase 2 — Earley + SPPF.
 
 ### The compliance bank — your regression net
 
