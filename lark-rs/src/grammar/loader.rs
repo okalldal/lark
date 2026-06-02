@@ -922,6 +922,11 @@ struct GrammarCompiler {
     literal_cache: HashMap<String, String>,
     /// Template definitions: name → (params, expansions).
     templates: HashMap<String, (Vec<String>, Vec<AliasedExpansion>)>,
+    /// Memo of template instantiations: canonical `name<args>` key → instance rule
+    /// name. Lets a self-recursive template (`_sep{x,d}: x | _sep{x,d} d x`) resolve
+    /// its own reference to the rule already being built instead of recursing
+    /// forever (mirrors Python Lark, which memoizes instantiations).
+    template_instances: HashMap<String, String>,
     /// Whether absent `[...]` groups emit `None` placeholders (Lark parity).
     maybe_placeholders: bool,
     /// `keep_all_tokens` of the rule currently being compiled — needed to count
@@ -940,6 +945,7 @@ impl GrammarCompiler {
             term_counter: 0,
             literal_cache: HashMap::new(),
             templates: HashMap::new(),
+            template_instances: HashMap::new(),
             maybe_placeholders,
             current_keep_all: false,
         }
@@ -1383,9 +1389,19 @@ impl GrammarCompiler {
             });
         }
 
-        // Create a name for this instantiation
+        // Memoize by (name, args): a repeat request for the same instantiation —
+        // including the self-reference inside a recursive template — resolves to the
+        // rule already being built rather than instantiating (and recursing) again.
+        let key = format!("{}::{:?}", name, args);
+        if let Some(existing) = self.template_instances.get(&key) {
+            return Ok(Symbol::NonTerminal(NonTerminal::new(existing)));
+        }
+
+        // Create a name for this instantiation and register it *before* compiling the
+        // body, so a self-reference encountered during compilation finds it.
         let inst_name = format!("__{}_{}_{}", name, parent, self.anon_counter);
         self.anon_counter += 1;
+        self.template_instances.insert(key, inst_name.clone());
 
         // Build substitution map
         let subst: HashMap<String, Value> = params.into_iter().zip(args).collect();
@@ -1413,20 +1429,7 @@ impl GrammarCompiler {
 
     fn subst_expr(expr: &Expr, subst: &HashMap<String, Value>) -> Expr {
         match expr {
-            Expr::Value(Value::Rule(name)) => {
-                if let Some(val) = subst.get(name) {
-                    Expr::Value(val.clone())
-                } else {
-                    expr.clone()
-                }
-            }
-            Expr::Value(Value::Terminal(name)) => {
-                if let Some(val) = subst.get(name) {
-                    Expr::Value(val.clone())
-                } else {
-                    expr.clone()
-                }
-            }
+            Expr::Value(v) => Expr::Value(Self::subst_value(v, subst)),
             Expr::Repeat { inner, min, max } => Expr::Repeat {
                 inner: Box::new(Self::subst_expr(inner, subst)),
                 min: *min,
@@ -1434,6 +1437,23 @@ impl GrammarCompiler {
             },
             Expr::Group(alts) => Expr::Group(Self::substitute_template(alts, subst)),
             Expr::Maybe(alts) => Expr::Maybe(Self::substitute_template(alts, subst)),
+            other => other.clone(),
+        }
+    }
+
+    /// Substitute template params inside a `Value`. Crucially this recurses into a
+    /// nested template usage's arguments, so `_sep{item, delim}` inside a `_sep`
+    /// body becomes `_sep{NUMBER, ","}` — the self-instantiation the memo then
+    /// collapses, rather than a reference to undefined `item`/`delim` rules.
+    fn subst_value(v: &Value, subst: &HashMap<String, Value>) -> Value {
+        match v {
+            Value::Rule(name) | Value::Terminal(name) => {
+                subst.get(name).cloned().unwrap_or_else(|| v.clone())
+            }
+            Value::TemplateUsage { name, args } => Value::TemplateUsage {
+                name: name.clone(),
+                args: args.iter().map(|a| Self::subst_value(a, subst)).collect(),
+            },
             other => other.clone(),
         }
     }

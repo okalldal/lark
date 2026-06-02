@@ -212,10 +212,10 @@ oracle. Three correctness bugs need fixing before Phase 2 starts (see Known Bugs
 ### ⬜ Phase 2 — Earley + SPPF
 
 **Phase 2 stays frozen** until the compliance-bank parity climbs (it is currently
-338/508 ≈ 66%) and the remaining Phase-1 bugs (BUG-5 and the BUG-7 loader
-stack-overflow) are scheduled. The conflict-critical blockers (BUG-1/2/6), the
-keyword lexer (BUG-3), and transparent `_rule` inlining (BUG-4) are now fixed, so
-the core fails loudly instead of silently mis-resolving.
+350/512 ≈ 68%) and the remaining Phase-1 bug (BUG-5, cosmetic) is scheduled. The
+conflict-critical blockers (BUG-1/2/6), the keyword lexer (BUG-3), transparent
+`_rule` inlining (BUG-4), and recursive templates (BUG-7) are now fixed, so the core
+fails loudly instead of silently mis-resolving.
 
 Earley is the second USP. It handles grammars LALR cannot (ambiguous, non-deterministic).
 Requesting `ParserAlgorithm::Earley` now returns an explicit error (was a silent
@@ -341,16 +341,28 @@ mirroring `LexerState::advance_by_lines` which already does this correctly.
 (matching CYK), and `LarkOptions::default()` uses `Lalr`. Guarded by
 `test_lalr_core::test_earley_errors_instead_of_silent_fallback`.
 
-### BUG-7 🟠 Loader stack-overflows on recursive templates and huge `~N`
+### BUG-7 ✅ FIXED — Recursive templates memoized; `~N` expanded iteratively
 
-**File:** `src/grammar/loader.rs` (template instantiation / EBNF `~N` expansion)
+**File:** `src/grammar/loader.rs`
 
-Two grammars in the compliance bank abort the process instead of failing
-loudly: a self-recursive template (`_sep{x,d}: x | _sep{x,d} d x`) recurses
-infinitely during instantiation, and `"A"~8191` blows the stack expanding the
-repetition. Both are content-skipped in `tests/fixtures/oracles/compliance/skip.json`
-(a stack overflow cannot be caught with `catch_unwind`). **Fix:** bound template
-recursion / detect cycles and reject loudly; expand `~N` iteratively.
+A self-recursive template (`_sep{x,d}: x | _sep{x,d} d x`) used to recurse
+infinitely during instantiation and abort the process. Two root causes, both now
+fixed to match Python Lark (which builds and parses this grammar):
+
+1. **Substitution skipped nested template-usage args** — `subst_expr` cloned a
+   `TemplateUsage` verbatim, so the inner `_sep{item, delim}` never became
+   `_sep{NUMBER, ","}`. Added `subst_value`, which recurses into a usage's args.
+2. **No instantiation memo** — even a correct self-reference recursed forever.
+   `instantiate_template` now memoizes by a canonical `name<args>` key and registers
+   the instance *before* compiling its body, so the self-reference resolves to the
+   rule already being built (a normal recursive rule).
+
+Beyond un-skipping the recursive-template grammar, fix (1) corrected nested template
+substitution generally — 8 compliance-bank XFAIL entries flipped to passing.
+
+The other historical aborter, `"A"~8191`, is already safe: the exact-repetition
+case (`n == m`) inlines the copies into one heap-allocated rule and LR(0) construction
+is iterative, so it no longer blows the stack. `skip.json` is now empty.
 
 ---
 
@@ -395,15 +407,15 @@ wild rely on these. Document as a known parity gap when adding Phase-3 grammar l
 
 ## Recommended Work Order (Next Sessions)
 
-BUG-1 through BUG-4 and BUG-6 are **done** (the core now fails loudly, the lexer
-matches Python's keyword/identifier behavior, and transparent rules inline).
-Remaining, each with a failing-first oracle. The compliance bank (below) is the
-regression net: fixing a bug should flip XFAIL entries to passing — regenerate
-`xfail.json` and watch parity rise (BUG-3 flipped 3, lifting the bank to ~66%).
+BUG-1 through BUG-4 and BUG-6/BUG-7 are **done** (the core now fails loudly, the
+lexer matches Python's keyword/identifier behavior, transparent rules inline, and
+recursive templates work). Remaining, with a failing-first oracle. The compliance
+bank (below) is the regression net: fixing a bug should flip XFAIL entries to passing
+— regenerate `xfail.json` and watch parity rise (BUG-3 flipped 3, BUG-7 flipped 8,
+lifting the bank to ~68%).
 
-1. **BUG-7** Bound template recursion / iterative `~N` (un-skip the two grammars)
-2. **BUG-5** Token position correctness (lower urgency — cosmetic for most grammars)
-3. Then, with bank parity high, start Phase 2 — Earley + SPPF
+1. **BUG-5** Token position correctness (lower urgency — cosmetic for most grammars)
+2. Then, with bank parity high, start Phase 2 — Earley + SPPF
 
 ### The compliance bank — your regression net
 
