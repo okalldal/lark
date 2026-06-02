@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(python3 lark-rs/tools/generate_oracles.py*)",
+      "Bash(python3 -c:*)",
+      "Bash(git status)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(git add*)",
+      "Bash(git commit*)",
+      "Bash(git push*)",
+      "Bash(git fetch*)",
+      "Bash(git branch*)",
+      "Bash(find lark-rs*)",
+      "Bash(grep -r*)",
+      "Bash(grep -n*)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd /home/user/lark && echo '=== lark-rs test status ===' && cargo test --manifest-path lark-rs/Cargo.toml 2>&1 | grep -E 'test .*(ok|FAILED)|test result|error\\[' | head -30 && echo '=== git status ===' && git log --oneline -3"
+          }
+        ]
+      }
+    ]
+  }
+}
