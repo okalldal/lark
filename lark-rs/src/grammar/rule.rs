@@ -55,6 +55,9 @@ pub struct RuleOptions {
     /// When using `maybe_placeholders`, indices in expansion that came from `?` operators
     /// and may be absent.
     pub empty_indices: Vec<bool>,
+    /// Number of `None` placeholder children this (empty `[...]`) production emits
+    /// on reduce, under `maybe_placeholders`. 0 for ordinary rules.
+    pub placeholder_count: usize,
 }
 
 impl Default for RuleOptions {
@@ -64,6 +67,7 @@ impl Default for RuleOptions {
             keep_all_tokens: false,
             priority: 0,
             empty_indices: Vec::new(),
+            placeholder_count: 0,
         }
     }
 }

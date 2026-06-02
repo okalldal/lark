@@ -19,11 +19,12 @@ use crate::error::GrammarError;
 pub fn load_grammar(
     grammar_text: &str,
     start: &[String],
+    maybe_placeholders: bool,
 ) -> Result<Grammar, GrammarError> {
     let mut parser = GrammarParser::new(grammar_text);
     let items = parser.parse_start()?;
 
-    let mut compiler = GrammarCompiler::new(start.to_vec());
+    let mut compiler = GrammarCompiler::new(start.to_vec(), maybe_placeholders);
     compiler.process_items(items)?;
     compiler.compile()
 }
@@ -921,10 +922,15 @@ struct GrammarCompiler {
     literal_cache: HashMap<String, String>,
     /// Template definitions: name → (params, expansions).
     templates: HashMap<String, (Vec<String>, Vec<AliasedExpansion>)>,
+    /// Whether absent `[...]` groups emit `None` placeholders (Lark parity).
+    maybe_placeholders: bool,
+    /// `keep_all_tokens` of the rule currently being compiled — needed to count
+    /// kept symbols for placeholder generation.
+    current_keep_all: bool,
 }
 
 impl GrammarCompiler {
-    fn new(start: Vec<String>) -> Self {
+    fn new(start: Vec<String>, maybe_placeholders: bool) -> Self {
         GrammarCompiler {
             start,
             rules: Vec::new(),
@@ -934,6 +940,8 @@ impl GrammarCompiler {
             term_counter: 0,
             literal_cache: HashMap::new(),
             templates: HashMap::new(),
+            maybe_placeholders,
+            current_keep_all: false,
         }
     }
 
@@ -981,6 +989,9 @@ impl GrammarCompiler {
         let keep_all = raw.modifiers.contains('!');
         let expand1 = raw.modifiers.contains('?');
         let origin = NonTerminal::new(&raw.name);
+        // Make keep_all visible to placeholder counting while this rule's body
+        // (and the anonymous rules it expands into) is compiled.
+        self.current_keep_all = keep_all;
 
         for (order, alt) in raw.expansions.into_iter().enumerate() {
             let alias = alt.alias.clone();
@@ -990,6 +1001,7 @@ impl GrammarCompiler {
                 keep_all_tokens: keep_all,
                 priority: raw.priority,
                 empty_indices: Vec::new(),
+                placeholder_count: 0,
             };
             self.rules.push(Rule::new(
                 origin.clone(),
@@ -1125,7 +1137,36 @@ impl GrammarCompiler {
         alts: Vec<AliasedExpansion>,
         parent: &str,
     ) -> Result<Symbol, GrammarError> {
-        self.compile_group(alts, parent, true)
+        // Without maybe_placeholders, `[x]` is just an optional group.
+        if !self.maybe_placeholders {
+            return self.compile_group(alts, parent, true);
+        }
+        // With maybe_placeholders, the empty case emits one `None` per kept symbol,
+        // using the widest alternative (Python Lark inserts max-width placeholders).
+        let name = self.fresh_anon_rule("maybe");
+        let origin = NonTerminal::new(&name);
+        let mut max_kept = 0;
+        for (order, alt) in alts.into_iter().enumerate() {
+            let alias = alt.alias.clone();
+            let syms = self.compile_expansion(alt.expansion, &name)?;
+            let kept = syms.iter().filter(|s| self.is_kept_symbol(s)).count();
+            max_kept = max_kept.max(kept);
+            self.rules.push(Rule::new(origin.clone(), syms, alias, RuleOptions::default(), order));
+        }
+        let empty_opts = RuleOptions { placeholder_count: max_kept, ..RuleOptions::default() };
+        self.rules.push(Rule::new(origin.clone(), vec![], None, empty_opts, 100));
+        Ok(Symbol::NonTerminal(origin))
+    }
+
+    /// Whether a symbol survives tree filtering (so it counts toward the number of
+    /// `None` placeholders an absent `[...]` must emit). Mirrors the filter applied
+    /// in `apply_rule_options`: tokens are dropped if `_`-prefixed (unless the rule
+    /// keeps all tokens); `_`-prefixed nonterminals are inlined away.
+    fn is_kept_symbol(&self, s: &Symbol) -> bool {
+        match s {
+            Symbol::Terminal(t) => self.current_keep_all || !t.name.starts_with('_'),
+            Symbol::NonTerminal(nt) => !nt.name.starts_with('_'),
+        }
     }
 
     fn compile_repeat(

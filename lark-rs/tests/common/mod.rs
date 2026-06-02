@@ -83,6 +83,16 @@ fn match_node_tree(tree: &Tree, oracle: &serde_json::Value) -> Result<(), String
                 match_node_tree(subtree, oc)
                     .map_err(|e| format!("In '{}' child {i}: {e}", tree.data))?;
             }
+            Child::None => {
+                // maybe_placeholders: a None child matches the oracle's serialized
+                // placeholder {"type": "unknown", "repr": "None"}.
+                if node_type != "unknown" {
+                    return Err(format!(
+                        "In '{}' child {i}: Rust has None placeholder but oracle has '{node_type}'",
+                        tree.data
+                    ));
+                }
+            }
             Child::Token(tok) => {
                 if node_type != "token" {
                     return Err(format!(

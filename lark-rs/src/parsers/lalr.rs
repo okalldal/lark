@@ -602,6 +602,7 @@ impl LalrParser {
                     value_stack.push(match child {
                         Child::Tree(t) => StackValue::Tree(t),
                         Child::Token(t) => StackValue::Token(t),
+                        Child::None => unreachable!("placeholder cannot be a standalone rule value"),
                     });
                 }
                 Some(Action::Accept) => {
@@ -737,6 +738,7 @@ impl LalrParser {
                     value_stack.push(match child {
                         Child::Tree(t) => StackValue::Tree(t),
                         Child::Token(t) => StackValue::Token(t),
+                        Child::None => unreachable!("placeholder cannot be a standalone rule value"),
                     });
                     // Don't advance lexer — same token may be consumed next
                 }
@@ -778,24 +780,36 @@ enum StackValue {
 }
 
 fn apply_rule_options(name: String, mut children: Vec<Child>, rule: &Rule) -> Child {
-    // Filter punctuation (unnamed/anonymous terminals) unless keep_all_tokens
+    // Filter punctuation (unnamed/anonymous terminals) unless keep_all_tokens.
+    // `None` placeholders are never filtered.
     if !rule.options.keep_all_tokens {
         children.retain(|c| match c {
             Child::Token(t) => !t.type_.starts_with("__") && !t.type_.starts_with("_"),
             Child::Tree(_) => true,
+            Child::None => true,
         });
     }
 
     // Inline children of anonymous/transparent rules (those whose name starts
     // with "__anon_" or is a _private_rule starting with "_").
     // These are EBNF expansion helpers that should be invisible in the final tree.
-    let children = inline_anonymous_trees(children);
+    let mut children = inline_anonymous_trees(children);
+
+    // maybe_placeholders: an empty `[...]` production emits one `None` per kept
+    // symbol of its widest alternative. These inline into the parent's children.
+    for _ in 0..rule.options.placeholder_count {
+        children.push(Child::None);
+    }
 
     // expand1: if exactly one child and no alias, return that child directly.
     // This handles both Tree and Token children — a ?rule matching a single
-    // terminal should yield the token itself, not a tree wrapping it.
+    // terminal should yield the token itself, not a tree wrapping it. A lone
+    // `None` placeholder is not collapsed (it must stay inside a tree, since the
+    // value stack only holds tokens and trees).
     let has_alias = rule.alias.is_some();
-    if rule.options.expand1 && !has_alias && children.len() == 1 {
+    if rule.options.expand1 && !has_alias && children.len() == 1
+        && !matches!(children[0], Child::None)
+    {
         return children.into_iter().next().unwrap();
     }
 
