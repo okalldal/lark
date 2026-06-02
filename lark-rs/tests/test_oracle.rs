@@ -93,6 +93,52 @@ fn test_json_oracle() {
     }
 }
 
+// ─── Keyword/identifier (maximal-munch) oracle tests ─────────────────────────
+
+/// Reserved words must not shadow longer identifiers that merely start with them
+/// ("iffy", "elsewhere"). This only holds with true maximal-munch lexing; a
+/// preference-order lexer mis-tokenizes "iffy" as ["if", "fy"]. Regression net
+/// for BUG-3.
+#[test]
+fn test_keywords_oracle() {
+    let lark = make_lalr_from_file("keywords");
+    let oracle = load_oracle("keywords", "cases");
+    let cases = oracle.as_array().expect("oracle must be an array");
+
+    let mut failures = Vec::new();
+
+    for case in cases {
+        let input = case["input"].as_str().unwrap_or("");
+        let should_pass = case["should_pass"].as_bool().unwrap_or(false);
+        let oracle_ok = case["ok"].as_bool().unwrap_or(false);
+
+        let result = lark.parse(input);
+
+        match (should_pass, oracle_ok, &result) {
+            (true, true, Ok(tree)) => {
+                let oracle_tree = &case["tree"];
+                if let Err(msg) = tree_matches_oracle(tree, oracle_tree) {
+                    failures.push(format!("input={input:?}: tree mismatch: {msg}"));
+                }
+            }
+            (true, true, Err(e)) => {
+                failures.push(format!("input={input:?}: expected parse success, got error: {e}"));
+            }
+            (false, false, Err(_)) => {}
+            (false, false, Ok(_)) => {
+                failures.push(format!(
+                    "input={input:?}: expected parse failure, but parsing succeeded"
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    if !failures.is_empty() {
+        panic!("Keyword/identifier oracle failures:\n{}", failures.join("\n"));
+    }
+}
+
 // ─── Python number literal oracle tests ──────────────────────────────────────
 
 const PYTHON_NUMBER_GRAMMAR: &str = r#"

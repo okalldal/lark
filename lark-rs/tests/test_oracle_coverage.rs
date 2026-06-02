@@ -15,11 +15,6 @@ const QUARANTINE: &[(&str, &str)] = &[
          separators (BUG-3); add an oracle once those land.",
     ),
     (
-        "keywords",
-        "Exercises contextual keyword/identifier disambiguation that depends on \
-         true maximal-munch (BUG-3); add an oracle once that lands.",
-    ),
-    (
         "python2",
         "6440-line WIP needing an INDENT/DEDENT indenter (Phase 3); not yet \
          parseable end-to-end.",
