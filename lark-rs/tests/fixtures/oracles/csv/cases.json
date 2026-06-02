@@ -1,0 +1,111 @@
+[
+  {
+    "input": "#a,b,c\n1,2,3\n",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "header",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "WORD",
+              "value": "a"
+            },
+            {
+              "type": "token",
+              "token_type": "WORD",
+              "value": "b"
+            },
+            {
+              "type": "token",
+              "token_type": "WORD",
+              "value": "c"
+            }
+          ]
+        },
+        {
+          "type": "tree",
+          "data": "row",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "INT",
+              "value": "1"
+            },
+            {
+              "type": "token",
+              "token_type": "INT",
+              "value": "2"
+            },
+            {
+              "type": "token",
+              "token_type": "INT",
+              "value": "3"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "#x\n1\n",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "header",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "WORD",
+              "value": "x"
+            }
+          ]
+        },
+        {
+          "type": "tree",
+          "data": "row",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "INT",
+              "value": "1"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "#h1,h2\n10,20\n30,40\n",
+    "should_pass": true,
+    "ok": false,
+    "tree": null,
+    "error": "Unexpected token Token('INT', '1') at line 1, column 3.\nExpected one of: \n\t* WORD\n\t* _NL\n\t* _SEPARATOR\nPrevious tokens: [Token('WORD', 'h')]\n"
+  },
+  {
+    "input": "",
+    "should_pass": false,
+    "ok": false,
+    "tree": null,
+    "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* HASH\n"
+  },
+  {
+    "input": "1,2,3\n",
+    "should_pass": false,
+    "ok": false,
+    "tree": null,
+    "error": "Unexpected token Token('INT', '1') at line 1, column 1.\nExpected one of: \n\t* HASH\nPrevious tokens: [None]\n"
+  }
+]

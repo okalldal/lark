@@ -161,7 +161,9 @@ After each REDUCE, `apply_rule_options()` post-processes children:
 3. `expand1` (`?rule`): if exactly one child and no alias, return that child as-is
    — returns `Child` (Token or Tree), not always a Tree
 
-**Note:** Transparent `_rule` inlining is not yet implemented — see Known Bugs.
+4. Inline transparent rules: a `_name` rule (single leading underscore) or
+   `__anon_*` EBNF helper is spliced into the parent's child list, not kept as a
+   wrapper node.
 
 ---
 
@@ -191,7 +193,7 @@ oracle. Three correctness bugs need fixing before Phase 2 starts (see Known Bugs
 | Terminal priority ordering | ✅ | (-priority, -pattern_len, name) |
 | Within-terminal alt ordering | ✅ | Longest-first (mirrors Python Lark) |
 | Tree assembly | ✅ | `expand1`, anon inlining |
-| Transparent `_rule` inlining | ❌ | `is_anonymous_rule` only checks `__anon_*`, not `_name` |
+| Transparent `_rule` inlining | ✅ | `is_anonymous_rule` flattens `__anon_*` and `_name` rules; alias exempt |
 | `keep_all_tokens` | ✅ | |
 | Aliases (`-> name`) | ✅ | Correctly overrides `expand1` |
 | Token positions (line/col) | ⚠️ | Byte-based columns; end_line wrong for tokens spanning newlines |
@@ -203,10 +205,10 @@ oracle. Three correctness bugs need fixing before Phase 2 starts (see Known Bugs
 ### ⬜ Phase 2 — Earley + SPPF
 
 **Phase 2 stays frozen** until the compliance-bank parity climbs (it is currently
-338/508 ≈ 66%) and the remaining Phase-1 bugs (BUG-4/5 and the BUG-7 loader
-stack-overflow) are scheduled. The conflict-critical blockers (BUG-1/2/6) and the
-maximal-munch/keyword lexer (BUG-3) are now fixed, so the core fails loudly
-instead of silently mis-resolving.
+338/508 ≈ 66%) and the remaining Phase-1 bugs (BUG-5 and the BUG-7 loader
+stack-overflow) are scheduled. The conflict-critical blockers (BUG-1/2/6), the
+keyword lexer (BUG-3), and transparent `_rule` inlining (BUG-4) are now fixed, so
+the core fails loudly instead of silently mis-resolving.
 
 Earley is the second USP. It handles grammars LALR cannot (ambiguous, non-deterministic).
 Requesting `ParserAlgorithm::Earley` now returns an explicit error (was a silent
@@ -297,18 +299,31 @@ chunking (Rust's `regex` crate has no named-group limit).
 **Oracle:** `keywords/cases` — `keywords.lark` (un-quarantined) parses `iffy`,
 `elsewhere`, `whiled` as `NAME` and `if`/`while` as keywords, matching Python Lark.
 
-### BUG-4 🟠 Transparent `_rule` trees not inlined
+### BUG-4 ✅ FIXED — Transparent `_rule` trees now inlined
 
-**File:** `src/parsers/lalr.rs:667`
+**File:** `src/parsers/lalr.rs`
 
-`is_anonymous_rule` only matches `__anon_*`. A `_name` rule (transparent in Python
-Lark) reduces to `Tree("_name", […])` that leaks into the output rather than being
-spliced into the parent's child list. Currently untested because `csv.lark` (which
-uses `_anything`, `_SEPARATOR`) has no oracle.
+`is_anonymous_rule` now flattens any node whose name starts with `_` — covering
+both `__anon_*` EBNF helpers and `_name` transparent rules — so a `_name` rule's
+children splice into the parent instead of leaking as a `Tree("_name", …)`.
+Aliased rules are exempt: the node carries the alias name (which has no leading
+underscore), so an alias overrides transparency, matching Python Lark.
 
-**Fix:** extend `is_anonymous_rule` (or `inline_anonymous_trees`) to also flatten
-nodes whose name starts with `_` (but not `__anon_`, already handled). Add oracle
-for `csv.lark` or a minimal `_rule` grammar.
+**Oracle:** `csv/cases` — `csv.lark` (un-quarantined); `_anything` inlines its token
+into `row`. Note: row values are kept to `INT` because `_anything`'s alternatives
+overlap (`WORD`/`NON_SEPARATOR_STRING`, `FLOAT`/`SIGNED_FLOAT`) and Lark breaks the
+equal-length tie by *expanded* regex-source length, which lark-rs does not
+reproduce — a separate, known lexer-ordering parity gap (see below).
+
+### Known parity gap — equal-length terminal tie-break
+
+When two terminals match the same text at the same length and priority, Python
+Lark's order falls to `-len(value)` where `value` is the **fully expanded** regex
+source. lark-rs ships its own `common.lark` stubs, so its source strings (and thus
+their lengths) differ, and an ambiguous tie can break the other way (e.g. a bare
+letter run matching both `WORD` and `NON_SEPARATOR_STRING`). This only affects
+genuinely ambiguous grammars; well-formed ones disambiguate by actual match length
+or priority. Closing it would require matching Python's regex expansion verbatim.
 
 ### BUG-5 🟠 Token positions: byte-based columns, wrong end_line for multi-line tokens
 
@@ -383,16 +398,15 @@ wild rely on these. Document as a known parity gap when adding Phase-3 grammar l
 
 ## Recommended Work Order (Next Sessions)
 
-BUG-1, BUG-2, BUG-3, BUG-6 are **done** (the core now fails loudly and the lexer
-matches Python's keyword/identifier behavior). Remaining, each with a failing-first
-oracle. The compliance bank (below) is the regression net: fixing a bug should flip
-XFAIL entries to passing — regenerate `xfail.json` and watch parity rise (BUG-3
-flipped 3, lifting the bank to ~66%).
+BUG-1 through BUG-4 and BUG-6 are **done** (the core now fails loudly, the lexer
+matches Python's keyword/identifier behavior, and transparent rules inline).
+Remaining, each with a failing-first oracle. The compliance bank (below) is the
+regression net: fixing a bug should flip XFAIL entries to passing — regenerate
+`xfail.json` and watch parity rise (BUG-3 flipped 3, lifting the bank to ~66%).
 
-1. **BUG-4** Transparent `_rule` inlining + `csv.lark` oracle (un-quarantine it)
-2. **BUG-7** Bound template recursion / iterative `~N` (un-skip the two grammars)
-3. **BUG-5** Token position correctness (lower urgency — cosmetic for most grammars)
-4. Then, with bank parity high, start Phase 2 — Earley + SPPF
+1. **BUG-7** Bound template recursion / iterative `~N` (un-skip the two grammars)
+2. **BUG-5** Token position correctness (lower urgency — cosmetic for most grammars)
+3. Then, with bank parity high, start Phase 2 — Earley + SPPF
 
 ### The compliance bank — your regression net
 
