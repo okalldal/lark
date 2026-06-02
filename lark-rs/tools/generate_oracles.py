@@ -112,6 +112,42 @@ PYTHON_NUMBER_INVALID = [
     "3e",    # exponent with no digits
 ]
 
+# CSV cases. These exercise transparent `_rule` inlining: `_anything` is a
+# single-underscore rule whose children must be spliced into the parent `row`
+# rather than appearing as a `Tree("_anything", …)` wrapper. `_SEPARATOR` / `_NL`
+# are `_`-prefixed terminals that are filtered out.
+#
+# `_anything`'s alternatives overlap on bare letter runs (WORD vs
+# NON_SEPARATOR_STRING); csv.lark gives NON_SEPARATOR_STRING an explicit priority so
+# the choice is principled — both Python Lark and lark-rs honor priority first — and
+# letter cells lex deterministically as NON_SEPARATOR_STRING in both.
+CSV_CASES = [
+    ("#a,b,c\n1,2,3\n",        True),
+    ("#x\n1\n",                True),
+    ("#h1,h2\n10,20\n30,40\n", True),
+    ("#name,age\nfoo,42\n",    True),  # letter cell → NON_SEPARATOR_STRING (priority)
+    ("",                       False),
+    ("1,2,3\n",                False),  # missing header
+]
+
+
+# Keyword-vs-identifier cases. These exercise true maximal-munch lexing: a
+# reserved word ("if", "else", "while") must NOT shadow a longer identifier that
+# merely starts with it ("iffy", "elsewhere", "whiled"). A preference-order lexer
+# that tries the keyword terminal first mis-tokenizes "iffy" as ["if", "fy"].
+KEYWORDS_CASES = [
+    ("iffy = 1;",            True),
+    ("elsewhere = 2;",       True),
+    ("whiled = 3;",          True),
+    ("thenable = 4;",        True),
+    ("if x then iffy = 5;",  True),
+    ("while x do y = 6;",    True),
+    ("if x then y = 7;",     True),
+    ("",                     False),
+    ("if x then",            False),
+]
+
+
 # JSON test cases (supplement to JSONTestSuite)
 JSON_CASES = [
     ('{}',                          True),
@@ -263,6 +299,42 @@ def generate_python_numbers():
     save_oracle("python_numbers", "invalid", invalid)
 
 
+def generate_csv():
+    print("Generating CSV (transparent `_rule` inlining) oracles...")
+    grammar = load_grammar("csv")
+    results = []
+    for inp, should_pass in CSV_CASES:
+        ok, result = run_case(grammar, inp, parser_type="lalr")
+        if should_pass and not ok:
+            print(f"  WARNING: expected to parse {inp!r}: {result}")
+        results.append({
+            "input": inp,
+            "should_pass": should_pass,
+            "ok": ok,
+            "tree": result if ok else None,
+            "error": result if not ok else None,
+        })
+    save_oracle("csv", "cases", results)
+
+
+def generate_keywords():
+    print("Generating keyword/identifier (maximal-munch) oracles...")
+    grammar = load_grammar("keywords")
+    results = []
+    for inp, should_pass in KEYWORDS_CASES:
+        ok, result = run_case(grammar, inp, parser_type="lalr")
+        if should_pass and not ok:
+            print(f"  WARNING: expected to parse {inp!r}: {result}")
+        results.append({
+            "input": inp,
+            "should_pass": should_pass,
+            "ok": ok,
+            "tree": result if ok else None,
+            "error": result if not ok else None,
+        })
+    save_oracle("keywords", "cases", results)
+
+
 def generate_json():
     print("Generating JSON oracles...")
     grammar = load_grammar("json")
@@ -325,6 +397,8 @@ if __name__ == "__main__":
     ORACLES_DIR.mkdir(parents=True, exist_ok=True)
     generate_arithmetic()
     generate_json()
+    generate_csv()
+    generate_keywords()
     generate_python_numbers()
     generate_lalr_core()
     generate_json_corpus_manifest()

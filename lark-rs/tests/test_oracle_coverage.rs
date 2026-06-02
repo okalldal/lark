@@ -10,16 +10,6 @@ use std::path::Path;
 /// silence the test without a genuine reason — that defeats the purpose.
 const QUARANTINE: &[(&str, &str)] = &[
     (
-        "csv",
-        "Exercises transparent `_rule` inlining (BUG-4) and maximal-munch \
-         separators (BUG-3); add an oracle once those land.",
-    ),
-    (
-        "keywords",
-        "Exercises contextual keyword/identifier disambiguation that depends on \
-         true maximal-munch (BUG-3); add an oracle once that lands.",
-    ),
-    (
         "python2",
         "6440-line WIP needing an INDENT/DEDENT indenter (Phase 3); not yet \
          parseable end-to-end.",

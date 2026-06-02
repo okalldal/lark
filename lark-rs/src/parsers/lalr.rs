@@ -849,6 +849,12 @@ fn inline_anonymous_trees(children: Vec<Child>) -> Vec<Child> {
     result
 }
 
+/// A tree node is spliced into its parent (rather than kept as a child) when its
+/// rule is "transparent". Two cases, both matching Python Lark:
+///   * `__anon_*` — EBNF expansion helpers (`*`, `+`, `?`, groups).
+///   * `_name`    — user-declared transparent rules (single leading underscore).
+/// Aliased rules are exempt: an alias overrides transparency, and the node's name
+/// is already the alias (which does not start with `_`), so it is not matched here.
 fn is_anonymous_rule(name: &str) -> bool {
-    name.starts_with("__anon_")
+    name.starts_with('_')
 }

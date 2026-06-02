@@ -1,0 +1,245 @@
+[
+  {
+    "input": "iffy = 1;",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "assign_stmt",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NAME",
+              "value": "iffy"
+            },
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "1"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "elsewhere = 2;",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "assign_stmt",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NAME",
+              "value": "elsewhere"
+            },
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "2"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "whiled = 3;",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "assign_stmt",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NAME",
+              "value": "whiled"
+            },
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "3"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "thenable = 4;",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "assign_stmt",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NAME",
+              "value": "thenable"
+            },
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "4"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "if x then iffy = 5;",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "if_stmt",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NAME",
+              "value": "x"
+            },
+            {
+              "type": "tree",
+              "data": "assign_stmt",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NAME",
+                  "value": "iffy"
+                },
+                {
+                  "type": "token",
+                  "token_type": "NUMBER",
+                  "value": "5"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "while x do y = 6;",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "while_stmt",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NAME",
+              "value": "x"
+            },
+            {
+              "type": "tree",
+              "data": "assign_stmt",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NAME",
+                  "value": "y"
+                },
+                {
+                  "type": "token",
+                  "token_type": "NUMBER",
+                  "value": "6"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "if x then y = 7;",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "if_stmt",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NAME",
+              "value": "x"
+            },
+            {
+              "type": "tree",
+              "data": "assign_stmt",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NAME",
+                  "value": "y"
+                },
+                {
+                  "type": "token",
+                  "token_type": "NUMBER",
+                  "value": "7"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "",
+    "should_pass": false,
+    "ok": false,
+    "tree": null,
+    "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* IF\n\t* NAME\n\t* WHILE\n"
+  },
+  {
+    "input": "if x then",
+    "should_pass": false,
+    "ok": false,
+    "tree": null,
+    "error": "Unexpected token Token('$END', '') at line 1, column 6.\nExpected one of: \n\t* IF\n\t* NAME\n\t* WHILE\n"
+  }
+]

@@ -28,6 +28,13 @@ We generate expected parse trees using Python Lark and compare Rust output again
 - Every bug must be reproducible as a test failure before we fix it
 - Prefer end-to-end tests over unit tests — the oracle checks the full pipeline
 - Corpus tests (JSONTestSuite) are kept at 100% oracle agreement; never regress them
+- Never write an oracle test that depends on an arbitrary lexer tie-break — two
+  terminals matching the same span at equal priority, which Lark resolves by an
+  incidental regex-source-length sort that lark-rs does not reproduce. Disambiguate
+  the grammar with explicit terminal priority instead, exactly as the Lark authors
+  do (e.g. `NON_SEPARATOR_STRING.2` in `csv.lark`). Both engines honor priority
+  first, so the result is principled. (Measured 2026-06-02: 0 of 140 compliance-bank
+  divergences are tie-breaks — a discipline for our grammars, not a gap to chase.)
 
 ### Generating Oracles
 
@@ -90,7 +97,7 @@ src/
     rule.rs           Rule, RuleOptions (expand1, keep_all_tokens, …)
     symbol.rs         Symbol, Terminal, NonTerminal
     terminal.rs       TerminalDef, Pattern, PatternRe, PatternStr
-  lexer.rs            BasicLexer, ContextualLexer, LexerState, build_mres
+  lexer.rs            Scanner (shared), BasicLexer, ContextualLexer, LexerState
   parsers/
     mod.rs            ParsingFrontend — wires lexer + parser together
     lalr.rs           ParseTable, LalrParser, build_lalr_table
@@ -161,7 +168,9 @@ After each REDUCE, `apply_rule_options()` post-processes children:
 3. `expand1` (`?rule`): if exactly one child and no alias, return that child as-is
    — returns `Child` (Token or Tree), not always a Tree
 
-**Note:** Transparent `_rule` inlining is not yet implemented — see Known Bugs.
+4. Inline transparent rules: a `_name` rule (single leading underscore) or
+   `__anon_*` EBNF helper is spliced into the parent's child list, not kept as a
+   wrapper node.
 
 ---
 
@@ -186,26 +195,27 @@ oracle. Three correctness bugs need fixing before Phase 2 starts (see Known Bugs
 | LALR(1) lookaheads | ✅ | True LALR(1) via spontaneous-generation + propagation (`LookaheadComputer`) |
 | Conflict detection | ✅ | S/R → shift; R/R → priority, else `GrammarError::Conflict`; matches Lark outcomes |
 | ParseTable (ACTION/GOTO) | ✅ | Shift/Reduce/Accept |
-| BasicLexer | ⚠️ | Per-chunk regex, not true maximal-munch across whole terminal set |
-| ContextualLexer | ⚠️ | Per-state regex, always_accept for ignores; same munch caveat |
+| BasicLexer | ✅ | Single combined regex (leftmost-first, like Python `re`) + `unless` keyword retyping |
+| ContextualLexer | ✅ | Per-state `Scanner`; per-state `unless` retyping; always_accept for ignores |
 | Terminal priority ordering | ✅ | (-priority, -pattern_len, name) |
 | Within-terminal alt ordering | ✅ | Longest-first (mirrors Python Lark) |
 | Tree assembly | ✅ | `expand1`, anon inlining |
-| Transparent `_rule` inlining | ❌ | `is_anonymous_rule` only checks `__anon_*`, not `_name` |
+| Transparent `_rule` inlining | ✅ | `is_anonymous_rule` flattens `__anon_*` and `_name` rules; alias exempt |
 | `keep_all_tokens` | ✅ | |
 | Aliases (`-> name`) | ✅ | Correctly overrides `expand1` |
 | Token positions (line/col) | ⚠️ | Byte-based columns; end_line wrong for tokens spanning newlines |
 | Oracle test harness | ✅ | arithmetic, JSON, python_numbers, lalr_core |
 | JSONTestSuite corpus | ✅ | 293/293 oracle agreement |
-| Compliance bank | ✅ | 257 grammars strip-mined from Python Lark's suite; 148/505 agree (XFAIL-gated) |
+| Compliance bank | ✅ | 257 grammars strip-mined from Python Lark's suite; 338/508 ≈ 66% agree (XFAIL-gated) |
 | Oracle-coverage enforcement | ✅ | Meta-test + CI freshness gate |
 
 ### ⬜ Phase 2 — Earley + SPPF
 
 **Phase 2 stays frozen** until the compliance-bank parity climbs (it is currently
-148/505 ≈ 29%) and the remaining Phase-1 bugs (BUG-3/4/5 and the two loader
-stack-overflows below) are scheduled. The conflict-critical blockers (BUG-1/2/6)
-are now fixed, so the core fails loudly instead of silently mis-resolving.
+338/508 ≈ 66%) and the remaining Phase-1 bugs (BUG-5 and the BUG-7 loader
+stack-overflow) are scheduled. The conflict-critical blockers (BUG-1/2/6), the
+keyword lexer (BUG-3), and transparent `_rule` inlining (BUG-4) are now fixed, so
+the core fails loudly instead of silently mis-resolving.
 
 Earley is the second USP. It handles grammars LALR cannot (ambiguous, non-deterministic).
 Requesting `ParserAlgorithm::Earley` now returns an explicit error (was a silent
@@ -274,35 +284,43 @@ raises the new `GrammarError::Conflict`. R/R is no longer silent last-writer-win
 **Oracle (outcome parity):** `lalr_core/conflicts` — for each grammar, lark-rs
 errors iff Python Lark raises `GrammarError` at construction.
 
-### BUG-3 🟠 Lexer uses preference order, not true maximal-munch
+### BUG-3 ✅ FIXED — Keyword/identifier disambiguation via Lark's `unless`
 
-**File:** `src/lexer.rs:204–228` (ContextualLexer), `src/lexer.rs:69–91` (BasicLexer)
+**File:** `src/lexer.rs`
 
-The combined alternation regex uses the `regex` crate's leftmost-first preference
-semantics. Winner is determined by **alternation order** (sort key: priority,
-pattern-source-length, name) — not by **actual match length** at runtime.
-`BasicLexer` compares lengths across chunks but not within a chunk.
-Python Lark guarantees longest-match.
+The earlier diagnosis ("Python guarantees longest-match; match each terminal and
+pick the longest span") was inaccurate. Python Lark's lexer is **not** true
+longest-match: it sorts terminals `(-priority, -max_width, -len(value), name)` and
+takes the first alternation match (leftmost-first, identical to the `regex`
+crate's semantics), **plus** an `unless` callback — a string terminal whose value
+is fully matched by a same-priority regex terminal (e.g. the keyword `if` inside
+`CNAME`) is dropped from the alternation and the regex match is retyped back to the
+keyword when the matched text equals it. That is what makes `if` lex as `IF` while
+`iffy` stays `NAME`, with no cross-terminal length scan.
 
-**Fix:** match each terminal independently and pick the longest actual span; priority
-breaks ties. An oracle grammar with overlapping terminals (`->` vs `-`; keyword vs
-identifier) will catch regressions.
+The fix unifies `BasicLexer`/`ContextualLexer` onto one `Scanner` that implements
+`unless` (computed per state for the contextual lexer, exactly as Python builds one
+`TraditionalLexer` per parser state), and drops the obsolete `MAX_GROUPS = 98`
+chunking (Rust's `regex` crate has no named-group limit).
 
-**Note:** the `MAX_GROUPS = 98` chunk limit cites Python `re`'s named-group limit,
-which does not apply to Rust's `regex` crate. The chunking can be removed.
+**Oracle:** `keywords/cases` — `keywords.lark` (un-quarantined) parses `iffy`,
+`elsewhere`, `whiled` as `NAME` and `if`/`while` as keywords, matching Python Lark.
 
-### BUG-4 🟠 Transparent `_rule` trees not inlined
+### BUG-4 ✅ FIXED — Transparent `_rule` trees now inlined
 
-**File:** `src/parsers/lalr.rs:667`
+**File:** `src/parsers/lalr.rs`
 
-`is_anonymous_rule` only matches `__anon_*`. A `_name` rule (transparent in Python
-Lark) reduces to `Tree("_name", […])` that leaks into the output rather than being
-spliced into the parent's child list. Currently untested because `csv.lark` (which
-uses `_anything`, `_SEPARATOR`) has no oracle.
+`is_anonymous_rule` now flattens any node whose name starts with `_` — covering
+both `__anon_*` EBNF helpers and `_name` transparent rules — so a `_name` rule's
+children splice into the parent instead of leaking as a `Tree("_name", …)`.
+Aliased rules are exempt: the node carries the alias name (which has no leading
+underscore), so an alias overrides transparency, matching Python Lark.
 
-**Fix:** extend `is_anonymous_rule` (or `inline_anonymous_trees`) to also flatten
-nodes whose name starts with `_` (but not `__anon_`, already handled). Add oracle
-for `csv.lark` or a minimal `_rule` grammar.
+**Oracle:** `csv/cases` — `csv.lark` (un-quarantined); `_anything` inlines its token
+into `row`. `_anything`'s alternatives overlap on bare letter runs
+(`WORD`/`NON_SEPARATOR_STRING`), so `csv.lark` gives `NON_SEPARATOR_STRING` an
+explicit `.2` priority so the choice is deterministic (see the tie-break rule under
+Testing Philosophy).
 
 ### BUG-5 🟠 Token positions: byte-based columns, wrong end_line for multi-line tokens
 
@@ -377,16 +395,15 @@ wild rely on these. Document as a known parity gap when adding Phase-3 grammar l
 
 ## Recommended Work Order (Next Sessions)
 
-BUG-1, BUG-2, BUG-6 are **done** (the core now fails loudly). Remaining, each with
-a failing-first oracle. The compliance bank (below) is the regression net: fixing a
-bug should flip XFAIL entries to passing — regenerate `xfail.json` and watch parity rise.
+BUG-1 through BUG-4 and BUG-6 are **done** (the core now fails loudly, the lexer
+matches Python's keyword/identifier behavior, and transparent rules inline).
+Remaining, each with a failing-first oracle. The compliance bank (below) is the
+regression net: fixing a bug should flip XFAIL entries to passing — regenerate
+`xfail.json` and watch parity rise (BUG-3 flipped 3, lifting the bank to ~66%).
 
-1. **BUG-3** True maximal-munch lexer + overlapping-terminal oracle
-2. **BUG-4** Transparent `_rule` inlining + `csv.lark` oracle (un-quarantine it)
-3. **BUG-7** Bound template recursion / iterative `~N` (un-skip the two grammars)
-4. **BUG-5** Token position correctness (lower urgency — cosmetic for most grammars)
-5. Un-quarantine `keywords.lark` once BUG-3 lands
-6. Then, with bank parity high, start Phase 2 — Earley + SPPF
+1. **BUG-7** Bound template recursion / iterative `~N` (un-skip the two grammars)
+2. **BUG-5** Token position correctness (lower urgency — cosmetic for most grammars)
+3. Then, with bank parity high, start Phase 2 — Earley + SPPF
 
 ### The compliance bank — your regression net
 
