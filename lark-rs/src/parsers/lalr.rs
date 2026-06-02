@@ -393,7 +393,6 @@ pub fn build_lalr_table(grammar: &Grammar) -> Result<ParseTable, GrammarError> {
     let start_states = builder.build(&grammar.start);
     let (states, transitions) = (builder.states, builder.transitions);
 
-    // LALR(1) lookahead computation — simplified: use FOLLOW sets
     let n_states = states.len();
     let mut action: Vec<HashMap<String, Action>> = vec![HashMap::new(); n_states];
     let mut goto: Vec<HashMap<String, usize>> = vec![HashMap::new(); n_states];

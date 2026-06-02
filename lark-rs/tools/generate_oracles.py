@@ -224,7 +224,7 @@ def save_oracle(suite, name, data):
     out_dir = ORACLES_DIR / suite
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"{name}.json"
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False))
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
     print(f"  wrote {path.relative_to(LARK_RS_DIR)}")
 
 

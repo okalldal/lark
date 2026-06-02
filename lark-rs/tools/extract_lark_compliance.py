@@ -171,7 +171,7 @@ def dedup_and_save():
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     out = OUT_DIR / "bank.json"
-    out.write_text(json.dumps(records, indent=2, ensure_ascii=False))
+    out.write_text(json.dumps(records, indent=2, ensure_ascii=False) + "\n")
 
     n_parse = sum(len(r["cases"]) for r in records)
     n_conflict = sum(1 for r in records if r["construct_error"])
