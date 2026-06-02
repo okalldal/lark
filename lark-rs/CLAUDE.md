@@ -105,14 +105,28 @@ tools/
 
 ### LALR Construction Pipeline (`lalr.rs`)
 
+**Actual current state (SLR(1)):**
 ```
 Grammar
   → GrammarAnalysis   (FIRST / FOLLOW / NULLABLE)
   → LR0Builder        (closure + goto → item sets / transitions)
-  → LookaheadComputer (LALR(1) lookahead propagation)
+  → build_lalr_table  uses FOLLOW sets for REDUCE lookaheads  ← SLR(1), not LALR(1)
   → ParseTable        { action[state][terminal] → Shift/Reduce/Accept,
                         goto[state][nonterminal] → state }
 ```
+
+**Intended state (LALR(1)) — not yet wired:**
+```
+Grammar
+  → GrammarAnalysis   (FIRST / FOLLOW / NULLABLE)
+  → LR0Builder        (closure + goto → item sets / transitions)
+  → LookaheadComputer (per-state LALR(1) lookahead propagation) ← WRITTEN, NOT CALLED
+  → build_lalr_table  uses per-state lookaheads for REDUCE
+  → ParseTable
+```
+
+`LookaheadComputer` (lalr.rs:169) is fully written but never called. Fixing this is the
+top Phase-1 blocker — see **Known Bugs** below.
 
 ### Parse-Tree Assembly
 
@@ -122,11 +136,16 @@ After each REDUCE, `apply_rule_options()` post-processes children:
 3. `expand1` (`?rule`): if exactly one child and no alias, return that child as-is
    — returns `Child` (Token or Tree), not always a Tree
 
+**Note:** Transparent `_rule` inlining is not yet implemented — see Known Bugs.
+
 ---
 
 ## Implementation Status
 
-### ✅ Phase 1 — LALR + Contextual Lexer (Complete)
+### 🔧 Phase 1 — LALR + Contextual Lexer (Core working, bugs to fix)
+
+The parser handles JSON, arithmetic, and Python number literals correctly against the
+oracle. Three correctness bugs need fixing before Phase 2 starts (see Known Bugs).
 
 | Component | Status | Notes |
 |-----------|--------|-------|
@@ -139,21 +158,30 @@ After each REDUCE, `apply_rule_options()` post-processes children:
 | Parameterised templates | ✅ | `_sep{x, sep}: x (sep x)*` |
 | FIRST/FOLLOW/NULLABLE | ✅ | Standard fixed-point algorithm |
 | LR(0) item sets | ✅ | Canonical collection |
-| LALR(1) lookaheads | ✅ | Digraph-based propagation |
+| LALR(1) lookaheads | ❌ **SLR(1)** | `LookaheadComputer` written but not called; FOLLOW sets used instead |
+| Conflict detection | ❌ | Conflicts silently resolved; rule priority not consulted |
 | ParseTable (ACTION/GOTO) | ✅ | Shift/Reduce/Accept |
-| BasicLexer | ✅ | Combined regex, longest match |
-| ContextualLexer | ✅ | Per-state regex, always_accept for ignores |
+| BasicLexer | ⚠️ | Per-chunk regex, not true maximal-munch across whole terminal set |
+| ContextualLexer | ⚠️ | Per-state regex, always_accept for ignores; same munch caveat |
 | Terminal priority ordering | ✅ | (-priority, -pattern_len, name) |
 | Within-terminal alt ordering | ✅ | Longest-first (mirrors Python Lark) |
-| Tree assembly | ✅ | `expand1`, transparent rules, anon inlining |
+| Tree assembly | ✅ | `expand1`, anon inlining |
+| Transparent `_rule` inlining | ❌ | `is_anonymous_rule` only checks `__anon_*`, not `_name` |
 | `keep_all_tokens` | ✅ | |
 | Aliases (`-> name`) | ✅ | Correctly overrides `expand1` |
+| Token positions (line/col) | ⚠️ | Byte-based columns; end_line wrong for tokens spanning newlines |
 | Oracle test harness | ✅ | arithmetic, JSON, python_numbers |
 | JSONTestSuite corpus | ✅ | 293/293 oracle agreement |
 
 ### ⬜ Phase 2 — Earley + SPPF
 
+**Do not start Phase 2 until the Phase-1 blockers below are resolved.**
+Building SPPF on top of an SLR(1) table with no conflict detection will compound bugs
+across layers and make them very hard to diagnose.
+
 Earley is the second USP. It handles grammars LALR cannot (ambiguous, non-deterministic).
+Currently, requesting `ParserAlgorithm::Earley` silently falls back to LALR — this must
+be changed to an explicit error first.
 
 | Component | Status | Notes |
 |-----------|--------|-------|
@@ -188,6 +216,95 @@ Earley is the second USP. It handles grammars LALR cannot (ambiguous, non-determ
 
 ---
 
+## Known Bugs — Must Fix Before Phase 2
+
+These are Phase-1 correctness issues discovered during code review (2026-06-02).
+They pass current tests only because the test grammars (JSON, arithmetic) don't
+exercise the failure modes. Each needs an oracle test that fails, then a fix.
+
+### BUG-1 🔴 Parser is SLR(1), not LALR(1) — `LookaheadComputer` is dead code
+
+**File:** `src/parsers/lalr.rs:294–345`
+
+`build_lalr_table` fills REDUCE actions using global `FOLLOW(origin)` sets, not
+per-state LALR(1) lookaheads. `LookaheadComputer` (lalr.rs:169) is fully written
+and correct but is **never called**.
+
+Impact: any LALR-but-not-SLR grammar produces spurious conflicts, silently mis-resolved.
+Also weakens the contextual lexer — it inherits the over-broad SLR lookahead set rather
+than the precise LALR set that is the USP.
+
+**Fix:** call `LookaheadComputer::compute()` in `build_lalr_table`; use its per-state
+result to replace the FOLLOW-set lookup in the REDUCE loop.
+
+**Oracle to add:** a grammar that is LALR-but-not-SLR (e.g. dangling-else, or two rules
+with identical FOLLOW sets but different per-state lookaheads).
+
+### BUG-2 🔴 No conflict detection — rule priority never consulted
+
+**File:** `src/parsers/lalr.rs:329–344`
+
+S/R conflicts always resolve to shift with no diagnostics. R/R conflicts are silently
+last-writer-wins. `RuleOptions.priority` is parsed but never used for resolution.
+Python Lark raises `GrammarAnalyzeError` and lists conflicting rules.
+
+**Fix:** collect conflicts during table construction; apply `priority` first; report
+unresolved conflicts as errors (or structured warnings).
+
+### BUG-3 🟠 Lexer uses preference order, not true maximal-munch
+
+**File:** `src/lexer.rs:204–228` (ContextualLexer), `src/lexer.rs:69–91` (BasicLexer)
+
+The combined alternation regex uses the `regex` crate's leftmost-first preference
+semantics. Winner is determined by **alternation order** (sort key: priority,
+pattern-source-length, name) — not by **actual match length** at runtime.
+`BasicLexer` compares lengths across chunks but not within a chunk.
+Python Lark guarantees longest-match.
+
+**Fix:** match each terminal independently and pick the longest actual span; priority
+breaks ties. An oracle grammar with overlapping terminals (`->` vs `-`; keyword vs
+identifier) will catch regressions.
+
+**Note:** the `MAX_GROUPS = 98` chunk limit cites Python `re`'s named-group limit,
+which does not apply to Rust's `regex` crate. The chunking can be removed.
+
+### BUG-4 🟠 Transparent `_rule` trees not inlined
+
+**File:** `src/parsers/lalr.rs:667`
+
+`is_anonymous_rule` only matches `__anon_*`. A `_name` rule (transparent in Python
+Lark) reduces to `Tree("_name", […])` that leaks into the output rather than being
+spliced into the parent's child list. Currently untested because `csv.lark` (which
+uses `_anything`, `_SEPARATOR`) has no oracle.
+
+**Fix:** extend `is_anonymous_rule` (or `inline_anonymous_trees`) to also flatten
+nodes whose name starts with `_` (but not `__anon_`, already handled). Add oracle
+for `csv.lark` or a minimal `_rule` grammar.
+
+### BUG-5 🟠 Token positions: byte-based columns, wrong end_line for multi-line tokens
+
+**File:** `src/lexer.rs:215–216` (ContextualLexer::next_token)
+
+`end_column: col + value.len()` uses byte length, not char count — wrong for
+non-ASCII input. `end_line: line` is set unconditionally with no newline scan inside
+the token value — wrong for multi-line tokens (e.g. `NEWLINE`, multi-line strings).
+
+**Fix:** walk `value.chars()` after a match to compute correct `end_line`/`end_column`,
+mirroring `LexerState::advance_by_lines` which already does this correctly.
+
+### BUG-6 🟡 Earley silently falls back to LALR instead of erroring
+
+**File:** `src/parsers/mod.rs:78–84`, `src/lib.rs:57`
+
+`LarkOptions::default()` sets `parser: Earley`. The frontend silently substitutes LALR.
+Earley accepts all CFGs; LALR rejects some — wrong results on ambiguous grammars, no
+error. CYK correctly errors; Earley should too until Phase 2.
+
+**Fix:** return `Err(LarkError::Grammar(GrammarError::Other { msg: "Earley not yet
+implemented" }))` matching the CYK pattern. Change the default to `Lalr`.
+
+---
+
 ## Key Design Decisions & Gotchas
 
 **Terminal ordering matters.** Terminals are sorted `(-priority, -pattern_len, name)` before
@@ -217,6 +334,28 @@ then explicitly skips tokens whose `type_` is in `lexer.ignore()`.
 
 **Import aliases are the registered name.** `%import common.WS -> _WS` means the terminal
 is `_WS` in this grammar, not `WS`. Store and look up by alias.
+
+**`LookaheadComputer` is written but not called (BUG-1).** Do not delete it — it is the
+correct LALR(1) implementation that needs to be wired up.
+
+**`regex` crate has no lookahead or backreferences.** Some Python Lark grammars in the
+wild rely on these. Document as a known parity gap when adding Phase-3 grammar library.
+
+---
+
+## Recommended Work Order (Next Sessions)
+
+Fix Phase-1 bugs before starting Phase 2. Each item should have an oracle test that
+fails first, then the implementation fix.
+
+1. **BUG-1** Wire up `LookaheadComputer` — true LALR(1) lookaheads
+2. **BUG-2** Conflict detection and rule-priority resolution
+3. **BUG-3** True maximal-munch lexer + overlapping-terminal oracle
+4. **BUG-4** Transparent `_rule` inlining + `csv.lark` oracle
+5. **BUG-6** Earley → explicit error; default to `Lalr`
+6. **BUG-5** Token position correctness (lower urgency — cosmetic for most grammars)
+7. Add oracles for committed-but-untested grammars: `keywords.lark`, `csv.lark`
+8. Then start Phase 2 — Earley + SPPF
 
 ---
 
