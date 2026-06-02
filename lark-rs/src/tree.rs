@@ -101,6 +101,7 @@ fn child_start(c: &Child) -> Option<usize> {
     match c {
         Child::Token(t) => Some(t.start_pos),
         Child::Tree(t) => t.meta.start_pos,
+        Child::None => None,
     }
 }
 fn child_end_line(c: &Child) -> Option<usize> {
@@ -121,14 +122,19 @@ fn child_end(c: &Child) -> Option<usize> {
     match c {
         Child::Token(t) => Some(t.end_pos),
         Child::Tree(t) => t.meta.end_pos,
+        Child::None => None,
     }
 }
 
-/// A child of a `Tree` node — either a subtree or a leaf token.
+/// A child of a `Tree` node — a subtree, a leaf token, or a `None` placeholder.
+///
+/// `None` placeholders are inserted for absent `[...]` groups when the parser is
+/// built with `maybe_placeholders` (mirroring Python Lark's `None` children).
 #[derive(Debug, Clone)]
 pub enum Child {
     Tree(Tree),
     Token(Token),
+    None,
 }
 
 impl Child {
@@ -156,6 +162,7 @@ impl fmt::Display for Child {
         match self {
             Child::Tree(t) => write!(f, "{}", t),
             Child::Token(t) => write!(f, "{}", t.value),
+            Child::None => write!(f, "None"),
         }
     }
 }
@@ -201,6 +208,7 @@ impl Tree {
             match child {
                 Child::Tree(t) => out.push_str(&t.pretty(indent + 1)),
                 Child::Token(tok) => out.push_str(&format!("{}  Token({}, {:?})", pad, tok.type_, tok.value)),
+                Child::None => out.push_str(&format!("{}  None", pad)),
             }
             out.push('\n');
         }
@@ -215,6 +223,7 @@ impl fmt::Display for Tree {
             .map(|c| match c {
                 Child::Tree(t) => t.to_string(),
                 Child::Token(tok) => format!("Token({}, {:?})", tok.type_, tok.value),
+                Child::None => "None".to_string(),
             })
             .collect();
         write!(f, "Tree({}, [{}])", self.data, children.join(", "))

@@ -1,4 +1,3 @@
 [
-  "\n                       start: \"[\" _sep{NUMBER, \",\"} \"]\"\n                       _sep{item, delim}: item | _sep{item, delim} delim item\n                       NUMBER: /\\d+/\n                       %ignore \" \"\n                       ",
-  "start: \"A\"~8191\n            "
+  "\n                       start: \"[\" _sep{NUMBER, \",\"} \"]\"\n                       _sep{item, delim}: item | _sep{item, delim} delim item\n                       NUMBER: /\\d+/\n                       %ignore \" \"\n                       "
 ]

@@ -19,11 +19,12 @@ use crate::error::GrammarError;
 pub fn load_grammar(
     grammar_text: &str,
     start: &[String],
+    maybe_placeholders: bool,
 ) -> Result<Grammar, GrammarError> {
     let mut parser = GrammarParser::new(grammar_text);
     let items = parser.parse_start()?;
 
-    let mut compiler = GrammarCompiler::new(start.to_vec());
+    let mut compiler = GrammarCompiler::new(start.to_vec(), maybe_placeholders);
     compiler.process_items(items)?;
     compiler.compile()
 }
@@ -921,10 +922,15 @@ struct GrammarCompiler {
     literal_cache: HashMap<String, String>,
     /// Template definitions: name → (params, expansions).
     templates: HashMap<String, (Vec<String>, Vec<AliasedExpansion>)>,
+    /// Whether absent `[...]` groups emit `None` placeholders (Lark parity).
+    maybe_placeholders: bool,
+    /// `keep_all_tokens` of the rule currently being compiled — needed to count
+    /// kept symbols for placeholder generation.
+    current_keep_all: bool,
 }
 
 impl GrammarCompiler {
-    fn new(start: Vec<String>) -> Self {
+    fn new(start: Vec<String>, maybe_placeholders: bool) -> Self {
         GrammarCompiler {
             start,
             rules: Vec::new(),
@@ -934,6 +940,8 @@ impl GrammarCompiler {
             term_counter: 0,
             literal_cache: HashMap::new(),
             templates: HashMap::new(),
+            maybe_placeholders,
+            current_keep_all: false,
         }
     }
 
@@ -981,6 +989,9 @@ impl GrammarCompiler {
         let keep_all = raw.modifiers.contains('!');
         let expand1 = raw.modifiers.contains('?');
         let origin = NonTerminal::new(&raw.name);
+        // Make keep_all visible to placeholder counting while this rule's body
+        // (and the anonymous rules it expands into) is compiled.
+        self.current_keep_all = keep_all;
 
         for (order, alt) in raw.expansions.into_iter().enumerate() {
             let alias = alt.alias.clone();
@@ -990,6 +1001,7 @@ impl GrammarCompiler {
                 keep_all_tokens: keep_all,
                 priority: raw.priority,
                 empty_indices: Vec::new(),
+                placeholder_count: 0,
             };
             self.rules.push(Rule::new(
                 origin.clone(),
@@ -1070,14 +1082,14 @@ impl GrammarCompiler {
             }
             LiteralVal::Re(pattern, flags) => {
                 let pat = Pattern::Re(PatternRe::new(pattern.as_str(), *flags)?);
-                (pat, self.fresh_terminal())
+                (pat, None)
             }
         };
-        // Use the hint, but ensure uniqueness
-        let name = if !self.terminals.iter().any(|t| t.name == name_hint) {
-            name_hint
-        } else {
-            self.fresh_terminal()
+        // Use the hint when it is a fresh, valid identifier; otherwise fall back
+        // to a generated `__ANON_N` name (always a valid regex group name).
+        let name = match name_hint {
+            Some(h) if !self.terminals.iter().any(|t| t.name == h) => h,
+            _ => self.fresh_terminal(),
         };
         self.terminals.push(TerminalDef::new(&name, pat, 0));
         self.literal_cache.insert(key, name.clone());
@@ -1125,7 +1137,36 @@ impl GrammarCompiler {
         alts: Vec<AliasedExpansion>,
         parent: &str,
     ) -> Result<Symbol, GrammarError> {
-        self.compile_group(alts, parent, true)
+        // Without maybe_placeholders, `[x]` is just an optional group.
+        if !self.maybe_placeholders {
+            return self.compile_group(alts, parent, true);
+        }
+        // With maybe_placeholders, the empty case emits one `None` per kept symbol,
+        // using the widest alternative (Python Lark inserts max-width placeholders).
+        let name = self.fresh_anon_rule("maybe");
+        let origin = NonTerminal::new(&name);
+        let mut max_kept = 0;
+        for (order, alt) in alts.into_iter().enumerate() {
+            let alias = alt.alias.clone();
+            let syms = self.compile_expansion(alt.expansion, &name)?;
+            let kept = syms.iter().filter(|s| self.is_kept_symbol(s)).count();
+            max_kept = max_kept.max(kept);
+            self.rules.push(Rule::new(origin.clone(), syms, alias, RuleOptions::default(), order));
+        }
+        let empty_opts = RuleOptions { placeholder_count: max_kept, ..RuleOptions::default() };
+        self.rules.push(Rule::new(origin.clone(), vec![], None, empty_opts, 100));
+        Ok(Symbol::NonTerminal(origin))
+    }
+
+    /// Whether a symbol survives tree filtering (so it counts toward the number of
+    /// `None` placeholders an absent `[...]` must emit). Mirrors the filter applied
+    /// in `apply_rule_options`: tokens are dropped if `_`-prefixed (unless the rule
+    /// keeps all tokens); `_`-prefixed nonterminals are inlined away.
+    fn is_kept_symbol(&self, s: &Symbol) -> bool {
+        match s {
+            Symbol::Terminal(t) => self.current_keep_all || !t.name.starts_with('_'),
+            Symbol::NonTerminal(nt) => !nt.name.starts_with('_'),
+        }
     }
 
     fn compile_repeat(
@@ -1243,11 +1284,16 @@ impl GrammarCompiler {
             }
             Expr::Repeat { inner, min, max } => {
                 let inner_pat = self.expr_to_pattern(inner)?;
-                let quantifier = match (min, max) {
-                    (0, Some(1)) => "?",
-                    (1, None) => "+",
-                    (0, None) => "*",
-                    _ => "",
+                // Inside a terminal, repetition becomes a regex quantifier.
+                // Bounded forms (`~n`, `~n..m`) must emit `{n}` / `{n,m}` / `{n,}`;
+                // previously they fell through to "" and silently dropped the count.
+                let quantifier = match (*min, *max) {
+                    (0, Some(1)) => "?".to_string(),
+                    (1, None) => "+".to_string(),
+                    (0, None) => "*".to_string(),
+                    (n, Some(m)) if n == m => format!("{{{n}}}"),
+                    (n, Some(m)) => format!("{{{n},{m}}}"),
+                    (n, None) => format!("{{{n},}}"),
                 };
                 Ok(Pattern::Re(PatternRe::new(
                     &format!("(?:{}){}", inner_pat.as_regex_str(), quantifier),
@@ -1427,16 +1473,22 @@ impl GrammarCompiler {
 }
 
 /// Attempt to produce a human-readable terminal name for a literal string.
-fn terminal_name_hint(s: &str) -> String {
+///
+/// Returns `None` when the literal has no safe identifier form (e.g. it contains
+/// backslashes, tabs, or other characters that are not valid in a regex named
+/// capture group); the caller then assigns a fresh `__ANON_N` name. Embedding
+/// raw/escaped pattern characters in the name produces invalid group names like
+/// `(?P<__ANON_\>…)` and crashes regex compilation.
+fn terminal_name_hint(s: &str) -> Option<String> {
     // Use lookup table for common punctuation
     if let Some(&name) = TERMINAL_NAMES.iter().find(|(ch, _)| ch == &s).map(|(_, n)| n) {
-        return format!("__{}", name);
+        return Some(format!("__{}", name));
     }
     // For keyword-like strings, use uppercase
     if s.chars().all(|c| c.is_alphanumeric() || c == '_') && !s.is_empty() {
-        return format!("__{}", s.to_uppercase());
+        return Some(format!("__{}", s.to_uppercase()));
     }
-    format!("__ANON_{}", regex::escape(s).chars().take(8).collect::<String>())
+    None
 }
 
 /// Standard terminal names for common punctuation/operators.
