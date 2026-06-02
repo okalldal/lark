@@ -951,6 +951,13 @@ impl GrammarCompiler {
         name
     }
 
+    /// Options for anonymous EBNF helper rules (groups, optionals, repetition).
+    /// `keep_all_tokens` propagates from the enclosing rule so that `!rule` keeps
+    /// tokens inside its `[...]`, `(...)`, `*`, `+` sub-expressions too.
+    fn anon_opts(&self) -> RuleOptions {
+        RuleOptions { keep_all_tokens: self.current_keep_all, ..RuleOptions::default() }
+    }
+
     fn fresh_terminal(&mut self) -> String {
         let name = format!("__ANON_{}", self.term_counter);
         self.term_counter += 1;
@@ -967,19 +974,31 @@ impl GrammarCompiler {
             }
         }
 
-        for item in items {
+        // Two passes: define terminals (and imports) before compiling rule bodies,
+        // so a string literal in a rule can unify with an already-known terminal
+        // of identical pattern (and avoid duplicate-name collisions).
+        let (term_items, rule_items): (Vec<Item>, Vec<Item>) = items.into_iter().partition(
+            |item| matches!(item, Item::TermItem(_) | Item::ImportItem(_) | Item::DeclareItem(_)),
+        );
+        for item in term_items {
+            match item {
+                Item::TermItem(t) => self.compile_term(t)?,
+                Item::ImportItem(spec) => self.resolve_import(spec)?,
+                Item::DeclareItem(_) => { /* forward declarations — no-op for now */ }
+                _ => unreachable!(),
+            }
+        }
+        for item in rule_items {
             match item {
                 Item::RuleItem(r) if !r.params.is_empty() => { /* template — used on demand */ }
                 Item::RuleItem(r) => self.compile_rule(r)?,
-                Item::TermItem(t) => self.compile_term(t)?,
                 Item::IgnoreItem(expansions) => {
                     for expansion in expansions {
                         let pat = self.expansion_to_pattern(&expansion)?;
                         self.ignore_patterns.push(pat);
                     }
                 }
-                Item::ImportItem(spec) => self.resolve_import(spec)?,
-                Item::DeclareItem(_) => { /* forward declarations — no-op for now */ }
+                _ => unreachable!(),
             }
         }
         Ok(())
@@ -1053,7 +1072,7 @@ impl GrammarCompiler {
                     regex::escape(&from), regex::escape(&to));
                 let pat = Pattern::Re(PatternRe::new(&pat_str, 0)?);
                 let name = self.fresh_terminal();
-                self.terminals.push(TerminalDef::new(&name, pat, 0));
+                self.terminals.push(TerminalDef::new(&name, pat, 0).with_filter_out(true));
                 Ok(Symbol::Terminal(Terminal::new(name)))
             }
             Value::TemplateUsage { name, args } => {
@@ -1085,13 +1104,17 @@ impl GrammarCompiler {
                 (pat, None)
             }
         };
-        // Use the hint when it is a fresh, valid identifier; otherwise fall back
-        // to a generated `__ANON_N` name (always a valid regex group name).
+        // Use the clean hint when it is a fresh, valid identifier; otherwise fall
+        // back to a generated `__ANON_N` name (always a valid regex group name).
+        // We deliberately do NOT unify with a same-pattern user terminal: a
+        // literal usage is always filter_out, whereas the named terminal may be
+        // kept, so they must stay distinct.
         let name = match name_hint {
             Some(h) if !self.terminals.iter().any(|t| t.name == h) => h,
             _ => self.fresh_terminal(),
         };
-        self.terminals.push(TerminalDef::new(&name, pat, 0));
+        // Terminals created from a literal in a rule body are filtered by default.
+        self.terminals.push(TerminalDef::new(&name, pat, 0).with_filter_out(true));
         self.literal_cache.insert(key, name.clone());
         Ok(name)
     }
@@ -1115,7 +1138,7 @@ impl GrammarCompiler {
                 origin.clone(),
                 syms,
                 alias,
-                RuleOptions::default(),
+                self.anon_opts(),
                 order,
             ));
         }
@@ -1125,7 +1148,7 @@ impl GrammarCompiler {
                 origin.clone(),
                 vec![],
                 None,
-                RuleOptions::default(),
+                self.anon_opts(),
                 100,
             ));
         }
@@ -1151,9 +1174,9 @@ impl GrammarCompiler {
             let syms = self.compile_expansion(alt.expansion, &name)?;
             let kept = syms.iter().filter(|s| self.is_kept_symbol(s)).count();
             max_kept = max_kept.max(kept);
-            self.rules.push(Rule::new(origin.clone(), syms, alias, RuleOptions::default(), order));
+            self.rules.push(Rule::new(origin.clone(), syms, alias, self.anon_opts(), order));
         }
-        let empty_opts = RuleOptions { placeholder_count: max_kept, ..RuleOptions::default() };
+        let empty_opts = RuleOptions { placeholder_count: max_kept, ..self.anon_opts() };
         self.rules.push(Rule::new(origin.clone(), vec![], None, empty_opts, 100));
         Ok(Symbol::NonTerminal(origin))
     }
@@ -1164,7 +1187,13 @@ impl GrammarCompiler {
     /// keeps all tokens); `_`-prefixed nonterminals are inlined away.
     fn is_kept_symbol(&self, s: &Symbol) -> bool {
         match s {
-            Symbol::Terminal(t) => self.current_keep_all || !t.name.starts_with('_'),
+            Symbol::Terminal(t) => {
+                if self.current_keep_all {
+                    return true;
+                }
+                // Kept iff the terminal is not filter_out.
+                !self.terminals.iter().any(|td| td.name == t.name && td.filter_out)
+            }
             Symbol::NonTerminal(nt) => !nt.name.starts_with('_'),
         }
     }
@@ -1183,8 +1212,8 @@ impl GrammarCompiler {
                 // inner? → optional rule
                 let name = self.fresh_anon_rule("opt");
                 let nt = NonTerminal::new(&name);
-                self.rules.push(Rule::new(nt.clone(), vec![inner_sym], None, RuleOptions::default(), 0));
-                self.rules.push(Rule::new(nt.clone(), vec![], None, RuleOptions::default(), 1));
+                self.rules.push(Rule::new(nt.clone(), vec![inner_sym], None, self.anon_opts(), 0));
+                self.rules.push(Rule::new(nt.clone(), vec![], None, self.anon_opts(), 1));
                 Ok(Symbol::NonTerminal(nt))
             }
             (1, None) => {
@@ -1192,8 +1221,8 @@ impl GrammarCompiler {
                 let name = self.fresh_anon_rule("plus");
                 let nt = NonTerminal::new(&name);
                 // name : inner | name inner
-                self.rules.push(Rule::new(nt.clone(), vec![inner_sym.clone()], None, RuleOptions::default(), 0));
-                self.rules.push(Rule::new(nt.clone(), vec![Symbol::NonTerminal(nt.clone()), inner_sym], None, RuleOptions::default(), 1));
+                self.rules.push(Rule::new(nt.clone(), vec![inner_sym.clone()], None, self.anon_opts(), 0));
+                self.rules.push(Rule::new(nt.clone(), vec![Symbol::NonTerminal(nt.clone()), inner_sym], None, self.anon_opts(), 1));
                 Ok(Symbol::NonTerminal(nt))
             }
             (0, None) => {
@@ -1201,8 +1230,8 @@ impl GrammarCompiler {
                 let name = self.fresh_anon_rule("star");
                 let nt = NonTerminal::new(&name);
                 // name : ε | name inner
-                self.rules.push(Rule::new(nt.clone(), vec![], None, RuleOptions::default(), 0));
-                self.rules.push(Rule::new(nt.clone(), vec![Symbol::NonTerminal(nt.clone()), inner_sym], None, RuleOptions::default(), 1));
+                self.rules.push(Rule::new(nt.clone(), vec![], None, self.anon_opts(), 0));
+                self.rules.push(Rule::new(nt.clone(), vec![Symbol::NonTerminal(nt.clone()), inner_sym], None, self.anon_opts(), 1));
                 Ok(Symbol::NonTerminal(nt))
             }
             (n, Some(m)) if n == m => {
@@ -1210,7 +1239,7 @@ impl GrammarCompiler {
                 let name = self.fresh_anon_rule("rep");
                 let nt = NonTerminal::new(&name);
                 let syms: Vec<Symbol> = std::iter::repeat(inner_sym).take(n).collect();
-                self.rules.push(Rule::new(nt.clone(), syms, None, RuleOptions::default(), 0));
+                self.rules.push(Rule::new(nt.clone(), syms, None, self.anon_opts(), 0));
                 Ok(Symbol::NonTerminal(nt))
             }
             (n, max_opt) => {
@@ -1220,7 +1249,7 @@ impl GrammarCompiler {
                 let nt = NonTerminal::new(&name);
                 for count in n..=max_count {
                     let syms: Vec<Symbol> = std::iter::repeat(inner_sym.clone()).take(count).collect();
-                    self.rules.push(Rule::new(nt.clone(), syms, None, RuleOptions::default(), count));
+                    self.rules.push(Rule::new(nt.clone(), syms, None, self.anon_opts(), count));
                 }
                 Ok(Symbol::NonTerminal(nt))
             }
@@ -1243,7 +1272,14 @@ impl GrammarCompiler {
             patterns.into_iter().map(|p| format!("(?:{})", p)).collect::<Vec<_>>().join("|")
         };
         let pat = Pattern::Re(PatternRe::new(&combined, 0)?);
-        self.terminals.push(TerminalDef::new(&raw.name, pat, raw.priority));
+        // A user terminal already defined (e.g. via %import) is not redefined.
+        if self.terminals.iter().any(|t| t.name == raw.name) {
+            return Ok(());
+        }
+        let filter_out = raw.name.starts_with('_');
+        self.terminals.push(
+            TerminalDef::new(&raw.name, pat, raw.priority).with_filter_out(filter_out),
+        );
         Ok(())
     }
 
@@ -1360,7 +1396,7 @@ impl GrammarCompiler {
         for (order, alt) in expansions.into_iter().enumerate() {
             let alias = alt.alias.clone();
             let syms = self.compile_expansion(alt.expansion, &inst_name)?;
-            self.rules.push(Rule::new(origin.clone(), syms, alias, RuleOptions::default(), order));
+            self.rules.push(Rule::new(origin.clone(), syms, alias, self.anon_opts(), order));
         }
         Ok(Symbol::NonTerminal(origin))
     }
@@ -1427,7 +1463,10 @@ impl GrammarCompiler {
                     let registered_name = alias.as_deref().unwrap_or(name.as_str());
                     let pat = Pattern::Re(PatternRe::new(td.1, 0)?);
                     if !self.terminals.iter().any(|t| t.name == registered_name) {
-                        self.terminals.push(TerminalDef::new(registered_name, pat, 0));
+                        self.terminals.push(
+                            TerminalDef::new(registered_name, pat, 0)
+                                .with_filter_out(registered_name.starts_with('_')),
+                        );
                     }
                 }
                 // Rules from common (e.g., %import common.list) are silently skipped for now.
@@ -1449,7 +1488,7 @@ impl GrammarCompiler {
             .collect();
         for (i, pat) in self.ignore_patterns.into_iter().enumerate() {
             let name = format!("__IGNORE_{}", i);
-            self.terminals.push(TerminalDef::new(&name, pat, 0));
+            self.terminals.push(TerminalDef::new(&name, pat, 0).with_filter_out(true));
         }
 
         // Sort terminals by (priority desc, max_width desc, name asc)
@@ -1480,13 +1519,16 @@ impl GrammarCompiler {
 /// raw/escaped pattern characters in the name produces invalid group names like
 /// `(?P<__ANON_\>…)` and crashes regex compilation.
 fn terminal_name_hint(s: &str) -> Option<String> {
-    // Use lookup table for common punctuation
+    // Common punctuation uses Python Lark's names (e.g. "," -> COMMA, "(" -> LPAR).
+    // Filtering is handled by `filter_out`, not a name prefix, so names are clean.
     if let Some(&name) = TERMINAL_NAMES.iter().find(|(ch, _)| ch == &s).map(|(_, n)| n) {
-        return Some(format!("__{}", name));
+        return Some(name.to_string());
     }
-    // For keyword-like strings, use uppercase
-    if s.chars().all(|c| c.is_alphanumeric() || c == '_') && !s.is_empty() {
-        return Some(format!("__{}", s.to_uppercase()));
+    // Keyword-like strings become their uppercase form, but only when that is a
+    // valid regex named-capture identifier (must not start with a digit).
+    let first_ok = s.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_');
+    if first_ok && s.chars().all(|c| c.is_alphanumeric() || c == '_') {
+        return Some(s.to_uppercase());
     }
     None
 }
