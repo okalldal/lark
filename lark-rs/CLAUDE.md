@@ -54,6 +54,26 @@ To initialise the JSONTestSuite submodule:
 git submodule update --init tests/corpora/JSONTestSuite
 ```
 
+### Before Pushing — Local CI Gate
+
+`lark-rs/scripts/check.sh` runs **exactly** what GitHub Actions runs (the `Format`
+pre-commit job, `cargo test --all`, and the oracle-freshness gate). Run it before
+pushing so a red CI is caught locally first:
+
+```bash
+lark-rs/scripts/check.sh
+```
+
+Enable the committed pre-push hook once per clone so it runs automatically on
+every `git push` (and blocks the push if any gate fails):
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Requirements: `pip install lark pre-commit` and the JSONTestSuite submodule
+(above). **Never push without a green gate.**
+
 ---
 
 ## Architecture
