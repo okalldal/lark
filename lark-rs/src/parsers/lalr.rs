@@ -115,6 +115,9 @@ impl<'g> LR0Builder<'g> {
     /// Build all LR(0) states starting from augmented start rules.
     fn build(&mut self, start_names: &[String]) -> HashMap<String, usize> {
         let mut start_states = HashMap::new();
+        // O(1) state deduplication + a worklist for iterative construction.
+        let mut index: HashMap<ItemSet, usize> = HashMap::new();
+        let mut worklist: VecDeque<usize> = VecDeque::new();
 
         for start_name in start_names {
             // Find the augmented start rule: $root_<name> -> <name> $END
@@ -133,32 +136,45 @@ impl<'g> LR0Builder<'g> {
             };
 
             let kernel: ItemSet = std::iter::once(LR0Item::new(aug_idx, 0)).collect();
-            let s0 = self.add_state(kernel);
+            let s0 = self.intern_state(kernel, &mut index, &mut worklist);
             start_states.insert(start_name.clone(), s0);
+        }
+
+        // Process states iteratively (a worklist, not recursion) so deep GOTO
+        // chains — e.g. `"A"~8191` expands to thousands of chained states — do not
+        // overflow the stack.
+        while let Some(id) = worklist.pop_front() {
+            let closed = self.states[id].clone();
+            let symbols: HashSet<Symbol> = closed.iter()
+                .filter_map(|item| item.expected(self.rules).cloned())
+                .collect();
+            for sym in symbols {
+                let next_state_items = self.goto(&closed, &sym);
+                if !next_state_items.is_empty() {
+                    let next_id = self.intern_state(next_state_items, &mut index, &mut worklist);
+                    self.transitions.insert((id, sym.name().to_string()), next_id);
+                }
+            }
         }
         start_states
     }
 
-    fn add_state(&mut self, kernel: ItemSet) -> usize {
+    /// Return the state id for the closure of `kernel`, creating it (and queuing
+    /// it for processing) if it does not already exist. O(1) lookup via `index`.
+    fn intern_state(
+        &mut self,
+        kernel: ItemSet,
+        index: &mut HashMap<ItemSet, usize>,
+        worklist: &mut VecDeque<usize>,
+    ) -> usize {
         let closed = self.closure(&kernel);
-        if let Some(pos) = self.states.iter().position(|s| s == &closed) {
-            return pos;
+        if let Some(&id) = index.get(&closed) {
+            return id;
         }
         let id = self.states.len();
         self.states.push(closed.clone());
-
-        // Collect symbols that can be shifted from this state
-        let symbols: HashSet<Symbol> = closed.iter()
-            .filter_map(|item| item.expected(self.rules).cloned())
-            .collect();
-
-        for sym in symbols {
-            let next_state_items = self.goto(&closed, &sym);
-            if !next_state_items.is_empty() {
-                let next_id = self.add_state(next_state_items);
-                self.transitions.insert((id, sym.name().to_string()), next_id);
-            }
-        }
+        index.insert(closed, id);
+        worklist.push_back(id);
         id
     }
 }

@@ -1243,11 +1243,16 @@ impl GrammarCompiler {
             }
             Expr::Repeat { inner, min, max } => {
                 let inner_pat = self.expr_to_pattern(inner)?;
-                let quantifier = match (min, max) {
-                    (0, Some(1)) => "?",
-                    (1, None) => "+",
-                    (0, None) => "*",
-                    _ => "",
+                // Inside a terminal, repetition becomes a regex quantifier.
+                // Bounded forms (`~n`, `~n..m`) must emit `{n}` / `{n,m}` / `{n,}`;
+                // previously they fell through to "" and silently dropped the count.
+                let quantifier = match (*min, *max) {
+                    (0, Some(1)) => "?".to_string(),
+                    (1, None) => "+".to_string(),
+                    (0, None) => "*".to_string(),
+                    (n, Some(m)) if n == m => format!("{{{n}}}"),
+                    (n, Some(m)) => format!("{{{n},{m}}}"),
+                    (n, None) => format!("{{{n},}}"),
                 };
                 Ok(Pattern::Re(PatternRe::new(
                     &format!("(?:{}){}", inner_pat.as_regex_str(), quantifier),
