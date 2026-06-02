@@ -165,86 +165,80 @@ impl<'g> LR0Builder<'g> {
 
 // ─── LALR(1) lookahead computation ───────────────────────────────────────────
 
-/// Propagates lookahead tokens to build LALR(1) from LR(0).
+/// Sentinel lookahead used by the spontaneous-generation / propagation
+/// algorithm to mark lookaheads that *propagate* from a kernel item rather than
+/// being generated spontaneously. It can never collide with a real terminal
+/// name (terminals are identifiers or `$`-prefixed synthetics).
+const PROPAGATE_MARK: &str = "#";
+
+/// Computes true LALR(1) lookaheads for every complete (reduce) item using the
+/// canonical spontaneous-generation-and-propagation method (Aho/Sethi/Ullman
+/// algorithms 4.62–4.63).
+///
+/// This is strictly more precise than SLR(1) FOLLOW sets: a reduce never picks
+/// up a lookahead in a state where that reduction cannot actually be followed
+/// by the token. That precision is what avoids spurious conflicts and is what
+/// the contextual lexer relies on.
 struct LookaheadComputer<'g> {
     rules: &'g [Rule],
     states: &'g [ItemSet],
     transitions: &'g BTreeMap<(usize, String), usize>,
     analysis: &'g GrammarAnalysis,
+    rule_index: HashMap<&'g str, Vec<usize>>,
 }
 
 impl<'g> LookaheadComputer<'g> {
-    /// Compute lookaheads for all reduce items in all states.
-    /// Returns: lookahead[state_id][item] → set of terminals
-    fn compute(&self) -> HashMap<usize, HashMap<LR0Item, HashSet<String>>> {
-        let mut lookaheads: HashMap<usize, HashMap<LR0Item, HashSet<String>>> = HashMap::new();
-
-        // Initialise: start items get $END
-        for (state_id, state) in self.states.iter().enumerate() {
-            for item in state {
-                if item.is_complete(self.rules) {
-                    lookaheads.entry(state_id).or_default()
-                        .entry(item.clone()).or_default();
-                }
-            }
+    fn new(
+        rules: &'g [Rule],
+        states: &'g [ItemSet],
+        transitions: &'g BTreeMap<(usize, String), usize>,
+        analysis: &'g GrammarAnalysis,
+    ) -> Self {
+        let mut rule_index: HashMap<&str, Vec<usize>> = HashMap::new();
+        for (i, rule) in rules.iter().enumerate() {
+            rule_index.entry(rule.origin.name.as_str()).or_default().push(i);
         }
+        LookaheadComputer { rules, states, transitions, analysis, rule_index }
+    }
 
-        // Propagate: for each item A → α • B β in state S:
-        //   FIRST(β FOLLOW(A)) contributes to lookaheads of B items in GOTO(S, B).
+    /// Kernel items are those with the dot past the start, plus the augmented
+    /// start items `$root_X → • X` (dot 0).
+    fn is_kernel(&self, item: &LR0Item) -> bool {
+        item.dot > 0 || self.rules[item.rule_idx].origin.name.starts_with("$root_")
+    }
+
+    /// LR(1) closure: given kernel items each carrying a set of lookahead
+    /// terminals, propagate lookaheads to every reachable closure item.
+    /// For an item `A → α • B β` with lookahead set `L`, each production
+    /// `B → γ` gains `[B → • γ]` with lookaheads `FIRST(β)` (plus `L` when `β`
+    /// is nullable). Iterates to a fixpoint.
+    fn lr1_closure(
+        &self,
+        kernel: &HashMap<LR0Item, HashSet<String>>,
+    ) -> HashMap<LR0Item, HashSet<String>> {
+        let mut result: HashMap<LR0Item, HashSet<String>> = kernel.clone();
         let mut changed = true;
         while changed {
             changed = false;
-            for (state_id, state) in self.states.iter().enumerate() {
-                for item in state {
-                    if let Some(sym) = item.expected(self.rules) {
-                        // The "after-dot" suffix
-                        let rule = &self.rules[item.rule_idx];
-                        let beta: Vec<Symbol> = rule.expansion[item.dot + 1..].to_vec();
-
-                        let (first_beta, beta_nullable) = self.analysis.first_of_seq(&beta);
-
-                        // Find GOTO(state, sym)
-                        if let Some(&next_state) = self.transitions.get(&(state_id, sym.name().to_string())) {
-                            let advanced = item.advance();
-                            if advanced.is_complete(self.rules) {
-                                let la_set = lookaheads.entry(next_state).or_default()
-                                    .entry(advanced.clone()).or_default();
-                                for t in &first_beta {
-                                    la_set.insert(t.name.clone());
-                                }
-                                if beta_nullable {
-                                    if let Some(current_la) = lookaheads.get(&state_id)
-                                        .and_then(|m| m.get(item))
-                                    {
-                                        let extra: Vec<String> = current_la.iter().cloned().collect();
-                                        let la_set2 = lookaheads.entry(next_state).or_default()
-                                            .entry(advanced).or_default();
-                                        for t in extra {
-                                            la_set2.insert(t);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Also add FOLLOW(B) to reduce items reachable via B
-                        if let Symbol::NonTerminal(nt) = sym {
-                            if let Some(follow_nt) = self.analysis.follow.get(nt) {
-                                // These propagate to reduce items in goto state
-                                if let Some(&next_state) = self.transitions.get(&(state_id, nt.name.clone())) {
-                                    for b_item in &self.states[next_state] {
-                                        if b_item.is_complete(self.rules)
-                                            && self.rules[b_item.rule_idx].origin == *nt
-                                        {
-                                            let la = lookaheads.entry(next_state).or_default()
-                                                .entry(b_item.clone()).or_default();
-                                            let before = la.len();
-                                            for t in follow_nt {
-                                                la.insert(t.name.clone());
-                                            }
-                                            if la.len() > before { changed = true; }
-                                        }
-                                    }
+            let snapshot: Vec<(LR0Item, HashSet<String>)> =
+                result.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            for (item, la) in snapshot {
+                if let Some(Symbol::NonTerminal(nt)) = item.expected(self.rules) {
+                    let rule = &self.rules[item.rule_idx];
+                    let beta: Vec<Symbol> = rule.expansion[item.dot + 1..].to_vec();
+                    let (first_beta, beta_nullable) = self.analysis.first_of_seq(&beta);
+                    let mut seed: HashSet<String> =
+                        first_beta.iter().map(|t| t.name.clone()).collect();
+                    if beta_nullable {
+                        seed.extend(la.iter().cloned());
+                    }
+                    if let Some(prods) = self.rule_index.get(nt.name.as_str()) {
+                        for &ri in prods {
+                            let it = LR0Item::new(ri, 0);
+                            let entry = result.entry(it).or_default();
+                            for s in &seed {
+                                if entry.insert(s.clone()) {
+                                    changed = true;
                                 }
                             }
                         }
@@ -252,7 +246,115 @@ impl<'g> LookaheadComputer<'g> {
                 }
             }
         }
-        lookaheads
+        result
+    }
+
+    /// Compute lookaheads for all reduce items in all states.
+    /// Returns: `reduce_la[state_id][rule_idx]` → lookahead terminals, for every
+    /// complete item in the state (including ε-rule items).
+    fn compute(&self) -> HashMap<usize, HashMap<usize, HashSet<String>>> {
+        // Kernel-item lookahead sets, keyed (state, item).
+        let mut kla: HashMap<(usize, LR0Item), HashSet<String>> = HashMap::new();
+        // Propagation links: (from_state, from_item) → (to_state, to_item).
+        let mut links: Vec<((usize, LR0Item), (usize, LR0Item))> = Vec::new();
+
+        // Seed all kernel items; the augmented start kernels get $END.
+        for (state_id, state) in self.states.iter().enumerate() {
+            for item in state {
+                if self.is_kernel(item) {
+                    let set = kla.entry((state_id, item.clone())).or_default();
+                    if self.rules[item.rule_idx].origin.name.starts_with("$root_") {
+                        set.insert(END_TERMINAL.to_string());
+                    }
+                }
+            }
+        }
+
+        // Discover spontaneous lookaheads and propagation links by closing each
+        // kernel item against the dummy lookahead `#`.
+        for (state_id, state) in self.states.iter().enumerate() {
+            for k in state {
+                if !self.is_kernel(k) {
+                    continue;
+                }
+                let mut seed = HashMap::new();
+                seed.insert(
+                    k.clone(),
+                    std::iter::once(PROPAGATE_MARK.to_string()).collect(),
+                );
+                let closed = self.lr1_closure(&seed);
+                for (item, la_set) in &closed {
+                    let sym = match item.expected(self.rules) {
+                        Some(s) => s,
+                        None => continue,
+                    };
+                    let goto_state = match self.transitions.get(&(state_id, sym.name().to_string())) {
+                        Some(&g) => g,
+                        None => continue,
+                    };
+                    let advanced = item.advance();
+                    for a in la_set {
+                        if a == PROPAGATE_MARK {
+                            links.push(((state_id, k.clone()), (goto_state, advanced.clone())));
+                        } else {
+                            kla.entry((goto_state, advanced.clone()))
+                                .or_default()
+                                .insert(a.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Propagate lookaheads along the links until a fixpoint.
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for (from, to) in &links {
+                let src: Vec<String> = kla
+                    .get(from)
+                    .map(|s| s.iter().cloned().collect())
+                    .unwrap_or_default();
+                if src.is_empty() {
+                    continue;
+                }
+                let dst = kla.entry(to.clone()).or_default();
+                for t in src {
+                    if dst.insert(t) {
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        // For each state, run a final LR(1) closure on the kernel lookaheads so
+        // that ε-rule reduce items (which are closure items, not kernels) also
+        // receive their lookaheads, then collect per reduce rule.
+        let mut reduce_la: HashMap<usize, HashMap<usize, HashSet<String>>> = HashMap::new();
+        for (state_id, state) in self.states.iter().enumerate() {
+            let mut kernel: HashMap<LR0Item, HashSet<String>> = HashMap::new();
+            for item in state {
+                if self.is_kernel(item) {
+                    let set = kla
+                        .get(&(state_id, item.clone()))
+                        .cloned()
+                        .unwrap_or_default();
+                    kernel.insert(item.clone(), set);
+                }
+            }
+            let closed = self.lr1_closure(&kernel);
+            for (item, la_set) in closed {
+                if item.is_complete(self.rules) {
+                    reduce_la
+                        .entry(state_id)
+                        .or_default()
+                        .entry(item.rule_idx)
+                        .or_default()
+                        .extend(la_set);
+                }
+            }
+        }
+        reduce_la
     }
 }
 
@@ -291,7 +393,6 @@ pub fn build_lalr_table(grammar: &Grammar) -> Result<ParseTable, GrammarError> {
     let start_states = builder.build(&grammar.start);
     let (states, transitions) = (builder.states, builder.transitions);
 
-    // LALR(1) lookahead computation — simplified: use FOLLOW sets
     let n_states = states.len();
     let mut action: Vec<HashMap<String, Action>> = vec![HashMap::new(); n_states];
     let mut goto: Vec<HashMap<String, usize>> = vec![HashMap::new(); n_states];
@@ -309,39 +410,78 @@ pub fn build_lalr_table(grammar: &Grammar) -> Result<ParseTable, GrammarError> {
         }
     }
 
-    // Fill REDUCE from complete items, using FOLLOW sets as lookaheads
+    // True LALR(1) lookaheads for every reduce item.
+    let reduce_la = LookaheadComputer::new(&rules, &states, &transitions, &analysis).compute();
+
+    // Fill REDUCE / ACCEPT actions, detecting and resolving conflicts exactly
+    // the way Python Lark does (lark/parsers/lalr_analysis.py):
+    //   * shift/reduce  → resolve as shift; no error in the default (non-strict) mode
+    //   * reduce/reduce → resolve by rule priority; a tie for the top priority is
+    //                     an unrepresentable grammar and raises a hard error
+    let mut conflicts: Vec<String> = Vec::new();
     for (state_id, state) in states.iter().enumerate() {
+        // Augmented start items reduce to ACCEPT on $END.
         for item in state {
-            if item.is_complete(&rules) {
-                let rule = &rules[item.rule_idx];
-                // Is this an augmented start rule?
-                if rule.origin.name.starts_with("$root_") {
-                    let _start_sym = rule.origin.name.strip_prefix("$root_").unwrap();
-                    action[state_id].insert(END_TERMINAL.to_string(), Action::Accept);
+            if item.is_complete(&rules)
+                && rules[item.rule_idx].origin.name.starts_with("$root_")
+            {
+                action[state_id].insert(END_TERMINAL.to_string(), Action::Accept);
+            }
+        }
+
+        let Some(rule_la) = reduce_la.get(&state_id) else { continue };
+        // For each lookahead terminal, the set of rules that reduce on it.
+        let mut reduces_by_la: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (&rule_idx, la_set) in rule_la {
+            if rules[rule_idx].origin.name.starts_with("$root_") {
+                continue; // handled as ACCEPT above
+            }
+            for la in la_set {
+                reduces_by_la.entry(la.clone()).or_default().push(rule_idx);
+            }
+        }
+
+        for (la, mut candidates) in reduces_by_la {
+            candidates.sort_unstable();
+            candidates.dedup();
+
+            // Resolve reduce/reduce collisions by priority (higher wins; tie = error).
+            let winner = if candidates.len() > 1 {
+                let mut by_prio = candidates.clone();
+                by_prio.sort_by_key(|&ri| std::cmp::Reverse(rules[ri].options.priority));
+                let best = rules[by_prio[0]].options.priority;
+                let second = rules[by_prio[1]].options.priority;
+                if best > second {
+                    by_prio[0]
+                } else {
+                    let rule_list: String = candidates
+                        .iter()
+                        .map(|&ri| format!("\n\t- {}", rules[ri]))
+                        .collect();
+                    conflicts.push(format!(
+                        "Reduce/Reduce collision in state {} for terminal {}:{}",
+                        state_id, la, rule_list
+                    ));
                     continue;
                 }
-                // Use FOLLOW(origin) as lookaheads
-                let lookaheads: Vec<String> = analysis.follow
-                    .get(&rule.origin)
-                    .map(|f| f.iter().map(|t| t.name.clone()).collect())
-                    .unwrap_or_default();
+            } else {
+                candidates[0]
+            };
 
-                for la in lookaheads {
-                    // Conflict resolution: shift wins over reduce (Lark default)
-                    if action[state_id].contains_key(&la) {
-                        // Prefer shift; only override if reduce isn't already set
-                        match action[state_id][&la] {
-                            Action::Shift(_) => { /* shift wins */ }
-                            _ => {
-                                action[state_id].insert(la, Action::Reduce(item.rule_idx));
-                            }
-                        }
-                    } else {
-                        action[state_id].insert(la, Action::Reduce(item.rule_idx));
-                    }
+            // Shift/reduce: an existing shift (or accept) wins (Lark default).
+            match action[state_id].get(&la) {
+                Some(Action::Shift(_)) | Some(Action::Accept) => { /* shift/accept wins */ }
+                _ => {
+                    action[state_id].insert(la, Action::Reduce(winner));
                 }
             }
         }
+    }
+
+    if !conflicts.is_empty() {
+        return Err(GrammarError::Conflict {
+            report: conflicts.join("\n\n"),
+        });
     }
 
     // Determine end states (state where we just shifted the start nonterminal)

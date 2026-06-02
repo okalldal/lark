@@ -22,6 +22,8 @@ pub enum GrammarError {
     SyntaxError { line: usize, col: usize, msg: String },
     #[error("Import not found: {path}")]
     ImportNotFound { path: String },
+    #[error("Grammar has unresolvable LALR conflicts:\n{report}")]
+    Conflict { report: String },
     #[error("{msg}")]
     Other { msg: String },
 }

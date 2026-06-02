@@ -52,7 +52,10 @@ impl Default for LarkOptions {
     fn default() -> Self {
         LarkOptions {
             start: vec!["start".to_string()],
-            parser: ParserAlgorithm::Earley,
+            // LALR is the only implemented backend (Earley is Phase 2). Python
+            // Lark defaults to Earley, but here that would make the default
+            // options fail to build, so we default to the working backend.
+            parser: ParserAlgorithm::Lalr,
             lexer: LexerType::Auto,
             ambiguity: Ambiguity::Resolve,
             propagate_positions: false,

@@ -35,4 +35,4 @@ repos:
   rev: v2.2.2
   hooks:
     - id: codespell
-      args: ["-L", "nd,iif,ot,datas"]
+      args: ["-L", "nd,iif,ot,datas,crate"]
