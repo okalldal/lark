@@ -1,0 +1,26 @@
+[
+  {
+    "name": "reduce_reduce",
+    "grammar": "\nstart: a | b\na: X\nb: X\nX: \"x\"\n",
+    "construct_error": true,
+    "error": "Reduce/Reduce collision in Terminal('$END') between the following rules: "
+  },
+  {
+    "name": "reduce_reduce_priority",
+    "grammar": "\nstart: a | b\na.2: X\nb.1: X\nX: \"x\"\n",
+    "construct_error": false,
+    "error": null
+  },
+  {
+    "name": "shift_reduce_dangling_else",
+    "grammar": "\nstart: stmt\n?stmt: \"if\" cond \"then\" stmt           -> if_then\n     | \"if\" cond \"then\" stmt \"else\" stmt -> if_then_else\n     | \"s\"                              -> simple\ncond: \"c\"\n%import common.WS\n%ignore WS\n",
+    "construct_error": false,
+    "error": null
+  },
+  {
+    "name": "clean",
+    "grammar": "\nstart: \"a\" \"b\"\n",
+    "construct_error": false,
+    "error": null
+  }
+]

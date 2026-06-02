@@ -131,6 +131,85 @@ JSON_CASES = [
 ]
 
 
+# ─── LALR core: LALR-but-not-SLR grammar + conflict outcome parity ───────────
+
+# Dangling-else is the canonical grammar that is LALR(1) but NOT SLR(1):
+# an SLR table reports a spurious shift/reduce conflict on it. Python Lark
+# (parser='lalr') builds it cleanly, which proves our lookaheads are true LALR.
+DANGLING_ELSE_GRAMMAR = r"""
+start: stmt
+?stmt: "if" cond "then" stmt           -> if_then
+     | "if" cond "then" stmt "else" stmt -> if_then_else
+     | "s"                              -> simple
+cond: "c"
+%import common.WS
+%ignore WS
+"""
+
+DANGLING_ELSE_CASES = [
+    ("s",                              True),
+    ("if c then s",                    True),
+    ("if c then s else s",             True),
+    ("if c then if c then s else s",   True),
+    ("if c then if c then s",          True),
+    ("if c then",                      False),
+]
+
+# Grammars that exercise the conflict detector. `construct_error` records
+# whether Python Lark raises at *construction* time (our outcome-parity oracle):
+#   * genuine reduce/reduce        → Lark raises GrammarError
+#   * reduce/reduce + rule priority → Lark resolves it, no error
+#   * shift/reduce (dangling-else)  → Lark resolves as shift, no error
+#   * unambiguous                   → no conflict
+CONFLICT_GRAMMARS = {
+    "reduce_reduce": r"""
+start: a | b
+a: X
+b: X
+X: "x"
+""",
+    "reduce_reduce_priority": r"""
+start: a | b
+a.2: X
+b.1: X
+X: "x"
+""",
+    "shift_reduce_dangling_else": DANGLING_ELSE_GRAMMAR,
+    "clean": r"""
+start: "a" "b"
+""",
+}
+
+
+def generate_lalr_core():
+    print("Generating LALR core oracles (dangling-else + conflict parity)...")
+    cases = []
+    for inp, should_pass in DANGLING_ELSE_CASES:
+        ok, result = run_case(DANGLING_ELSE_GRAMMAR, inp, parser_type="lalr")
+        if should_pass and not ok:
+            print(f"  WARNING: dangling-else expected to parse {inp!r}: {result}")
+        cases.append({
+            "input": inp, "should_pass": should_pass, "ok": ok,
+            "tree": result if ok else None, "error": result if not ok else None,
+        })
+    save_oracle("lalr_core", "dangling_else",
+                {"grammar": DANGLING_ELSE_GRAMMAR, "cases": cases})
+
+    conflicts = []
+    for name, g in CONFLICT_GRAMMARS.items():
+        try:
+            Lark(g, parser="lalr", maybe_placeholders=False)
+            construct_error, msg = False, None
+        except Exception as e:
+            construct_error = True
+            msg = (str(e).splitlines() or [type(e).__name__])[0]
+        conflicts.append({
+            "name": name, "grammar": g,
+            "construct_error": construct_error, "error": msg,
+        })
+    save_oracle("lalr_core", "conflicts", conflicts)
+
+
 def run_case(grammar_text, input_text, parser_type="lalr", start="start"):
     """Return (ok, tree_dict_or_error_msg)."""
     try:
@@ -247,5 +326,6 @@ if __name__ == "__main__":
     generate_arithmetic()
     generate_json()
     generate_python_numbers()
+    generate_lalr_core()
     generate_json_corpus_manifest()
     print("\nDone. Commit tests/fixtures/oracles/ to track expected outputs.")

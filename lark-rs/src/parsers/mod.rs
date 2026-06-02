@@ -76,11 +76,12 @@ pub fn build_frontend(
             Ok(ParsingFrontend { kind })
         }
         ParserAlgorithm::Earley => {
-            // Phase 2: Earley not yet implemented; fall back to LALR.
-            build_frontend(grammar, &LarkOptions {
-                parser: ParserAlgorithm::Lalr,
-                ..options.clone()
-            })
+            // Phase 2: Earley is not implemented yet. Fail loudly rather than
+            // silently substituting LALR — LALR rejects grammars Earley accepts,
+            // so a silent fallback would give wrong results on ambiguous grammars.
+            Err(LarkError::Grammar(crate::error::GrammarError::Other {
+                msg: "Earley parser not yet implemented".to_string(),
+            }))
         }
         ParserAlgorithm::Cyk => {
             Err(LarkError::Grammar(crate::error::GrammarError::Other {

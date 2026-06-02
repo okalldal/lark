@@ -1,0 +1,173 @@
+{
+  "grammar": "\nstart: stmt\n?stmt: \"if\" cond \"then\" stmt           -> if_then\n     | \"if\" cond \"then\" stmt \"else\" stmt -> if_then_else\n     | \"s\"                              -> simple\ncond: \"c\"\n%import common.WS\n%ignore WS\n",
+  "cases": [
+    {
+      "input": "s",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "simple",
+            "children": []
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "if c then s",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "if_then",
+            "children": [
+              {
+                "type": "tree",
+                "data": "cond",
+                "children": []
+              },
+              {
+                "type": "tree",
+                "data": "simple",
+                "children": []
+              }
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "if c then s else s",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "if_then_else",
+            "children": [
+              {
+                "type": "tree",
+                "data": "cond",
+                "children": []
+              },
+              {
+                "type": "tree",
+                "data": "simple",
+                "children": []
+              },
+              {
+                "type": "tree",
+                "data": "simple",
+                "children": []
+              }
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "if c then if c then s else s",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "if_then",
+            "children": [
+              {
+                "type": "tree",
+                "data": "cond",
+                "children": []
+              },
+              {
+                "type": "tree",
+                "data": "if_then_else",
+                "children": [
+                  {
+                    "type": "tree",
+                    "data": "cond",
+                    "children": []
+                  },
+                  {
+                    "type": "tree",
+                    "data": "simple",
+                    "children": []
+                  },
+                  {
+                    "type": "tree",
+                    "data": "simple",
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "if c then if c then s",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "if_then",
+            "children": [
+              {
+                "type": "tree",
+                "data": "cond",
+                "children": []
+              },
+              {
+                "type": "tree",
+                "data": "if_then",
+                "children": [
+                  {
+                    "type": "tree",
+                    "data": "cond",
+                    "children": []
+                  },
+                  {
+                    "type": "tree",
+                    "data": "simple",
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "if c then",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "Unexpected token Token('$END', '') at line 1, column 6.\nExpected one of: \n\t* IF\n\t* S\n"
+    }
+  ]
+}
