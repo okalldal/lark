@@ -35,6 +35,8 @@ pub struct ParseTable {
     pub end_states: HashMap<String, usize>,
     /// Compiled rules (indexed by rule index).
     pub rules: Vec<Rule>,
+    /// Names of terminals filtered from the tree by default (`filter_out`).
+    pub filter_out: HashSet<String>,
 }
 
 // ─── LR(0) item ──────────────────────────────────────────────────────────────
@@ -404,6 +406,13 @@ pub fn build_lalr_table(grammar: &Grammar) -> Result<ParseTable, GrammarError> {
         .map(|t| t.name.as_str())
         .collect();
 
+    // Terminals filtered from the tree by default (filter_out), used by
+    // apply_rule_options instead of a name-prefix heuristic.
+    let filter_out: HashSet<String> = grammar.terminals.iter()
+        .filter(|t| t.filter_out)
+        .map(|t| t.name.clone())
+        .collect();
+
     // LR(0) state construction
     let mut builder = LR0Builder::new(&rules);
     let start_states = builder.build(&grammar.start);
@@ -517,6 +526,7 @@ pub fn build_lalr_table(grammar: &Grammar) -> Result<ParseTable, GrammarError> {
         start_states,
         end_states,
         rules,
+        filter_out,
     })
 }
 
@@ -587,7 +597,7 @@ impl LalrParser {
                     for _ in 0..len { state_stack.pop(); }
 
                     let tree_name = rule.tree_name().to_string();
-                    let child = apply_rule_options(tree_name, children, rule);
+                    let child = apply_rule_options(tree_name, children, rule, &self.table.filter_out);
                     let top_state = *state_stack.last().unwrap();
                     let next_state = self.table.goto[top_state]
                         .get(&rule.origin.name)
@@ -723,7 +733,7 @@ impl LalrParser {
                     for _ in 0..len { state_stack.pop(); }
 
                     let tree_name = rule.tree_name().to_string();
-                    let child = apply_rule_options(tree_name, children, rule);
+                    let child = apply_rule_options(tree_name, children, rule, &self.table.filter_out);
                     let top_state = *state_stack.last().unwrap();
                     let next_state = self.table.goto[top_state]
                         .get(&rule.origin.name)
@@ -779,12 +789,17 @@ enum StackValue {
     Tree(Tree),
 }
 
-fn apply_rule_options(name: String, mut children: Vec<Child>, rule: &Rule) -> Child {
-    // Filter punctuation (unnamed/anonymous terminals) unless keep_all_tokens.
-    // `None` placeholders are never filtered.
+fn apply_rule_options(
+    name: String,
+    mut children: Vec<Child>,
+    rule: &Rule,
+    filter_out: &HashSet<String>,
+) -> Child {
+    // Drop filter_out terminals (anonymous literals, `_`-prefixed) unless the rule
+    // keeps all tokens. `None` placeholders are never filtered.
     if !rule.options.keep_all_tokens {
         children.retain(|c| match c {
-            Child::Token(t) => !t.type_.starts_with("__") && !t.type_.starts_with("_"),
+            Child::Token(t) => !filter_out.contains(&t.type_),
             Child::Tree(_) => true,
             Child::None => true,
         });

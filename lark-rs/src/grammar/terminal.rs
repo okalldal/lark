@@ -122,11 +122,22 @@ pub struct TerminalDef {
     pub pattern: Pattern,
     /// Higher priority terminals are tried first in the lexer.
     pub priority: i32,
+    /// When true, tokens of this terminal are dropped from the tree unless the
+    /// rule keeps all tokens. Set for terminals auto-created from string/regex
+    /// literals and for user terminals named with a leading `_`. Decouples
+    /// filtering from the terminal's name so anonymous literals can be named
+    /// cleanly (e.g. `A`, `PLUS`) like Python Lark.
+    pub filter_out: bool,
 }
 
 impl TerminalDef {
     pub fn new(name: impl Into<String>, pattern: Pattern, priority: i32) -> Self {
-        TerminalDef { name: name.into(), pattern, priority }
+        TerminalDef { name: name.into(), pattern, priority, filter_out: false }
+    }
+
+    pub fn with_filter_out(mut self, filter_out: bool) -> Self {
+        self.filter_out = filter_out;
+        self
     }
 
     /// Terminals that match literal strings with the same content as their name
