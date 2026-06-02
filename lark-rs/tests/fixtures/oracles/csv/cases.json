@@ -95,6 +95,50 @@
     "error": "Unexpected token Token('INT', '1') at line 1, column 3.\nExpected one of: \n\t* WORD\n\t* _NL\n\t* _SEPARATOR\nPrevious tokens: [Token('WORD', 'h')]\n"
   },
   {
+    "input": "#name,age\nfoo,42\n",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "header",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "WORD",
+              "value": "name"
+            },
+            {
+              "type": "token",
+              "token_type": "WORD",
+              "value": "age"
+            }
+          ]
+        },
+        {
+          "type": "tree",
+          "data": "row",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NON_SEPARATOR_STRING",
+              "value": "foo"
+            },
+            {
+              "type": "token",
+              "token_type": "INT",
+              "value": "42"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
     "input": "",
     "should_pass": false,
     "ok": false,

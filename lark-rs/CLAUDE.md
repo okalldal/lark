@@ -28,6 +28,13 @@ We generate expected parse trees using Python Lark and compare Rust output again
 - Every bug must be reproducible as a test failure before we fix it
 - Prefer end-to-end tests over unit tests — the oracle checks the full pipeline
 - Corpus tests (JSONTestSuite) are kept at 100% oracle agreement; never regress them
+- Never write an oracle test that depends on an arbitrary lexer tie-break — two
+  terminals matching the same span at equal priority, which Lark resolves by an
+  incidental regex-source-length sort that lark-rs does not reproduce. Disambiguate
+  the grammar with explicit terminal priority instead, exactly as the Lark authors
+  do (e.g. `NON_SEPARATOR_STRING.2` in `csv.lark`). Both engines honor priority
+  first, so the result is principled. (Measured 2026-06-02: 0 of 140 compliance-bank
+  divergences are tie-breaks — a discipline for our grammars, not a gap to chase.)
 
 ### Generating Oracles
 
@@ -310,20 +317,10 @@ Aliased rules are exempt: the node carries the alias name (which has no leading
 underscore), so an alias overrides transparency, matching Python Lark.
 
 **Oracle:** `csv/cases` — `csv.lark` (un-quarantined); `_anything` inlines its token
-into `row`. Note: row values are kept to `INT` because `_anything`'s alternatives
-overlap (`WORD`/`NON_SEPARATOR_STRING`, `FLOAT`/`SIGNED_FLOAT`) and Lark breaks the
-equal-length tie by *expanded* regex-source length, which lark-rs does not
-reproduce — a separate, known lexer-ordering parity gap (see below).
-
-### Known parity gap — equal-length terminal tie-break
-
-When two terminals match the same text at the same length and priority, Python
-Lark's order falls to `-len(value)` where `value` is the **fully expanded** regex
-source. lark-rs ships its own `common.lark` stubs, so its source strings (and thus
-their lengths) differ, and an ambiguous tie can break the other way (e.g. a bare
-letter run matching both `WORD` and `NON_SEPARATOR_STRING`). This only affects
-genuinely ambiguous grammars; well-formed ones disambiguate by actual match length
-or priority. Closing it would require matching Python's regex expansion verbatim.
+into `row`. `_anything`'s alternatives overlap on bare letter runs
+(`WORD`/`NON_SEPARATOR_STRING`), so `csv.lark` gives `NON_SEPARATOR_STRING` an
+explicit `.2` priority so the choice is deterministic (see the tie-break rule under
+Testing Philosophy).
 
 ### BUG-5 🟠 Token positions: byte-based columns, wrong end_line for multi-line tokens
 

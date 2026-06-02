@@ -2,7 +2,10 @@ start: header _NL row+
 header: "#" " "? (WORD _SEPARATOR?)+
 row: (_anything _SEPARATOR?)+ _NL
 _anything: INT | WORD | NON_SEPARATOR_STRING | FLOAT | SIGNED_FLOAT
-NON_SEPARATOR_STRING: /[a-zA-z.;\\\/]+/
+// Explicit priority resolves the WORD/NON_SEPARATOR_STRING overlap on bare letter
+// runs deterministically (both Python Lark and lark-rs honor priority first), so
+// the grammar has no arbitrary lexer tie-break for tests to depend on.
+NON_SEPARATOR_STRING.2: /[a-zA-z.;\\\/]+/
 _SEPARATOR: /[  ]+/
           | "\t"
           | ","

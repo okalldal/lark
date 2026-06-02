@@ -117,18 +117,17 @@ PYTHON_NUMBER_INVALID = [
 # rather than appearing as a `Tree("_anything", …)` wrapper. `_SEPARATOR` / `_NL`
 # are `_`-prefixed terminals that are filtered out.
 #
-# Row values are kept to INT so the lexer choice is unambiguous. The grammar's
-# `_anything` alternatives overlap (`WORD` vs `NON_SEPARATOR_STRING` both match a
-# bare letter run; `FLOAT` vs `SIGNED_FLOAT` both match an unsigned float), and
-# Lark breaks those ties by the length of the *expanded* regex source — a value we
-# do not reproduce, since lark-rs ships its own `common.lark` stubs. That is a
-# known, separate lexer-ordering parity gap, not part of `_rule` inlining.
+# `_anything`'s alternatives overlap on bare letter runs (WORD vs
+# NON_SEPARATOR_STRING); csv.lark gives NON_SEPARATOR_STRING an explicit priority so
+# the choice is principled — both Python Lark and lark-rs honor priority first — and
+# letter cells lex deterministically as NON_SEPARATOR_STRING in both.
 CSV_CASES = [
-    ("#a,b,c\n1,2,3\n",      True),
-    ("#x\n1\n",              True),
+    ("#a,b,c\n1,2,3\n",        True),
+    ("#x\n1\n",                True),
     ("#h1,h2\n10,20\n30,40\n", True),
-    ("",                     False),
-    ("1,2,3\n",              False),  # missing header
+    ("#name,age\nfoo,42\n",    True),  # letter cell → NON_SEPARATOR_STRING (priority)
+    ("",                       False),
+    ("1,2,3\n",                False),  # missing header
 ]
 
 
