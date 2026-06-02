@@ -1070,14 +1070,14 @@ impl GrammarCompiler {
             }
             LiteralVal::Re(pattern, flags) => {
                 let pat = Pattern::Re(PatternRe::new(pattern.as_str(), *flags)?);
-                (pat, self.fresh_terminal())
+                (pat, None)
             }
         };
-        // Use the hint, but ensure uniqueness
-        let name = if !self.terminals.iter().any(|t| t.name == name_hint) {
-            name_hint
-        } else {
-            self.fresh_terminal()
+        // Use the hint when it is a fresh, valid identifier; otherwise fall back
+        // to a generated `__ANON_N` name (always a valid regex group name).
+        let name = match name_hint {
+            Some(h) if !self.terminals.iter().any(|t| t.name == h) => h,
+            _ => self.fresh_terminal(),
         };
         self.terminals.push(TerminalDef::new(&name, pat, 0));
         self.literal_cache.insert(key, name.clone());
@@ -1427,16 +1427,22 @@ impl GrammarCompiler {
 }
 
 /// Attempt to produce a human-readable terminal name for a literal string.
-fn terminal_name_hint(s: &str) -> String {
+///
+/// Returns `None` when the literal has no safe identifier form (e.g. it contains
+/// backslashes, tabs, or other characters that are not valid in a regex named
+/// capture group); the caller then assigns a fresh `__ANON_N` name. Embedding
+/// raw/escaped pattern characters in the name produces invalid group names like
+/// `(?P<__ANON_\>…)` and crashes regex compilation.
+fn terminal_name_hint(s: &str) -> Option<String> {
     // Use lookup table for common punctuation
     if let Some(&name) = TERMINAL_NAMES.iter().find(|(ch, _)| ch == &s).map(|(_, n)| n) {
-        return format!("__{}", name);
+        return Some(format!("__{}", name));
     }
     // For keyword-like strings, use uppercase
     if s.chars().all(|c| c.is_alphanumeric() || c == '_') && !s.is_empty() {
-        return format!("__{}", s.to_uppercase());
+        return Some(format!("__{}", s.to_uppercase()));
     }
-    format!("__ANON_{}", regex::escape(s).chars().take(8).collect::<String>())
+    None
 }
 
 /// Standard terminal names for common punctuation/operators.
