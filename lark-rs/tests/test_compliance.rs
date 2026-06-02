@@ -160,7 +160,9 @@ fn test_compliance_bank() {
     if std::env::var("LARK_COMPLIANCE_WRITE_XFAIL").is_ok() {
         let list: Vec<&String> = failures.iter().collect();
         let path = fixtures_dir().join("xfail.json");
-        std::fs::write(&path, serde_json::to_string_pretty(&list).unwrap())
+        // Trailing newline keeps the file consistent with the JSON oracle
+        // generators and satisfies the end-of-file-fixer pre-commit hook.
+        std::fs::write(&path, serde_json::to_string_pretty(&list).unwrap() + "\n")
             .expect("write xfail.json");
         eprintln!("wrote {} XFAIL entries to {}", failures.len(), path.display());
         return;
