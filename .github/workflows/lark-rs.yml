@@ -1,0 +1,50 @@
+name: lark-rs
+
+on:
+  push:
+    paths:
+      - 'lark-rs/**'
+      - 'lark/**'
+      - '.github/workflows/lark-rs.yml'
+  pull_request:
+    paths:
+      - 'lark-rs/**'
+      - 'lark/**'
+      - '.github/workflows/lark-rs.yml'
+
+defaults:
+  run:
+    working-directory: lark-rs
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cargo test
+        run: cargo test --all
+
+      # The oracle JSON is generated from Python Lark and committed so Rust tests
+      # run without Python. This gate proves the generators are deterministic and
+      # that the committed oracles are in sync with the current Python Lark.
+      - name: Oracle freshness (committed oracles must match regeneration)
+        run: |
+          python3 tools/generate_oracles.py
+          python3 tools/extract_lark_compliance.py
+          if ! git diff --quiet -- tests/fixtures/oracles; then
+            echo "::error::Committed oracles are stale. Run tools/generate_oracles.py"
+            echo "and tools/extract_lark_compliance.py, then commit the changes."
+            git --no-pager diff --stat -- tests/fixtures/oracles
+            exit 1
+          fi

@@ -2379,65 +2379,6 @@
           ]
         },
         "error_kind": null
-      },
-      {
-        "input": "[1, 2, 3, 4]",
-        "should_parse": true,
-        "tree": {
-          "type": "tree",
-          "data": "start",
-          "children": [
-            {
-              "type": "tree",
-              "data": "sep",
-              "children": [
-                {
-                  "type": "token",
-                  "token_type": "NUMBER",
-                  "value": "1"
-                },
-                {
-                  "type": "token",
-                  "token_type": "NUMBER",
-                  "value": "2"
-                },
-                {
-                  "type": "token",
-                  "token_type": "NUMBER",
-                  "value": "3"
-                },
-                {
-                  "type": "token",
-                  "token_type": "NUMBER",
-                  "value": "4"
-                }
-              ]
-            }
-          ]
-        },
-        "error_kind": null
-      },
-      {
-        "input": "[1]",
-        "should_parse": true,
-        "tree": {
-          "type": "tree",
-          "data": "start",
-          "children": [
-            {
-              "type": "tree",
-              "data": "sep",
-              "children": [
-                {
-                  "type": "token",
-                  "token_type": "NUMBER",
-                  "value": "1"
-                }
-              ]
-            }
-          ]
-        },
-        "error_kind": null
       }
     ]
   },
@@ -32364,28 +32305,6 @@
           "children": []
         },
         "error_kind": null
-      },
-      {
-        "input": "N",
-        "should_parse": true,
-        "tree": {
-          "type": "tree",
-          "data": "start",
-          "children": [
-            {
-              "type": "tree",
-              "data": "rule_to_import",
-              "children": [
-                {
-                  "type": "token",
-                  "token_type": "test_relative_import_of_nested_grammar__grammar_to_import__NESTED_TERMINAL",
-                  "value": "N"
-                }
-              ]
-            }
-          ]
-        },
-        "error_kind": null
       }
     ]
   },
@@ -34835,33 +34754,6 @@
         "should_parse": false,
         "tree": null,
         "error_kind": "UnexpectedToken"
-      },
-      {
-        "input": "cd",
-        "should_parse": true,
-        "tree": {
-          "type": "tree",
-          "data": "startab",
-          "children": [
-            {
-              "type": "tree",
-              "data": "grammars__ab__expr",
-              "children": [
-                {
-                  "type": "token",
-                  "token_type": "A",
-                  "value": "c"
-                },
-                {
-                  "type": "token",
-                  "token_type": "B",
-                  "value": "d"
-                }
-              ]
-            }
-          ]
-        },
-        "error_kind": null
       }
     ]
   },

@@ -71,9 +71,11 @@ def representable(grammar, options):
     return True
 
 
-# id(lark_instance) -> record dict; plus a flat list of all records.
-_INSTANCES = {}
+# Flat list of all captured records. Each successfully-built instance also
+# carries a back-reference to its record as an attribute (NOT keyed by id(),
+# which Python reuses after GC and would misattribute parse calls).
 _RECORDS = []
+_RECORD_ATTR = "_lark_rs_compliance_record"
 
 _orig_init = Lark.__init__
 _orig_parse = Lark.parse
@@ -98,12 +100,12 @@ def _patched_init(self, grammar, **options):
         raise
     if rep:
         rec = {**meta, "construct_error": False, "cases": []}
-        _INSTANCES[id(self)] = rec
+        object.__setattr__(self, _RECORD_ATTR, rec)
         _RECORDS.append(rec)
 
 
 def _patched_parse(self, text, *args, **kwargs):
-    rec = _INSTANCES.get(id(self))
+    rec = getattr(self, _RECORD_ATTR, None)
     # Only capture the plain `parse(text)` form — start=/on_error= variants
     # would not round-trip through the simple Rust replay.
     capture = rec is not None and not args and not kwargs and isinstance(text, str)
