@@ -1,0 +1,374 @@
+[
+  {
+    "input": "{}",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "object",
+      "children": []
+    },
+    "error": null
+  },
+  {
+    "input": "{\"key\": \"value\"}",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "object",
+      "children": [
+        {
+          "type": "tree",
+          "data": "pair",
+          "children": [
+            {
+              "type": "tree",
+              "data": "string",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "ESCAPED_STRING",
+                  "value": "\"key\""
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "string",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "ESCAPED_STRING",
+                  "value": "\"value\""
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "{\"a\": 1, \"b\": 2}",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "object",
+      "children": [
+        {
+          "type": "tree",
+          "data": "pair",
+          "children": [
+            {
+              "type": "tree",
+              "data": "string",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "ESCAPED_STRING",
+                  "value": "\"a\""
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "SIGNED_NUMBER",
+                  "value": "1"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "tree",
+          "data": "pair",
+          "children": [
+            {
+              "type": "tree",
+              "data": "string",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "ESCAPED_STRING",
+                  "value": "\"b\""
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "SIGNED_NUMBER",
+                  "value": "2"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "[]",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "array",
+      "children": []
+    },
+    "error": null
+  },
+  {
+    "input": "[1, 2, 3]",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "array",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "SIGNED_NUMBER",
+              "value": "1"
+            }
+          ]
+        },
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "SIGNED_NUMBER",
+              "value": "2"
+            }
+          ]
+        },
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "SIGNED_NUMBER",
+              "value": "3"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "[true, false, null]",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "array",
+      "children": [
+        {
+          "type": "tree",
+          "data": "true",
+          "children": []
+        },
+        {
+          "type": "tree",
+          "data": "false",
+          "children": []
+        },
+        {
+          "type": "tree",
+          "data": "null",
+          "children": []
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "{\"nested\": {\"a\": [1,2,3]}}",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "object",
+      "children": [
+        {
+          "type": "tree",
+          "data": "pair",
+          "children": [
+            {
+              "type": "tree",
+              "data": "string",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "ESCAPED_STRING",
+                  "value": "\"nested\""
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "object",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "pair",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "string",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "ESCAPED_STRING",
+                          "value": "\"a\""
+                        }
+                      ]
+                    },
+                    {
+                      "type": "tree",
+                      "data": "array",
+                      "children": [
+                        {
+                          "type": "tree",
+                          "data": "number",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "SIGNED_NUMBER",
+                              "value": "1"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "tree",
+                          "data": "number",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "SIGNED_NUMBER",
+                              "value": "2"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "tree",
+                          "data": "number",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "SIGNED_NUMBER",
+                              "value": "3"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "\"hello\"",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "string",
+      "children": [
+        {
+          "type": "token",
+          "token_type": "ESCAPED_STRING",
+          "value": "\"hello\""
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "42",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "number",
+      "children": [
+        {
+          "type": "token",
+          "token_type": "SIGNED_NUMBER",
+          "value": "42"
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "-3.14e10",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "number",
+      "children": [
+        {
+          "type": "token",
+          "token_type": "SIGNED_NUMBER",
+          "value": "-3.14e10"
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "{key: value}",
+    "should_pass": false,
+    "ok": false,
+    "tree": null,
+    "error": "No terminal matches 'k' in the current parser context, at line 1 col 2\n\n{key: value}\n ^\nExpected one of: \n\t* ESCAPED_STRING\n\t* RBRACE\n\t* _WS\n\nPrevious tokens: Token('LBRACE', '{')\n"
+  },
+  {
+    "input": "[1, 2,]",
+    "should_pass": false,
+    "ok": false,
+    "tree": null,
+    "error": "Unexpected token Token('RSQB', ']') at line 1, column 7.\nExpected one of: \n\t* ESCAPED_STRING\n\t* FALSE\n\t* LBRACE\n\t* LSQB\n\t* NULL\n\t* SIGNED_NUMBER\n\t* TRUE\n\t* _WS\nPrevious tokens: [Token('COMMA', ',')]\n"
+  },
+  {
+    "input": "",
+    "should_pass": false,
+    "ok": false,
+    "tree": null,
+    "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* ESCAPED_STRING\n\t* FALSE\n\t* LBRACE\n\t* LSQB\n\t* NULL\n\t* SIGNED_NUMBER\n\t* TRUE\n"
+  },
+  {
+    "input": "{\"a\": }",
+    "should_pass": false,
+    "ok": false,
+    "tree": null,
+    "error": "Unexpected token Token('RBRACE', '}') at line 1, column 7.\nExpected one of: \n\t* ESCAPED_STRING\n\t* FALSE\n\t* LBRACE\n\t* LSQB\n\t* NULL\n\t* SIGNED_NUMBER\n\t* TRUE\nPrevious tokens: [Token('_WS', ' ')]\n"
+  }
+]
