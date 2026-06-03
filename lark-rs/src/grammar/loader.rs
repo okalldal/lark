@@ -1005,6 +1005,17 @@ struct GrammarCompiler {
     /// `*` / `+` / `~` helpers and transparent `_rules` are deliberately absent
     /// (size 0), exactly as Lark treats `_`-prefixed symbols as removed.
     helper_sizes: HashMap<String, usize>,
+    /// Cache of the shared `+`-recurse helper (`P: inner | P inner`) keyed by its
+    /// inner symbol and the keep-all context. Identical `x+`/`x*` occurrences reuse
+    /// one rule — Python Lark's `rules_cache`. This sharing is what keeps grammars
+    /// like `a+ b | a+` and `a* b | a+` LALR-parseable: with separate recurse rules
+    /// the duplicated `… -> "a"` reductions are an unresolvable reduce/reduce.
+    recurse_cache: HashMap<(Symbol, bool), String>,
+    /// Anon helper rules that already derive ε (the `?`/`*` helpers). A `?` applied
+    /// to one of these is redundant — `(X?)?` is just `X?` — so it is collapsed
+    /// rather than stacked, which is what Python Lark's distribute+dedup achieves
+    /// and what keeps `("A"?)?` from building two ambiguous empty rules.
+    nullable_opts: std::collections::HashSet<String>,
 }
 
 impl GrammarCompiler {
@@ -1024,6 +1035,8 @@ impl GrammarCompiler {
             global_keep_all: keep_all_tokens,
             current_keep_all: keep_all_tokens,
             helper_sizes: HashMap::new(),
+            recurse_cache: HashMap::new(),
+            nullable_opts: std::collections::HashSet::new(),
         }
     }
 
@@ -1232,12 +1245,25 @@ impl GrammarCompiler {
     fn compile_group(
         &mut self,
         alts: Vec<AliasedExpansion>,
-        _parent: &str,
+        parent: &str,
         optional: bool,
     ) -> Result<Symbol, GrammarError> {
-        if alts.len() == 1 && alts[0].alias.is_none() {
-            // Inline single-alternative groups by flattening (handled at call site)
-            // But we still need a symbol, so create a named rule
+        // A plain single-alternative group with no alias that compiles to exactly
+        // one symbol *is* that symbol — skip the wrapper rule. Besides dropping a
+        // redundant transparent node, this lets `(X)+` share `X`'s recurse helper
+        // and stops `("A"?)?` from stacking a second nullable rule.
+        if !optional && alts.len() == 1 && alts[0].alias.is_none() {
+            let alt = alts.into_iter().next().unwrap();
+            let mut syms = self.compile_expansion(alt.expansion, parent)?;
+            if syms.len() == 1 {
+                return Ok(syms.pop().unwrap());
+            }
+            let name = self.fresh_anon_rule("group");
+            let origin = NonTerminal::new(&name);
+            let size: usize = syms.iter().map(|s| self.symbol_size(s)).sum();
+            self.helper_sizes.insert(name.clone(), size);
+            self.rules.push(Rule::new(origin.clone(), syms, None, self.anon_opts(), 0));
+            return Ok(Symbol::NonTerminal(origin));
         }
         let name = self.fresh_anon_rule("group");
         let origin = NonTerminal::new(&name);
@@ -1331,6 +1357,29 @@ impl GrammarCompiler {
         }
     }
 
+    /// The shared one-or-more recurse helper `P: inner | P inner` for `inner`,
+    /// cached by `(inner, keep_all)` so identical `x+`/`x*` occurrences reuse one
+    /// rule (Python Lark's `rules_cache`). Sharing collapses what would otherwise be
+    /// duplicate, conflicting recurse rules into one, keeping `a+ b | a+` LALR.
+    fn plus_helper(&mut self, inner_sym: Symbol) -> Symbol {
+        let key = (inner_sym.clone(), self.current_keep_all);
+        if let Some(name) = self.recurse_cache.get(&key) {
+            return Symbol::NonTerminal(NonTerminal::new(name));
+        }
+        let name = self.fresh_anon_rule("plus");
+        let nt = NonTerminal::new(&name);
+        self.rules.push(Rule::new(nt.clone(), vec![inner_sym.clone()], None, self.anon_opts(), 0));
+        self.rules.push(Rule::new(
+            nt.clone(),
+            vec![Symbol::NonTerminal(nt.clone()), inner_sym],
+            None,
+            self.anon_opts(),
+            1,
+        ));
+        self.recurse_cache.insert(key, name);
+        Symbol::NonTerminal(nt)
+    }
+
     fn compile_repeat(
         &mut self,
         inner: Expr,
@@ -1345,30 +1394,35 @@ impl GrammarCompiler {
                 // inner? → optional rule. `?` adds no placeholders of its own, but
                 // when nested inside a `[...]` it contributes its inner size to the
                 // outer maybe's count (Lark's `FindRuleSize` takes the present arm).
+                // If `inner` is *already* a nullable `?`/`*` helper, the extra `?` is
+                // redundant — collapse it so `(X?)?` is just `X?`.
+                if let Symbol::NonTerminal(nt) = &inner_sym {
+                    if self.nullable_opts.contains(&nt.name) {
+                        return Ok(inner_sym);
+                    }
+                }
                 let name = self.fresh_anon_rule("opt");
                 let nt = NonTerminal::new(&name);
                 let size = self.symbol_size(&inner_sym);
                 self.helper_sizes.insert(name.clone(), size);
+                self.nullable_opts.insert(name.clone());
                 self.rules.push(Rule::new(nt.clone(), vec![inner_sym], None, self.anon_opts(), 0));
                 self.rules.push(Rule::new(nt.clone(), vec![], None, self.anon_opts(), 1));
                 Ok(Symbol::NonTerminal(nt))
             }
             (1, None) => {
-                // inner+ → one-or-more
-                let name = self.fresh_anon_rule("plus");
-                let nt = NonTerminal::new(&name);
-                // name : inner | name inner
-                self.rules.push(Rule::new(nt.clone(), vec![inner_sym.clone()], None, self.anon_opts(), 0));
-                self.rules.push(Rule::new(nt.clone(), vec![Symbol::NonTerminal(nt.clone()), inner_sym], None, self.anon_opts(), 1));
-                Ok(Symbol::NonTerminal(nt))
+                // inner+ → one-or-more, via the shared recurse helper.
+                Ok(self.plus_helper(inner_sym))
             }
             (0, None) => {
-                // inner* → zero-or-more via helper + optional
+                // inner* → optional wrapper around the *same* shared recurse helper,
+                // so `x*` and `x+` reuse one `P: inner | P inner` rule (Lark's model).
+                let plus = self.plus_helper(inner_sym);
                 let name = self.fresh_anon_rule("star");
                 let nt = NonTerminal::new(&name);
-                // name : ε | name inner
-                self.rules.push(Rule::new(nt.clone(), vec![], None, self.anon_opts(), 0));
-                self.rules.push(Rule::new(nt.clone(), vec![Symbol::NonTerminal(nt.clone()), inner_sym], None, self.anon_opts(), 1));
+                self.nullable_opts.insert(name.clone());
+                self.rules.push(Rule::new(nt.clone(), vec![plus], None, self.anon_opts(), 0));
+                self.rules.push(Rule::new(nt.clone(), vec![], None, self.anon_opts(), 1));
                 Ok(Symbol::NonTerminal(nt))
             }
             (n, Some(m)) if n == m => {
@@ -1729,7 +1783,6 @@ impl GrammarCompiler {
             },
             Expr::Group(alts) => Expr::Group(Self::substitute_template(alts, subst)),
             Expr::Maybe(alts) => Expr::Maybe(Self::substitute_template(alts, subst)),
-            other => other.clone(),
         }
     }
 
