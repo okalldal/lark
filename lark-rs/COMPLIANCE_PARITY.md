@@ -145,25 +145,32 @@ These are a grab-bag: rule-priority resolution on ambiguous alternations, EBNF
 parsing (49/50 — parse the priority as `i64`/bignum-clamped, not `i32`). Take
 them last; reproduce each individually.
 
-## Leverage summary
+## Follow-up tickets / index
 
-| Milestone | Theme | ~entries | Confidence | Status |
-|-----------|-------|---------:|------------|--------|
-| M1 | escape decoding `\x \u \U` | — | High | ✅ done |
-| M2 | anonymous regex literals kept | — | High | ✅ done |
-| M3 | case-insensitive terminals | — | High | ✅ done |
-| M5-global | grammar-wide `keep_all_tokens` | — | High | ✅ done |
-| M7a | invalid range + bad import | — | High | ✅ done |
-| M4 | template tree-shape + higher-order | 12 | Medium | ⬜ |
-| M8 | EBNF/priority residue (+ 73/74 conflict) | ~10 | Mixed | ⬜ |
-| M6 | inline↔named terminal collision | 5 | High effort | ⬜ (needs per-position filter model) |
-| M7b | regex collision detection | 2 | Medium | ⬜ |
-| M5 | nested `maybe_placeholders` | 4 | Medium | ⬜ |
+> **GitHub issues are disabled on this repository, so this section is the
+> tracker.** Each open ticket below has a stable ID and a self-contained
+> milestone section above (root cause, compliance-bank ids, proposed fix, files,
+> done-when). If issues get enabled later, lift each ticket into one verbatim.
+
+| Ticket | Theme | ~entries | Confidence | Status |
+|--------|-------|---------:|------------|--------|
+| M1 | escape decoding `\x \u \U` | — | High | ✅ done (PR #15) |
+| M2 | anonymous regex literals kept | — | High | ✅ done (PR #15) |
+| M3 | case-insensitive terminals | — | High | ✅ done (PR #15) |
+| M5-global | grammar-wide `keep_all_tokens` | — | High | ✅ done (PR #15) |
+| M7a | invalid range + bad import | — | High | ✅ done (PR #15) |
+| **M6** | per-position token filtering (collision) | 5 | High effort | ⬜ open — architectural, load-bearing for Earley |
+| **M4** | template tree-shape + higher-order | 12 | Medium | ⬜ open |
+| **M8** | EBNF/priority residue (+ 73/74 conflict) | ~10 | Mixed | ⬜ open |
+| **M5** | nested `maybe_placeholders` | 4 | Medium | ⬜ open |
+| **M7b** | regex collision detection | 2 | Medium | ⬜ open — needs Lark's exact rule reproduced first |
 
 The work so far took the bank from 75.6% to **89.6%** — 72 entries from six
 root-cause fixes. The remaining 53 are M4/M6/M8, regex-collision, and
-nested-maybe. M6 (and the rest of M5) touch shared
-lexer/tree-builder code Earley depends on, so they still pay double.
+nested-maybe. M6 (and the rest of M5) touch shared lexer/tree-builder code Earley
+depends on, so they still pay double. **Recommended next:** M6 — highest value
+and the per-position keep-mask it introduces is exactly the chokepoint Earley's
+forest-walk will reuse.
 
 ## Exit criterion — when Earley unfreezes
 
