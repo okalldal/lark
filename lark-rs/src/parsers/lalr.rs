@@ -548,98 +548,121 @@ impl LalrParser {
             .collect()
     }
 
+    // ─── Shared LALR driver helpers ──────────────────────────────────────────
+    //
+    // `parse` and `parse_contextual` differ only in how they source the next token
+    // (a pre-lexed iterator vs. the contextual lexer). The state-machine core —
+    // start resolution, REDUCE, ACCEPT, and the unexpected-token error — is shared
+    // through the helpers below so the two drivers stay thin.
+
+    /// Resolve the start symbol to its initial state.
+    fn initial_state(&self, start: Option<&str>) -> Result<usize, ParseError> {
+        let start_name = start.unwrap_or_else(|| {
+            self.table.start_states.keys().next().map(String::as_str).unwrap_or("start")
+        });
+        self.table.start_states.get(start_name).copied().ok_or_else(|| {
+            ParseError::UnexpectedEof {
+                line: 0, col: 0,
+                expected: vec![format!("start symbol '{}'", start_name)],
+            }
+        })
+    }
+
+    /// Valid terminals (the ACTION keys) for a state — used to build error reports.
+    fn expected_at(&self, state: usize) -> Vec<String> {
+        self.table.action.get(state).map(|m| m.keys().cloned().collect()).unwrap_or_default()
+    }
+
+    /// Apply a REDUCE: pop the rule's children, build its node (applying rule
+    /// options), and follow GOTO. `at` supplies the position for the (effectively
+    /// unreachable) missing-GOTO error.
+    fn reduce(
+        &self,
+        rule_idx: usize,
+        state_stack: &mut Vec<usize>,
+        value_stack: &mut Vec<StackValue>,
+        at: &Token,
+    ) -> Result<(), ParseError> {
+        let rule = &self.table.rules[rule_idx];
+        let len = rule.expansion.len();
+        let children: Vec<Child> = value_stack
+            .drain(value_stack.len() - len..)
+            .map(|sv| match sv {
+                StackValue::Token(t) => Child::Token(t),
+                StackValue::Tree(tr) => Child::Tree(tr),
+            })
+            .collect();
+        for _ in 0..len { state_stack.pop(); }
+
+        let tree_name = rule.tree_name().to_string();
+        let child = apply_rule_options(tree_name, children, rule, &self.table.filter_out);
+        let top_state = *state_stack.last().unwrap();
+        let next_state = self.table.goto[top_state]
+            .get(&rule.origin.name)
+            .copied()
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                token: at.value.clone(),
+                token_type: rule.origin.name.clone(),
+                line: at.line, col: at.column,
+                expected: vec![rule.origin.name.clone()],
+            })?;
+        state_stack.push(next_state);
+        value_stack.push(match child {
+            Child::Tree(t) => StackValue::Tree(t),
+            Child::Token(t) => StackValue::Token(t),
+            Child::None => unreachable!("placeholder cannot be a standalone rule value"),
+        });
+        Ok(())
+    }
+
+    /// ACCEPT: the final value on the stack is the parse result.
+    fn accept(value_stack: &mut Vec<StackValue>) -> Result<Tree, ParseError> {
+        value_stack.pop().map(|sv| match sv {
+            StackValue::Tree(t) => t,
+            StackValue::Token(tok) => Tree::new(tok.type_.clone(), vec![Child::Token(tok)]),
+        }).ok_or(ParseError::UnexpectedEof { line: 0, col: 0, expected: vec![] })
+    }
+
+    /// Build the error for a token with no action in the current state.
+    fn unexpected(&self, state: usize, token: &Token) -> ParseError {
+        let expected = self.expected_at(state);
+        if token.type_ == "$END" {
+            ParseError::UnexpectedEof { line: token.line, col: token.column, expected }
+        } else {
+            ParseError::UnexpectedToken {
+                token: token.value.clone(),
+                token_type: token.type_.clone(),
+                line: token.line, col: token.column,
+                expected,
+            }
+        }
+    }
+
     /// Parse a pre-tokenized sequence.
     pub fn parse(
         &self,
         tokens: Vec<Token>,
         start: Option<&str>,
     ) -> Result<Tree, ParseError> {
-        let start_name = start.unwrap_or_else(|| {
-            self.table.start_states.keys().next().map(String::as_str).unwrap_or("start")
-        });
-
-        let initial_state = *self.table.start_states.get(start_name)
-            .ok_or_else(|| ParseError::UnexpectedEof {
-                line: 0, col: 0,
-                expected: vec![format!("start symbol '{}'", start_name)],
-            })?;
-
-        let mut state_stack: Vec<usize> = vec![initial_state];
+        let mut state_stack: Vec<usize> = vec![self.initial_state(start)?];
         let mut value_stack: Vec<StackValue> = Vec::new();
         let mut token_iter = tokens.into_iter().peekable();
 
         loop {
             let current_state = *state_stack.last().unwrap();
-            let token = match token_iter.peek() {
-                Some(t) => t.clone(),
-                None => Token::new("$END", ""),
-            };
+            let token = token_iter.peek().cloned().unwrap_or_else(|| Token::new("$END", ""));
 
-            let action = self.table.action.get(current_state)
-                .and_then(|m| m.get(&token.type_));
-
-            match action {
+            match self.table.action.get(current_state).and_then(|m| m.get(&token.type_)) {
                 Some(Action::Shift(next_state)) => {
                     let tok = token_iter.next().unwrap();
                     state_stack.push(*next_state);
                     value_stack.push(StackValue::Token(tok));
                 }
                 Some(Action::Reduce(rule_idx)) => {
-                    let rule = &self.table.rules[*rule_idx];
-                    let len = rule.expansion.len();
-                    let children: Vec<Child> = value_stack
-                        .drain(value_stack.len() - len..)
-                        .map(|sv| match sv {
-                            StackValue::Token(t) => Child::Token(t),
-                            StackValue::Tree(tr) => Child::Tree(tr),
-                        })
-                        .collect();
-                    for _ in 0..len { state_stack.pop(); }
-
-                    let tree_name = rule.tree_name().to_string();
-                    let child = apply_rule_options(tree_name, children, rule, &self.table.filter_out);
-                    let top_state = *state_stack.last().unwrap();
-                    let next_state = self.table.goto[top_state]
-                        .get(&rule.origin.name)
-                        .copied()
-                        .ok_or_else(|| ParseError::UnexpectedToken {
-                            token: format!("{:?}", token.value),
-                            token_type: rule.origin.name.clone(),
-                            line: token.line, col: token.column,
-                            expected: vec![rule.origin.name.clone()],
-                        })?;
-                    state_stack.push(next_state);
-                    value_stack.push(match child {
-                        Child::Tree(t) => StackValue::Tree(t),
-                        Child::Token(t) => StackValue::Token(t),
-                        Child::None => unreachable!("placeholder cannot be a standalone rule value"),
-                    });
+                    self.reduce(*rule_idx, &mut state_stack, &mut value_stack, &token)?;
                 }
-                Some(Action::Accept) => {
-                    return value_stack.pop().map(|sv| match sv {
-                        StackValue::Tree(t) => t,
-                        StackValue::Token(tok) => Tree::new(tok.type_.clone(), vec![Child::Token(tok)]),
-                    }).ok_or_else(|| ParseError::UnexpectedEof {
-                        line: 0, col: 0, expected: vec![],
-                    });
-                }
-                None => {
-                    let expected: Vec<String> = self.table.action
-                        .get(current_state)
-                        .map(|m| m.keys().cloned().collect())
-                        .unwrap_or_default();
-                    if token.type_ == "$END" {
-                        return Err(ParseError::UnexpectedEof {
-                            line: token.line, col: token.column, expected,
-                        });
-                    }
-                    return Err(ParseError::UnexpectedToken {
-                        token: token.value.clone(),
-                        token_type: token.type_.clone(),
-                        line: token.line, col: token.column,
-                        expected,
-                    });
-                }
+                Some(Action::Accept) => return Self::accept(&mut value_stack),
+                None => return Err(self.unexpected(current_state, &token)),
             }
         }
     }
@@ -652,17 +675,7 @@ impl LalrParser {
         lexer: &ContextualLexer,
         start: Option<&str>,
     ) -> Result<Tree, ParseError> {
-        let start_name = start.unwrap_or_else(|| {
-            self.table.start_states.keys().next().map(String::as_str).unwrap_or("start")
-        });
-
-        let initial_state = *self.table.start_states.get(start_name)
-            .ok_or_else(|| ParseError::UnexpectedEof {
-                line: 0, col: 0,
-                expected: vec![format!("start symbol '{}'", start_name)],
-            })?;
-
-        let mut state_stack: Vec<usize> = vec![initial_state];
+        let mut state_stack: Vec<usize> = vec![self.initial_state(start)?];
         let mut value_stack: Vec<StackValue> = Vec::new();
         let mut lex_state = LexerState::new(text);
         let mut current_token: Option<Token> = None;
@@ -670,7 +683,7 @@ impl LalrParser {
         loop {
             let current_state = *state_stack.last().unwrap();
 
-            // Get next token from contextual lexer if we don't have one.
+            // Lex the next token for this state if we don't already hold one.
             // Ignored terminals (whitespace etc.) are transparently consumed.
             if current_token.is_none() {
                 loop {
@@ -683,7 +696,7 @@ impl LalrParser {
                     match lexer.next_token(lex_state.text, lex_state.pos, current_state, lex_state.line, lex_state.col)? {
                         Some(tok) => {
                             if lexer.ignore().contains(&tok.type_) {
-                                // Consume the ignored token and loop to get the next real one
+                                // Consume the ignored token and loop for the next real one.
                                 lex_state.advance_by_lines(tok.value.len(), &tok.value);
                                 continue;
                             }
@@ -691,17 +704,14 @@ impl LalrParser {
                             break;
                         }
                         None => {
-                            // No token matched at current position; nothing valid here.
-                            let expected: Vec<String> = self.table.action.get(current_state)
-                                .map(|m| m.keys().cloned().collect())
-                                .unwrap_or_default();
+                            // No terminal valid here matched at the current position.
                             let ch: String = lex_state.text[lex_state.pos..].chars().take(1).collect();
                             return Err(ParseError::UnexpectedToken {
                                 token: ch,
                                 token_type: String::new(),
                                 line: lex_state.line,
                                 col: lex_state.col,
-                                expected,
+                                expected: self.expected_at(current_state),
                             });
                         }
                     }
@@ -709,74 +719,19 @@ impl LalrParser {
             }
             let token = current_token.as_ref().unwrap().clone();
 
-            let action = self.table.action.get(current_state)
-                .and_then(|m| m.get(&token.type_));
-
-            match action {
+            match self.table.action.get(current_state).and_then(|m| m.get(&token.type_)) {
                 Some(Action::Shift(next_state)) => {
                     state_stack.push(*next_state);
                     value_stack.push(StackValue::Token(token.clone()));
-                    // Advance lexer position
                     lex_state.advance_by(token.value.len());
                     current_token = None;
                 }
                 Some(Action::Reduce(rule_idx)) => {
-                    let rule = &self.table.rules[*rule_idx];
-                    let len = rule.expansion.len();
-                    let children: Vec<Child> = value_stack
-                        .drain(value_stack.len() - len..)
-                        .map(|sv| match sv {
-                            StackValue::Token(t) => Child::Token(t),
-                            StackValue::Tree(tr) => Child::Tree(tr),
-                        })
-                        .collect();
-                    for _ in 0..len { state_stack.pop(); }
-
-                    let tree_name = rule.tree_name().to_string();
-                    let child = apply_rule_options(tree_name, children, rule, &self.table.filter_out);
-                    let top_state = *state_stack.last().unwrap();
-                    let next_state = self.table.goto[top_state]
-                        .get(&rule.origin.name)
-                        .copied()
-                        .ok_or_else(|| ParseError::UnexpectedToken {
-                            token: token.value.clone(),
-                            token_type: rule.origin.name.clone(),
-                            line: token.line, col: token.column,
-                            expected: vec![rule.origin.name.clone()],
-                        })?;
-                    state_stack.push(next_state);
-                    value_stack.push(match child {
-                        Child::Tree(t) => StackValue::Tree(t),
-                        Child::Token(t) => StackValue::Token(t),
-                        Child::None => unreachable!("placeholder cannot be a standalone rule value"),
-                    });
-                    // Don't advance lexer — same token may be consumed next
+                    // Don't advance the lexer — the same token may be consumed next.
+                    self.reduce(*rule_idx, &mut state_stack, &mut value_stack, &token)?;
                 }
-                Some(Action::Accept) => {
-                    return value_stack.pop().map(|sv| match sv {
-                        StackValue::Tree(t) => t,
-                        StackValue::Token(tok) => Tree::new(tok.type_.clone(), vec![Child::Token(tok)]),
-                    }).ok_or_else(|| ParseError::UnexpectedEof {
-                        line: 0, col: 0, expected: vec![],
-                    });
-                }
-                None => {
-                    let expected: Vec<String> = self.table.action
-                        .get(current_state)
-                        .map(|m| m.keys().cloned().collect())
-                        .unwrap_or_default();
-                    if token.type_ == "$END" {
-                        return Err(ParseError::UnexpectedEof {
-                            line: token.line, col: token.column, expected,
-                        });
-                    }
-                    return Err(ParseError::UnexpectedToken {
-                        token: token.value.clone(),
-                        token_type: token.type_.clone(),
-                        line: token.line, col: token.column,
-                        expected,
-                    });
-                }
+                Some(Action::Accept) => return Self::accept(&mut value_stack),
+                None => return Err(self.unexpected(current_state, &token)),
             }
         }
     }
