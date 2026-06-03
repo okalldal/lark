@@ -1,7 +1,9 @@
 pub mod lalr;
 pub mod earley;
+pub mod token_source;
 
 pub use lalr::{build_lalr_table, ParseTable, LalrParser};
+pub use token_source::{Contextual, LexFailure, PreLexed, TokenSource};
 
 use crate::grammar::Grammar;
 use crate::lexer::{LexerConf, BasicLexer, ContextualLexer, Lexer};
