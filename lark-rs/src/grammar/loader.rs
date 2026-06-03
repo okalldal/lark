@@ -20,11 +20,12 @@ pub fn load_grammar(
     grammar_text: &str,
     start: &[String],
     maybe_placeholders: bool,
+    keep_all_tokens: bool,
 ) -> Result<Grammar, GrammarError> {
     let mut parser = GrammarParser::new(grammar_text);
     let items = parser.parse_start()?;
 
-    let mut compiler = GrammarCompiler::new(start.to_vec(), maybe_placeholders);
+    let mut compiler = GrammarCompiler::new(start.to_vec(), maybe_placeholders, keep_all_tokens);
     compiler.process_items(items)?;
     compiler.compile()
 }
@@ -373,26 +374,66 @@ impl<'a> Lexer<'a> {
     }
 }
 
+/// Decode escape sequences in a string literal, mirroring Python Lark's
+/// `eval_escaping` (which defers to `ast.literal_eval`). The numeric escapes
+/// `\xHH`, `\uHHHH`, and `\UHHHHHHHH` decode to the corresponding `char`;
+/// `\n \t \r \f \v \0` map to their control characters; `\\ \" \'` are literal.
+/// An unrecognized escape (e.g. `\w`, `\d`) keeps its backslash so regex
+/// metacharacters embedded in a string survive — matching Lark, which prepends a
+/// backslash for any escape outside `Uuxnftr`.
 fn unescape_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars();
+    let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('n') => out.push('\n'),
-                Some('t') => out.push('\t'),
-                Some('r') => out.push('\r'),
-                Some('\\') => out.push('\\'),
-                Some('"') => out.push('"'),
-                Some('\'') => out.push('\''),
-                Some(c) => { out.push('\\'); out.push(c); }
-                None => out.push('\\'),
-            }
-        } else {
+        if c != '\\' {
             out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('r') => out.push('\r'),
+            Some('f') => out.push('\u{0C}'),
+            Some('v') => out.push('\u{0B}'),
+            Some('0') => out.push('\0'),
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some('\'') => out.push('\''),
+            Some('x') => push_hex_escape(&mut out, &mut chars, 2, "\\x"),
+            Some('u') => push_hex_escape(&mut out, &mut chars, 4, "\\u"),
+            Some('U') => push_hex_escape(&mut out, &mut chars, 8, "\\U"),
+            // Unknown escape: keep the backslash (regex escapes like `\w`, `\d`).
+            Some(c) => { out.push('\\'); out.push(c); }
+            None => out.push('\\'),
         }
     }
     out
+}
+
+/// Consume exactly `n` hex digits and push the decoded `char`. If the digits are
+/// missing or do not form a valid scalar value, emit the escape verbatim so a
+/// malformed escape never silently changes meaning.
+fn push_hex_escape(
+    out: &mut String,
+    chars: &mut std::iter::Peekable<std::str::Chars>,
+    n: usize,
+    prefix: &str,
+) {
+    let mut hex = String::with_capacity(n);
+    for _ in 0..n {
+        match chars.peek() {
+            Some(c) if c.is_ascii_hexdigit() => { hex.push(*c); chars.next(); }
+            _ => break,
+        }
+    }
+    match (hex.len() == n)
+        .then(|| u32::from_str_radix(&hex, 16).ok())
+        .flatten()
+        .and_then(char::from_u32)
+    {
+        Some(ch) => out.push(ch),
+        None => { out.push_str(prefix); out.push_str(&hex); }
+    }
 }
 
 fn parse_re_flags(s: &str) -> u32 {
@@ -932,13 +973,16 @@ struct GrammarCompiler {
     template_instances: HashMap<String, String>,
     /// Whether absent `[...]` groups emit `None` placeholders (Lark parity).
     maybe_placeholders: bool,
+    /// The grammar-wide `keep_all_tokens` option: when set, every rule keeps its
+    /// tokens, exactly as if each carried the `!` modifier.
+    global_keep_all: bool,
     /// `keep_all_tokens` of the rule currently being compiled — needed to count
     /// kept symbols for placeholder generation.
     current_keep_all: bool,
 }
 
 impl GrammarCompiler {
-    fn new(start: Vec<String>, maybe_placeholders: bool) -> Self {
+    fn new(start: Vec<String>, maybe_placeholders: bool, keep_all_tokens: bool) -> Self {
         GrammarCompiler {
             start,
             rules: Vec::new(),
@@ -951,7 +995,8 @@ impl GrammarCompiler {
             templates: HashMap::new(),
             template_instances: HashMap::new(),
             maybe_placeholders,
-            current_keep_all: false,
+            global_keep_all: keep_all_tokens,
+            current_keep_all: keep_all_tokens,
         }
     }
 
@@ -1019,7 +1064,7 @@ impl GrammarCompiler {
     }
 
     fn compile_rule(&mut self, raw: RawRule) -> Result<(), GrammarError> {
-        let keep_all = raw.modifiers.contains('!');
+        let keep_all = raw.modifiers.contains('!') || self.global_keep_all;
         let expand1 = raw.modifiers.contains('?');
         let origin = NonTerminal::new(&raw.name);
         // Make keep_all visible to placeholder counting while this rule's body
@@ -1086,7 +1131,8 @@ impl GrammarCompiler {
                     regex::escape(&from), regex::escape(&to));
                 let pat = Pattern::Re(PatternRe::new(&pat_str, 0)?);
                 let name = self.fresh_terminal();
-                self.terminals.push(TerminalDef::new(&name, pat, 0).with_filter_out(true));
+                // A char-range terminal is a regex literal — kept, like `/[a-z]/`.
+                self.terminals.push(TerminalDef::new(&name, pat, 0).with_filter_out(false));
                 Ok(Symbol::Terminal(Terminal::new(name)))
             }
             Value::TemplateUsage { name, args } => {
@@ -1127,8 +1173,12 @@ impl GrammarCompiler {
             Some(h) if !self.terminals.iter().any(|t| t.name == h) => h,
             _ => self.fresh_terminal(),
         };
-        // Terminals created from a literal in a rule body are filtered by default.
-        self.terminals.push(TerminalDef::new(&name, pat, 0).with_filter_out(true));
+        // Anonymous *string* literals are filtered out of the tree (keyword-like
+        // punctuation); anonymous *regex* literals are kept, matching Python Lark
+        // (a `/regex/` in a rule body produces a kept `__ANON_n` token). The `i`
+        // flag compiles a string to a regex but it is still a string literal.
+        let filter_out = matches!(lit, LiteralVal::Str(..));
+        self.terminals.push(TerminalDef::new(&name, pat, 0).with_filter_out(filter_out));
         self.literal_cache.insert(key, name.clone());
         Ok(name)
     }

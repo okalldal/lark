@@ -98,7 +98,10 @@ impl Scanner {
         let mut groups = Vec::with_capacity(scan.len());
         for (id, term) in scan {
             let group = format!("g{}", id.0);
-            parts.push(format!("(?P<{}>{})", group, term.pattern.as_regex_str()));
+            // `to_inline_regex` keeps per-terminal flags (e.g. `(?i:…)` for a
+            // case-insensitive terminal) scoped to this group; `as_regex_str`
+            // would drop them, so `"a"i` would not match `A`.
+            parts.push(format!("(?P<{}>{})", group, term.pattern.to_inline_regex()));
             groups.push((id, group));
         }
         let pattern = parts.join("|");
@@ -146,7 +149,7 @@ fn compute_unless(
 
     let mut unless: HashMap<SymbolId, HashMap<String, SymbolId>> = HashMap::new();
     for (re_id, re_t) in &res {
-        let full_src = format!("^(?:{})$", re_t.pattern.as_regex_str());
+        let full_src = format!("^(?:{})$", re_t.pattern.to_inline_regex());
         let full = Regex::new(&full_src)
             .map_err(|e| GrammarError::InvalidRegex { pattern: full_src.clone(), reason: e.to_string() })?;
         for (s_id, s_t) in &strs {

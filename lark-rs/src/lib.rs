@@ -23,7 +23,12 @@ pub struct Lark {
 
 impl Lark {
     pub fn new(grammar_text: &str, options: LarkOptions) -> Result<Self, LarkError> {
-        let grammar = load_grammar(grammar_text, &options.start, options.maybe_placeholders)?;
+        let grammar = load_grammar(
+            grammar_text,
+            &options.start,
+            options.maybe_placeholders,
+            options.keep_all_tokens,
+        )?;
         let frontend = parsers::build_frontend(&grammar, &options)?;
         Ok(Lark { grammar, frontend })
     }
@@ -103,6 +108,7 @@ mod tests {
             "start: WORD\nWORD: /[a-z]+/\n",
             &["start".to_string()],
             false,
+            false,
         ).unwrap();
         assert!(!grammar.rules.is_empty());
         assert!(grammar.terminals.iter().any(|t| t.name == "WORD"));
@@ -114,6 +120,7 @@ mod tests {
             "%import common.WORD\nstart: WORD\n",
             &["start".to_string()],
             false,
+            false,
         ).unwrap();
         assert!(grammar.terminals.iter().any(|t| t.name == "WORD"));
     }
@@ -123,6 +130,7 @@ mod tests {
         let res = grammar::load_grammar(
             "start: \"hello\" | \"world\"\n",
             &["start".to_string()],
+            false,
             false,
         );
         assert!(res.is_ok());
@@ -137,6 +145,7 @@ mod tests {
             "start: item* sep item+\nitem: /[a-z]/\nsep: \",\"?\n",
             &["start".to_string()],
             false,
+            false,
         );
         assert!(res.is_ok(), "Grammar load failed: {:?}", res.err());
     }
@@ -148,6 +157,7 @@ mod tests {
         let grammar = grammar::load_grammar(
             "start: GREETING\nGREETING: HELLO | HI\nHELLO: \"hello\"\nHI: \"hi\"\n",
             &["start".to_string()],
+            false,
             false,
         )
         .unwrap();
@@ -165,6 +175,7 @@ mod tests {
             "start: A\nA: \"a\" B\nB: \"b\" A\n",
             &["start".to_string()],
             false,
+            false,
         );
         assert!(matches!(res, Err(GrammarError::Other { .. })), "got {res:?}");
     }
@@ -174,6 +185,7 @@ mod tests {
         let grammar = grammar::load_grammar(
             "start: WORD\nWORD: /[a-z]+/\n%ignore /[ \\t]+/\n",
             &["start".to_string()],
+            false,
             false,
         ).unwrap();
         assert!(!grammar.ignore.is_empty());

@@ -14,13 +14,37 @@ on. Hardening that core now means the SPPF forest-walk inherits a *correct*
 shaper instead of 125 latent bugs we'd then be debugging across two engines with
 no oracle to tell us which one is wrong.
 
-## Current state (2026-06-03)
+## Current state (2026-06-03, after M1–M3 + M5-global)
 
-- Bank: **257 grammars, 504 input-cases + construct-error checks**.
-- Agreement: **≈68%**; **125 XFAIL entries**, **0 skipped**.
-- XFAIL shape: `build:<ri>` (16), `construct:<ri>` (8), `parse:<ri>:<ci>` (101,
-  of which 22 are downstream of a build failure and 79 are standalone tree/error
-  divergences across 71 grammars).
+- Bank: **257 grammars, 512 input-cases + construct-error checks**.
+- Agreement: **88.9% (455/512)**; **57 XFAIL entries**, **0 skipped**.
+  (Was 75.6% / 125 XFAIL before this sprint — four lexer/terminal-filtering fixes
+  flipped 68 cases; see "Done" below.)
+- Remaining XFAIL shape: `build:<ri>` (10), `construct:<ri>` (8),
+  `parse:<ri>:<ci>` (39, of which 16 are downstream of a build failure and 23 are
+  standalone tree divergences across 19 grammars).
+
+## Done — Sprint "lexer & terminal-filtering parity" (M1, M2, M3, M5-global)
+
+Four root-cause fixes in `loader.rs` / `lexer.rs`, 68 XFAILs flipped, no
+regressions, full oracle + JSON-corpus suite green. Pinned by
+`tests/test_escapes_and_filtering.rs`.
+
+1. **M1 — escape decoding.** `unescape_string` now decodes `\xHH`, `\uHHHH`,
+   `\UHHHHHHHH` (plus `\f \v \0`), so string terminals and char-range bounds with
+   escapes build and match. Malformed escapes fall back to literal text.
+2. **M2 — anonymous regex literals are kept.** An inline `/regex/` (or char
+   range) produced a `filter_out` token like a string literal, so its tokens
+   vanished from the tree. Now only anonymous *string* literals are filtered;
+   regex/range literals are kept, matching Lark's `__ANON_n` behavior. *(This,
+   not escape handling, was the bulk of the old M2 cluster.)*
+3. **M3 — case-insensitive flag honored.** The scanner built its combined regex
+   with `as_regex_str()`, which *drops* per-terminal flags, so `"a"i` never
+   matched `A`. It now uses `to_inline_regex()`, scoping `(?i:…)` to each group.
+4. **M5-global — grammar-wide `keep_all_tokens`.** The `LarkOptions` field was
+   defined but never threaded into the loader (only the per-rule `!` modifier
+   worked). It now flows into `GrammarCompiler`, so it keeps tokens *and* drives
+   `maybe_placeholders` counting.
 
 ## Methodology (unchanged — this is the discipline, not a detour)
 
@@ -38,58 +62,10 @@ Each milestone below follows the project loop:
 `LARK_COMPLIANCE_TRACE=1` prints each grammar before it runs. Never push without
 `scripts/check.sh` green.
 
-## Milestones, ordered by leverage × confidence
+## Milestones
 
-The clusters are sized by how many XFAIL entries each should flip. Order is
-chosen so the highest-leverage, highest-confidence root causes land first, and so
-that build failures (which also drag 22 downstream `parse:` entries) are cleared
-early.
-
-### M1 — Escape-sequence decoding (`\x`, `\u`, `\U`) — ~26 entries, highest leverage
-
-**Root cause (confirmed in code):** `unescape_string` in
-`src/grammar/loader.rs` handles only `\n \t \r \\ \" \'`. Hex/unicode escapes
-fall through to the `Some(c) => push('\\'); push(c)` arm, so `"\x01"` becomes the
-literal 4-char string `\x01`, and a char-range bound like `"\x01".."\x03"` is
-built from un-decoded bounds.
-
-This single gap explains:
-- **Build failures** `B: char-range with escape bounds` — ids 202–207
-  (`A: "\U0000FFFF".."\U00010002"`, `"a".."c"`, `"\x01".."\x03"`).
-- **Parse divergences** in string terminals with escapes — ids 200/201
-  (`"\x01"`, `"\xABCD"`), 221–226 (`\U0010FFFF`, `ā`, mixed).
-
-**Fix:** extend `unescape_string` to decode `\xHH`, `\uHHHH`, `\U00HHHHHH` (and
-the `\0` / octal forms Lark accepts) to the corresponding `char`. Mirror Python
-Lark's `lark/utils.py` escape handling exactly. Add an oracle test for an astral
-codepoint (so we don't regress UTF-8 column counting from BUG-5).
-
-### M2 — Regex terminal escape / char-class semantics — ~14 entries
-
-**Symptom:** `/regex/` terminals with backslash escapes and character classes
-diverge — ids 164–193 (`/[^x]+/`, `/[ab]/`, `/\//`, `/\[/`, `/\[ab]/`, `/\\/`,
-`/\\[ab]/`, `/\\\t/`, `/\\t/`, `/\\w/`, `/\n/`, `/\t/`, `/\w/`).
-
-**Likely root cause:** regex literal text is passed to the `regex` crate
-verbatim (`loader.rs` ~1117) without translating Python `re` escape conventions,
-and/or the anonymous-terminal value/typing differs. Python `re` and the Rust
-`regex` crate mostly agree, so each id needs its failing case reproduced to split
-"pattern compiles but matches wrong span" from "pattern fails to compile" from
-"token_type/`__ANON_n` naming differs". Triage the 14 against the oracle first,
-then fix the shared cause(s). This is the cluster with the most uncertainty —
-budget reproduction time before committing to a fix.
-
-### M3 — Case-insensitive terminals (`"a"i`, `/a/i`) — ~12 entries
-
-**Symptom:** ids 42/43, 105, 106/107, 110/111, 114, 115/116. With
-`keep_all_tokens`, the token *value* must preserve the source casing (`'A'` for
-input `Aa`) while the terminal still matches case-insensitively; `"INT"i` keyword
-retyping must interact correctly with `%ignore`.
-
-**Fix:** ensure the `i` flag sets `IGNORECASE` on the compiled pattern (string
-terminals `"a"i` currently take the `Pattern::Str` path — they must become a
-case-insensitive regex, not a literal) and that the retained token carries the
-matched source text, not the pattern text.
+**M1–M3 and the global-`keep_all_tokens` half of M5 are done** (see the "Done"
+section above). The remaining work, ordered by leverage × confidence:
 
 ### M4 — Template instantiation tree-shape — ~10 entries (+2 build, +2 construct-adjacent)
 
@@ -105,19 +81,17 @@ applied as a template. Confirm each against the oracle; the higher-order case ma
 need `instantiate_template` to resolve a parameter that resolves to another
 template.
 
-### M5 — `maybe_placeholders` (None for absent optionals) — ~4 entries
+### M5 — `maybe_placeholders` residue (nested `[...]`) — ~4 entries
 
-**Symptom:** ids 123/124 (`!start: ["a" ["b" "c"]]`), 232/234
-(`start: ["a"] ["b"] ["c"]`) — for empty input the oracle tree has explicit
-`None` children (one per absent `[...]` group); lark-rs omits them. Build
-failures 108/109 (`!start: ("A"?)?`) are the nested-nullable shape of the same
-feature.
+The grammar-wide `keep_all_tokens` half is **done**; what remains is *nested*
+optionals: ids 123/124 (`!start: ["a" ["b" "c"]]`) and 227/228
+(`["+"|"-"] float …`). A single `[...]` now emits the right `None` count; a
+`[...]` nested inside another `[...]` does not yet. Build failures 108/109
+(`!start: ("A"?)?`) are the nullable-EBNF shape of the same gap.
 
-**Fix:** when `maybe_placeholders` is on, each `[...]` (optional) that matched
-nothing must emit a `None` placeholder child in position. This needs a
-placeholder representation in the tree (`Child::None`) and `TreeBuilder` support —
-note this is the one milestone that touches the shared tree representation Earley
-will also use, so get it right here.
+**Fix:** make placeholder counting recurse through nested maybe/optional groups
+(the inner group's placeholder slots must surface in the outer empty production).
+`Child::None` and `TreeBuilder` support already exist.
 
 ### M6 — Inline-pattern ↔ named-terminal collision — ~5 entries
 
@@ -154,20 +128,22 @@ them last; reproduce each individually.
 
 ## Leverage summary
 
-| Milestone | Theme | ~entries | Confidence |
-|-----------|-------|---------:|------------|
-| M1 | escape decoding `\x \u \U` | 26 | High (root cause confirmed) |
-| M2 | regex escape / char-class | 14 | Medium (needs per-id repro) |
-| M3 | case-insensitive terminals | 12 | High |
-| M4 | template tree-shape + higher-order | 12 | Medium |
-| M5 | maybe_placeholders | 6 | High |
-| M6 | inline↔named terminal collision | 5 | High |
-| M7 | construct-error parity | 8 | High |
-| M8 | EBNF/priority residue | 8 | Mixed |
+| Milestone | Theme | ~entries | Confidence | Status |
+|-----------|-------|---------:|------------|--------|
+| M1 | escape decoding `\x \u \U` | — | High | ✅ done |
+| M2 | anonymous regex literals kept | — | High | ✅ done |
+| M3 | case-insensitive terminals | — | High | ✅ done |
+| M5-global | grammar-wide `keep_all_tokens` | — | High | ✅ done |
+| M4 | template tree-shape + higher-order | 12 | Medium | ⬜ |
+| M6 | inline↔named terminal collision | 5 | High | ⬜ |
+| M7 | construct-error parity | 8 | High | ⬜ |
+| M8 | EBNF/priority residue | 8 | Mixed | ⬜ |
+| M5 | nested `maybe_placeholders` | 4 | Medium | ⬜ |
 
-Clearing M1–M3 alone (~52 entries, all high/medium confidence) takes the bank
-from ≈68% past ≈78%. M1+M5+M6 are the ones that touch shared lexer/tree-builder
-code Earley depends on, so they pay double.
+The lexer/terminal-filtering sprint (M1–M3 + M5-global) took the bank from 75.6%
+to **88.9%** — 68 entries from four root-cause fixes. The remaining 57 are
+M4/M6/M7/M8 and nested-maybe. M6 (and the rest of M5) touch shared
+lexer/tree-builder code Earley depends on, so they still pay double.
 
 ## Exit criterion — when Earley unfreezes
 
