@@ -58,7 +58,7 @@ pub fn build_frontend(
             // Lower the surface grammar to the interned IR once, then build the
             // parse table and lexer from it.
             let cg = crate::grammar::lower(grammar);
-            let table = build_lalr_table(&cg)?;
+            let table = build_lalr_table(&cg, options.strict)?;
             let parser = LalrParser::new(table);
 
             let terminals: Vec<(
@@ -74,7 +74,8 @@ pub fn build_frontend(
                     )
                 })
                 .collect();
-            let lexer_conf = LexerConf::new(terminals, cg.ignore.clone());
+            let lexer_conf = LexerConf::new(terminals, cg.ignore.clone())
+                .with_global_flags(options.g_regex_flags);
 
             let kind = match options.lexer {
                 LexerType::Basic => {

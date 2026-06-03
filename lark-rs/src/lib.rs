@@ -57,6 +57,15 @@ pub struct LarkOptions {
     pub propagate_positions: bool,
     pub keep_all_tokens: bool,
     pub maybe_placeholders: bool,
+    /// Reject grammars with shift/reduce conflicts (and same-priority regex
+    /// terminal collisions) at construction time instead of silently resolving
+    /// them. Mirrors Python Lark's `strict=True`.
+    pub strict: bool,
+    /// Global regex flags applied to every terminal pattern, as a bitset over
+    /// [`grammar::terminal::flags`] (`IGNORECASE` etc.). Mirrors Python Lark's
+    /// `g_regex_flags`. Zero (the default) leaves every terminal's own flags
+    /// untouched.
+    pub g_regex_flags: u32,
 }
 
 impl Default for LarkOptions {
@@ -72,6 +81,8 @@ impl Default for LarkOptions {
             propagate_positions: false,
             keep_all_tokens: false,
             maybe_placeholders: false,
+            strict: false,
+            g_regex_flags: 0,
         }
     }
 }
