@@ -25,7 +25,11 @@ impl GrammarAnalysis {
         let n_terminals = grammar.n_terminals();
         let nullable = compute_nullable(grammar, n_symbols);
         let first = compute_first(grammar, &nullable);
-        GrammarAnalysis { nullable, first, n_terminals }
+        GrammarAnalysis {
+            nullable,
+            first,
+            n_terminals,
+        }
     }
 
     #[inline]

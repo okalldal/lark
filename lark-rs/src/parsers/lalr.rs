@@ -76,7 +76,10 @@ impl LR0Item {
     }
 
     fn advance(&self) -> Self {
-        LR0Item { rule_idx: self.rule_idx, dot: self.dot + 1 }
+        LR0Item {
+            rule_idx: self.rule_idx,
+            dot: self.dot + 1,
+        }
     }
 
     fn is_complete(&self, rules: &[CompiledRule]) -> bool {
@@ -103,7 +106,13 @@ impl<'g> LR0Builder<'g> {
         for (i, rule) in rules.iter().enumerate() {
             rule_index.entry(rule.origin).or_default().push(i);
         }
-        LR0Builder { rules, n_terminals, rule_index, states: Vec::new(), transitions: BTreeMap::new() }
+        LR0Builder {
+            rules,
+            n_terminals,
+            rule_index,
+            states: Vec::new(),
+            transitions: BTreeMap::new(),
+        }
     }
 
     #[inline]
@@ -160,8 +169,10 @@ impl<'g> LR0Builder<'g> {
         // expands to thousands of chained states — do not overflow the stack.
         while let Some(id) = worklist.pop_front() {
             let closed = self.states[id].clone();
-            let symbols: BTreeSet<SymbolId> =
-                closed.iter().filter_map(|item| item.expected(self.rules)).collect();
+            let symbols: BTreeSet<SymbolId> = closed
+                .iter()
+                .filter_map(|item| item.expected(self.rules))
+                .collect();
             for sym in symbols {
                 let next_state_items = self.goto(&closed, sym);
                 if !next_state_items.is_empty() {
@@ -217,7 +228,12 @@ impl<'g> LookaheadComputer<'g> {
         transitions: &'g BTreeMap<(usize, SymbolId), usize>,
         analysis: &'g GrammarAnalysis,
     ) -> Self {
-        LookaheadComputer { rules, states, transitions, analysis }
+        LookaheadComputer {
+            rules,
+            states,
+            transitions,
+            analysis,
+        }
     }
 
     /// Kernel items: dot past the start, plus the augmented start items (dot 0).
@@ -247,8 +263,12 @@ impl<'g> LookaheadComputer<'g> {
             let snapshot: Vec<(LR0Item, HashSet<SymbolId>)> =
                 result.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
             for (item, la) in snapshot {
-                let Some(sym) = item.expected(self.rules) else { continue };
-                let Some(prods) = rule_index.get(&sym) else { continue };
+                let Some(sym) = item.expected(self.rules) else {
+                    continue;
+                };
+                let Some(prods) = rule_index.get(&sym) else {
+                    continue;
+                };
                 let rule = &self.rules[item.rule_idx];
                 let beta = &rule.expansion[item.dot + 1..];
                 let (first_beta, beta_nullable) = self.analysis.first_of_seq(beta);
@@ -301,14 +321,20 @@ impl<'g> LookaheadComputer<'g> {
                 seed.insert(k.clone(), std::iter::once(PROPAGATE_MARK).collect());
                 let closed = self.lr1_closure(&seed, &rule_index);
                 for (item, la_set) in &closed {
-                    let Some(sym) = item.expected(self.rules) else { continue };
-                    let Some(&goto_state) = self.transitions.get(&(state_id, sym)) else { continue };
+                    let Some(sym) = item.expected(self.rules) else {
+                        continue;
+                    };
+                    let Some(&goto_state) = self.transitions.get(&(state_id, sym)) else {
+                        continue;
+                    };
                     let advanced = item.advance();
                     for &a in la_set {
                         if a == PROPAGATE_MARK {
                             links.push(((state_id, k.clone()), (goto_state, advanced.clone())));
                         } else {
-                            kla.entry((goto_state, advanced.clone())).or_default().insert(a);
+                            kla.entry((goto_state, advanced.clone()))
+                                .or_default()
+                                .insert(a);
                         }
                     }
                 }
@@ -320,7 +346,10 @@ impl<'g> LookaheadComputer<'g> {
         while changed {
             changed = false;
             for (from, to) in &links {
-                let src: Vec<SymbolId> = kla.get(from).map(|s| s.iter().copied().collect()).unwrap_or_default();
+                let src: Vec<SymbolId> = kla
+                    .get(from)
+                    .map(|s| s.iter().copied().collect())
+                    .unwrap_or_default();
                 if src.is_empty() {
                     continue;
                 }
@@ -340,7 +369,10 @@ impl<'g> LookaheadComputer<'g> {
             let mut kernel: HashMap<LR0Item, HashSet<SymbolId>> = HashMap::new();
             for item in state {
                 if self.is_kernel(item) {
-                    let set = kla.get(&(state_id, item.clone())).cloned().unwrap_or_default();
+                    let set = kla
+                        .get(&(state_id, item.clone()))
+                        .cloned()
+                        .unwrap_or_default();
                     kernel.insert(item.clone(), set);
                 }
             }
@@ -412,7 +444,9 @@ pub fn build_lalr_table(grammar: &CompiledGrammar) -> Result<ParseTable, Grammar
             }
         }
 
-        let Some(rule_la) = reduce_la.get(&state_id) else { continue };
+        let Some(rule_la) = reduce_la.get(&state_id) else {
+            continue;
+        };
         let mut reduces_by_la: BTreeMap<SymbolId, Vec<usize>> = BTreeMap::new();
         for (&rule_idx, la_set) in rule_la {
             if rules[rule_idx].is_start {
@@ -435,8 +469,10 @@ pub fn build_lalr_table(grammar: &CompiledGrammar) -> Result<ParseTable, Grammar
                 if best > second {
                     by_prio[0]
                 } else {
-                    let rule_list: String =
-                        candidates.iter().map(|&ri| format!("\n\t- {}", rules[ri])).collect();
+                    let rule_list: String = candidates
+                        .iter()
+                        .map(|&ri| format!("\n\t- {}", rules[ri]))
+                        .collect();
                     conflicts.push(format!(
                         "Reduce/Reduce collision in state {} for terminal {}:{}",
                         state_id,
@@ -458,7 +494,9 @@ pub fn build_lalr_table(grammar: &CompiledGrammar) -> Result<ParseTable, Grammar
     }
 
     if !conflicts.is_empty() {
-        return Err(GrammarError::Conflict { report: conflicts.join("\n\n") });
+        return Err(GrammarError::Conflict {
+            report: conflicts.join("\n\n"),
+        });
     }
 
     Ok(ParseTable {
@@ -511,13 +549,13 @@ impl LalrParser {
             Some(name) => self.table.symbols.id(name),
             None => self.table.start_states.keys().next().copied(),
         };
-        start_id.and_then(|id| self.table.start_states.get(&id).copied()).ok_or_else(|| {
-            ParseError::UnexpectedEof {
+        start_id
+            .and_then(|id| self.table.start_states.get(&id).copied())
+            .ok_or_else(|| ParseError::UnexpectedEof {
                 line: 0,
                 col: 0,
                 expected: vec![format!("start symbol '{}'", start.unwrap_or("?"))],
-            }
-        })
+            })
     }
 
     /// Valid terminal names for a state — used to build error reports.
@@ -528,7 +566,10 @@ impl LalrParser {
             .map(|row| {
                 row.iter()
                     .enumerate()
-                    .filter_map(|(t, a)| a.as_ref().map(|_| self.table.symbols.name(SymbolId(t as u32)).to_string()))
+                    .filter_map(|(t, a)| {
+                        a.as_ref()
+                            .map(|_| self.table.symbols.name(SymbolId(t as u32)).to_string())
+                    })
                     .collect()
             })
             .unwrap_or_default()
@@ -553,8 +594,7 @@ impl LalrParser {
         let rule = &self.table.rules[rule_idx];
         let len = rule.expansion.len();
 
-        let child_values: Vec<NodeValue> =
-            value_stack.drain(value_stack.len() - len..).collect();
+        let child_values: Vec<NodeValue> = value_stack.drain(value_stack.len() - len..).collect();
         for _ in 0..len {
             state_stack.pop();
         }
@@ -588,9 +628,11 @@ impl LalrParser {
             Some(NodeValue::Tree(t)) => Ok(ParseTree::Tree(t)),
             Some(NodeValue::Token(tok)) => Ok(ParseTree::Token(tok)),
             // A start rule is never transparent, so its value is never Inline.
-            Some(NodeValue::Inline(_)) | None => {
-                Err(ParseError::UnexpectedEof { line: 0, col: 0, expected: vec![] })
-            }
+            Some(NodeValue::Inline(_)) | None => Err(ParseError::UnexpectedEof {
+                line: 0,
+                col: 0,
+                expected: vec![],
+            }),
         }
     }
 
@@ -598,7 +640,11 @@ impl LalrParser {
     fn unexpected(&self, state: usize, token: &Token) -> ParseError {
         let expected = self.expected_at(state);
         if token.type_id == SymbolId::END {
-            ParseError::UnexpectedEof { line: token.line, col: token.column, expected }
+            ParseError::UnexpectedEof {
+                line: token.line,
+                col: token.column,
+                expected,
+            }
         } else {
             ParseError::UnexpectedToken {
                 token: token.value.clone(),

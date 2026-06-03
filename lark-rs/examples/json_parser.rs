@@ -3,7 +3,7 @@
 //! This demonstrates the Rust Lark API using the same grammar format
 //! as Python Lark, parsing JSON with LALR + contextual lexer.
 
-use lark_rs::{Lark, LarkOptions, ParserAlgorithm, LexerType};
+use lark_rs::{Lark, LarkOptions, LexerType, ParserAlgorithm};
 
 const JSON_GRAMMAR: &str = r#"
     ?start: value

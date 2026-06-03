@@ -27,7 +27,12 @@ fn build(grammar: &str, lexer: LexerType) -> Lark {
 /// (type, value) of the single token child of a one-child `start` tree.
 fn only_token(lark: &Lark, input: &str) -> (String, String) {
     let tree = lark.parse(input).expect("parse").as_tree().unwrap().clone();
-    assert_eq!(tree.children.len(), 1, "expected exactly one child: {:?}", tree.children);
+    assert_eq!(
+        tree.children.len(),
+        1,
+        "expected exactly one child: {:?}",
+        tree.children
+    );
     match &tree.children[0] {
         Child::Token(t) => (t.type_.clone(), t.value.clone()),
         other => panic!("child is not a token: {other:?}"),
@@ -43,7 +48,11 @@ fn test_literal_unifies_with_named_terminal_basic_lexer() {
     for lexer in [LexerType::Basic, LexerType::Contextual] {
         let label = format!("{lexer:?}");
         let lark = build("start: \"a\" A\nA: \"a\"", lexer);
-        assert_eq!(only_token(&lark, "aa"), ("A".to_string(), "a".to_string()), "{label}");
+        assert_eq!(
+            only_token(&lark, "aa"),
+            ("A".to_string(), "a".to_string()),
+            "{label}"
+        );
     }
 }
 

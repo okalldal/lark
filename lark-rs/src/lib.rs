@@ -1,19 +1,20 @@
 pub mod error;
 pub mod grammar;
 pub mod lexer;
-pub mod tree;
 pub mod parsers;
+pub mod tree;
 
-pub use error::{LarkError, ParseError, GrammarError};
+pub use error::{GrammarError, LarkError, ParseError};
 pub use grammar::{
-    load_grammar, lower, CompiledGrammar, CompiledRule, Grammar, SymbolId, SymbolKind, SymbolTable,
+    load_grammar, lower,
     rule::{Rule, RuleOptions},
-    symbol::{Symbol, Terminal, NonTerminal},
+    symbol::{NonTerminal, Symbol, Terminal},
     terminal::TerminalDef,
+    CompiledGrammar, CompiledRule, Grammar, SymbolId, SymbolKind, SymbolTable,
 };
-pub use lexer::{Lexer, LexerConf, BasicLexer, ContextualLexer};
-pub use tree::{Tree, Token, Child, ParseTree};
-pub use parsers::{ParserConf, ParseTable, lalr, TokenSource, LexFailure};
+pub use lexer::{BasicLexer, ContextualLexer, Lexer, LexerConf};
+pub use parsers::{lalr, LexFailure, ParseTable, ParserConf, TokenSource};
+pub use tree::{Child, ParseTree, Token, Tree};
 
 /// Main entry point — mirrors Python's `Lark(grammar, parser=..., lexer=...)`
 pub struct Lark {
@@ -109,7 +110,8 @@ mod tests {
             &["start".to_string()],
             false,
             false,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(!grammar.rules.is_empty());
         assert!(grammar.terminals.iter().any(|t| t.name == "WORD"));
     }
@@ -121,7 +123,8 @@ mod tests {
             &["start".to_string()],
             false,
             false,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(grammar.terminals.iter().any(|t| t.name == "WORD"));
     }
 
@@ -177,7 +180,10 @@ mod tests {
             false,
             false,
         );
-        assert!(matches!(res, Err(GrammarError::Other { .. })), "got {res:?}");
+        assert!(
+            matches!(res, Err(GrammarError::Other { .. })),
+            "got {res:?}"
+        );
     }
 
     #[test]
@@ -187,7 +193,8 @@ mod tests {
             &["start".to_string()],
             false,
             false,
-        ).unwrap();
+        )
+        .unwrap();
         assert!(!grammar.ignore.is_empty());
     }
 }

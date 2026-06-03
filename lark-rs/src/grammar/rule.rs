@@ -1,4 +1,4 @@
-use super::symbol::{Symbol, NonTerminal};
+use super::symbol::{NonTerminal, Symbol};
 
 /// A single grammar rule: `origin → expansion`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -19,7 +19,13 @@ impl Rule {
         options: RuleOptions,
         order: usize,
     ) -> Self {
-        Rule { origin, expansion, alias, options, order }
+        Rule {
+            origin,
+            expansion,
+            alias,
+            options,
+            order,
+        }
     }
 
     pub fn is_empty(&self) -> bool {

@@ -9,8 +9,8 @@ use std::path::Path;
 /// must agree. Grammar limitations that affect Python Lark equally are skipped.
 #[test]
 fn test_json_corpus_against_oracle() {
-    let corpus_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/corpora/JSONTestSuite/test_parsing");
+    let corpus_dir =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/corpora/JSONTestSuite/test_parsing");
 
     if !corpus_dir.exists() {
         eprintln!("JSONTestSuite submodule not initialised — skipping corpus test");
@@ -67,9 +67,7 @@ fn test_json_corpus_against_oracle() {
         if parse_ok == python_ok {
             agree += 1;
         } else {
-            hard_failures.push(format!(
-                "FAIL {fname}: Rust={parse_ok} Python={python_ok}"
-            ));
+            hard_failures.push(format!("FAIL {fname}: Rust={parse_ok} Python={python_ok}"));
         }
     }
 
@@ -78,9 +76,7 @@ fn test_json_corpus_against_oracle() {
     } else {
         100
     };
-    eprintln!(
-        "JSONTestSuite oracle agreement: {agree}/{total_definitive} ({pct}%)"
-    );
+    eprintln!("JSONTestSuite oracle agreement: {agree}/{total_definitive} ({pct}%)");
 
     if !hard_failures.is_empty() {
         panic!(

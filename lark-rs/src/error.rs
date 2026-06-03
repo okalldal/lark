@@ -19,7 +19,11 @@ pub enum GrammarError {
     #[error("Invalid regex pattern '{pattern}': {reason}")]
     InvalidRegex { pattern: String, reason: String },
     #[error("Grammar syntax error at line {line}, column {col}: {msg}")]
-    SyntaxError { line: usize, col: usize, msg: String },
+    SyntaxError {
+        line: usize,
+        col: usize,
+        msg: String,
+    },
     #[error("Import not found: {path}")]
     ImportNotFound { path: String },
     #[error("Grammar has unresolvable LALR conflicts:\n{report}")]
@@ -38,7 +42,9 @@ pub enum ParseError {
         pos: usize,
         expected: String,
     },
-    #[error("Unexpected token {token:?} at line {line}, column {col}\nExpected one of: {expected:?}")]
+    #[error(
+        "Unexpected token {token:?} at line {line}, column {col}\nExpected one of: {expected:?}"
+    )]
     UnexpectedToken {
         token: String,
         token_type: String,

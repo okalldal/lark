@@ -1,17 +1,17 @@
-pub mod lalr;
 pub mod earley;
+pub mod lalr;
 pub mod token_source;
 pub mod tree_builder;
 
-pub use lalr::{build_lalr_table, ParseTable, LalrParser};
+pub use lalr::{build_lalr_table, LalrParser, ParseTable};
 pub use token_source::{Contextual, LexFailure, PreLexed, TokenSource};
 pub use tree_builder::{NodeValue, TreeBuilder};
 
+use crate::error::{LarkError, ParseError};
 use crate::grammar::Grammar;
-use crate::lexer::{LexerConf, BasicLexer, ContextualLexer, Lexer};
+use crate::lexer::{BasicLexer, ContextualLexer, Lexer, LexerConf};
 use crate::tree::ParseTree;
-use crate::error::{ParseError, LarkError};
-use crate::{LarkOptions, ParserAlgorithm, LexerType};
+use crate::{LarkOptions, LexerType, ParserAlgorithm};
 
 #[derive(Debug, Clone)]
 pub struct ParserConf {
@@ -25,16 +25,18 @@ pub struct ParsingFrontend {
 }
 
 enum FrontendKind {
-    LalrBasic { parser: LalrParser, lexer: BasicLexer },
-    LalrContextual { parser: LalrParser, lexer: ContextualLexer },
+    LalrBasic {
+        parser: LalrParser,
+        lexer: BasicLexer,
+    },
+    LalrContextual {
+        parser: LalrParser,
+        lexer: ContextualLexer,
+    },
 }
 
 impl ParsingFrontend {
-    pub fn parse(
-        &self,
-        text: &str,
-        start: Option<&str>,
-    ) -> Result<ParseTree, ParseError> {
+    pub fn parse(&self, text: &str, start: Option<&str>) -> Result<ParseTree, ParseError> {
         match &self.kind {
             FrontendKind::LalrBasic { parser, lexer } => {
                 let tokens = lexer.lex(text)?;
@@ -59,10 +61,18 @@ pub fn build_frontend(
             let table = build_lalr_table(&cg)?;
             let parser = LalrParser::new(table);
 
-            let terminals: Vec<(crate::grammar::SymbolId, crate::grammar::terminal::TerminalDef)> = cg
+            let terminals: Vec<(
+                crate::grammar::SymbolId,
+                crate::grammar::terminal::TerminalDef,
+            )> = cg
                 .terminals
                 .iter()
-                .map(|t| (cg.symbols.id(&t.name).expect("terminal interned"), t.clone()))
+                .map(|t| {
+                    (
+                        cg.symbols.id(&t.name).expect("terminal interned"),
+                        t.clone(),
+                    )
+                })
                 .collect();
             let lexer_conf = LexerConf::new(terminals, cg.ignore.clone());
 
@@ -92,10 +102,8 @@ pub fn build_frontend(
                 msg: "Earley parser not yet implemented".to_string(),
             }))
         }
-        ParserAlgorithm::Cyk => {
-            Err(LarkError::Grammar(crate::error::GrammarError::Other {
-                msg: "CYK parser not yet implemented".to_string(),
-            }))
-        }
+        ParserAlgorithm::Cyk => Err(LarkError::Grammar(crate::error::GrammarError::Other {
+            msg: "CYK parser not yet implemented".to_string(),
+        })),
     }
 }

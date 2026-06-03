@@ -31,7 +31,10 @@ fn load_json(name: &str) -> Option<Value> {
 fn record_options(rec: &Value) -> LarkOptions {
     let start = match &rec["start"] {
         Value::String(s) => vec![s.clone()],
-        Value::Array(a) => a.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
+        Value::Array(a) => a
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
         _ => vec!["start".to_string()],
     };
     let lexer = match rec["lexer"].as_str() {
@@ -66,7 +69,9 @@ fn try_parse(lark: &Lark, input: &str) -> Option<lark_rs::ParseTree> {
 
 #[test]
 fn test_compliance_bank() {
-    let Some(records) = load_bank_or_skip() else { return };
+    let Some(records) = load_bank_or_skip() else {
+        return;
+    };
     let records = records.as_array().expect("bank is an array");
 
     // Silence panic backtraces from the many expected-to-fail grammars.
@@ -81,7 +86,11 @@ fn test_compliance_bank() {
     // so these are skipped by content until the underlying loader bug is fixed.
     let skip: BTreeSet<String> = load_json("skip.json")
         .and_then(|v| v.as_array().cloned())
-        .map(|a| a.into_iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.into_iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let mut skipped = 0usize;
 
@@ -141,7 +150,11 @@ fn test_compliance_bank() {
 
     let xfail: BTreeSet<String> = load_json("xfail.json")
         .and_then(|v| v.as_array().cloned())
-        .map(|a| a.into_iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.into_iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
 
     let passing = total_parse + total_construct - failures.len();
@@ -164,7 +177,11 @@ fn test_compliance_bank() {
         // generators and satisfies the end-of-file-fixer pre-commit hook.
         std::fs::write(&path, serde_json::to_string_pretty(&list).unwrap() + "\n")
             .expect("write xfail.json");
-        eprintln!("wrote {} XFAIL entries to {}", failures.len(), path.display());
+        eprintln!(
+            "wrote {} XFAIL entries to {}",
+            failures.len(),
+            path.display()
+        );
         return;
     }
 

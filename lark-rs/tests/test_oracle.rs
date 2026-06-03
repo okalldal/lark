@@ -29,7 +29,9 @@ fn test_arithmetic_oracle() {
             }
             // Case should pass, Python Lark passed, but we failed
             (true, true, Err(e)) => {
-                failures.push(format!("input={input:?}: expected parse success, got error: {e}"));
+                failures.push(format!(
+                    "input={input:?}: expected parse success, got error: {e}"
+                ));
             }
             // Case should fail and we correctly fail
             (false, false, Err(_)) => {}
@@ -76,7 +78,9 @@ fn test_json_oracle() {
                 }
             }
             (true, true, Err(e)) => {
-                failures.push(format!("input={input:?}: expected parse success, got error: {e}"));
+                failures.push(format!(
+                    "input={input:?}: expected parse success, got error: {e}"
+                ));
             }
             (false, false, Err(_)) => {}
             (false, false, Ok(_)) => {
@@ -121,7 +125,9 @@ fn test_csv_oracle() {
                 }
             }
             (true, true, Err(e)) => {
-                failures.push(format!("input={input:?}: expected parse success, got error: {e}"));
+                failures.push(format!(
+                    "input={input:?}: expected parse success, got error: {e}"
+                ));
             }
             (false, false, Err(_)) => {}
             (false, false, Ok(_)) => {
@@ -167,7 +173,9 @@ fn test_terminal_refs_oracle() {
                 }
             }
             (true, true, Err(e)) => {
-                failures.push(format!("input={input:?}: expected parse success, got error: {e}"));
+                failures.push(format!(
+                    "input={input:?}: expected parse success, got error: {e}"
+                ));
             }
             (false, false, Err(_)) => {}
             (false, false, Ok(_)) => {
@@ -180,7 +188,10 @@ fn test_terminal_refs_oracle() {
     }
 
     if !failures.is_empty() {
-        panic!("Terminal-reference oracle failures:\n{}", failures.join("\n"));
+        panic!(
+            "Terminal-reference oracle failures:\n{}",
+            failures.join("\n")
+        );
     }
 }
 
@@ -213,7 +224,9 @@ fn test_keywords_oracle() {
                 }
             }
             (true, true, Err(e)) => {
-                failures.push(format!("input={input:?}: expected parse success, got error: {e}"));
+                failures.push(format!(
+                    "input={input:?}: expected parse success, got error: {e}"
+                ));
             }
             (false, false, Err(_)) => {}
             (false, false, Ok(_)) => {
@@ -226,7 +239,10 @@ fn test_keywords_oracle() {
     }
 
     if !failures.is_empty() {
-        panic!("Keyword/identifier oracle failures:\n{}", failures.join("\n"));
+        panic!(
+            "Keyword/identifier oracle failures:\n{}",
+            failures.join("\n")
+        );
     }
 }
 
@@ -283,7 +299,10 @@ fn test_python_numbers_valid_oracle() {
     }
 
     if !failures.is_empty() {
-        panic!("Python number (valid) oracle failures:\n{}", failures.join("\n"));
+        panic!(
+            "Python number (valid) oracle failures:\n{}",
+            failures.join("\n")
+        );
     }
 }
 
@@ -307,6 +326,9 @@ fn test_python_numbers_invalid_oracle() {
     }
 
     if !failures.is_empty() {
-        panic!("Python number (invalid) oracle failures:\n{}", failures.join("\n"));
+        panic!(
+            "Python number (invalid) oracle failures:\n{}",
+            failures.join("\n")
+        );
     }
 }

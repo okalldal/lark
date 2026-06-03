@@ -1,5 +1,5 @@
-use regex::Regex;
 use crate::error::GrammarError;
+use regex::Regex;
 
 /// Pattern for matching a terminal — either a fixed string or a regex.
 #[derive(Debug, Clone)]
@@ -104,19 +104,35 @@ impl PatternRe {
 /// Empty when no flags are set.
 pub fn flag_letters(flags: u32) -> String {
     let mut s = String::new();
-    if flags & flags::IGNORECASE != 0 { s.push('i'); }
-    if flags & flags::MULTILINE != 0 { s.push('m'); }
-    if flags & flags::DOTALL != 0 { s.push('s'); }
-    if flags & flags::VERBOSE != 0 { s.push('x'); }
+    if flags & flags::IGNORECASE != 0 {
+        s.push('i');
+    }
+    if flags & flags::MULTILINE != 0 {
+        s.push('m');
+    }
+    if flags & flags::DOTALL != 0 {
+        s.push('s');
+    }
+    if flags & flags::VERBOSE != 0 {
+        s.push('x');
+    }
     s
 }
 
 fn build_flag_prefix(flags: u32) -> String {
     let mut s = String::from("(?");
-    if flags & flags::IGNORECASE != 0 { s.push('i'); }
-    if flags & flags::MULTILINE != 0 { s.push('m'); }
-    if flags & flags::DOTALL != 0 { s.push('s'); }
-    if flags & flags::VERBOSE != 0 { s.push('x'); }
+    if flags & flags::IGNORECASE != 0 {
+        s.push('i');
+    }
+    if flags & flags::MULTILINE != 0 {
+        s.push('m');
+    }
+    if flags & flags::DOTALL != 0 {
+        s.push('s');
+    }
+    if flags & flags::VERBOSE != 0 {
+        s.push('x');
+    }
     if s == "(?)" || s == "(?" {
         return String::new();
     }
@@ -143,7 +159,11 @@ pub struct TerminalDef {
 
 impl TerminalDef {
     pub fn new(name: impl Into<String>, pattern: Pattern, priority: i32) -> Self {
-        TerminalDef { name: name.into(), pattern, priority }
+        TerminalDef {
+            name: name.into(),
+            pattern,
+            priority,
+        }
     }
 }
 

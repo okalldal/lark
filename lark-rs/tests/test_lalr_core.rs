@@ -29,16 +29,14 @@ fn test_dangling_else_is_lalr_not_slr() {
     let oracle = load_oracle("lalr_core", "dangling_else");
     let grammar = oracle["grammar"].as_str().expect("oracle grammar");
 
-    let lark = try_build(grammar)
-        .expect("dangling-else must build under true LALR(1) (BUG-1)");
+    let lark = try_build(grammar).expect("dangling-else must build under true LALR(1) (BUG-1)");
 
     for case in oracle["cases"].as_array().unwrap() {
         let input = case["input"].as_str().unwrap();
         let should_pass = case["should_pass"].as_bool().unwrap();
         let result = lark.parse(input);
         if should_pass {
-            let tree = result
-                .unwrap_or_else(|e| panic!("expected {input:?} to parse: {e}"));
+            let tree = result.unwrap_or_else(|e| panic!("expected {input:?} to parse: {e}"));
             tree_matches_oracle(&tree, &case["tree"])
                 .unwrap_or_else(|e| panic!("tree mismatch for {input:?}: {e}"));
         } else {
@@ -93,9 +91,7 @@ fn test_conflict_detection_matches_oracle() {
             match result {
                 Ok(_) => unreachable!("asserted above"),
                 Err(LarkError::Grammar(lark_rs::GrammarError::Conflict { .. })) => {}
-                Err(e) => panic!(
-                    "expected GrammarError::Conflict for {name:?}, got: {e}"
-                ),
+                Err(e) => panic!("expected GrammarError::Conflict for {name:?}, got: {e}"),
             }
         }
     }
@@ -130,8 +126,12 @@ NUMBER: /[0-9]+/
     let contextual = build(LexerType::Contextual);
 
     for input in ["[]", "[1]", "[1, 2, 3]", "[1, [2, 3], [ ]]"] {
-        let b = basic.parse(input).unwrap_or_else(|e| panic!("basic {input:?}: {e}"));
-        let c = contextual.parse(input).unwrap_or_else(|e| panic!("contextual {input:?}: {e}"));
+        let b = basic
+            .parse(input)
+            .unwrap_or_else(|e| panic!("basic {input:?}: {e}"));
+        let c = contextual
+            .parse(input)
+            .unwrap_or_else(|e| panic!("contextual {input:?}: {e}"));
         assert_eq!(
             b.to_string(),
             c.to_string(),

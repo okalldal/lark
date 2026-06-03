@@ -29,8 +29,12 @@ impl Token {
             type_id: SymbolId::UNSET,
             type_: type_.into(),
             value: value.into(),
-            line: 0, column: 0, end_line: 0, end_column: 0,
-            start_pos: 0, end_pos: 0,
+            line: 0,
+            column: 0,
+            end_line: 0,
+            end_column: 0,
+            start_pos: 0,
+            end_pos: 0,
         }
     }
 
@@ -44,7 +48,7 @@ impl Token {
     pub fn with_position(mut self, line: usize, col: usize, start: usize, end: usize) -> Self {
         self.line = line;
         self.column = col;
-        self.end_line = line;  // updated by lexer for multi-line tokens
+        self.end_line = line; // updated by lexer for multi-line tokens
         self.end_column = col + (end - start);
         self.start_pos = start;
         self.end_pos = end;
@@ -153,22 +157,36 @@ pub enum Child {
 
 impl Child {
     pub fn as_tree(&self) -> Option<&Tree> {
-        match self { Child::Tree(t) => Some(t), _ => None }
+        match self {
+            Child::Tree(t) => Some(t),
+            _ => None,
+        }
     }
 
     pub fn as_token(&self) -> Option<&Token> {
-        match self { Child::Token(t) => Some(t), _ => None }
+        match self {
+            Child::Token(t) => Some(t),
+            _ => None,
+        }
     }
 
-    pub fn is_tree(&self) -> bool { matches!(self, Child::Tree(_)) }
-    pub fn is_token(&self) -> bool { matches!(self, Child::Token(_)) }
+    pub fn is_tree(&self) -> bool {
+        matches!(self, Child::Tree(_))
+    }
+    pub fn is_token(&self) -> bool {
+        matches!(self, Child::Token(_))
+    }
 }
 
 impl From<Tree> for Child {
-    fn from(t: Tree) -> Self { Child::Tree(t) }
+    fn from(t: Tree) -> Self {
+        Child::Tree(t)
+    }
 }
 impl From<Token> for Child {
-    fn from(t: Token) -> Self { Child::Token(t) }
+    fn from(t: Token) -> Self {
+        Child::Token(t)
+    }
 }
 
 impl fmt::Display for Child {
@@ -195,12 +213,20 @@ pub struct Tree {
 impl Tree {
     pub fn new(data: impl Into<String>, children: Vec<Child>) -> Self {
         let meta = Meta::from_children(&children);
-        Tree { data: data.into(), children, meta }
+        Tree {
+            data: data.into(),
+            children,
+            meta,
+        }
     }
 
     /// Iterate all subtrees depth-first (post-order).
     pub fn iter_subtrees(&self) -> impl Iterator<Item = &Tree> {
-        IterSubtrees { stack: vec![self], result: Vec::new() }.collect_all()
+        IterSubtrees {
+            stack: vec![self],
+            result: Vec::new(),
+        }
+        .collect_all()
     }
 
     /// Iterate all leaf tokens.
@@ -221,7 +247,9 @@ impl Tree {
         for child in &self.children {
             match child {
                 Child::Tree(t) => out.push_str(&t.pretty(indent + 1)),
-                Child::Token(tok) => out.push_str(&format!("{}  Token({}, {:?})", pad, tok.type_, tok.value)),
+                Child::Token(tok) => {
+                    out.push_str(&format!("{}  Token({}, {:?})", pad, tok.type_, tok.value))
+                }
                 Child::None => out.push_str(&format!("{}  None", pad)),
             }
             out.push('\n');
@@ -233,7 +261,9 @@ impl Tree {
 
 impl fmt::Display for Tree {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let children: Vec<String> = self.children.iter()
+        let children: Vec<String> = self
+            .children
+            .iter()
             .map(|c| match c {
                 Child::Tree(t) => t.to_string(),
                 Child::Token(tok) => format!("Token({}, {:?})", tok.type_, tok.value),

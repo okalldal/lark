@@ -83,7 +83,12 @@ pub struct SymbolTable {
 
 impl SymbolTable {
     fn new() -> Self {
-        SymbolTable { infos: Vec::new(), by_name: HashMap::new(), n_terminals: 0, sealed: false }
+        SymbolTable {
+            infos: Vec::new(),
+            by_name: HashMap::new(),
+            n_terminals: 0,
+            sealed: false,
+        }
     }
 
     /// Seal the terminal id range: all terminals are interned, so the boundary
@@ -100,11 +105,17 @@ impl SymbolTable {
     /// *before* any non-terminal so the terminal id range stays contiguous.
     fn intern_terminal(&mut self, name: &str) -> SymbolId {
         if let Some(&id) = self.by_name.get(name) {
-            debug_assert_eq!(self.infos[id.index()].kind, SymbolKind::Terminal,
-                "symbol {name:?} interned as both terminal and non-terminal");
+            debug_assert_eq!(
+                self.infos[id.index()].kind,
+                SymbolKind::Terminal,
+                "symbol {name:?} interned as both terminal and non-terminal"
+            );
             return id;
         }
-        debug_assert!(!self.sealed, "interning new terminal {name:?} after the range was sealed");
+        debug_assert!(
+            !self.sealed,
+            "interning new terminal {name:?} after the range was sealed"
+        );
         let id = SymbolId(self.infos.len() as u32);
         self.infos.push(SymbolInfo {
             name: name.to_string(),
@@ -120,8 +131,11 @@ impl SymbolTable {
     /// have been sealed first (see [`seal_terminals`](Self::seal_terminals)).
     fn intern_nonterminal(&mut self, name: &str, inline: bool, is_start: bool) -> SymbolId {
         if let Some(&id) = self.by_name.get(name) {
-            debug_assert_eq!(self.infos[id.index()].kind, SymbolKind::NonTerminal,
-                "symbol {name:?} interned as both terminal and non-terminal");
+            debug_assert_eq!(
+                self.infos[id.index()].kind,
+                SymbolKind::NonTerminal,
+                "symbol {name:?} interned as both terminal and non-terminal"
+            );
             // A name first seen via a rule body and later as a start symbol can
             // upgrade its flags.
             let info = &mut self.infos[id.index()];
@@ -129,7 +143,10 @@ impl SymbolTable {
             info.is_start |= is_start;
             return id;
         }
-        debug_assert!(self.sealed, "interning non-terminal {name:?} before the terminal range was sealed");
+        debug_assert!(
+            self.sealed,
+            "interning non-terminal {name:?} before the terminal range was sealed"
+        );
         let id = SymbolId(self.infos.len() as u32);
         self.infos.push(SymbolInfo {
             name: name.to_string(),
@@ -315,9 +332,7 @@ pub fn lower(grammar: &Grammar) -> CompiledGrammar {
         }
     }
 
-    let id = |sym: &Symbol| -> SymbolId {
-        symbols.id(sym.name()).expect("symbol interned above")
-    };
+    let id = |sym: &Symbol| -> SymbolId { symbols.id(sym.name()).expect("symbol interned above") };
 
     // ── Compiled rules. ─────────────────────────────────────────────────────
     let start_ids: Vec<SymbolId> = grammar
@@ -344,7 +359,10 @@ pub fn lower(grammar: &Grammar) -> CompiledGrammar {
         // A template instance is named `base{N}`; its tree label is the base name
         // (Lark's `template_source`), so strip the `{…}` marker. Ordinary rule
         // names never contain `{`, so this is a no-op for them.
-        let tree_name = rule.alias.clone().unwrap_or_else(|| template_base(&rule.origin.name).to_string());
+        let tree_name = rule
+            .alias
+            .clone()
+            .unwrap_or_else(|| template_base(&rule.origin.name).to_string());
         rules.push(CompiledRule {
             origin,
             expansion,
@@ -419,7 +437,9 @@ mod tests {
                 is_term,
                 matches!(info.kind, SymbolKind::Terminal),
                 "symbol {} ({}) on wrong side of n_terminals={}",
-                i, info.name, n
+                i,
+                info.name,
+                n
             );
         }
     }
