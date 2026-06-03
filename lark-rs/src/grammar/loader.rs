@@ -980,8 +980,11 @@ struct GrammarCompiler {
     term_counter: usize,
     /// Cache: literal string/regex → auto-generated terminal name.
     literal_cache: HashMap<String, String>,
-    /// Template definitions: name → (params, expansions).
-    templates: HashMap<String, (Vec<String>, Vec<AliasedExpansion>)>,
+    /// Template definitions: name → (params, expansions, modifiers, priority).
+    /// The modifiers (`!` keep-all, `?` expand1) and priority are kept so each
+    /// instantiation inherits the template's rule options, exactly as Python Lark
+    /// deep-copies the template's `RuleOptions` onto every instance.
+    templates: HashMap<String, (Vec<String>, Vec<AliasedExpansion>, String, i32)>,
     /// Memo of template instantiations: canonical `name<args>` key → instance rule
     /// name. Lets a self-recursive template (`_sep{x,d}: x | _sep{x,d} d x`) resolve
     /// its own reference to the rule already being built instead of recursing
@@ -1048,7 +1051,10 @@ impl GrammarCompiler {
         for item in &items {
             if let Item::RuleItem(r) = item {
                 if !r.params.is_empty() {
-                    self.templates.insert(r.name.clone(), (r.params.clone(), r.expansions.clone()));
+                    self.templates.insert(
+                        r.name.clone(),
+                        (r.params.clone(), r.expansions.clone(), r.modifiers.clone(), r.priority),
+                    );
                 }
             }
         }
@@ -1644,9 +1650,9 @@ impl GrammarCompiler {
         &mut self,
         name: &str,
         args: Vec<Value>,
-        parent: &str,
+        _parent: &str,
     ) -> Result<Symbol, GrammarError> {
-        let (params, expansions) = self.templates.get(name)
+        let (params, expansions, modifiers, priority) = self.templates.get(name)
             .ok_or_else(|| GrammarError::UndefinedRule { name: name.to_string() })?
             .clone();
 
@@ -1664,14 +1670,32 @@ impl GrammarCompiler {
             return Ok(Symbol::NonTerminal(NonTerminal::new(existing)));
         }
 
-        // Create a name for this instantiation and register it *before* compiling the
-        // body, so a self-reference encountered during compilation finds it.
-        let inst_name = format!("__{}_{}_{}", name, parent, self.anon_counter);
+        // Name the instance `base{N}`: the `{` marks it as a template instance whose
+        // *tree label* is the base name (Lark's `template_source`), and leaving the
+        // base prefix intact means a `_`-prefixed template (`_expr`) instantiates to
+        // a transparent rule while `expr` does not. The counter keeps distinct
+        // arg-sets distinct. Registered *before* compiling the body so a
+        // self-reference resolves to the rule being built.
+        let inst_name = format!("{}{{{}}}", name, self.anon_counter);
         self.anon_counter += 1;
         self.template_instances.insert(key, inst_name.clone());
 
         // Build substitution map
         let subst: HashMap<String, Value> = params.into_iter().zip(args).collect();
+
+        // Each instance inherits the template's own rule options (keep-all / expand1
+        // / priority), not the anon-helper defaults — so `!expr{t}` keeps its tokens.
+        let keep_all = modifiers.contains('!') || self.global_keep_all;
+        let inst_opts = RuleOptions {
+            expand1: modifiers.contains('?'),
+            keep_all_tokens: keep_all,
+            priority,
+            ..RuleOptions::default()
+        };
+        // Make keep-all visible to placeholder counting while this body compiles,
+        // then restore the caller's context.
+        let saved_keep_all = self.current_keep_all;
+        self.current_keep_all = keep_all;
 
         // Substitute template params in expansions
         let expansions = Self::substitute_template(&expansions, &subst);
@@ -1679,8 +1703,9 @@ impl GrammarCompiler {
         for (order, alt) in expansions.into_iter().enumerate() {
             let alias = alt.alias.clone();
             let syms = self.compile_expansion(alt.expansion, &inst_name)?;
-            self.rules.push(Rule::new(origin.clone(), syms, alias, self.anon_opts(), order));
+            self.rules.push(Rule::new(origin.clone(), syms, alias, inst_opts.clone(), order));
         }
+        self.current_keep_all = saved_keep_all;
         Ok(Symbol::NonTerminal(origin))
     }
 
@@ -1717,10 +1742,19 @@ impl GrammarCompiler {
             Value::Rule(name) | Value::Terminal(name) => {
                 subst.get(name).cloned().unwrap_or_else(|| v.clone())
             }
-            Value::TemplateUsage { name, args } => Value::TemplateUsage {
-                name: name.clone(),
-                args: args.iter().map(|a| Self::subst_value(a, subst)).collect(),
-            },
+            // Higher-order templates: a parameter can itself be a template applied
+            // as `t{…}`. Substitute the *usage's name* too (`t` → `b`), so
+            // `a{t}: t{"a"}` with `a{b}` instantiates `b{"a"}`, not undefined `t`.
+            Value::TemplateUsage { name, args } => {
+                let name = match subst.get(name) {
+                    Some(Value::Rule(n)) | Some(Value::Terminal(n)) => n.clone(),
+                    _ => name.clone(),
+                };
+                Value::TemplateUsage {
+                    name,
+                    args: args.iter().map(|a| Self::subst_value(a, subst)).collect(),
+                }
+            }
             other => other.clone(),
         }
     }

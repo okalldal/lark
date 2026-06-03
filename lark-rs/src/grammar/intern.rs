@@ -264,6 +264,13 @@ impl CompiledGrammar {
     }
 }
 
+/// The tree label for a (possibly template-instance) rule name: everything before
+/// the `{` that marks a template instantiation (`expr{0}` → `expr`). Ordinary
+/// names contain no `{`, so they pass through unchanged.
+fn template_base(name: &str) -> &str {
+    name.split_once('{').map_or(name, |(base, _)| base)
+}
+
 /// Lower a surface [`Grammar`] to a [`CompiledGrammar`].
 ///
 /// Interning order is load-bearing: `$END`, then every terminal, then every
@@ -334,7 +341,10 @@ pub fn lower(grammar: &Grammar) -> CompiledGrammar {
         let is_start_origin = start_ids.contains(&origin);
         // A start symbol's rule is never inlined: the root must form a node.
         let transparent = inline && rule.alias.is_none() && !is_start_origin;
-        let tree_name = rule.alias.clone().unwrap_or_else(|| rule.origin.name.clone());
+        // A template instance is named `base{N}`; its tree label is the base name
+        // (Lark's `template_source`), so strip the `{…}` marker. Ordinary rule
+        // names never contain `{`, so this is a no-op for them.
+        let tree_name = rule.alias.clone().unwrap_or_else(|| template_base(&rule.origin.name).to_string());
         rules.push(CompiledRule {
             origin,
             expansion,

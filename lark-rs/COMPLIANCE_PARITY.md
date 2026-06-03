@@ -4,7 +4,7 @@
 bank says it generalizes beyond JSON/arithmetic. Phase 2 (Earley/SPPF) stays
 frozen until this roadmap is burned down — see the exit criterion at the bottom.
 
-> **Exit criterion reached (2026-06-03):** the bank is at **91.4%** (≥ 90%), with
+> **Exit criterion reached (2026-06-03):** the bank is at **94.1%** (≥ 90%), with
 > every remaining XFAIL triaged and root-caused below. Phase 2 (Earley/SPPF) is
 > now eligible to start; this roadmap continues in parallel to keep climbing the
 > LALR path. See the exit criterion at the bottom.
@@ -19,16 +19,26 @@ on. Hardening that core now means the SPPF forest-walk inherits a *correct*
 shaper instead of 125 latent bugs we'd then be debugging across two engines with
 no oracle to tell us which one is wrong.
 
-## Current state (2026-06-03, after M1–M3 + M5-global + M5-nested + M8-priority + M6-core)
+## Current state (2026-06-03, after M1–M6 + M4 + M8-priority)
 
 - Bank: **257 grammars, 512 input-cases + construct-error checks**.
-- Agreement: **91.4% (468/512)**; **44 XFAIL entries**, **0 skipped**.
-  (Was 75.6% / 125 XFAIL at the start of this sprint, 90.8% / 47 before the M6
-  per-position-filtering refactor — see "Done" below.)
-- Remaining XFAIL shape: `build:<ri>` (8), `construct:<ri>` (4),
-  `parse:<ri>:<ci>` (32).
+- Agreement: **94.1% (482/512)**; **30 XFAIL entries**, **0 skipped**.
+  (Was 75.6% / 125 XFAIL at the start of this sprint, 91.4% / 44 before M4 — see
+  "Done" below.)
+- Remaining XFAIL shape: `build:<ri>` (6), `construct:<ri>` (4),
+  `parse:<ri>:<ci>` (20). These are M8 (EBNF/priority residue + nullable build),
+  the 14/15 terminal-algebra-typing tail of M6, and M7b (regex collision).
 
-## Done — M6 per-position token filtering (latest, architectural)
+## Done — M4 template instantiation tree-shape (latest)
+
+All template tree-shape divergences fixed in `instantiate_template` /
+`subst_value` / `lower()`: instances now form a node labeled with the *base* name
+(or inline when the base is `_`-prefixed), inherit the template's `!`/`?`/priority
+options, and resolve higher-order templates (a parameter applied as a template).
+14 XFAILs flipped (44 → 30); full suite + compliance green, no regressions. Pinned
+by `tests/test_templates.rs`. Details in the M4 milestone below.
+
+## Done — M6 per-position token filtering (architectural)
 
 The load-bearing refactor the roadmap flagged for Earley. Filtering moved off the
 per-terminal `filter_out` flag onto a **per-rule-position keep mask**
@@ -103,19 +113,31 @@ Each milestone below follows the project loop:
 **M1–M3 and the global-`keep_all_tokens` half of M5 are done** (see the "Done"
 section above). The remaining work, ordered by leverage × confidence:
 
-### M4 — Template instantiation tree-shape — ~10 entries (+2 build, +2 construct-adjacent)
+### M4 — Template instantiation tree-shape — ✅ done
 
 **Symptom:** ids 2/3 (`sep{NUMBER,","}`), 4/5 (`!_expr{t}` transparent +
 keep_all), 6/7 (`expr{"B"}` string arg), 8/9 (`expr{t}: … | … -> b` alias arm).
 Build failures 245/246 (`a{b}` / `a{t}: t{"a"}` — **higher-order templates**,
 a template passed as a template argument).
 
-**Fix:** the BUG-7 work fixed *recursive* and *nested* template substitution; the
-remaining divergences are tree-shape (transparent/alias/keep_all interaction
-inside instantiated bodies) and the higher-order case where a parameter is itself
-applied as a template. Confirm each against the oracle; the higher-order case may
-need `instantiate_template` to resolve a parameter that resolves to another
-template.
+**✅ Done.** Three root causes in `instantiate_template`, all matching Python Lark's
+`ApplyTemplates`:
+
+1. **Instance naming / tree label.** Instances were named `__{name}_{parent}_{N}`,
+   so they always started with `_` (wrongly *transparent*) and the tree label was
+   the mangled name. Now an instance is named `base{N}` — the `{` marks it as a
+   template instance whose tree label is the *base* name (Lark's `template_source`,
+   stripped in `lower()` via `template_base`), and the intact base prefix makes
+   `_expr` transparent while `expr`/`sep` form a node.
+2. **Inherited options.** Instances used the anon-helper defaults, dropping the
+   template's `!` keep-all / `?` expand1 / priority. They now build their own
+   `RuleOptions` from the template's modifiers (stored alongside the template), and
+   `current_keep_all` is set while the body compiles — so `!expr{t}` keeps tokens.
+3. **Higher-order templates (245/246).** `subst_value` now substitutes a template
+   *usage's name*, not just its args: `a{t}: t{"a"}` instantiated as `a{b}` resolves
+   `t{"a"}` to `b{"a"}` instead of erroring on undefined `t`.
+
+Pinned by `tests/test_templates.rs`.
 
 ### M5 — `maybe_placeholders` residue (nested `[...]`) — ✅ nested done; 227/228 + 108/109 reclassified
 
@@ -214,19 +236,17 @@ each individually.
 | M5-nested | nested `maybe_placeholders` (123/124) | — | High | ✅ done |
 | M8-priority | oversized terminal priority (49/50) | — | High | ✅ done |
 | M6-core | per-position token filtering + unify (155, 194/195) | — | High | ✅ done |
-| **M4** | template tree-shape + higher-order | 12 | Medium | ⬜ open |
+| M4 | template tree-shape + higher-order (2–9, 245/246) | — | Medium | ✅ done |
 | **M8** | EBNF/priority residue (156–161, 77/78, 108/109, 227/228, + 73/74 conflict) | ~12 | Mixed | ⬜ open |
 | **M6b** | terminal-algebra typing under collision (14/15) | 4 | Medium | ⬜ open |
 | **M7b** | regex collision detection | 2 | Medium | ⬜ open — needs Lark's exact rule reproduced first |
 
-The work so far took the bank from 75.6% to **91.4%** — 81 entries from nine
-root-cause fixes. The remaining 44 are M4 (templates), M8 (EBNF/priority residue),
-14/15 (terminal-algebra typing), and regex-collision. The M6 per-position keep mask
-(`filter_pos`) and the SPPF→tree convention it sets — one value per expansion
-symbol, filtered by position — are exactly what Earley's forest-walk will reuse, so
-that chokepoint is now in place. **Recommended next:** M4 (template tree-shape) is
-the largest cluster (~12); Phase 2 (Earley/SPPF) may also begin in parallel now that
-the exit criterion and the shared tree-builder contract are settled.
+The work so far took the bank from 75.6% to **94.1%** — 95 entries from ten
+root-cause fixes. The remaining 30 are M8 (EBNF `+`/`*` branch-choice + priority +
+nullable build), the 14/15 terminal-algebra-typing tail of M6, and regex-collision.
+**Recommended next:** M8 (the largest remaining cluster, ~12) — and Phase 2
+(Earley/SPPF) may begin in parallel now that the exit criterion, the shared
+tree-builder contract, and templates are all settled.
 
 ## Exit criterion — when Earley unfreezes
 

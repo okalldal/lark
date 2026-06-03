@@ -228,13 +228,13 @@ oracle. Three correctness bugs need fixing before Phase 2 starts (see Known Bugs
 | Token positions (line/col) | ✅ | Char-based columns; end_line/end_column newline-aware |
 | Oracle test harness | ✅ | arithmetic, JSON, python_numbers, lalr_core |
 | JSONTestSuite corpus | ✅ | 293/293 oracle agreement |
-| Compliance bank | ✅ | 257 grammars strip-mined from Python Lark's suite; 468/512 ≈ 91.4% agree (XFAIL-gated) |
+| Compliance bank | ✅ | 257 grammars strip-mined from Python Lark's suite; 482/512 ≈ 94.1% agree (XFAIL-gated) |
 | Oracle-coverage enforcement | ✅ | Meta-test + CI freshness gate |
 
 ### ⬜ Phase 2 — Earley + SPPF
 
 **Phase 2 is now eligible to start:** the compliance bank reached the 90% exit
-criterion (currently 468/512 ≈ 91.4%, with every remaining XFAIL triaged and
+criterion (currently 482/512 ≈ 94.1%, with every remaining XFAIL triaged and
 root-caused; see [`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md) for the exit
 criterion and remaining milestones). The roadmap continues in parallel to keep
 climbing the LALR path. All Phase-1 correctness bugs (BUG-1 through BUG-7) are now
@@ -438,17 +438,19 @@ All Phase-1 correctness bugs (BUG-1 through BUG-7) are **done**. The compliance 
 is the regression net: fixing a bug flips XFAIL entries to passing — regenerate
 `xfail.json` and watch parity rise (BUG-3 flipped 3, BUG-7 flipped 8; the
 lexer/terminal-filtering sprint plus two construct-error checks flipped 72, then
-nested-`maybe_placeholders` + oversized-priority flipped 6 more, then the M6
-per-position-filtering refactor flipped 3, lifting the bank to 91.4%).
+nested-`maybe_placeholders` + oversized-priority flipped 6 more, the M6
+per-position-filtering refactor flipped 3, and M4 template tree-shape flipped 14,
+lifting the bank to 94.1%).
 
-**The remaining 44 XFAILs are triaged and sequenced in
+**The remaining 30 XFAILs are triaged and sequenced in
 [`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md)** — all on the LALR path (the bank
 is 100% LALR grammars, so Earley is orthogonal, not a way to climb parity). M1–M3,
 the global-`keep_all_tokens` half of M5, nested `maybe_placeholders` (123/124), the
-oversized-priority part of M8 (49/50), and the M6 core (per-position token filtering
-+ literal/terminal unification, ids 155 & 194/195) are done; the remaining
-milestones are M4 (templates), M8 (EBNF/priority residue), and the 14/15
-terminal-algebra-typing tail of M6. That doc
+oversized-priority part of M8 (49/50), the M6 core (per-position token filtering +
+literal/terminal unification, ids 155 & 194/195), and M4 (template tree-shape +
+higher-order, ids 2–9 & 245/246) are done; the remaining milestones are M8
+(EBNF/priority residue + nullable build) and the 14/15 terminal-algebra-typing tail
+of M6. That doc
 also defines the exit criterion that unfreezes Phase 2.
 
 ### Strategy: consolidate the load-bearing abstractions *before* Phase 2
