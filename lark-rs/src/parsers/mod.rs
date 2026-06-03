@@ -9,7 +9,7 @@ pub use tree_builder::{NodeValue, TreeBuilder};
 
 use crate::grammar::Grammar;
 use crate::lexer::{LexerConf, BasicLexer, ContextualLexer, Lexer};
-use crate::tree::Tree;
+use crate::tree::ParseTree;
 use crate::error::{ParseError, LarkError};
 use crate::{LarkOptions, ParserAlgorithm, LexerType};
 
@@ -34,7 +34,7 @@ impl ParsingFrontend {
         &self,
         text: &str,
         start: Option<&str>,
-    ) -> Result<Tree, ParseError> {
+    ) -> Result<ParseTree, ParseError> {
         match &self.kind {
             FrontendKind::LalrBasic { parser, lexer } => {
                 let tokens = lexer.lex(text)?;

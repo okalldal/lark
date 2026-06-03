@@ -6,7 +6,7 @@
 //! `generate_oracles.py` freezes Python Lark's verdict for each into
 //! `fuzz/corpus.json`; this test replays that frozen corpus and diffs lark-rs
 //! against it using the same normalization as every other oracle test
-//! (`tree_matches_oracle`).
+//! (`tree_matches_oracle`), which compares both tree roots and bare-token roots.
 //!
 //! A RED here means lark-rs regressed on a find — a tree-shape mismatch or an
 //! accept/reject disagreement — and it is guarded forever, just like the
@@ -21,52 +21,7 @@
 mod common;
 
 use common::{load_oracle, make_lalr_from_file, tree_matches_oracle};
-use lark_rs::{Child, Tree};
 use std::collections::HashMap;
-
-/// KNOWN PARITY GAP — start-rule `expand1` to a bare token.
-///
-/// Discovered by the differential fuzzer on its first run (minimal repro: the
-/// arithmetic input `"0"`). When the start rule collapses via `?rule` to a single
-/// token, Python Lark returns that bare `Token` as the parse result. lark-rs's
-/// `parse()` is typed `-> Result<Tree, _>`, so it cannot return a bare token; at
-/// ACCEPT (`lalr.rs`) it wraps the token in `Tree::new(tok.type_, [tok])` — a tree
-/// named after the *terminal*, which is wrong under any policy.
-///
-/// Closing it properly is an API change (a `Tree`-or-`Token` parse result), out of
-/// scope for the fuzzer-infrastructure change that surfaced it. Until then we
-/// forgive *exactly* this wrapping: the oracle root is a bare token, and lark-rs
-/// returned a single-child tree wrapping the same token (type + value). Any other
-/// shape — or, once the API is fixed, a clean match — falls through and fails, so
-/// this carve-out is self-deleting (just like a compliance-bank xfail flip).
-fn known_bare_token_root_gap(oracle_token: &serde_json::Value, tree: &Tree) -> Result<(), String> {
-    let want_type = oracle_token["token_type"].as_str().unwrap_or("?");
-    let want_value = oracle_token["value"].as_str().unwrap_or("?");
-    match tree.children.as_slice() {
-        [Child::Token(tok)] if tree.data == tok.type_ => {
-            if tok.type_ != want_type {
-                return Err(format!(
-                    "bare-token-root gap: token type {:?} != {want_type:?}",
-                    tok.type_
-                ));
-            }
-            if tok.value != want_value {
-                return Err(format!(
-                    "bare-token-root gap: token value {:?} != {want_value:?}",
-                    tok.value
-                ));
-            }
-            Ok(())
-        }
-        _ => Err(format!(
-            "oracle root is a bare token {want_type}({want_value:?}) but lark-rs \
-             returned an unexpected shape: data={:?}, {} children \
-             (the known wrapping gap is now closed or changed — update the differ)",
-            tree.data,
-            tree.children.len()
-        )),
-    }
-}
 
 #[test]
 fn test_fuzz_corpus_against_oracle() {
@@ -76,7 +31,6 @@ fn test_fuzz_corpus_against_oracle() {
     // Build each grammar's parser once and reuse it across its cases.
     let mut parsers: HashMap<String, lark_rs::Lark> = HashMap::new();
     let mut failures = Vec::new();
-    let mut known_gap = 0usize;
 
     for case in cases {
         let grammar = case["grammar"].as_str().unwrap_or("");
@@ -90,18 +44,11 @@ fn test_fuzz_corpus_against_oracle() {
         let result = lark.parse(input);
 
         match (oracle_ok, &result) {
-            // Python Lark parsed it: lark-rs must parse it and agree on the tree.
-            (true, Ok(tree)) => {
-                // Bare-token root is a documented parity gap — forgive only that.
-                if case["tree"]["type"].as_str() == Some("token") {
-                    match known_bare_token_root_gap(&case["tree"], tree) {
-                        Ok(()) => known_gap += 1,
-                        Err(msg) => failures.push(format!("[{grammar}] input={input:?}: {msg}")),
-                    }
-                } else if let Err(msg) = tree_matches_oracle(tree, &case["tree"]) {
-                    failures.push(format!(
-                        "[{grammar}] input={input:?}: tree mismatch: {msg}"
-                    ));
+            // Python Lark parsed it: lark-rs must parse it and agree on the result
+            // — whether the root is a tree or a bare token (expand1 collapse).
+            (true, Ok(parse_tree)) => {
+                if let Err(msg) = tree_matches_oracle(parse_tree, &case["tree"]) {
+                    failures.push(format!("[{grammar}] input={input:?}: mismatch: {msg}"));
                 }
             }
             (true, Err(e)) => {
@@ -128,9 +75,5 @@ fn test_fuzz_corpus_against_oracle() {
         );
     }
 
-    eprintln!(
-        "fuzz corpus: {} cases agree ({} via the documented bare-token-root parity gap)",
-        cases.len(),
-        known_gap
-    );
+    eprintln!("fuzz corpus: {} cases agree with Python Lark", cases.len());
 }

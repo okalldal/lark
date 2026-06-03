@@ -488,15 +488,14 @@ is not "done" until the bank says it generalizes beyond JSON/arithmetic.
      into `fuzz/corpus.json` (under the freshness gate); `test_fuzz_corpus.rs`
      replays + diffs via `tree_matches_oracle`. RED = a regression on a known
      find. Keeping a find: `--minimize` then `--record --input … --note …`.
-   - **The one find so far (recorded, not fixed):** a start-rule
-     `expand1`-to-bare-token parity gap — for input `1`, Python Lark returns a
-     bare `Token`, but lark-rs's `Tree`-typed `parse()` wraps it as
-     `Tree(tok.type_, [tok])` at ACCEPT (`lalr.rs`). Closing it is an API change
-     (a `Tree`-or-`Token` result). It is a **known-open** entry: paired with a
-     documented carve-out in `test_fuzz_corpus.rs` (still checking the token's
-     type+value) that self-deletes once the API is fixed — exactly the
-     compliance-bank xfail discipline. (A find that is *fixed* instead of carved
-     simply becomes a green `tree_matches_oracle` case.)
+   - **The one find so far (now FIXED):** a start-rule `expand1`-to-bare-token
+     parity gap — for input `1`, Python Lark returns a bare `Token`, but lark-rs's
+     `Tree`-typed `parse()` wrapped it as `Tree(tok.type_, [tok])` at ACCEPT
+     (`lalr.rs`). Closed by the flagged API change: `parse()` now returns a
+     `ParseTree` (`Tree`-or-`Token`) and ACCEPT yields the bare token directly. As
+     predicted, the self-deleting carve-out in `test_fuzz_corpus.rs`
+     (`known_bare_token_root_gap`) is gone and the find is now a plain green
+     `tree_matches_oracle` case — the find that is *fixed* instead of carved.
    - **Still TODO:** an online Rust-side differ (so the minimizer can shrink while
      *preserving divergence*, not just parse-success) and random *grammar*
      fuzzing.

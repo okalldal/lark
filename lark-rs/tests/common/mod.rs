@@ -1,6 +1,6 @@
 /// Shared test utilities: oracle loading, tree comparison, parser helpers.
 
-use lark_rs::{Lark, LarkOptions, ParserAlgorithm, LexerType, Tree, Child};
+use lark_rs::{Lark, LarkOptions, ParserAlgorithm, LexerType, ParseTree, Token, Tree, Child};
 
 /// Build a LALR + contextual-lexer parser for the given grammar text.
 pub fn make_lalr(grammar_text: &str) -> Lark {
@@ -38,17 +38,44 @@ pub fn load_oracle(suite: &str, name: &str) -> serde_json::Value {
         .unwrap_or_else(|e| panic!("Oracle JSON parse error: {e}"))
 }
 
-/// Compare a `Tree` against the oracle JSON node produced by generate_oracles.py.
+/// Compare a parse result against the oracle JSON node produced by
+/// generate_oracles.py.
+///
+/// The oracle root is normally a `tree`, but a `?start` rule that collapses via
+/// expand1 to a single token gives a bare `token` root — and lark-rs's
+/// [`ParseTree`] now mirrors that, so both shapes are compared here uniformly.
 ///
 /// Returns `Ok(())` on match, `Err(String)` describing the first mismatch.
-pub fn tree_matches_oracle(tree: &Tree, oracle: &serde_json::Value) -> Result<(), String> {
+pub fn tree_matches_oracle(result: &ParseTree, oracle: &serde_json::Value) -> Result<(), String> {
     let node_type = oracle["type"].as_str().unwrap_or("?");
-    if node_type != "tree" {
+    match (result, node_type) {
+        (ParseTree::Tree(tree), "tree") => match_node_tree(tree, oracle),
+        (ParseTree::Token(tok), "token") => match_token(tok, oracle),
+        (ParseTree::Tree(tree), other) => Err(format!(
+            "root is Tree('{}') but oracle node type is '{other}'",
+            tree.data
+        )),
+        (ParseTree::Token(tok), other) => Err(format!(
+            "root is Token({}) but oracle node type is '{other}'",
+            tok.type_
+        )),
+    }
+}
+
+/// Compare a leaf `Token` against an oracle `token` node (type + value).
+fn match_token(tok: &Token, oracle: &serde_json::Value) -> Result<(), String> {
+    let expected_type = oracle["token_type"].as_str().unwrap_or("?");
+    let expected_value = oracle["value"].as_str().unwrap_or("?");
+    if tok.type_ != expected_type {
+        return Err(format!("token type '{}' != '{expected_type}'", tok.type_));
+    }
+    if tok.value != expected_value {
         return Err(format!(
-            "Expected oracle node type 'tree' at root, got '{node_type}'"
+            "token value {:?} != {expected_value:?}",
+            tok.value
         ));
     }
-    match_node_tree(tree, oracle)
+    Ok(())
 }
 
 fn match_node_tree(tree: &Tree, oracle: &serde_json::Value) -> Result<(), String> {
@@ -100,20 +127,8 @@ fn match_node_tree(tree: &Tree, oracle: &serde_json::Value) -> Result<(), String
                         tree.data, tok.type_
                     ));
                 }
-                let expected_type = oc["token_type"].as_str().unwrap_or("?");
-                let expected_value = oc["value"].as_str().unwrap_or("?");
-                if tok.type_ != expected_type {
-                    return Err(format!(
-                        "In '{}' child {i}: token type '{}' != '{expected_type}'",
-                        tree.data, tok.type_
-                    ));
-                }
-                if tok.value != expected_value {
-                    return Err(format!(
-                        "In '{}' child {i}: token value {:?} != {expected_value:?}",
-                        tree.data, tok.value
-                    ));
-                }
+                match_token(tok, oc)
+                    .map_err(|e| format!("In '{}' child {i}: {e}", tree.data))?;
             }
         }
     }
