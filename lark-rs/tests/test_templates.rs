@@ -50,7 +50,7 @@ fn test_named_template_keeps_base_label() {
     // `sep{NUMBER, ","}` forms a `sep` node (base name), not the instance name; the
     // delimiter `","` is filtered, the items are kept.
     let lark = build(
-        "start: \"[\" sep{NUMBER, \",\"} \"]\"\nsep{item, delim}: item (delim item)*\nNUMBER: /\\d+/\n%ignore \" \"",
+        "start: \"[\" sep{NUMBER, \",\"} \"]\"\nsep{item, delim}: item (delim item)*\n NUMBER: /\\d+/\n%ignore \" \"",
     );
     assert_eq!(parsed_shape(&lark, "[1, 2, 3]"), "start[sep[NUMBER:1,NUMBER:2,NUMBER:3]]");
     assert_eq!(parsed_shape(&lark, "[1]"), "start[sep[NUMBER:1]]");
