@@ -102,6 +102,8 @@ src/
   parsers/
     mod.rs            ParsingFrontend — lowers grammar, wires lexer + parser
     lalr.rs           Dense ParseTable, LalrParser, build_lalr_table
+    token_source.rs   TokenSource trait + PreLexed / Contextual (lexer⇄parser API)
+    tree_builder.rs   TreeBuilder — shared rule→tree shaping (LALR + future Earley)
     earley.rs         Earley + SPPF (Phase 2 — stub)
 
 tests/
@@ -448,33 +450,37 @@ is not "done" until the bank says it generalizes beyond JSON/arithmetic.
 
 **Load-bearing — do before Earley (in order):**
 
-1. **Terminal algebra** (`loader.rs`). Split grammar-expansion from
-   terminal-compilation and give terminals a real compiled form that can *reference
-   other terminals* (`C: "C" | D`), with scoped-flag inlining and dead-terminal
-   pruning. This is where ~22 build-failures and a chunk of parse-failures live, and
-   it is the substrate the Phase-3 grammar standard library needs. Raises parity
-   *and* fixes the foundation. **← Sprint 1 (in progress).**
-2. **`TokenSource` trait.** Collapse the bespoke per-frontend coupling (`parse` vs
-   `parse_contextual`, `FrontendKind::Lalr{Basic,Contextual}`) onto one interface:
-   "give me the next token, given the parser's acceptable-terminal set." Earley + the
-   dynamic lexer are the next combinations that will punish its absence — get the
-   interface right before they land. Pure refactor, bank stays green.
-3. **Tree/output IR.** Intern tree labels (the engine still clones `tree_name:
-   String` on every reduce and `Tree::data`/`Token.type_` stay `String`). Settle one
-   tree-builder *before* Earley's SPPF materializes a second one shaped differently.
+1. ✅ **Terminal algebra** (`loader.rs`) — *Sprint 1, merged (#9).* Terminals can
+   reference other terminals (`C: "C" | D`) with scoped-flag inlining and
+   dead-terminal pruning; parity ~68% → 75.6%.
+2. ✅ **`TokenSource` trait** — *Sprint 2, merged (#10).* `parse`/`parse_contextual`
+   collapsed onto one `LalrParser::run<S: TokenSource>` driver; `PreLexed` +
+   `Contextual` sources. The input interface a future Earley driver consumes too.
+3. ✅ **Shared tree-builder** (`parsers/tree_builder.rs`) — *Sprint 3.* The
+   tree-shaping semantics (filter, transparent splice, `expand1`, placeholders,
+   alias) now live in one `TreeBuilder::assemble`, called by the LALR reducer and
+   (soon) the Earley forest-walk — so the SPPF cannot grow a second, subtly
+   different shaper. This is also the single chokepoint where the node
+   representation can later change. **Deliberately deferred** (now a localized
+   change behind that chokepoint, profiler-gated): interning the *public* tree's
+   labels. A `Tree` is the user-facing output and must stay self-contained
+   (`tree.data == "if_then"`); replacing its owned `String` label with an id would
+   force every consumer to carry the symbol table for a perf win no profiler has
+   asked for yet. When it is justified, switch `Tree::data` to `Box<str>`/arena in
+   one place.
 4. **Differential fuzzer.** Turn the static oracle into an active one: generate random
    inputs (then random grammars) and diff lark-rs against Python Lark automatically.
    Cheap on top of the existing harness; de-risks every subsequent feature.
 
 **Then** build **Phase 2 — Earley + SPPF** on `CompiledGrammar`, sharing the
-`TokenSource` and the tree-builder, keying forest nodes by `SymbolId`.
+`TokenSource` and the `TreeBuilder`, keying forest nodes by `SymbolId`.
 
 **Local — defer deliberately (profiler-gated, nothing is blocked on them):**
 FIRST/FOLLOW bitsets; the DeRemer–Pennello relational lookahead method (the current
 `lr1_closure` snapshots its map each fixpoint iteration — correct but quadratic on
-large grammars); zero-copy token spans; the residual name-based lookups
-(`augmented_start`, `initial_state` still `format!` + hash a name the IR was meant to
-retire).
+large grammars); zero-copy token spans; interned/`Box<str>` tree labels; the
+residual name-based lookups (`augmented_start`, `initial_state` still `format!` +
+hash a name the IR was meant to retire).
 
 ### Core IR consolidation (done 2026-06-03)
 

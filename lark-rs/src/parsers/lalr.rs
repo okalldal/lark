@@ -23,6 +23,7 @@ use crate::lexer::ContextualLexer;
 use crate::tree::{Child, Token, Tree};
 
 use super::token_source::{Contextual, LexFailure, PreLexed, TokenSource};
+use super::tree_builder::{NodeValue, TreeBuilder};
 
 // ─── Parse table ─────────────────────────────────────────────────────────────
 
@@ -53,11 +54,6 @@ pub struct ParseTable {
 }
 
 impl ParseTable {
-    #[inline]
-    fn is_filtered(&self, id: SymbolId) -> bool {
-        self.filter_out.get(id.index()).copied().unwrap_or(false)
-    }
-
     #[inline]
     fn action_at(&self, state: usize, terminal: SymbolId) -> Option<&Action> {
         self.action.get(state)?.get(terminal.index())?.as_ref()
@@ -544,61 +540,30 @@ impl LalrParser {
             .unwrap_or_default()
     }
 
-    /// Apply a REDUCE: pop the rule's children, build its value (applying rule
-    /// options), and follow GOTO. `at` supplies the position for the (effectively
-    /// unreachable) missing-GOTO error.
+    /// The shared tree-builder over this parse table's rules and filter flags.
+    fn tree_builder(&self) -> TreeBuilder<'_> {
+        TreeBuilder::new(&self.table.rules, &self.table.filter_out)
+    }
+
+    /// Apply a REDUCE: pop the rule's child values, hand them to the shared
+    /// [`TreeBuilder`] to shape the parent value, and follow GOTO. `at` supplies
+    /// the position for the (effectively unreachable) missing-GOTO error.
     fn reduce(
         &self,
         rule_idx: usize,
         state_stack: &mut Vec<usize>,
-        value_stack: &mut Vec<StackValue>,
+        value_stack: &mut Vec<NodeValue>,
         at: &Token,
     ) -> Result<(), ParseError> {
         let rule = &self.table.rules[rule_idx];
         let len = rule.expansion.len();
 
-        // Collect children: expand inlined (transparent) sub-rules, and drop
-        // filtered tokens unless this rule keeps all tokens. Inlined children were
-        // already filtered when their own rule reduced.
-        let mut children: Vec<Child> = Vec::new();
-        for sv in value_stack.drain(value_stack.len() - len..) {
-            match sv {
-                StackValue::Token(t) => {
-                    if rule.options.keep_all_tokens || !self.table.is_filtered(t.type_id) {
-                        children.push(Child::Token(t));
-                    }
-                }
-                StackValue::Tree(t) => children.push(Child::Tree(t)),
-                StackValue::Inline(cs) => children.extend(cs),
-            }
-        }
+        let child_values: Vec<NodeValue> =
+            value_stack.drain(value_stack.len() - len..).collect();
         for _ in 0..len {
             state_stack.pop();
         }
-
-        // maybe_placeholders: an empty `[...]` production emits one `None` per
-        // kept symbol of its widest alternative.
-        for _ in 0..rule.options.placeholder_count {
-            children.push(Child::None);
-        }
-
-        let value = if rule.transparent {
-            // `_rule` / `__anon_*`: splice children into the parent.
-            StackValue::Inline(children)
-        } else if rule.options.expand1
-            && rule.alias.is_none()
-            && children.len() == 1
-            && !matches!(children[0], Child::None)
-        {
-            // `?rule` with a single child: return that child directly (Token or Tree).
-            match children.pop().unwrap() {
-                Child::Tree(t) => StackValue::Tree(t),
-                Child::Token(t) => StackValue::Token(t),
-                Child::None => unreachable!("guarded above"),
-            }
-        } else {
-            StackValue::Tree(Tree::new(rule.tree_name.clone(), children))
-        };
+        let value = self.tree_builder().assemble(rule_idx, child_values);
 
         let top_state = *state_stack.last().unwrap();
         let nt_index = rule.origin.index() - self.table.n_terminals;
@@ -619,12 +584,12 @@ impl LalrParser {
     }
 
     /// ACCEPT: the final value on the stack is the parse result.
-    fn accept(value_stack: &mut Vec<StackValue>) -> Result<Tree, ParseError> {
+    fn accept(value_stack: &mut Vec<NodeValue>) -> Result<Tree, ParseError> {
         match value_stack.pop() {
-            Some(StackValue::Tree(t)) => Ok(t),
-            Some(StackValue::Token(tok)) => Ok(Tree::new(tok.type_.clone(), vec![Child::Token(tok)])),
+            Some(NodeValue::Tree(t)) => Ok(t),
+            Some(NodeValue::Token(tok)) => Ok(Tree::new(tok.type_.clone(), vec![Child::Token(tok)])),
             // A start rule is never transparent, so its value is never Inline.
-            Some(StackValue::Inline(_)) | None => {
+            Some(NodeValue::Inline(_)) | None => {
                 Err(ParseError::UnexpectedEof { line: 0, col: 0, expected: vec![] })
             }
         }
@@ -656,7 +621,7 @@ impl LalrParser {
         start: Option<&str>,
     ) -> Result<Tree, ParseError> {
         let mut state_stack: Vec<usize> = vec![self.initial_state(start)?];
-        let mut value_stack: Vec<StackValue> = Vec::new();
+        let mut value_stack: Vec<NodeValue> = Vec::new();
 
         loop {
             let state = *state_stack.last().unwrap();
@@ -669,7 +634,7 @@ impl LalrParser {
                 Some(Action::Shift(next_state)) => {
                     source.advance();
                     state_stack.push(next_state);
-                    value_stack.push(StackValue::Token(token));
+                    value_stack.push(NodeValue::Token(token));
                 }
                 Some(Action::Reduce(rule_idx)) => {
                     // Don't advance the source — the same token may be consumed next.
@@ -709,15 +674,4 @@ impl LalrParser {
     ) -> Result<Tree, ParseError> {
         self.run(&mut Contextual::new(text, lexer), start)
     }
-}
-
-// ─── Stack values ─────────────────────────────────────────────────────────────
-
-/// A value on the parser's semantic stack.
-enum StackValue {
-    Token(Token),
-    Tree(Tree),
-    /// Children of a transparent (`_rule` / `__anon_*`) reduction, to be spliced
-    /// into the parent's child list rather than wrapped in a node.
-    Inline(Vec<Child>),
 }
