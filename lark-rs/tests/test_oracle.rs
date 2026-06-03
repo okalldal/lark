@@ -138,6 +138,52 @@ fn test_csv_oracle() {
     }
 }
 
+// ─── Terminal-reference oracle tests ─────────────────────────────────────────
+
+/// Terminals that reference other terminals (`GREETING: HELLO | HOWDY`,
+/// `HOWDY: HOW DY`, `WORD: LETTER+`, `HEY: "hey"i`): the referenced pattern is
+/// inlined (with scoped flags), and terminals referenced only by other terminals
+/// are pruned. Regression net for the terminal-algebra sprint.
+#[test]
+fn test_terminal_refs_oracle() {
+    let lark = make_lalr_from_file("terminal_refs");
+    let oracle = load_oracle("terminal_refs", "cases");
+    let cases = oracle.as_array().expect("oracle must be an array");
+
+    let mut failures = Vec::new();
+
+    for case in cases {
+        let input = case["input"].as_str().unwrap_or("");
+        let should_pass = case["should_pass"].as_bool().unwrap_or(false);
+        let oracle_ok = case["ok"].as_bool().unwrap_or(false);
+
+        let result = lark.parse(input);
+
+        match (should_pass, oracle_ok, &result) {
+            (true, true, Ok(tree)) => {
+                let oracle_tree = &case["tree"];
+                if let Err(msg) = tree_matches_oracle(tree, oracle_tree) {
+                    failures.push(format!("input={input:?}: tree mismatch: {msg}"));
+                }
+            }
+            (true, true, Err(e)) => {
+                failures.push(format!("input={input:?}: expected parse success, got error: {e}"));
+            }
+            (false, false, Err(_)) => {}
+            (false, false, Ok(_)) => {
+                failures.push(format!(
+                    "input={input:?}: expected parse failure, but parsing succeeded"
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    if !failures.is_empty() {
+        panic!("Terminal-reference oracle failures:\n{}", failures.join("\n"));
+    }
+}
+
 // ─── Keyword/identifier (maximal-munch) oracle tests ─────────────────────────
 
 /// Reserved words must not shadow longer identifiers that merely start with them

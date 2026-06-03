@@ -23,6 +23,25 @@ impl Pattern {
             Pattern::Re(_) => None,
         }
     }
+
+    /// A self-contained regex for this pattern, suitable for *inlining* into a
+    /// larger pattern (e.g. when terminal `A` references terminal `B`). Any flags
+    /// are applied as a *scoped* group `(?flags:…)` so they affect only this
+    /// sub-pattern and never leak into the rest of the enclosing regex — unlike
+    /// `as_regex_str`, which drops the separately-stored flags entirely.
+    pub fn to_inline_regex(&self) -> String {
+        match self {
+            Pattern::Str(p) => p.escaped.clone(),
+            Pattern::Re(p) => {
+                let letters = flag_letters(p.flags);
+                if letters.is_empty() {
+                    p.pattern.clone()
+                } else {
+                    format!("(?{letters}:{})", p.pattern)
+                }
+            }
+        }
+    }
 }
 
 impl PartialEq for Pattern {
@@ -79,6 +98,17 @@ impl PatternRe {
         })?;
         Ok(PatternRe { pattern, flags })
     }
+}
+
+/// The inline-flag letters (`imsx`) for a flag bitset, in canonical order.
+/// Empty when no flags are set.
+pub fn flag_letters(flags: u32) -> String {
+    let mut s = String::new();
+    if flags & flags::IGNORECASE != 0 { s.push('i'); }
+    if flags & flags::MULTILINE != 0 { s.push('m'); }
+    if flags & flags::DOTALL != 0 { s.push('s'); }
+    if flags & flags::VERBOSE != 0 { s.push('x'); }
+    s
 }
 
 fn build_flag_prefix(flags: u32) -> String {

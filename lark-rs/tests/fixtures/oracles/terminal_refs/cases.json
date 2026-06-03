@@ -1,0 +1,104 @@
+[
+  {
+    "input": "hello world",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "token",
+          "token_type": "GREETING",
+          "value": "hello"
+        },
+        {
+          "type": "token",
+          "token_type": "WORD",
+          "value": "world"
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "howdy yall",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "token",
+          "token_type": "GREETING",
+          "value": "howdy"
+        },
+        {
+          "type": "token",
+          "token_type": "WORD",
+          "value": "yall"
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "HEY there",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "token",
+          "token_type": "GREETING",
+          "value": "HEY"
+        },
+        {
+          "type": "token",
+          "token_type": "WORD",
+          "value": "there"
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "hey now",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "token",
+          "token_type": "GREETING",
+          "value": "hey"
+        },
+        {
+          "type": "token",
+          "token_type": "WORD",
+          "value": "now"
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "",
+    "should_pass": false,
+    "ok": false,
+    "tree": null,
+    "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* GREETING\n"
+  },
+  {
+    "input": "hello",
+    "should_pass": false,
+    "ok": false,
+    "tree": null,
+    "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* WORD\n"
+  }
+]

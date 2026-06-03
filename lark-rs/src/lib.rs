@@ -137,6 +137,34 @@ mod tests {
     }
 
     #[test]
+    fn test_terminal_reference_is_inlined() {
+        // A terminal may reference another terminal (defined in any order); the
+        // referenced pattern is inlined and the referenced-only terminal is pruned.
+        let grammar = grammar::load_grammar(
+            "start: GREETING\nGREETING: HELLO | HI\nHELLO: \"hello\"\nHI: \"hi\"\n",
+            &["start".to_string()],
+            false,
+        )
+        .unwrap();
+        let names: Vec<&str> = grammar.terminals.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"GREETING"), "GREETING kept: {names:?}");
+        assert!(!names.contains(&"HELLO"), "HELLO inlined+pruned: {names:?}");
+        assert!(!names.contains(&"HI"), "HI inlined+pruned: {names:?}");
+    }
+
+    #[test]
+    fn test_cyclic_terminal_is_rejected() {
+        // Terminals denote regular languages, so a reference cycle is an error
+        // (Python Lark raises GrammarError too) — not a hang or stack overflow.
+        let res = grammar::load_grammar(
+            "start: A\nA: \"a\" B\nB: \"b\" A\n",
+            &["start".to_string()],
+            false,
+        );
+        assert!(matches!(res, Err(GrammarError::Other { .. })), "got {res:?}");
+    }
+
+    #[test]
     fn test_grammar_ignore_directive() {
         let grammar = grammar::load_grammar(
             "start: WORD\nWORD: /[a-z]+/\n%ignore /[ \\t]+/\n",
