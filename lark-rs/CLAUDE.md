@@ -432,6 +432,13 @@ is the regression net: fixing a bug flips XFAIL entries to passing — regenerat
 `xfail.json` and watch parity rise (BUG-3 flipped 3, BUG-7 flipped 8, lifting the bank
 to ~68%).
 
+**The 125 remaining XFAILs are triaged and sequenced in
+[`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md)** — eight milestones ordered by
+leverage × confidence, all on the LALR path (the bank is 100% LALR grammars, so
+Earley is orthogonal, not a way to climb parity). Start there; M1 (escape
+decoding `\x \u \U` in `unescape_string`) is the highest-leverage root cause
+(~26 entries). That doc also defines the exit criterion that unfreezes Phase 2.
+
 ### Strategy: consolidate the load-bearing abstractions *before* Phase 2
 
 A 2026-06-03 architecture review settled the sequencing question (feature-complete
