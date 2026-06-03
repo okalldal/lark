@@ -25,38 +25,36 @@ pub enum NodeValue {
 }
 
 /// Applies a rule's tree-shaping options to its assembled children. Borrows the
-/// compiled rules and the per-terminal `filter_out` flags from the parse table;
-/// holds no mutable state, so a fresh one can be made per reduction for free.
+/// compiled rules from the parse table; holds no mutable state, so a fresh one can
+/// be made per reduction for free. Token filtering is per *rule position* (each
+/// rule carries its own keep mask), not per terminal — see [`CompiledRule::filter_pos`].
 pub struct TreeBuilder<'g> {
     rules: &'g [CompiledRule],
-    filter_out: &'g [bool],
 }
 
 impl<'g> TreeBuilder<'g> {
-    pub fn new(rules: &'g [CompiledRule], filter_out: &'g [bool]) -> Self {
-        TreeBuilder { rules, filter_out }
-    }
-
-    #[inline]
-    fn is_filtered(&self, tok: &Token) -> bool {
-        self.filter_out.get(tok.type_id.index()).copied().unwrap_or(false)
+    pub fn new(rules: &'g [CompiledRule]) -> Self {
+        TreeBuilder { rules }
     }
 
     /// Build the value the parent sees when `rule_idx` reduces over `child_values`
-    /// (in left-to-right order). This is backend-agnostic: the LALR reducer drains
-    /// them off its value stack; an Earley walk collects them from a forest node.
+    /// (in left-to-right order, one per expansion symbol). This is backend-agnostic:
+    /// the LALR reducer drains them off its value stack; an Earley walk collects
+    /// them from a forest node.
     pub fn assemble(&self, rule_idx: usize, child_values: Vec<NodeValue>) -> NodeValue {
         let rule = &self.rules[rule_idx];
 
         // Flatten child values into the parent's child list: drop filtered
         // punctuation tokens (unless the rule keeps all tokens), and splice the
         // children of an inlined (transparent) sub-rule in place. Inlined children
-        // were already filtered when their own rule reduced.
+        // were already filtered when their own rule reduced. The child at index `i`
+        // corresponds to expansion symbol `i`, so its keep/drop is `filter_pos[i]`.
         let mut children: Vec<Child> = Vec::new();
-        for value in child_values {
+        for (i, value) in child_values.into_iter().enumerate() {
             match value {
                 NodeValue::Token(t) => {
-                    if rule.options.keep_all_tokens || !self.is_filtered(&t) {
+                    let filtered = rule.filter_pos.get(i).copied().unwrap_or(false);
+                    if rule.options.keep_all_tokens || !filtered {
                         children.push(Child::Token(t));
                     }
                 }

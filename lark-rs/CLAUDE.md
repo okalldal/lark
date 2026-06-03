@@ -158,8 +158,12 @@ Grammar (string-named, name-prefix semantics)
 
 The flags replace the old name-prefix sniffing entirely:
 `is_start` (was `name.starts_with("$root_")`), `transparent` (was a leading `_` /
-`__anon_` check), `filter_out` (per-terminal-id bool), and terminal-vs-non-terminal
-(was a name set + `$` check) is now just `id < n_terminals`.
+`__anon_` check), and terminal-vs-non-terminal (was a name set + `$` check) is now
+just `id < n_terminals`. Token filtering is **per rule position**, not per terminal:
+each `CompiledRule` carries a `filter_pos: Vec<bool>` parallel to its expansion
+(lowered from each `Symbol::Terminal` occurrence's own `filter_out`), so a terminal
+that is unified for lexing can still be kept at one rule position and dropped at
+another — Lark's model (see M6 in `COMPLIANCE_PARITY.md`).
 
 ### LALR Construction Pipeline (`lalr.rs`)
 
@@ -224,14 +228,16 @@ oracle. Three correctness bugs need fixing before Phase 2 starts (see Known Bugs
 | Token positions (line/col) | ✅ | Char-based columns; end_line/end_column newline-aware |
 | Oracle test harness | ✅ | arithmetic, JSON, python_numbers, lalr_core |
 | JSONTestSuite corpus | ✅ | 293/293 oracle agreement |
-| Compliance bank | ✅ | 257 grammars strip-mined from Python Lark's suite; 459/512 ≈ 89.6% agree (XFAIL-gated) |
+| Compliance bank | ✅ | 257 grammars strip-mined from Python Lark's suite; 504/512 ≈ 98.4% agree (XFAIL-gated) |
 | Oracle-coverage enforcement | ✅ | Meta-test + CI freshness gate |
 
 ### ⬜ Phase 2 — Earley + SPPF
 
-**Phase 2 stays frozen** until the compliance-bank parity climbs further (it is
-currently 459/512 ≈ 89.6%; see [`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md) for
-the exit criterion and remaining milestones). All Phase-1 correctness bugs (BUG-1 through BUG-7) are now
+**Phase 2 is now eligible to start:** the compliance bank reached the 90% exit
+criterion (currently 504/512 ≈ 98.4%, with every remaining XFAIL triaged and
+root-caused; see [`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md) for the exit
+criterion and remaining milestones). The roadmap continues in parallel to keep
+climbing the LALR path. All Phase-1 correctness bugs (BUG-1 through BUG-7) are now
 fixed: true LALR(1) lookaheads, fail-loud conflicts, the keyword lexer (BUG-3),
 transparent `_rule` inlining (BUG-4), char-based positions (BUG-5), the Earley
 fail-loud guard (BUG-6), and recursive templates (BUG-7). The core now fails loudly
@@ -431,14 +437,17 @@ wild rely on these. Document as a known parity gap when adding Phase-3 grammar l
 All Phase-1 correctness bugs (BUG-1 through BUG-7) are **done**. The compliance bank
 is the regression net: fixing a bug flips XFAIL entries to passing — regenerate
 `xfail.json` and watch parity rise (BUG-3 flipped 3, BUG-7 flipped 8; the
-lexer/terminal-filtering sprint plus two construct-error checks flipped 72, lifting the bank to 89.6%).
+lexer/terminal-filtering sprint plus two construct-error checks flipped 72, then
+nested-`maybe_placeholders` + oversized-priority flipped 6 more, the M6
+per-position-filtering refactor flipped 3, M4 template tree-shape flipped 14, and
+M8 EBNF-helper sharing + nullable collapse flipped 22, lifting the bank to 98.4%).
 
-**The remaining 53 XFAILs are triaged and sequenced in
+**The remaining 8 XFAILs are triaged in
 [`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md)** — all on the LALR path (the bank
-is 100% LALR grammars, so Earley is orthogonal, not a way to climb parity). M1–M3
-+ the global-`keep_all_tokens` half of M5 are done; the remaining milestones are
-M4 (templates), M6 (inline↔named terminal collision), M7 (construct-error
-parity), M8 (EBNF/priority residue), and nested `maybe_placeholders`. That doc
+is 100% LALR grammars, so Earley is orthogonal, not a way to climb parity). M1–M8
+are done; the only remaining items are the hard tail: regex-collision construct
+errors (57/58), an LALR conflict-*detection* parity case (73/74), and
+terminal-algebra token typing (14/15). That doc
 also defines the exit criterion that unfreezes Phase 2.
 
 ### Strategy: consolidate the load-bearing abstractions *before* Phase 2

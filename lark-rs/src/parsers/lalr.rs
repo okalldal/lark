@@ -45,8 +45,6 @@ pub struct ParseTable {
     pub start_states: HashMap<SymbolId, usize>,
     /// Compiled rules (indexed by rule index).
     pub rules: Vec<CompiledRule>,
-    /// `filter_out[terminal_id]` — token dropped from the tree by default.
-    pub filter_out: Vec<bool>,
     /// Symbol metadata (names for diagnostics, kind, …).
     pub symbols: SymbolTable,
     /// Size of the terminal id range; non-terminal GOTO index is `id - this`.
@@ -463,15 +461,11 @@ pub fn build_lalr_table(grammar: &CompiledGrammar) -> Result<ParseTable, Grammar
         return Err(GrammarError::Conflict { report: conflicts.join("\n\n") });
     }
 
-    let filter_out: Vec<bool> =
-        (0..n_terminals).map(|t| grammar.symbols.info(SymbolId(t as u32)).filter_out).collect();
-
     Ok(ParseTable {
         action,
         goto,
         start_states,
         rules: rules.clone(),
-        filter_out,
         symbols: grammar.symbols.clone(),
         n_terminals,
     })
@@ -540,9 +534,10 @@ impl LalrParser {
             .unwrap_or_default()
     }
 
-    /// The shared tree-builder over this parse table's rules and filter flags.
+    /// The shared tree-builder over this parse table's rules (filtering is per
+    /// rule position, carried by each [`CompiledRule`]).
     fn tree_builder(&self) -> TreeBuilder<'_> {
-        TreeBuilder::new(&self.table.rules, &self.table.filter_out)
+        TreeBuilder::new(&self.table.rules)
     }
 
     /// Apply a REDUCE: pop the rule's child values, hand them to the shared

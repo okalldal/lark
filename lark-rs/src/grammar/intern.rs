@@ -60,9 +60,6 @@ pub enum SymbolKind {
 pub struct SymbolInfo {
     pub name: String,
     pub kind: SymbolKind,
-    /// Terminal only: token is dropped from the tree unless the rule keeps all
-    /// tokens (anonymous literals and `_`-prefixed terminals).
-    pub filter_out: bool,
     /// Non-terminal only: the symbol's name marks it for inlining (a leading
     /// `_`, covering both `_name` transparent rules and `__anon_*` EBNF helpers).
     /// Whether a *rule* actually inlines also depends on its alias and start
@@ -101,7 +98,7 @@ impl SymbolTable {
 
     /// Intern a terminal. Idempotent by name. Must be called for every terminal
     /// *before* any non-terminal so the terminal id range stays contiguous.
-    fn intern_terminal(&mut self, name: &str, filter_out: bool) -> SymbolId {
+    fn intern_terminal(&mut self, name: &str) -> SymbolId {
         if let Some(&id) = self.by_name.get(name) {
             debug_assert_eq!(self.infos[id.index()].kind, SymbolKind::Terminal,
                 "symbol {name:?} interned as both terminal and non-terminal");
@@ -112,7 +109,6 @@ impl SymbolTable {
         self.infos.push(SymbolInfo {
             name: name.to_string(),
             kind: SymbolKind::Terminal,
-            filter_out,
             inline: false,
             is_start: false,
         });
@@ -138,7 +134,6 @@ impl SymbolTable {
         self.infos.push(SymbolInfo {
             name: name.to_string(),
             kind: SymbolKind::NonTerminal,
-            filter_out: false,
             inline,
             is_start,
         });
@@ -206,6 +201,14 @@ impl SymbolTable {
 pub struct CompiledRule {
     pub origin: SymbolId,
     pub expansion: Vec<SymbolId>,
+    /// Per-position keep mask, parallel to `expansion`: `filter_pos[i]` is true
+    /// when a token reduced at position `i` is dropped from the tree (unless the
+    /// rule keeps all tokens). This is per *occurrence*, not per terminal — the
+    /// same terminal can be kept at one position and filtered at another (Python
+    /// Lark's model), which is what lets a unified literal (`"a"` lexing as `A`)
+    /// be filtered while a sibling `A` reference is kept. Non-terminal positions
+    /// are always `false` (they reduce to trees/inlines, never filtered here).
+    pub filter_pos: Vec<bool>,
     pub alias: Option<String>,
     pub options: RuleOptions,
     pub order: usize,
@@ -261,6 +264,13 @@ impl CompiledGrammar {
     }
 }
 
+/// The tree label for a (possibly template-instance) rule name: everything before
+/// the `{` that marks a template instantiation (`expr{0}` → `expr`). Ordinary
+/// names contain no `{`, so they pass through unchanged.
+fn template_base(name: &str) -> &str {
+    name.split_once('{').map_or(name, |(base, _)| base)
+}
+
 /// Lower a surface [`Grammar`] to a [`CompiledGrammar`].
 ///
 /// Interning order is load-bearing: `$END`, then every terminal, then every
@@ -270,17 +280,17 @@ pub fn lower(grammar: &Grammar) -> CompiledGrammar {
     let mut symbols = SymbolTable::new();
 
     // ── Terminals first, $END at id 0. ──────────────────────────────────────
-    let end = symbols.intern_terminal("$END", false);
+    let end = symbols.intern_terminal("$END");
     debug_assert_eq!(end, SymbolId::END);
     for t in &grammar.terminals {
-        symbols.intern_terminal(&t.name, t.filter_out);
+        symbols.intern_terminal(&t.name);
     }
     // Defensive: a terminal referenced in a rule body but somehow absent from
     // the terminal list still belongs to the terminal id range.
     for rule in &grammar.rules {
         for sym in &rule.expansion {
             if let Symbol::Terminal(t) = sym {
-                symbols.intern_terminal(&t.name, t.filter_out);
+                symbols.intern_terminal(&t.name);
             }
         }
     }
@@ -320,14 +330,25 @@ pub fn lower(grammar: &Grammar) -> CompiledGrammar {
     for rule in &grammar.rules {
         let origin = symbols.id(&rule.origin.name).expect("origin interned");
         let expansion: Vec<SymbolId> = rule.expansion.iter().map(&id).collect();
+        // Per-occurrence keep mask: a terminal symbol's own `filter_out` decides
+        // its position; non-terminals never filter here.
+        let filter_pos: Vec<bool> = rule
+            .expansion
+            .iter()
+            .map(|s| matches!(s, Symbol::Terminal(t) if t.filter_out))
+            .collect();
         let inline = symbols.info(origin).inline;
         let is_start_origin = start_ids.contains(&origin);
         // A start symbol's rule is never inlined: the root must form a node.
         let transparent = inline && rule.alias.is_none() && !is_start_origin;
-        let tree_name = rule.alias.clone().unwrap_or_else(|| rule.origin.name.clone());
+        // A template instance is named `base{N}`; its tree label is the base name
+        // (Lark's `template_source`), so strip the `{…}` marker. Ordinary rule
+        // names never contain `{`, so this is a no-op for them.
+        let tree_name = rule.alias.clone().unwrap_or_else(|| template_base(&rule.origin.name).to_string());
         rules.push(CompiledRule {
             origin,
             expansion,
+            filter_pos,
             alias: rule.alias.clone(),
             options: rule.options.clone(),
             order: rule.order,
@@ -345,6 +366,7 @@ pub fn lower(grammar: &Grammar) -> CompiledGrammar {
         rules.push(CompiledRule {
             origin: root,
             expansion: vec![start_id],
+            filter_pos: vec![false],
             alias: None,
             options: RuleOptions::default(),
             order: 0,

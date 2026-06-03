@@ -348,7 +348,14 @@ impl<'a> Lexer<'a> {
             return None;
         }
         let len = sign + after_sign.bytes().take_while(|b| b.is_ascii_digit()).count();
-        let n: i32 = rest[..len].parse().ok()?;
+        let digits = &rest[..len];
+        // Python Lark priorities are arbitrary-precision ints; we store i32 and
+        // saturate, so a huge (negative) priority like `A.-99999999999999999999999`
+        // clamps to the extreme rather than failing to lex.
+        let n: i32 = match digits.parse::<i128>() {
+            Ok(v) => v.clamp(i32::MIN as i128, i32::MAX as i128) as i32,
+            Err(_) => if digits.starts_with('-') { i32::MIN } else { i32::MAX },
+        };
         self.advance(len);
         Some(Tok::Number(n))
     }
@@ -973,8 +980,11 @@ struct GrammarCompiler {
     term_counter: usize,
     /// Cache: literal string/regex → auto-generated terminal name.
     literal_cache: HashMap<String, String>,
-    /// Template definitions: name → (params, expansions).
-    templates: HashMap<String, (Vec<String>, Vec<AliasedExpansion>)>,
+    /// Template definitions: name → (params, expansions, modifiers, priority).
+    /// The modifiers (`!` keep-all, `?` expand1) and priority are kept so each
+    /// instantiation inherits the template's rule options, exactly as Python Lark
+    /// deep-copies the template's `RuleOptions` onto every instance.
+    templates: HashMap<String, (Vec<String>, Vec<AliasedExpansion>, String, i32)>,
     /// Memo of template instantiations: canonical `name<args>` key → instance rule
     /// name. Lets a self-recursive template (`_sep{x,d}: x | _sep{x,d} d x`) resolve
     /// its own reference to the rule already being built instead of recursing
@@ -988,6 +998,24 @@ struct GrammarCompiler {
     /// `keep_all_tokens` of the rule currently being compiled — needed to count
     /// kept symbols for placeholder generation.
     current_keep_all: bool,
+    /// Inlined "rule size" of each anonymous EBNF helper (maybe / optional /
+    /// group), mirroring Python Lark's `FindRuleSize`. An absent `[...]` emits one
+    /// `None` per unit of this size, and a *nested* maybe/group inside a `[...]`
+    /// must contribute its own size (not 0) so placeholders compose recursively.
+    /// `*` / `+` / `~` helpers and transparent `_rules` are deliberately absent
+    /// (size 0), exactly as Lark treats `_`-prefixed symbols as removed.
+    helper_sizes: HashMap<String, usize>,
+    /// Cache of the shared `+`-recurse helper (`P: inner | P inner`) keyed by its
+    /// inner symbol and the keep-all context. Identical `x+`/`x*` occurrences reuse
+    /// one rule — Python Lark's `rules_cache`. This sharing is what keeps grammars
+    /// like `a+ b | a+` and `a* b | a+` LALR-parseable: with separate recurse rules
+    /// the duplicated `… -> "a"` reductions are an unresolvable reduce/reduce.
+    recurse_cache: HashMap<(Symbol, bool), String>,
+    /// Anon helper rules that already derive ε (the `?`/`*` helpers). A `?` applied
+    /// to one of these is redundant — `(X?)?` is just `X?` — so it is collapsed
+    /// rather than stacked, which is what Python Lark's distribute+dedup achieves
+    /// and what keeps `("A"?)?` from building two ambiguous empty rules.
+    nullable_opts: std::collections::HashSet<String>,
 }
 
 impl GrammarCompiler {
@@ -1006,6 +1034,9 @@ impl GrammarCompiler {
             maybe_placeholders,
             global_keep_all: keep_all_tokens,
             current_keep_all: keep_all_tokens,
+            helper_sizes: HashMap::new(),
+            recurse_cache: HashMap::new(),
+            nullable_opts: std::collections::HashSet::new(),
         }
     }
 
@@ -1033,7 +1064,10 @@ impl GrammarCompiler {
         for item in &items {
             if let Item::RuleItem(r) = item {
                 if !r.params.is_empty() {
-                    self.templates.insert(r.name.clone(), (r.params.clone(), r.expansions.clone()));
+                    self.templates.insert(
+                        r.name.clone(),
+                        (r.params.clone(), r.expansions.clone(), r.modifiers.clone(), r.priority),
+                    );
                 }
             }
         }
@@ -1129,20 +1163,29 @@ impl GrammarCompiler {
 
     fn compile_value(&mut self, v: Value, parent: &str) -> Result<Symbol, GrammarError> {
         match v {
-            Value::Terminal(name) => Ok(Symbol::Terminal(Terminal::new(name))),
+            // A named terminal reference is filtered iff `_`-prefixed (Lark's
+            // `Terminal(s, filter_out=s.startswith('_'))`).
+            Value::Terminal(name) => {
+                let filter_out = name.starts_with('_');
+                Ok(Symbol::Terminal(Terminal { name, filter_out }))
+            }
             Value::Rule(name) => Ok(Symbol::NonTerminal(NonTerminal::new(name))),
             Value::Literal(lit) => {
+                // An anonymous *string* literal is filtered out of the tree
+                // (keyword-like punctuation); an anonymous *regex* literal is kept,
+                // matching Python Lark. This is a property of the *occurrence*, not
+                // the terminal — the same terminal may be kept elsewhere.
+                let filter_out = matches!(lit, LiteralVal::Str(..));
                 let term_name = self.get_or_create_terminal(lit)?;
-                Ok(Symbol::Terminal(Terminal::new(term_name)))
+                Ok(Symbol::Terminal(Terminal { name: term_name, filter_out }))
             }
             Value::Range(from, to) => {
                 let pat_str = format!("[{}-{}]",
                     regex::escape(&from), regex::escape(&to));
                 let pat = Pattern::Re(PatternRe::new(&pat_str, 0)?);
-                let name = self.fresh_terminal();
                 // A char-range terminal is a regex literal — kept, like `/[a-z]/`.
-                self.terminals.push(TerminalDef::new(&name, pat, 0).with_filter_out(false));
-                Ok(Symbol::Terminal(Terminal::new(name)))
+                let name = self.intern_anon_pattern(pat, None);
+                Ok(Symbol::Terminal(Terminal { name, filter_out: false }))
             }
             Value::TemplateUsage { name, args } => {
                 self.instantiate_template(&name, args, parent)
@@ -1173,40 +1216,63 @@ impl GrammarCompiler {
                 (pat, None)
             }
         };
+        let name = self.intern_anon_pattern(pat, name_hint);
+        self.literal_cache.insert(key, name.clone());
+        Ok(name)
+    }
+
+    /// Intern an anonymous literal/range pattern, returning the terminal name to
+    /// reference it by. Unifies with an existing same-pattern terminal — named or
+    /// anonymous — by adopting its name, exactly as Python Lark's
+    /// `PrepareAnonTerminals` reuses the user terminal's name (so `"a"` lexes as
+    /// `A` when `A: "a"` exists, and an inline `/a/` reuses `A` from `A: /a/`).
+    /// Filtering is *not* keyed on this terminal — each occurrence carries its own
+    /// `filter_out` — so unifying for lexing never changes a token's keep/drop fate.
+    fn intern_anon_pattern(&mut self, pat: Pattern, name_hint: Option<String>) -> String {
+        if let Some(existing) = self.terminals.iter().find(|td| patterns_equivalent(&td.pattern, &pat)) {
+            return existing.name.clone();
+        }
         // Use the clean hint when it is a fresh, valid identifier; otherwise fall
         // back to a generated `__ANON_N` name (always a valid regex group name).
-        // We deliberately do NOT unify with a same-pattern user terminal: a
-        // literal usage is always filter_out, whereas the named terminal may be
-        // kept, so they must stay distinct.
         let name = match name_hint {
             Some(h) if !self.terminals.iter().any(|t| t.name == h) => h,
             _ => self.fresh_terminal(),
         };
-        // Anonymous *string* literals are filtered out of the tree (keyword-like
-        // punctuation); anonymous *regex* literals are kept, matching Python Lark
-        // (a `/regex/` in a rule body produces a kept `__ANON_n` token). The `i`
-        // flag compiles a string to a regex but it is still a string literal.
-        let filter_out = matches!(lit, LiteralVal::Str(..));
-        self.terminals.push(TerminalDef::new(&name, pat, 0).with_filter_out(filter_out));
-        self.literal_cache.insert(key, name.clone());
-        Ok(name)
+        self.terminals.push(TerminalDef::new(&name, pat, 0));
+        name
     }
 
     fn compile_group(
         &mut self,
         alts: Vec<AliasedExpansion>,
-        _parent: &str,
+        parent: &str,
         optional: bool,
     ) -> Result<Symbol, GrammarError> {
-        if alts.len() == 1 && alts[0].alias.is_none() {
-            // Inline single-alternative groups by flattening (handled at call site)
-            // But we still need a symbol, so create a named rule
+        // A plain single-alternative group with no alias that compiles to exactly
+        // one symbol *is* that symbol — skip the wrapper rule. Besides dropping a
+        // redundant transparent node, this lets `(X)+` share `X`'s recurse helper
+        // and stops `("A"?)?` from stacking a second nullable rule.
+        if !optional && alts.len() == 1 && alts[0].alias.is_none() {
+            let alt = alts.into_iter().next().unwrap();
+            let mut syms = self.compile_expansion(alt.expansion, parent)?;
+            if syms.len() == 1 {
+                return Ok(syms.pop().unwrap());
+            }
+            let name = self.fresh_anon_rule("group");
+            let origin = NonTerminal::new(&name);
+            let size: usize = syms.iter().map(|s| self.symbol_size(s)).sum();
+            self.helper_sizes.insert(name.clone(), size);
+            self.rules.push(Rule::new(origin.clone(), syms, None, self.anon_opts(), 0));
+            return Ok(Symbol::NonTerminal(origin));
         }
         let name = self.fresh_anon_rule("group");
         let origin = NonTerminal::new(&name);
+        let mut max_size = 0;
         for (order, alt) in alts.into_iter().enumerate() {
             let alias = alt.alias.clone();
             let syms = self.compile_expansion(alt.expansion, &name)?;
+            let size: usize = syms.iter().map(|s| self.symbol_size(s)).sum();
+            max_size = max_size.max(size);
             self.rules.push(Rule::new(
                 origin.clone(),
                 syms,
@@ -1215,6 +1281,9 @@ impl GrammarCompiler {
                 order,
             ));
         }
+        // A group is spliced inline; record its size so a `[...]` wrapping it
+        // counts the right number of placeholders (Lark's `FindRuleSize`).
+        self.helper_sizes.insert(name.clone(), max_size);
         if optional {
             // Add empty alternative
             self.rules.push(Rule::new(
@@ -1245,30 +1314,70 @@ impl GrammarCompiler {
         for (order, alt) in alts.into_iter().enumerate() {
             let alias = alt.alias.clone();
             let syms = self.compile_expansion(alt.expansion, &name)?;
-            let kept = syms.iter().filter(|s| self.is_kept_symbol(s)).count();
-            max_kept = max_kept.max(kept);
+            // The empty production emits one `None` per kept slot of the widest
+            // alternative. A slot is a kept token *or* the inlined size of a
+            // nested maybe/group, so nested optionals compose (Lark `FindRuleSize`).
+            let size: usize = syms.iter().map(|s| self.symbol_size(s)).sum();
+            max_kept = max_kept.max(size);
             self.rules.push(Rule::new(origin.clone(), syms, alias, self.anon_opts(), order));
         }
+        // Record this maybe's size so an enclosing `[...]` counts it recursively.
+        self.helper_sizes.insert(name.clone(), max_kept);
         let empty_opts = RuleOptions { placeholder_count: max_kept, ..self.anon_opts() };
         self.rules.push(Rule::new(origin.clone(), vec![], None, empty_opts, 100));
         Ok(Symbol::NonTerminal(origin))
     }
 
-    /// Whether a symbol survives tree filtering (so it counts toward the number of
-    /// `None` placeholders an absent `[...]` must emit). Mirrors the filter applied
-    /// in `apply_rule_options`: tokens are dropped if `_`-prefixed (unless the rule
-    /// keeps all tokens); `_`-prefixed nonterminals are inlined away.
-    fn is_kept_symbol(&self, s: &Symbol) -> bool {
+    /// Number of tree children a symbol contributes to an absent `[...]`'s `None`
+    /// placeholder count — Python Lark's `FindRuleSize`. A kept token is 1, a
+    /// filtered token 0; a named rule is 1, a transparent `_rule` / `*` / `+` / `~`
+    /// helper is 0 (inlined-away, like Lark's `_`-prefixed symbols); a nested
+    /// maybe / optional / group contributes its own recorded inlined size, so
+    /// placeholders compose through arbitrary nesting.
+    fn symbol_size(&self, s: &Symbol) -> usize {
         match s {
             Symbol::Terminal(t) => {
                 if self.current_keep_all {
-                    return true;
+                    1
+                } else if t.filter_out {
+                    0
+                } else {
+                    1
                 }
-                // Kept iff the terminal is not filter_out.
-                !self.terminals.iter().any(|td| td.name == t.name && td.filter_out)
             }
-            Symbol::NonTerminal(nt) => !nt.name.starts_with('_'),
+            Symbol::NonTerminal(nt) => {
+                if let Some(&size) = self.helper_sizes.get(&nt.name) {
+                    size
+                } else if nt.name.starts_with('_') {
+                    0
+                } else {
+                    1
+                }
+            }
         }
+    }
+
+    /// The shared one-or-more recurse helper `P: inner | P inner` for `inner`,
+    /// cached by `(inner, keep_all)` so identical `x+`/`x*` occurrences reuse one
+    /// rule (Python Lark's `rules_cache`). Sharing collapses what would otherwise be
+    /// duplicate, conflicting recurse rules into one, keeping `a+ b | a+` LALR.
+    fn plus_helper(&mut self, inner_sym: Symbol) -> Symbol {
+        let key = (inner_sym.clone(), self.current_keep_all);
+        if let Some(name) = self.recurse_cache.get(&key) {
+            return Symbol::NonTerminal(NonTerminal::new(name));
+        }
+        let name = self.fresh_anon_rule("plus");
+        let nt = NonTerminal::new(&name);
+        self.rules.push(Rule::new(nt.clone(), vec![inner_sym.clone()], None, self.anon_opts(), 0));
+        self.rules.push(Rule::new(
+            nt.clone(),
+            vec![Symbol::NonTerminal(nt.clone()), inner_sym],
+            None,
+            self.anon_opts(),
+            1,
+        ));
+        self.recurse_cache.insert(key, name);
+        Symbol::NonTerminal(nt)
     }
 
     fn compile_repeat(
@@ -1282,29 +1391,38 @@ impl GrammarCompiler {
 
         match (min, max) {
             (0, Some(1)) => {
-                // inner? → optional rule
+                // inner? → optional rule. `?` adds no placeholders of its own, but
+                // when nested inside a `[...]` it contributes its inner size to the
+                // outer maybe's count (Lark's `FindRuleSize` takes the present arm).
+                // If `inner` is *already* a nullable `?`/`*` helper, the extra `?` is
+                // redundant — collapse it so `(X?)?` is just `X?`.
+                if let Symbol::NonTerminal(nt) = &inner_sym {
+                    if self.nullable_opts.contains(&nt.name) {
+                        return Ok(inner_sym);
+                    }
+                }
                 let name = self.fresh_anon_rule("opt");
                 let nt = NonTerminal::new(&name);
+                let size = self.symbol_size(&inner_sym);
+                self.helper_sizes.insert(name.clone(), size);
+                self.nullable_opts.insert(name.clone());
                 self.rules.push(Rule::new(nt.clone(), vec![inner_sym], None, self.anon_opts(), 0));
                 self.rules.push(Rule::new(nt.clone(), vec![], None, self.anon_opts(), 1));
                 Ok(Symbol::NonTerminal(nt))
             }
             (1, None) => {
-                // inner+ → one-or-more
-                let name = self.fresh_anon_rule("plus");
-                let nt = NonTerminal::new(&name);
-                // name : inner | name inner
-                self.rules.push(Rule::new(nt.clone(), vec![inner_sym.clone()], None, self.anon_opts(), 0));
-                self.rules.push(Rule::new(nt.clone(), vec![Symbol::NonTerminal(nt.clone()), inner_sym], None, self.anon_opts(), 1));
-                Ok(Symbol::NonTerminal(nt))
+                // inner+ → one-or-more, via the shared recurse helper.
+                Ok(self.plus_helper(inner_sym))
             }
             (0, None) => {
-                // inner* → zero-or-more via helper + optional
+                // inner* → optional wrapper around the *same* shared recurse helper,
+                // so `x*` and `x+` reuse one `P: inner | P inner` rule (Lark's model).
+                let plus = self.plus_helper(inner_sym);
                 let name = self.fresh_anon_rule("star");
                 let nt = NonTerminal::new(&name);
-                // name : ε | name inner
-                self.rules.push(Rule::new(nt.clone(), vec![], None, self.anon_opts(), 0));
-                self.rules.push(Rule::new(nt.clone(), vec![Symbol::NonTerminal(nt.clone()), inner_sym], None, self.anon_opts(), 1));
+                self.nullable_opts.insert(name.clone());
+                self.rules.push(Rule::new(nt.clone(), vec![plus], None, self.anon_opts(), 0));
+                self.rules.push(Rule::new(nt.clone(), vec![], None, self.anon_opts(), 1));
                 Ok(Symbol::NonTerminal(nt))
             }
             (n, Some(m)) if n == m => {
@@ -1360,9 +1478,7 @@ impl GrammarCompiler {
             }
             let regex = &memo[&t.name];
             let pat = Pattern::Re(PatternRe::new(regex.as_str(), 0)?);
-            let filter_out = t.name.starts_with('_');
-            self.terminals
-                .push(TerminalDef::new(&t.name, pat, t.priority).with_filter_out(filter_out));
+            self.terminals.push(TerminalDef::new(&t.name, pat, t.priority));
         }
         Ok(())
     }
@@ -1588,9 +1704,9 @@ impl GrammarCompiler {
         &mut self,
         name: &str,
         args: Vec<Value>,
-        parent: &str,
+        _parent: &str,
     ) -> Result<Symbol, GrammarError> {
-        let (params, expansions) = self.templates.get(name)
+        let (params, expansions, modifiers, priority) = self.templates.get(name)
             .ok_or_else(|| GrammarError::UndefinedRule { name: name.to_string() })?
             .clone();
 
@@ -1608,14 +1724,32 @@ impl GrammarCompiler {
             return Ok(Symbol::NonTerminal(NonTerminal::new(existing)));
         }
 
-        // Create a name for this instantiation and register it *before* compiling the
-        // body, so a self-reference encountered during compilation finds it.
-        let inst_name = format!("__{}_{}_{}", name, parent, self.anon_counter);
+        // Name the instance `base{N}`: the `{` marks it as a template instance whose
+        // *tree label* is the base name (Lark's `template_source`), and leaving the
+        // base prefix intact means a `_`-prefixed template (`_expr`) instantiates to
+        // a transparent rule while `expr` does not. The counter keeps distinct
+        // arg-sets distinct. Registered *before* compiling the body so a
+        // self-reference resolves to the rule being built.
+        let inst_name = format!("{}{{{}}}", name, self.anon_counter);
         self.anon_counter += 1;
         self.template_instances.insert(key, inst_name.clone());
 
         // Build substitution map
         let subst: HashMap<String, Value> = params.into_iter().zip(args).collect();
+
+        // Each instance inherits the template's own rule options (keep-all / expand1
+        // / priority), not the anon-helper defaults — so `!expr{t}` keeps its tokens.
+        let keep_all = modifiers.contains('!') || self.global_keep_all;
+        let inst_opts = RuleOptions {
+            expand1: modifiers.contains('?'),
+            keep_all_tokens: keep_all,
+            priority,
+            ..RuleOptions::default()
+        };
+        // Make keep-all visible to placeholder counting while this body compiles,
+        // then restore the caller's context.
+        let saved_keep_all = self.current_keep_all;
+        self.current_keep_all = keep_all;
 
         // Substitute template params in expansions
         let expansions = Self::substitute_template(&expansions, &subst);
@@ -1623,8 +1757,9 @@ impl GrammarCompiler {
         for (order, alt) in expansions.into_iter().enumerate() {
             let alias = alt.alias.clone();
             let syms = self.compile_expansion(alt.expansion, &inst_name)?;
-            self.rules.push(Rule::new(origin.clone(), syms, alias, self.anon_opts(), order));
+            self.rules.push(Rule::new(origin.clone(), syms, alias, inst_opts.clone(), order));
         }
+        self.current_keep_all = saved_keep_all;
         Ok(Symbol::NonTerminal(origin))
     }
 
@@ -1648,7 +1783,6 @@ impl GrammarCompiler {
             },
             Expr::Group(alts) => Expr::Group(Self::substitute_template(alts, subst)),
             Expr::Maybe(alts) => Expr::Maybe(Self::substitute_template(alts, subst)),
-            other => other.clone(),
         }
     }
 
@@ -1661,10 +1795,19 @@ impl GrammarCompiler {
             Value::Rule(name) | Value::Terminal(name) => {
                 subst.get(name).cloned().unwrap_or_else(|| v.clone())
             }
-            Value::TemplateUsage { name, args } => Value::TemplateUsage {
-                name: name.clone(),
-                args: args.iter().map(|a| Self::subst_value(a, subst)).collect(),
-            },
+            // Higher-order templates: a parameter can itself be a template applied
+            // as `t{…}`. Substitute the *usage's name* too (`t` → `b`), so
+            // `a{t}: t{"a"}` with `a{b}` instantiates `b{"a"}`, not undefined `t`.
+            Value::TemplateUsage { name, args } => {
+                let name = match subst.get(name) {
+                    Some(Value::Rule(n)) | Some(Value::Terminal(n)) => n.clone(),
+                    _ => name.clone(),
+                };
+                Value::TemplateUsage {
+                    name,
+                    args: args.iter().map(|a| Self::subst_value(a, subst)).collect(),
+                }
+            }
             other => other.clone(),
         }
     }
@@ -1701,10 +1844,7 @@ impl GrammarCompiler {
                     let registered_name = alias.as_deref().unwrap_or(name.as_str());
                     let pat = Pattern::Re(PatternRe::new(td.1, 0)?);
                     if !self.terminals.iter().any(|t| t.name == registered_name) {
-                        self.terminals.push(
-                            TerminalDef::new(registered_name, pat, 0)
-                                .with_filter_out(registered_name.starts_with('_')),
-                        );
+                        self.terminals.push(TerminalDef::new(registered_name, pat, 0));
                     }
                 }
                 // Rules from common (e.g., %import common.list) are silently skipped for now.
@@ -1726,7 +1866,9 @@ impl GrammarCompiler {
             .collect();
         for (i, pat) in self.ignore_patterns.into_iter().enumerate() {
             let name = format!("__IGNORE_{}", i);
-            self.terminals.push(TerminalDef::new(&name, pat, 0).with_filter_out(true));
+            // `%ignore` tokens never reach the tree (the parse loop skips them), so
+            // they need no per-occurrence filter — they appear in no rule body.
+            self.terminals.push(TerminalDef::new(&name, pat, 0));
         }
 
         // Prune terminals that no rule (or `%ignore`) references. A terminal used
@@ -1786,6 +1928,21 @@ fn terminal_name_hint(s: &str) -> Option<String> {
         return Some(s.to_uppercase());
     }
     None
+}
+
+/// Two patterns are equivalent for terminal unification when they match the same
+/// language: identical regex source *and* identical flags. Python Lark keys its
+/// `term_reverse` map on `Pattern` equality (and raises on a flag mismatch for the
+/// same source); we treat differing flags as simply distinct, so unification never
+/// merges, say, `"a"` with `"a"i`.
+fn patterns_equivalent(a: &Pattern, b: &Pattern) -> bool {
+    fn flags_of(p: &Pattern) -> u32 {
+        match p {
+            Pattern::Str(_) => 0,
+            Pattern::Re(r) => r.flags,
+        }
+    }
+    a.as_regex_str() == b.as_regex_str() && flags_of(a) == flags_of(b)
 }
 
 /// Standard terminal names for common punctuation/operators.
