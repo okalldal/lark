@@ -148,6 +148,21 @@ KEYWORDS_CASES = [
 ]
 
 
+# Terminal-reference cases. These exercise terminals that reference *other*
+# terminals (`GREETING: HELLO | HOWDY`, `HOWDY: HOW DY`, `WORD: LETTER+`): the
+# referenced terminal's pattern is inlined into the referencing one (including
+# scoped flags for a case-insensitive `"hey"i`), and a terminal referenced only by
+# another terminal is pruned and never produces a token of its own.
+TERMINAL_REFS_CASES = [
+    ("hello world", True),
+    ("howdy yall",  True),
+    ("HEY there",   True),   # scoped case-insensitive inline match
+    ("hey now",     True),
+    ("",            False),
+    ("hello",       False),  # missing trailing WORD
+]
+
+
 # JSON test cases (supplement to JSONTestSuite)
 JSON_CASES = [
     ('{}',                          True),
@@ -335,6 +350,24 @@ def generate_keywords():
     save_oracle("keywords", "cases", results)
 
 
+def generate_terminal_refs():
+    print("Generating terminal-reference oracles...")
+    grammar = load_grammar("terminal_refs")
+    results = []
+    for inp, should_pass in TERMINAL_REFS_CASES:
+        ok, result = run_case(grammar, inp, parser_type="lalr")
+        if should_pass and not ok:
+            print(f"  WARNING: expected to parse {inp!r}: {result}")
+        results.append({
+            "input": inp,
+            "should_pass": should_pass,
+            "ok": ok,
+            "tree": result if ok else None,
+            "error": result if not ok else None,
+        })
+    save_oracle("terminal_refs", "cases", results)
+
+
 def generate_json():
     print("Generating JSON oracles...")
     grammar = load_grammar("json")
@@ -399,6 +432,7 @@ if __name__ == "__main__":
     generate_json()
     generate_csv()
     generate_keywords()
+    generate_terminal_refs()
     generate_python_numbers()
     generate_lalr_core()
     generate_json_corpus_manifest()

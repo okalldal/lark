@@ -913,6 +913,9 @@ struct GrammarCompiler {
     start: Vec<String>,
     rules: Vec<Rule>,
     terminals: Vec<TerminalDef>,
+    /// Raw terminal definitions, collected before any are compiled so a terminal
+    /// body may reference another terminal defined later (`C: "C" | D`).
+    raw_terms: Vec<RawTerm>,
     ignore_patterns: Vec<Pattern>,
     /// Counter for generating unique anonymous rule names.
     anon_counter: usize,
@@ -940,6 +943,7 @@ impl GrammarCompiler {
             start,
             rules: Vec::new(),
             terminals: Vec::new(),
+            raw_terms: Vec::new(),
             ignore_patterns: Vec::new(),
             anon_counter: 0,
             term_counter: 0,
@@ -980,31 +984,35 @@ impl GrammarCompiler {
             }
         }
 
-        // Two passes: define terminals (and imports) before compiling rule bodies,
-        // so a string literal in a rule can unify with an already-known terminal
-        // of identical pattern (and avoid duplicate-name collisions).
-        let (term_items, rule_items): (Vec<Item>, Vec<Item>) = items.into_iter().partition(
-            |item| matches!(item, Item::TermItem(_) | Item::ImportItem(_) | Item::DeclareItem(_)),
-        );
-        for item in term_items {
+        // Staged compilation. Terminals are resolved as a whole *before* rule bodies
+        // so that (a) a string literal in a rule can unify with an already-known
+        // terminal and (b) a terminal body may reference any other terminal,
+        // regardless of definition order. Imports/declares run first so terminal
+        // bodies can reference imported terminals.
+        let mut rule_items = Vec::new();
+        let mut ignore_items = Vec::new();
+        for item in items {
             match item {
-                Item::TermItem(t) => self.compile_term(t)?,
                 Item::ImportItem(spec) => self.resolve_import(spec)?,
                 Item::DeclareItem(_) => { /* forward declarations — no-op for now */ }
-                _ => unreachable!(),
+                Item::TermItem(t) => self.raw_terms.push(t),
+                Item::RuleItem(r) if !r.params.is_empty() => { /* template — used on demand */ }
+                Item::RuleItem(r) => rule_items.push(r),
+                Item::IgnoreItem(expansions) => ignore_items.push(expansions),
             }
         }
-        for item in rule_items {
-            match item {
-                Item::RuleItem(r) if !r.params.is_empty() => { /* template — used on demand */ }
-                Item::RuleItem(r) => self.compile_rule(r)?,
-                Item::IgnoreItem(expansions) => {
-                    for expansion in expansions {
-                        let pat = self.expansion_to_pattern(&expansion)?;
-                        self.ignore_patterns.push(pat);
-                    }
-                }
-                _ => unreachable!(),
+
+        // Resolve all terminals (inlining terminal-to-terminal references).
+        self.resolve_terminals()?;
+
+        // Rule bodies, then `%ignore` expansions (which may reference terminals).
+        for r in rule_items {
+            self.compile_rule(r)?;
+        }
+        for expansions in ignore_items {
+            for expansion in expansions {
+                let pat = self.expansion_to_pattern(&expansion)?;
+                self.ignore_patterns.push(pat);
             }
         }
         Ok(())
@@ -1262,31 +1270,175 @@ impl GrammarCompiler {
         }
     }
 
-    fn compile_term(&mut self, raw: RawTerm) -> Result<(), GrammarError> {
-        // A terminal's expansion must resolve to a single pattern (or alternative of patterns).
-        // Sort alternatives longest-first to mirror Python Lark's ordering so that
-        // more-specific patterns (e.g. decimal+exponent) beat their prefixes.
-        let mut patterns = Vec::new();
-        for alt in raw.expansions {
-            let pat = self.expansion_to_pattern(&alt.expansion)?;
-            patterns.push(pat.as_regex_str().to_string());
+    /// Compile every user terminal to a regex, inlining terminal-to-terminal
+    /// references (`C: "C" | D`). Resolution is order-independent and memoized;
+    /// mutually-recursive terminals are rejected (a terminal denotes a *regular*
+    /// language, so it cannot reference itself). Each terminal is then registered
+    /// as a `Pattern::Re` — matching the previous behavior, where even a pure
+    /// string terminal becomes a regex.
+    fn resolve_terminals(&mut self) -> Result<(), GrammarError> {
+        let raw_terms = std::mem::take(&mut self.raw_terms);
+        let by_name: HashMap<&str, &RawTerm> =
+            raw_terms.iter().map(|t| (t.name.as_str(), t)).collect();
+        // Terminals already known (imports, declares) as inline-ready regex — a
+        // terminal body may reference these too.
+        let imported: HashMap<String, String> = self
+            .terminals
+            .iter()
+            .map(|t| (t.name.clone(), t.pattern.to_inline_regex()))
+            .collect();
+
+        let mut memo: HashMap<String, String> = HashMap::new();
+        for t in &raw_terms {
+            Self::resolve_term_regex(&t.name, &by_name, &imported, &mut memo, &mut Vec::new())?;
         }
-        let combined = if patterns.len() == 1 {
-            patterns.remove(0)
-        } else {
-            patterns.sort_by(|a, b| b.len().cmp(&a.len()));
-            patterns.into_iter().map(|p| format!("(?:{})", p)).collect::<Vec<_>>().join("|")
-        };
-        let pat = Pattern::Re(PatternRe::new(&combined, 0)?);
-        // A user terminal already defined (e.g. via %import) is not redefined.
-        if self.terminals.iter().any(|t| t.name == raw.name) {
-            return Ok(());
+
+        // Register in source order so terminal ordering stays stable. A terminal
+        // already defined via `%import` is not redefined (import wins).
+        for t in &raw_terms {
+            if self.terminals.iter().any(|td| td.name == t.name) {
+                continue;
+            }
+            let regex = &memo[&t.name];
+            let pat = Pattern::Re(PatternRe::new(regex.as_str(), 0)?);
+            let filter_out = t.name.starts_with('_');
+            self.terminals
+                .push(TerminalDef::new(&t.name, pat, t.priority).with_filter_out(filter_out));
         }
-        let filter_out = raw.name.starts_with('_');
-        self.terminals.push(
-            TerminalDef::new(&raw.name, pat, raw.priority).with_filter_out(filter_out),
-        );
         Ok(())
+    }
+
+    /// Resolve one terminal to its combined regex string, recursing into any
+    /// referenced terminals. Memoized; `stack` carries the active resolution chain
+    /// for cycle detection.
+    fn resolve_term_regex(
+        name: &str,
+        by_name: &HashMap<&str, &RawTerm>,
+        imported: &HashMap<String, String>,
+        memo: &mut HashMap<String, String>,
+        stack: &mut Vec<String>,
+    ) -> Result<String, GrammarError> {
+        if let Some(r) = memo.get(name) {
+            return Ok(r.clone());
+        }
+        // Reference to an imported/declared terminal, or a common-library terminal.
+        if let Some(r) = imported.get(name) {
+            return Ok(r.clone());
+        }
+        let Some(raw) = by_name.get(name) else {
+            if let Some(&(_, src)) = COMMON_TERMINALS.iter().find(|(n, _)| *n == name) {
+                return Ok(src.to_string());
+            }
+            return Err(GrammarError::UndefinedTerminal { name: name.to_string() });
+        };
+        if stack.iter().any(|n| n == name) {
+            stack.push(name.to_string());
+            return Err(GrammarError::Other {
+                msg: format!("Cyclic terminal definition: {}", stack.join(" -> ")),
+            });
+        }
+        stack.push(name.to_string());
+
+        // Build one regex per alternative, then join longest-first (mirroring
+        // Python Lark) so a more specific alternative beats its own prefix.
+        let mut alts = Vec::with_capacity(raw.expansions.len());
+        for alt in &raw.expansions {
+            let mut parts = String::new();
+            for expr in &alt.expansion {
+                parts.push_str(&Self::term_expr_regex(expr, by_name, imported, memo, stack)?);
+            }
+            alts.push(parts);
+        }
+        stack.pop();
+
+        let combined = if alts.len() == 1 {
+            alts.pop().unwrap()
+        } else {
+            alts.sort_by(|a, b| b.len().cmp(&a.len()));
+            alts.into_iter().map(|p| format!("(?:{p})")).collect::<Vec<_>>().join("|")
+        };
+        memo.insert(name.to_string(), combined.clone());
+        Ok(combined)
+    }
+
+    /// Regex for a single `Expr` appearing in a *terminal* body. Unlike
+    /// `expr_to_pattern`, a terminal reference is resolved (and inlined) rather
+    /// than looked up after the fact, and flags are applied as scoped groups.
+    fn term_expr_regex(
+        expr: &Expr,
+        by_name: &HashMap<&str, &RawTerm>,
+        imported: &HashMap<String, String>,
+        memo: &mut HashMap<String, String>,
+        stack: &mut Vec<String>,
+    ) -> Result<String, GrammarError> {
+        let regex = match expr {
+            Expr::Value(Value::Literal(LiteralVal::Str(s, ci))) => {
+                let escaped = regex::escape(s);
+                if *ci { format!("(?i:{escaped})") } else { escaped }
+            }
+            Expr::Value(Value::Literal(LiteralVal::Re(pattern, flags))) => {
+                // Validate and apply any flags as a scoped group.
+                Pattern::Re(PatternRe::new(pattern.as_str(), *flags)?).to_inline_regex()
+            }
+            Expr::Value(Value::Range(from, to)) => {
+                if from.chars().count() != 1 || to.chars().count() != 1 {
+                    return Err(GrammarError::Other {
+                        msg: "Range requires single characters".to_string(),
+                    });
+                }
+                format!("[{}-{}]", regex::escape(from), regex::escape(to))
+            }
+            Expr::Value(Value::Terminal(referenced)) => {
+                let inner = Self::resolve_term_regex(referenced, by_name, imported, memo, stack)?;
+                format!("(?:{inner})")
+            }
+            Expr::Repeat { inner, min, max } => {
+                let inner_re = Self::term_expr_regex(inner, by_name, imported, memo, stack)?;
+                let quantifier = match (*min, *max) {
+                    (0, Some(1)) => "?".to_string(),
+                    (1, None) => "+".to_string(),
+                    (0, None) => "*".to_string(),
+                    (n, Some(m)) if n == m => format!("{{{n}}}"),
+                    (n, Some(m)) => format!("{{{n},{m}}}"),
+                    (n, None) => format!("{{{n},}}"),
+                };
+                format!("(?:{inner_re}){quantifier}")
+            }
+            Expr::Group(alts) => {
+                let parts = Self::term_alts_regex(alts, by_name, imported, memo, stack)?;
+                format!("(?:{})", parts.join("|"))
+            }
+            Expr::Maybe(alts) => {
+                let parts = Self::term_alts_regex(alts, by_name, imported, memo, stack)?;
+                format!("(?:{})?", parts.join("|"))
+            }
+            Expr::Value(Value::Rule(name)) | Expr::Value(Value::TemplateUsage { name, .. }) => {
+                return Err(GrammarError::Other {
+                    msg: format!("Terminal definition cannot reference rule {name:?}"),
+                });
+            }
+        };
+        Ok(regex)
+    }
+
+    /// Regex strings for each alternative of a parenthesised group inside a
+    /// terminal body (concatenating each alternative's exprs).
+    fn term_alts_regex(
+        alts: &[AliasedExpansion],
+        by_name: &HashMap<&str, &RawTerm>,
+        imported: &HashMap<String, String>,
+        memo: &mut HashMap<String, String>,
+        stack: &mut Vec<String>,
+    ) -> Result<Vec<String>, GrammarError> {
+        let mut out = Vec::with_capacity(alts.len());
+        for alt in alts {
+            let mut parts = String::new();
+            for expr in &alt.expansion {
+                parts.push_str(&Self::term_expr_regex(expr, by_name, imported, memo, stack)?);
+            }
+            out.push(parts);
+        }
+        Ok(out)
     }
 
     fn expansion_to_pattern(&self, exprs: &[Expr]) -> Result<Pattern, GrammarError> {
@@ -1366,7 +1518,7 @@ impl GrammarCompiler {
                 } else if let Some(&(_, pat_str)) = COMMON_TERMINALS.iter().find(|(n, _)| *n == name.as_str()) {
                     Ok(Pattern::Re(PatternRe::new(pat_str, 0)?))
                 } else {
-                    Err(GrammarError::Other { msg: format!("Unknown terminal in ignore: {name}") })
+                    Err(GrammarError::UndefinedTerminal { name: name.clone() })
                 }
             }
             _ => Err(GrammarError::Other { msg: format!("Cannot convert {:?} to pattern", expr) }),
@@ -1510,6 +1662,23 @@ impl GrammarCompiler {
             let name = format!("__IGNORE_{}", i);
             self.terminals.push(TerminalDef::new(&name, pat, 0).with_filter_out(true));
         }
+
+        // Prune terminals that no rule (or `%ignore`) references. A terminal used
+        // only inside another terminal (`C: "C" | D` — `D` is inlined into `C`)
+        // has no token of its own, exactly as Python Lark drops it. Terminals
+        // referenced by a rule body, and the synthetic `%ignore` terminals, stay.
+        let mut used: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for rule in &self.rules {
+            for sym in &rule.expansion {
+                if let Symbol::Terminal(t) = sym {
+                    used.insert(t.name.as_str());
+                }
+            }
+        }
+        for name in &ignore_names {
+            used.insert(name.as_str());
+        }
+        self.terminals.retain(|t| used.contains(t.name.as_str()));
 
         // Sort terminals by (priority desc, max_width desc, name asc)
         self.terminals.sort_by(|a, b| {

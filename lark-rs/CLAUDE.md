@@ -428,9 +428,53 @@ wild rely on these. Document as a known parity gap when adding Phase-3 grammar l
 All Phase-1 correctness bugs (BUG-1 through BUG-7) are **done**. The compliance bank
 is the regression net: fixing a bug flips XFAIL entries to passing — regenerate
 `xfail.json` and watch parity rise (BUG-3 flipped 3, BUG-7 flipped 8, lifting the bank
-to ~68%). Next: keep widening compliance parity (the remaining XFAILs are unimplemented
-features and structural bugs — measure with the divergence breakdown), then start
-Phase 2 — Earley + SPPF.
+to ~68%).
+
+### Strategy: consolidate the load-bearing abstractions *before* Phase 2
+
+A 2026-06-03 architecture review settled the sequencing question (feature-complete
+then refactor **vs.** consolidate now). The answer is neither extreme: in a parsing
+toolkit the architecture *is* the product — Earley, CYK, the dynamic lexer, error
+recovery, the indenter and the bindings are *combinations* over the same core
+(lexer × parser × tree-builder × grammar-IR), not independent features. So we
+consolidate the few abstractions every later phase stands on **now** (they get more
+expensive to change each week), and defer the local optimizations until a profiler
+or a feature demands them. This is targeted, not a freeze: each step lands green
+against the oracle suite + compliance bank, and we keep refactoring continuously
+rather than saving a big-bang rewrite for the end.
+
+**North star: the compliance-bank percentage, not the feature checklist.** A feature
+is not "done" until the bank says it generalizes beyond JSON/arithmetic.
+
+**Load-bearing — do before Earley (in order):**
+
+1. **Terminal algebra** (`loader.rs`). Split grammar-expansion from
+   terminal-compilation and give terminals a real compiled form that can *reference
+   other terminals* (`C: "C" | D`), with scoped-flag inlining and dead-terminal
+   pruning. This is where ~22 build-failures and a chunk of parse-failures live, and
+   it is the substrate the Phase-3 grammar standard library needs. Raises parity
+   *and* fixes the foundation. **← Sprint 1 (in progress).**
+2. **`TokenSource` trait.** Collapse the bespoke per-frontend coupling (`parse` vs
+   `parse_contextual`, `FrontendKind::Lalr{Basic,Contextual}`) onto one interface:
+   "give me the next token, given the parser's acceptable-terminal set." Earley + the
+   dynamic lexer are the next combinations that will punish its absence — get the
+   interface right before they land. Pure refactor, bank stays green.
+3. **Tree/output IR.** Intern tree labels (the engine still clones `tree_name:
+   String` on every reduce and `Tree::data`/`Token.type_` stay `String`). Settle one
+   tree-builder *before* Earley's SPPF materializes a second one shaped differently.
+4. **Differential fuzzer.** Turn the static oracle into an active one: generate random
+   inputs (then random grammars) and diff lark-rs against Python Lark automatically.
+   Cheap on top of the existing harness; de-risks every subsequent feature.
+
+**Then** build **Phase 2 — Earley + SPPF** on `CompiledGrammar`, sharing the
+`TokenSource` and the tree-builder, keying forest nodes by `SymbolId`.
+
+**Local — defer deliberately (profiler-gated, nothing is blocked on them):**
+FIRST/FOLLOW bitsets; the DeRemer–Pennello relational lookahead method (the current
+`lr1_closure` snapshots its map each fixpoint iteration — correct but quadratic on
+large grammars); zero-copy token spans; the residual name-based lookups
+(`augmented_start`, `initial_state` still `format!` + hash a name the IR was meant to
+retire).
 
 ### Core IR consolidation (done 2026-06-03)
 

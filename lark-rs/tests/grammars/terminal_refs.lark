@@ -1,0 +1,18 @@
+// Terminals that reference other terminals.
+//   GREETING inlines an alternation of terminals (HELLO | HOWDY)
+//   HOWDY inlines a *sequence* of terminals (HOW DY)
+//   WORD inlines a repetition of a referenced terminal (LETTER+)
+//   GREET_CI inlines a case-insensitive terminal, exercising scoped-flag inlining
+// HELLO/HOWDY/HOW/DY/LETTER/HEY are referenced only by other terminals, so they
+// are pruned and never appear as tokens of their own.
+start: GREETING WORD
+GREETING: HELLO | HOWDY | GREET_CI
+HELLO: "hello"
+HOWDY: HOW DY
+HOW: "how"
+DY: "dy"
+GREET_CI: HEY
+HEY: "hey"i
+WORD: LETTER+
+LETTER: "a".."z"
+%ignore " "
