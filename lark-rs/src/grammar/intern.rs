@@ -39,6 +39,10 @@ impl SymbolId {
     /// The synthetic end-of-input terminal `$END`. Always interned first.
     pub const END: SymbolId = SymbolId(0);
 
+    /// Placeholder for a token not produced by a lexer (test/manual `Token`s).
+    /// Never indexes a parse table — such tokens take the "unexpected" path.
+    pub const UNSET: SymbolId = SymbolId(u32::MAX);
+
     #[inline]
     pub fn index(self) -> usize {
         self.0 as usize

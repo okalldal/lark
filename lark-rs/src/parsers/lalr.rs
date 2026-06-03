@@ -1,42 +1,65 @@
 //! LALR(1) parser: table construction and execution.
 //!
 //! The pipeline is:
-//! 1. `GrammarAnalysis` computes FIRST/FOLLOW/NULLABLE.
+//! 1. `GrammarAnalysis` computes NULLABLE/FIRST.
 //! 2. `LR0Builder` constructs LR(0) item sets (states).
-//! 3. `LookaheadComputer` propagates LALR(1) lookaheads.
-//! 4. `build_lalr_table` assembles the ACTION/GOTO tables.
+//! 3. `LookaheadComputer` propagates true LALR(1) lookaheads.
+//! 4. `build_lalr_table` assembles dense ACTION/GOTO tables.
 //! 5. `LalrParser` drives the state machine against a token stream.
+//!
+//! The grammar is fully interned ([`CompiledGrammar`]): every symbol is a `Copy`
+//! [`SymbolId`], terminals occupy id range `[0, n_terminals)` and non-terminals
+//! `[n_terminals, len)`. So ACTION is a dense `[state][terminal_id]` matrix and
+//! GOTO a dense `[state][nonterminal_index]` matrix — both pure array indexing,
+//! no hashing on the hot path. Every tree-shaping decision is a precomputed flag
+//! on the rule; the engine never inspects a symbol's name.
 
-use std::collections::{HashMap, HashSet, BTreeMap, BTreeSet, VecDeque};
-use crate::grammar::{Grammar, symbol::*, rule::Rule, analysis::{GrammarAnalysis, END_TERMINAL}};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+
 use crate::error::{GrammarError, ParseError};
-use crate::tree::{Tree, Token, Child};
+use crate::grammar::analysis::GrammarAnalysis;
+use crate::grammar::intern::{CompiledGrammar, CompiledRule, SymbolId, SymbolTable};
 use crate::lexer::{ContextualLexer, LexerState};
+use crate::tree::{Child, Token, Tree};
 
 // ─── Parse table ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub enum Action {
-    Shift(usize),          // shift and go to state N
-    Reduce(usize),         // reduce using rule index N
+    Shift(usize),  // shift and go to state N
+    Reduce(usize), // reduce using rule index N
     Accept,
 }
 
-/// Immutable parse tables produced by LALR analysis.
+/// Immutable parse tables produced by LALR analysis. Dense and id-indexed.
 #[derive(Debug)]
 pub struct ParseTable {
-    /// action[state][terminal_name] → Action
-    pub action: Vec<HashMap<String, Action>>,
-    /// goto[state][nonterminal_name] → next_state
-    pub goto: Vec<HashMap<String, usize>>,
+    /// `action[state][terminal_id]` → action (None = error).
+    pub action: Vec<Vec<Option<Action>>>,
+    /// `goto[state][nonterminal_index]` → next state (None = no transition).
+    pub goto: Vec<Vec<Option<u32>>>,
     /// Start state per start symbol.
-    pub start_states: HashMap<String, usize>,
-    /// Accept states per start symbol.
-    pub end_states: HashMap<String, usize>,
+    pub start_states: HashMap<SymbolId, usize>,
     /// Compiled rules (indexed by rule index).
-    pub rules: Vec<Rule>,
-    /// Names of terminals filtered from the tree by default (`filter_out`).
-    pub filter_out: HashSet<String>,
+    pub rules: Vec<CompiledRule>,
+    /// `filter_out[terminal_id]` — token dropped from the tree by default.
+    pub filter_out: Vec<bool>,
+    /// Symbol metadata (names for diagnostics, kind, …).
+    pub symbols: SymbolTable,
+    /// Size of the terminal id range; non-terminal GOTO index is `id - this`.
+    pub n_terminals: usize,
+}
+
+impl ParseTable {
+    #[inline]
+    fn is_filtered(&self, id: SymbolId) -> bool {
+        self.filter_out.get(id.index()).copied().unwrap_or(false)
+    }
+
+    #[inline]
+    fn action_at(&self, state: usize, terminal: SymbolId) -> Option<&Action> {
+        self.action.get(state)?.get(terminal.index())?.as_ref()
+    }
 }
 
 // ─── LR(0) item ──────────────────────────────────────────────────────────────
@@ -52,15 +75,15 @@ impl LR0Item {
         LR0Item { rule_idx, dot }
     }
 
-    fn expected<'a>(&self, rules: &'a [Rule]) -> Option<&'a Symbol> {
-        rules[self.rule_idx].expansion.get(self.dot)
+    fn expected(&self, rules: &[CompiledRule]) -> Option<SymbolId> {
+        rules[self.rule_idx].expansion.get(self.dot).copied()
     }
 
     fn advance(&self) -> Self {
         LR0Item { rule_idx: self.rule_idx, dot: self.dot + 1 }
     }
 
-    fn is_complete(&self, rules: &[Rule]) -> bool {
+    fn is_complete(&self, rules: &[CompiledRule]) -> bool {
         self.dot >= rules[self.rule_idx].expansion.len()
     }
 }
@@ -70,34 +93,42 @@ type ItemSet = BTreeSet<LR0Item>;
 // ─── LR(0) state machine builder ─────────────────────────────────────────────
 
 struct LR0Builder<'g> {
-    rules: &'g [Rule],
-    /// Maps (nonterminal name) → [rule indices]
-    rule_index: HashMap<&'g str, Vec<usize>>,
-    /// States: index → ItemSet
+    rules: &'g [CompiledRule],
+    n_terminals: usize,
+    /// non-terminal id → rule indices producing it.
+    rule_index: HashMap<SymbolId, Vec<usize>>,
     states: Vec<ItemSet>,
-    /// Transitions: (state_id, Symbol) → state_id
-    transitions: BTreeMap<(usize, String), usize>,
+    transitions: BTreeMap<(usize, SymbolId), usize>,
 }
 
 impl<'g> LR0Builder<'g> {
-    fn new(rules: &'g [Rule]) -> Self {
-        let mut rule_index: HashMap<&str, Vec<usize>> = HashMap::new();
+    fn new(rules: &'g [CompiledRule], n_terminals: usize) -> Self {
+        let mut rule_index: HashMap<SymbolId, Vec<usize>> = HashMap::new();
         for (i, rule) in rules.iter().enumerate() {
-            rule_index.entry(rule.origin.name.as_str()).or_default().push(i);
+            rule_index.entry(rule.origin).or_default().push(i);
         }
-        LR0Builder { rules, rule_index, states: Vec::new(), transitions: BTreeMap::new() }
+        LR0Builder { rules, n_terminals, rule_index, states: Vec::new(), transitions: BTreeMap::new() }
     }
 
-    /// Compute the epsilon-closure of a set of LR(0) items.
+    #[inline]
+    fn is_nonterminal(&self, id: SymbolId) -> bool {
+        id.index() >= self.n_terminals
+    }
+
+    /// Epsilon-closure of a set of LR(0) items.
     fn closure(&self, kernel: &ItemSet) -> ItemSet {
         let mut result = kernel.clone();
         let mut worklist: VecDeque<LR0Item> = kernel.iter().cloned().collect();
         while let Some(item) = worklist.pop_front() {
-            if let Some(Symbol::NonTerminal(nt)) = item.expected(self.rules) {
-                for &rule_idx in self.rule_index.get(nt.name.as_str()).unwrap_or(&vec![]) {
-                    let new_item = LR0Item::new(rule_idx, 0);
-                    if result.insert(new_item.clone()) {
-                        worklist.push_back(new_item);
+            if let Some(sym) = item.expected(self.rules) {
+                if self.is_nonterminal(sym) {
+                    if let Some(prods) = self.rule_index.get(&sym) {
+                        for &rule_idx in prods {
+                            let new_item = LR0Item::new(rule_idx, 0);
+                            if result.insert(new_item.clone()) {
+                                worklist.push_back(new_item);
+                            }
+                        }
                     }
                 }
             }
@@ -105,64 +136,48 @@ impl<'g> LR0Builder<'g> {
         result
     }
 
-    /// Compute the GOTO transition from a state on a symbol.
-    fn goto(&self, state: &ItemSet, sym: &Symbol) -> ItemSet {
-        let moved: ItemSet = state.iter()
+    /// GOTO transition from a state on a symbol.
+    fn goto(&self, state: &ItemSet, sym: SymbolId) -> ItemSet {
+        let moved: ItemSet = state
+            .iter()
             .filter(|item| item.expected(self.rules) == Some(sym))
             .map(|item| item.advance())
             .collect();
         self.closure(&moved)
     }
 
-    /// Build all LR(0) states starting from augmented start rules.
-    fn build(&mut self, start_names: &[String]) -> HashMap<String, usize> {
+    /// Build all LR(0) states from the augmented start rules.
+    ///
+    /// `starts`: (start symbol id, its augmented `$root` rule index).
+    fn build(&mut self, starts: &[(SymbolId, usize)]) -> HashMap<SymbolId, usize> {
         let mut start_states = HashMap::new();
-        // O(1) state deduplication + a worklist for iterative construction.
         let mut index: HashMap<ItemSet, usize> = HashMap::new();
         let mut worklist: VecDeque<usize> = VecDeque::new();
 
-        for start_name in start_names {
-            // Find the augmented start rule: $root_<name> -> <name> $END
-            // We synthesize a kernel item for it.
-            let aug_name = format!("$root_{}", start_name);
-            let aug_idx = self.rules.iter().position(|r| r.origin.name == aug_name);
-            let aug_idx = match aug_idx {
-                Some(i) => i,
-                None => {
-                    // No augmented rule — use first rule for this start symbol
-                    match self.rules.iter().position(|r| r.origin.name == *start_name) {
-                        Some(i) => i,
-                        None => continue,
-                    }
-                }
-            };
-
+        for &(start_id, aug_idx) in starts {
             let kernel: ItemSet = std::iter::once(LR0Item::new(aug_idx, 0)).collect();
             let s0 = self.intern_state(kernel, &mut index, &mut worklist);
-            start_states.insert(start_name.clone(), s0);
+            start_states.insert(start_id, s0);
         }
 
-        // Process states iteratively (a worklist, not recursion) so deep GOTO
-        // chains — e.g. `"A"~8191` expands to thousands of chained states — do not
-        // overflow the stack.
+        // Iterative worklist (not recursion) so deep GOTO chains — e.g. `"A"~8191`
+        // expands to thousands of chained states — do not overflow the stack.
         while let Some(id) = worklist.pop_front() {
             let closed = self.states[id].clone();
-            let symbols: HashSet<Symbol> = closed.iter()
-                .filter_map(|item| item.expected(self.rules).cloned())
-                .collect();
+            let symbols: BTreeSet<SymbolId> =
+                closed.iter().filter_map(|item| item.expected(self.rules)).collect();
             for sym in symbols {
-                let next_state_items = self.goto(&closed, &sym);
+                let next_state_items = self.goto(&closed, sym);
                 if !next_state_items.is_empty() {
                     let next_id = self.intern_state(next_state_items, &mut index, &mut worklist);
-                    self.transitions.insert((id, sym.name().to_string()), next_id);
+                    self.transitions.insert((id, sym), next_id);
                 }
             }
         }
         start_states
     }
 
-    /// Return the state id for the closure of `kernel`, creating it (and queuing
-    /// it for processing) if it does not already exist. O(1) lookup via `index`.
+    /// State id for the closure of `kernel`, creating + queuing it if new.
     fn intern_state(
         &mut self,
         kernel: ItemSet,
@@ -183,82 +198,73 @@ impl<'g> LR0Builder<'g> {
 
 // ─── LALR(1) lookahead computation ───────────────────────────────────────────
 
-/// Sentinel lookahead used by the spontaneous-generation / propagation
-/// algorithm to mark lookaheads that *propagate* from a kernel item rather than
-/// being generated spontaneously. It can never collide with a real terminal
-/// name (terminals are identifiers or `$`-prefixed synthetics).
-const PROPAGATE_MARK: &str = "#";
+/// Sentinel lookahead marking lookaheads that *propagate* from a kernel item
+/// rather than being generated spontaneously. [`SymbolId::UNSET`] can never
+/// collide with a real terminal (terminals live in `[0, n_terminals)`).
+const PROPAGATE_MARK: SymbolId = SymbolId::UNSET;
 
-/// Computes true LALR(1) lookaheads for every complete (reduce) item using the
-/// canonical spontaneous-generation-and-propagation method (Aho/Sethi/Ullman
-/// algorithms 4.62–4.63).
-///
-/// This is strictly more precise than SLR(1) FOLLOW sets: a reduce never picks
-/// up a lookahead in a state where that reduction cannot actually be followed
-/// by the token. That precision is what avoids spurious conflicts and is what
-/// the contextual lexer relies on.
+/// Computes true LALR(1) lookaheads for every reduce item via spontaneous
+/// generation + propagation (Aho/Sethi/Ullman 4.62–4.63). Strictly more precise
+/// than SLR FOLLOW sets, which is what avoids spurious conflicts and what the
+/// contextual lexer relies on.
 struct LookaheadComputer<'g> {
-    rules: &'g [Rule],
+    rules: &'g [CompiledRule],
     states: &'g [ItemSet],
-    transitions: &'g BTreeMap<(usize, String), usize>,
+    transitions: &'g BTreeMap<(usize, SymbolId), usize>,
     analysis: &'g GrammarAnalysis,
-    rule_index: HashMap<&'g str, Vec<usize>>,
 }
 
 impl<'g> LookaheadComputer<'g> {
     fn new(
-        rules: &'g [Rule],
+        rules: &'g [CompiledRule],
         states: &'g [ItemSet],
-        transitions: &'g BTreeMap<(usize, String), usize>,
+        transitions: &'g BTreeMap<(usize, SymbolId), usize>,
         analysis: &'g GrammarAnalysis,
     ) -> Self {
-        let mut rule_index: HashMap<&str, Vec<usize>> = HashMap::new();
-        for (i, rule) in rules.iter().enumerate() {
-            rule_index.entry(rule.origin.name.as_str()).or_default().push(i);
-        }
-        LookaheadComputer { rules, states, transitions, analysis, rule_index }
+        LookaheadComputer { rules, states, transitions, analysis }
     }
 
-    /// Kernel items are those with the dot past the start, plus the augmented
-    /// start items `$root_X → • X` (dot 0).
+    /// Kernel items: dot past the start, plus the augmented start items (dot 0).
     fn is_kernel(&self, item: &LR0Item) -> bool {
-        item.dot > 0 || self.rules[item.rule_idx].origin.name.starts_with("$root_")
+        item.dot > 0 || self.rules[item.rule_idx].is_start
     }
 
-    /// LR(1) closure: given kernel items each carrying a set of lookahead
-    /// terminals, propagate lookaheads to every reachable closure item.
-    /// For an item `A → α • B β` with lookahead set `L`, each production
-    /// `B → γ` gains `[B → • γ]` with lookaheads `FIRST(β)` (plus `L` when `β`
-    /// is nullable). Iterates to a fixpoint.
+    fn rule_index(&self) -> HashMap<SymbolId, Vec<usize>> {
+        let mut idx: HashMap<SymbolId, Vec<usize>> = HashMap::new();
+        for (i, rule) in self.rules.iter().enumerate() {
+            idx.entry(rule.origin).or_default().push(i);
+        }
+        idx
+    }
+
+    /// LR(1) closure: propagate lookahead sets from kernel items to every
+    /// reachable closure item, to a fixpoint.
     fn lr1_closure(
         &self,
-        kernel: &HashMap<LR0Item, HashSet<String>>,
-    ) -> HashMap<LR0Item, HashSet<String>> {
-        let mut result: HashMap<LR0Item, HashSet<String>> = kernel.clone();
+        kernel: &HashMap<LR0Item, HashSet<SymbolId>>,
+        rule_index: &HashMap<SymbolId, Vec<usize>>,
+    ) -> HashMap<LR0Item, HashSet<SymbolId>> {
+        let mut result: HashMap<LR0Item, HashSet<SymbolId>> = kernel.clone();
         let mut changed = true;
         while changed {
             changed = false;
-            let snapshot: Vec<(LR0Item, HashSet<String>)> =
+            let snapshot: Vec<(LR0Item, HashSet<SymbolId>)> =
                 result.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
             for (item, la) in snapshot {
-                if let Some(Symbol::NonTerminal(nt)) = item.expected(self.rules) {
-                    let rule = &self.rules[item.rule_idx];
-                    let beta: Vec<Symbol> = rule.expansion[item.dot + 1..].to_vec();
-                    let (first_beta, beta_nullable) = self.analysis.first_of_seq(&beta);
-                    let mut seed: HashSet<String> =
-                        first_beta.iter().map(|t| t.name.clone()).collect();
-                    if beta_nullable {
-                        seed.extend(la.iter().cloned());
-                    }
-                    if let Some(prods) = self.rule_index.get(nt.name.as_str()) {
-                        for &ri in prods {
-                            let it = LR0Item::new(ri, 0);
-                            let entry = result.entry(it).or_default();
-                            for s in &seed {
-                                if entry.insert(s.clone()) {
-                                    changed = true;
-                                }
-                            }
+                let Some(sym) = item.expected(self.rules) else { continue };
+                let Some(prods) = rule_index.get(&sym) else { continue };
+                let rule = &self.rules[item.rule_idx];
+                let beta = &rule.expansion[item.dot + 1..];
+                let (first_beta, beta_nullable) = self.analysis.first_of_seq(beta);
+                let mut seed = first_beta;
+                if beta_nullable {
+                    seed.extend(la.iter().copied());
+                }
+                for &ri in prods {
+                    let entry = result.entry(LR0Item::new(ri, 0)).or_default();
+                    for &s in &seed {
+                        if entry.insert(s) {
+                            changed = true;
                         }
                     }
                 }
@@ -267,22 +273,22 @@ impl<'g> LookaheadComputer<'g> {
         result
     }
 
-    /// Compute lookaheads for all reduce items in all states.
-    /// Returns: `reduce_la[state_id][rule_idx]` → lookahead terminals, for every
-    /// complete item in the state (including ε-rule items).
-    fn compute(&self) -> HashMap<usize, HashMap<usize, HashSet<String>>> {
+    /// Lookaheads for every reduce item in every state.
+    /// `reduce_la[state][rule_idx]` → lookahead terminals.
+    fn compute(&self) -> HashMap<usize, HashMap<usize, HashSet<SymbolId>>> {
+        let rule_index = self.rule_index();
         // Kernel-item lookahead sets, keyed (state, item).
-        let mut kla: HashMap<(usize, LR0Item), HashSet<String>> = HashMap::new();
+        let mut kla: HashMap<(usize, LR0Item), HashSet<SymbolId>> = HashMap::new();
         // Propagation links: (from_state, from_item) → (to_state, to_item).
         let mut links: Vec<((usize, LR0Item), (usize, LR0Item))> = Vec::new();
 
-        // Seed all kernel items; the augmented start kernels get $END.
+        // Seed augmented start kernels with $END.
         for (state_id, state) in self.states.iter().enumerate() {
             for item in state {
                 if self.is_kernel(item) {
                     let set = kla.entry((state_id, item.clone())).or_default();
-                    if self.rules[item.rule_idx].origin.name.starts_with("$root_") {
-                        set.insert(END_TERMINAL.to_string());
+                    if self.rules[item.rule_idx].is_start {
+                        set.insert(SymbolId::END);
                     }
                 }
             }
@@ -296,43 +302,29 @@ impl<'g> LookaheadComputer<'g> {
                     continue;
                 }
                 let mut seed = HashMap::new();
-                seed.insert(
-                    k.clone(),
-                    std::iter::once(PROPAGATE_MARK.to_string()).collect(),
-                );
-                let closed = self.lr1_closure(&seed);
+                seed.insert(k.clone(), std::iter::once(PROPAGATE_MARK).collect());
+                let closed = self.lr1_closure(&seed, &rule_index);
                 for (item, la_set) in &closed {
-                    let sym = match item.expected(self.rules) {
-                        Some(s) => s,
-                        None => continue,
-                    };
-                    let goto_state = match self.transitions.get(&(state_id, sym.name().to_string())) {
-                        Some(&g) => g,
-                        None => continue,
-                    };
+                    let Some(sym) = item.expected(self.rules) else { continue };
+                    let Some(&goto_state) = self.transitions.get(&(state_id, sym)) else { continue };
                     let advanced = item.advance();
-                    for a in la_set {
+                    for &a in la_set {
                         if a == PROPAGATE_MARK {
                             links.push(((state_id, k.clone()), (goto_state, advanced.clone())));
                         } else {
-                            kla.entry((goto_state, advanced.clone()))
-                                .or_default()
-                                .insert(a.clone());
+                            kla.entry((goto_state, advanced.clone())).or_default().insert(a);
                         }
                     }
                 }
             }
         }
 
-        // Propagate lookaheads along the links until a fixpoint.
+        // Propagate lookaheads along links to a fixpoint.
         let mut changed = true;
         while changed {
             changed = false;
             for (from, to) in &links {
-                let src: Vec<String> = kla
-                    .get(from)
-                    .map(|s| s.iter().cloned().collect())
-                    .unwrap_or_default();
+                let src: Vec<SymbolId> = kla.get(from).map(|s| s.iter().copied().collect()).unwrap_or_default();
                 if src.is_empty() {
                     continue;
                 }
@@ -345,22 +337,18 @@ impl<'g> LookaheadComputer<'g> {
             }
         }
 
-        // For each state, run a final LR(1) closure on the kernel lookaheads so
-        // that ε-rule reduce items (which are closure items, not kernels) also
-        // receive their lookaheads, then collect per reduce rule.
-        let mut reduce_la: HashMap<usize, HashMap<usize, HashSet<String>>> = HashMap::new();
+        // Final per-state LR(1) closure so ε-rule reduce items (closure items,
+        // not kernels) also receive lookaheads; collect per reduce rule.
+        let mut reduce_la: HashMap<usize, HashMap<usize, HashSet<SymbolId>>> = HashMap::new();
         for (state_id, state) in self.states.iter().enumerate() {
-            let mut kernel: HashMap<LR0Item, HashSet<String>> = HashMap::new();
+            let mut kernel: HashMap<LR0Item, HashSet<SymbolId>> = HashMap::new();
             for item in state {
                 if self.is_kernel(item) {
-                    let set = kla
-                        .get(&(state_id, item.clone()))
-                        .cloned()
-                        .unwrap_or_default();
+                    let set = kla.get(&(state_id, item.clone())).cloned().unwrap_or_default();
                     kernel.insert(item.clone(), set);
                 }
             }
-            let closed = self.lr1_closure(&kernel);
+            let closed = self.lr1_closure(&kernel, &rule_index);
             for (item, la_set) in closed {
                 if item.is_complete(self.rules) {
                     reduce_la
@@ -378,91 +366,64 @@ impl<'g> LookaheadComputer<'g> {
 
 // ─── Table construction ───────────────────────────────────────────────────────
 
-pub fn build_lalr_table(grammar: &Grammar) -> Result<ParseTable, GrammarError> {
-    // Augment grammar: add $root_<start> → <start> rules
-    let mut rules = grammar.rules.clone();
+pub fn build_lalr_table(grammar: &CompiledGrammar) -> Result<ParseTable, GrammarError> {
+    let rules = &grammar.rules;
+    let n_terminals = grammar.n_terminals();
+    let n_nonterminals = grammar.symbols.n_nonterminals();
+    let analysis = GrammarAnalysis::compute(grammar);
 
-    for start in &grammar.start {
-        let aug_rule = Rule::simple(
-            NonTerminal::new(format!("$root_{}", start)),
-            vec![Symbol::NonTerminal(NonTerminal::new(start.clone()))],
-        );
-        rules.push(aug_rule);
-    }
-
-    // Grammar analysis
-    let aug_grammar = Grammar {
-        rules: rules.clone(),
-        terminals: grammar.terminals.clone(),
-        ignore: grammar.ignore.clone(),
-        start: grammar.start.clone(),
-    };
-    let analysis = GrammarAnalysis::compute(&aug_grammar);
-
-    // Build a lookup set of terminal names for correct SHIFT vs GOTO classification.
-    // We cannot rely on naming conventions (e.g. anonymous non-terminals use "__anon_"
-    // which clashes with the "__RSQB" naming of literal terminals).
-    let terminal_names: HashSet<&str> = grammar.terminals.iter()
-        .map(|t| t.name.as_str())
+    // Pair each start symbol with its augmented `$root` rule index.
+    let starts: Vec<(SymbolId, usize)> = grammar
+        .start
+        .iter()
+        .filter_map(|&s| {
+            rules
+                .iter()
+                .position(|r| r.is_start && r.expansion == [s])
+                .map(|idx| (s, idx))
+        })
         .collect();
 
-    // Terminals filtered from the tree by default (filter_out), used by
-    // apply_rule_options instead of a name-prefix heuristic.
-    let filter_out: HashSet<String> = grammar.terminals.iter()
-        .filter(|t| t.filter_out)
-        .map(|t| t.name.clone())
-        .collect();
-
-    // LR(0) state construction
-    let mut builder = LR0Builder::new(&rules);
-    let start_states = builder.build(&grammar.start);
+    // LR(0) state construction.
+    let mut builder = LR0Builder::new(rules, n_terminals);
+    let start_states = builder.build(&starts);
     let (states, transitions) = (builder.states, builder.transitions);
 
     let n_states = states.len();
-    let mut action: Vec<HashMap<String, Action>> = vec![HashMap::new(); n_states];
-    let mut goto: Vec<HashMap<String, usize>> = vec![HashMap::new(); n_states];
+    let mut action: Vec<Vec<Option<Action>>> = vec![vec![None; n_terminals]; n_states];
+    let mut goto: Vec<Vec<Option<u32>>> = vec![vec![None; n_nonterminals]; n_states];
 
-    // Fill SHIFT and GOTO from transitions
-    for ((state_id, sym_name), &next_state) in &transitions {
-        // Use the grammar's terminal list to determine SHIFT vs GOTO.
-        // Augmented start rules ($root_X) and $END are always terminals.
-        let is_terminal = terminal_names.contains(sym_name.as_str())
-            || sym_name.starts_with('$');
-        if is_terminal {
-            action[*state_id].insert(sym_name.clone(), Action::Shift(next_state));
+    // SHIFT and GOTO from transitions — terminal vs non-terminal is the id range.
+    for (&(state_id, sym), &next_state) in &transitions {
+        if sym.index() < n_terminals {
+            action[state_id][sym.index()] = Some(Action::Shift(next_state));
         } else {
-            goto[*state_id].insert(sym_name.clone(), next_state);
+            goto[state_id][sym.index() - n_terminals] = Some(next_state as u32);
         }
     }
 
-    // True LALR(1) lookaheads for every reduce item.
-    let reduce_la = LookaheadComputer::new(&rules, &states, &transitions, &analysis).compute();
-
-    // Fill REDUCE / ACCEPT actions, detecting and resolving conflicts exactly
-    // the way Python Lark does (lark/parsers/lalr_analysis.py):
-    //   * shift/reduce  → resolve as shift; no error in the default (non-strict) mode
-    //   * reduce/reduce → resolve by rule priority; a tie for the top priority is
-    //                     an unrepresentable grammar and raises a hard error
+    // REDUCE / ACCEPT, resolving conflicts exactly as Python Lark does:
+    //   * shift/reduce  → shift wins (no error in default mode)
+    //   * reduce/reduce → highest rule priority wins; a tie is a hard error
+    let reduce_la = LookaheadComputer::new(rules, &states, &transitions, &analysis).compute();
     let mut conflicts: Vec<String> = Vec::new();
+
     for (state_id, state) in states.iter().enumerate() {
         // Augmented start items reduce to ACCEPT on $END.
         for item in state {
-            if item.is_complete(&rules)
-                && rules[item.rule_idx].origin.name.starts_with("$root_")
-            {
-                action[state_id].insert(END_TERMINAL.to_string(), Action::Accept);
+            if item.is_complete(rules) && rules[item.rule_idx].is_start {
+                action[state_id][SymbolId::END.index()] = Some(Action::Accept);
             }
         }
 
         let Some(rule_la) = reduce_la.get(&state_id) else { continue };
-        // For each lookahead terminal, the set of rules that reduce on it.
-        let mut reduces_by_la: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        let mut reduces_by_la: BTreeMap<SymbolId, Vec<usize>> = BTreeMap::new();
         for (&rule_idx, la_set) in rule_la {
-            if rules[rule_idx].origin.name.starts_with("$root_") {
-                continue; // handled as ACCEPT above
+            if rules[rule_idx].is_start {
+                continue; // handled as ACCEPT
             }
-            for la in la_set {
-                reduces_by_la.entry(la.clone()).or_default().push(rule_idx);
+            for &la in la_set {
+                reduces_by_la.entry(la).or_default().push(rule_idx);
             }
         }
 
@@ -470,7 +431,6 @@ pub fn build_lalr_table(grammar: &Grammar) -> Result<ParseTable, GrammarError> {
             candidates.sort_unstable();
             candidates.dedup();
 
-            // Resolve reduce/reduce collisions by priority (higher wins; tie = error).
             let winner = if candidates.len() > 1 {
                 let mut by_prio = candidates.clone();
                 by_prio.sort_by_key(|&ri| std::cmp::Reverse(rules[ri].options.priority));
@@ -479,13 +439,13 @@ pub fn build_lalr_table(grammar: &Grammar) -> Result<ParseTable, GrammarError> {
                 if best > second {
                     by_prio[0]
                 } else {
-                    let rule_list: String = candidates
-                        .iter()
-                        .map(|&ri| format!("\n\t- {}", rules[ri]))
-                        .collect();
+                    let rule_list: String =
+                        candidates.iter().map(|&ri| format!("\n\t- {}", rules[ri])).collect();
                     conflicts.push(format!(
                         "Reduce/Reduce collision in state {} for terminal {}:{}",
-                        state_id, la, rule_list
+                        state_id,
+                        grammar.symbols.name(la),
+                        rule_list
                     ));
                     continue;
                 }
@@ -493,40 +453,29 @@ pub fn build_lalr_table(grammar: &Grammar) -> Result<ParseTable, GrammarError> {
                 candidates[0]
             };
 
-            // Shift/reduce: an existing shift (or accept) wins (Lark default).
-            match action[state_id].get(&la) {
-                Some(Action::Shift(_)) | Some(Action::Accept) => { /* shift/accept wins */ }
-                _ => {
-                    action[state_id].insert(la, Action::Reduce(winner));
-                }
+            // Shift/accept wins over reduce (Lark default).
+            match &action[state_id][la.index()] {
+                Some(Action::Shift(_)) | Some(Action::Accept) => {}
+                _ => action[state_id][la.index()] = Some(Action::Reduce(winner)),
             }
         }
     }
 
     if !conflicts.is_empty() {
-        return Err(GrammarError::Conflict {
-            report: conflicts.join("\n\n"),
-        });
+        return Err(GrammarError::Conflict { report: conflicts.join("\n\n") });
     }
 
-    // Determine end states (state where we just shifted the start nonterminal)
-    let mut end_states = HashMap::new();
-    for start in &grammar.start {
-        // End state: from start_state, follow goto[start]
-        if let Some(&s0) = start_states.get(start) {
-            if let Some(&end) = goto[s0].get(start) {
-                end_states.insert(start.clone(), end);
-            }
-        }
-    }
+    let filter_out: Vec<bool> =
+        (0..n_terminals).map(|t| grammar.symbols.info(SymbolId(t as u32)).filter_out).collect();
 
     Ok(ParseTable {
         action,
         goto,
         start_states,
-        end_states,
-        rules,
+        rules: rules.clone(),
         filter_out,
+        symbols: grammar.symbols.clone(),
+        n_terminals,
     })
 }
 
@@ -541,39 +490,59 @@ impl LalrParser {
         LalrParser { table }
     }
 
-    /// Return the set of valid terminals per state (for the contextual lexer).
-    pub fn state_terminals(&self) -> HashMap<usize, Vec<String>> {
-        self.table.action.iter().enumerate()
-            .map(|(state, actions)| (state, actions.keys().cloned().collect()))
+    /// Valid terminal ids per state — for the contextual lexer.
+    pub fn state_terminals(&self) -> HashMap<usize, Vec<SymbolId>> {
+        self.table
+            .action
+            .iter()
+            .enumerate()
+            .map(|(state, row)| {
+                let ids = row
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(t, a)| a.as_ref().map(|_| SymbolId(t as u32)))
+                    .collect();
+                (state, ids)
+            })
             .collect()
     }
 
     // ─── Shared LALR driver helpers ──────────────────────────────────────────
     //
-    // `parse` and `parse_contextual` differ only in how they source the next token
-    // (a pre-lexed iterator vs. the contextual lexer). The state-machine core —
-    // start resolution, REDUCE, ACCEPT, and the unexpected-token error — is shared
-    // through the helpers below so the two drivers stay thin.
+    // `parse` and `parse_contextual` differ only in how they source the next
+    // token (a pre-lexed iterator vs. the contextual lexer). The state-machine
+    // core is shared through the helpers below so the two drivers stay thin.
 
-    /// Resolve the start symbol to its initial state.
+    /// Resolve the start symbol name to its initial state.
     fn initial_state(&self, start: Option<&str>) -> Result<usize, ParseError> {
-        let start_name = start.unwrap_or_else(|| {
-            self.table.start_states.keys().next().map(String::as_str).unwrap_or("start")
-        });
-        self.table.start_states.get(start_name).copied().ok_or_else(|| {
+        let start_id = match start {
+            Some(name) => self.table.symbols.id(name),
+            None => self.table.start_states.keys().next().copied(),
+        };
+        start_id.and_then(|id| self.table.start_states.get(&id).copied()).ok_or_else(|| {
             ParseError::UnexpectedEof {
-                line: 0, col: 0,
-                expected: vec![format!("start symbol '{}'", start_name)],
+                line: 0,
+                col: 0,
+                expected: vec![format!("start symbol '{}'", start.unwrap_or("?"))],
             }
         })
     }
 
-    /// Valid terminals (the ACTION keys) for a state — used to build error reports.
+    /// Valid terminal names for a state — used to build error reports.
     fn expected_at(&self, state: usize) -> Vec<String> {
-        self.table.action.get(state).map(|m| m.keys().cloned().collect()).unwrap_or_default()
+        self.table
+            .action
+            .get(state)
+            .map(|row| {
+                row.iter()
+                    .enumerate()
+                    .filter_map(|(t, a)| a.as_ref().map(|_| self.table.symbols.name(SymbolId(t as u32)).to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
-    /// Apply a REDUCE: pop the rule's children, build its node (applying rule
+    /// Apply a REDUCE: pop the rule's children, build its value (applying rule
     /// options), and follow GOTO. `at` supplies the position for the (effectively
     /// unreachable) missing-GOTO error.
     fn reduce(
@@ -585,74 +554,107 @@ impl LalrParser {
     ) -> Result<(), ParseError> {
         let rule = &self.table.rules[rule_idx];
         let len = rule.expansion.len();
-        let children: Vec<Child> = value_stack
-            .drain(value_stack.len() - len..)
-            .map(|sv| match sv {
-                StackValue::Token(t) => Child::Token(t),
-                StackValue::Tree(tr) => Child::Tree(tr),
-            })
-            .collect();
-        for _ in 0..len { state_stack.pop(); }
 
-        let tree_name = rule.tree_name().to_string();
-        let child = apply_rule_options(tree_name, children, rule, &self.table.filter_out);
+        // Collect children: expand inlined (transparent) sub-rules, and drop
+        // filtered tokens unless this rule keeps all tokens. Inlined children were
+        // already filtered when their own rule reduced.
+        let mut children: Vec<Child> = Vec::new();
+        for sv in value_stack.drain(value_stack.len() - len..) {
+            match sv {
+                StackValue::Token(t) => {
+                    if rule.options.keep_all_tokens || !self.table.is_filtered(t.type_id) {
+                        children.push(Child::Token(t));
+                    }
+                }
+                StackValue::Tree(t) => children.push(Child::Tree(t)),
+                StackValue::Inline(cs) => children.extend(cs),
+            }
+        }
+        for _ in 0..len {
+            state_stack.pop();
+        }
+
+        // maybe_placeholders: an empty `[...]` production emits one `None` per
+        // kept symbol of its widest alternative.
+        for _ in 0..rule.options.placeholder_count {
+            children.push(Child::None);
+        }
+
+        let value = if rule.transparent {
+            // `_rule` / `__anon_*`: splice children into the parent.
+            StackValue::Inline(children)
+        } else if rule.options.expand1
+            && rule.alias.is_none()
+            && children.len() == 1
+            && !matches!(children[0], Child::None)
+        {
+            // `?rule` with a single child: return that child directly (Token or Tree).
+            match children.pop().unwrap() {
+                Child::Tree(t) => StackValue::Tree(t),
+                Child::Token(t) => StackValue::Token(t),
+                Child::None => unreachable!("guarded above"),
+            }
+        } else {
+            StackValue::Tree(Tree::new(rule.tree_name.clone(), children))
+        };
+
         let top_state = *state_stack.last().unwrap();
+        let nt_index = rule.origin.index() - self.table.n_terminals;
         let next_state = self.table.goto[top_state]
-            .get(&rule.origin.name)
+            .get(nt_index)
             .copied()
+            .flatten()
             .ok_or_else(|| ParseError::UnexpectedToken {
                 token: at.value.clone(),
-                token_type: rule.origin.name.clone(),
-                line: at.line, col: at.column,
-                expected: vec![rule.origin.name.clone()],
+                token_type: self.table.symbols.name(rule.origin).to_string(),
+                line: at.line,
+                col: at.column,
+                expected: vec![self.table.symbols.name(rule.origin).to_string()],
             })?;
-        state_stack.push(next_state);
-        value_stack.push(match child {
-            Child::Tree(t) => StackValue::Tree(t),
-            Child::Token(t) => StackValue::Token(t),
-            Child::None => unreachable!("placeholder cannot be a standalone rule value"),
-        });
+        state_stack.push(next_state as usize);
+        value_stack.push(value);
         Ok(())
     }
 
     /// ACCEPT: the final value on the stack is the parse result.
     fn accept(value_stack: &mut Vec<StackValue>) -> Result<Tree, ParseError> {
-        value_stack.pop().map(|sv| match sv {
-            StackValue::Tree(t) => t,
-            StackValue::Token(tok) => Tree::new(tok.type_.clone(), vec![Child::Token(tok)]),
-        }).ok_or(ParseError::UnexpectedEof { line: 0, col: 0, expected: vec![] })
+        match value_stack.pop() {
+            Some(StackValue::Tree(t)) => Ok(t),
+            Some(StackValue::Token(tok)) => Ok(Tree::new(tok.type_.clone(), vec![Child::Token(tok)])),
+            // A start rule is never transparent, so its value is never Inline.
+            Some(StackValue::Inline(_)) | None => {
+                Err(ParseError::UnexpectedEof { line: 0, col: 0, expected: vec![] })
+            }
+        }
     }
 
     /// Build the error for a token with no action in the current state.
     fn unexpected(&self, state: usize, token: &Token) -> ParseError {
         let expected = self.expected_at(state);
-        if token.type_ == "$END" {
+        if token.type_id == SymbolId::END {
             ParseError::UnexpectedEof { line: token.line, col: token.column, expected }
         } else {
             ParseError::UnexpectedToken {
                 token: token.value.clone(),
                 token_type: token.type_.clone(),
-                line: token.line, col: token.column,
+                line: token.line,
+                col: token.column,
                 expected,
             }
         }
     }
 
     /// Parse a pre-tokenized sequence.
-    pub fn parse(
-        &self,
-        tokens: Vec<Token>,
-        start: Option<&str>,
-    ) -> Result<Tree, ParseError> {
+    pub fn parse(&self, tokens: Vec<Token>, start: Option<&str>) -> Result<Tree, ParseError> {
         let mut state_stack: Vec<usize> = vec![self.initial_state(start)?];
         let mut value_stack: Vec<StackValue> = Vec::new();
         let mut token_iter = tokens.into_iter().peekable();
 
         loop {
             let current_state = *state_stack.last().unwrap();
-            let token = token_iter.peek().cloned().unwrap_or_else(|| Token::new("$END", ""));
+            let token = token_iter.peek().cloned().unwrap_or_else(Token::end);
 
-            match self.table.action.get(current_state).and_then(|m| m.get(&token.type_)) {
+            match self.table.action_at(current_state, token.type_id) {
                 Some(Action::Shift(next_state)) => {
                     let tok = token_iter.next().unwrap();
                     state_stack.push(*next_state);
@@ -667,8 +669,8 @@ impl LalrParser {
         }
     }
 
-    /// Parse using the contextual lexer — lex one token at a time, feeding
-    /// the current parser state to the lexer so it only tries valid terminals.
+    /// Parse using the contextual lexer — lex one token at a time, feeding the
+    /// current parser state to the lexer so it only tries valid terminals.
     pub fn parse_contextual(
         &self,
         text: &str,
@@ -688,15 +690,17 @@ impl LalrParser {
             if current_token.is_none() {
                 loop {
                     if lex_state.is_done() {
-                        current_token = Some(Token::new("$END", "").with_position(
-                            lex_state.line, lex_state.col, lex_state.pos, lex_state.pos,
+                        current_token = Some(Token::end().with_position(
+                            lex_state.line,
+                            lex_state.col,
+                            lex_state.pos,
+                            lex_state.pos,
                         ));
                         break;
                     }
                     match lexer.next_token(lex_state.text, lex_state.pos, current_state, lex_state.line, lex_state.col)? {
                         Some(tok) => {
-                            if lexer.ignore().contains(&tok.type_) {
-                                // Consume the ignored token and loop for the next real one.
+                            if lexer.is_ignored(tok.type_id) {
                                 lex_state.advance_by_lines(tok.value.len(), &tok.value);
                                 continue;
                             }
@@ -704,7 +708,6 @@ impl LalrParser {
                             break;
                         }
                         None => {
-                            // No terminal valid here matched at the current position.
                             let ch: String = lex_state.text[lex_state.pos..].chars().take(1).collect();
                             return Err(ParseError::UnexpectedToken {
                                 token: ch,
@@ -719,7 +722,7 @@ impl LalrParser {
             }
             let token = current_token.as_ref().unwrap().clone();
 
-            match self.table.action.get(current_state).and_then(|m| m.get(&token.type_)) {
+            match self.table.action_at(current_state, token.type_id) {
                 Some(Action::Shift(next_state)) => {
                     state_stack.push(*next_state);
                     value_stack.push(StackValue::Token(token.clone()));
@@ -737,79 +740,13 @@ impl LalrParser {
     }
 }
 
-// ─── Tree construction helpers ────────────────────────────────────────────────
+// ─── Stack values ─────────────────────────────────────────────────────────────
 
+/// A value on the parser's semantic stack.
 enum StackValue {
     Token(Token),
     Tree(Tree),
-}
-
-fn apply_rule_options(
-    name: String,
-    mut children: Vec<Child>,
-    rule: &Rule,
-    filter_out: &HashSet<String>,
-) -> Child {
-    // Drop filter_out terminals (anonymous literals, `_`-prefixed) unless the rule
-    // keeps all tokens. `None` placeholders are never filtered.
-    if !rule.options.keep_all_tokens {
-        children.retain(|c| match c {
-            Child::Token(t) => !filter_out.contains(&t.type_),
-            Child::Tree(_) => true,
-            Child::None => true,
-        });
-    }
-
-    // Inline children of anonymous/transparent rules (those whose name starts
-    // with "__anon_" or is a _private_rule starting with "_").
-    // These are EBNF expansion helpers that should be invisible in the final tree.
-    let mut children = inline_anonymous_trees(children);
-
-    // maybe_placeholders: an empty `[...]` production emits one `None` per kept
-    // symbol of its widest alternative. These inline into the parent's children.
-    for _ in 0..rule.options.placeholder_count {
-        children.push(Child::None);
-    }
-
-    // expand1: if exactly one child and no alias, return that child directly.
-    // This handles both Tree and Token children — a ?rule matching a single
-    // terminal should yield the token itself, not a tree wrapping it. A lone
-    // `None` placeholder is not collapsed (it must stay inside a tree, since the
-    // value stack only holds tokens and trees).
-    let has_alias = rule.alias.is_some();
-    if rule.options.expand1 && !has_alias && children.len() == 1
-        && !matches!(children[0], Child::None)
-    {
-        return children.into_iter().next().unwrap();
-    }
-
-    Child::Tree(Tree::new(name, children))
-}
-
-/// Recursively flatten anonymous rule trees into their parent's child list.
-/// Anonymous rules are those named `__anon_*` (EBNF helpers) or `_name` (transparent rules).
-fn inline_anonymous_trees(children: Vec<Child>) -> Vec<Child> {
-    let mut result = Vec::with_capacity(children.len());
-    for child in children {
-        match child {
-            Child::Tree(ref t) if is_anonymous_rule(&t.data) => {
-                // Inline this node's children (already processed when the node was built)
-                if let Child::Tree(t) = child {
-                    result.extend(t.children);
-                }
-            }
-            other => result.push(other),
-        }
-    }
-    result
-}
-
-/// A tree node is spliced into its parent (rather than kept as a child) when its
-/// rule is "transparent". Two cases, both matching Python Lark:
-///   * `__anon_*` — EBNF expansion helpers (`*`, `+`, `?`, groups).
-///   * `_name`    — user-declared transparent rules (single leading underscore).
-/// Aliased rules are exempt: an alias overrides transparency, and the node's name
-/// is already the alias (which does not start with `_`), so it is not matched here.
-fn is_anonymous_rule(name: &str) -> bool {
-    name.starts_with('_')
+    /// Children of a transparent (`_rule` / `__anon_*`) reduction, to be spliced
+    /// into the parent's child list rather than wrapped in a node.
+    Inline(Vec<Child>),
 }

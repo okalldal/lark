@@ -49,13 +49,18 @@ pub fn build_frontend(
 ) -> Result<ParsingFrontend, LarkError> {
     match options.parser {
         ParserAlgorithm::Lalr => {
-            let table = build_lalr_table(grammar)?;
+            // Lower the surface grammar to the interned IR once, then build the
+            // parse table and lexer from it.
+            let cg = crate::grammar::lower(grammar);
+            let table = build_lalr_table(&cg)?;
             let parser = LalrParser::new(table);
 
-            let lexer_conf = LexerConf::new(
-                grammar.terminals.clone(),
-                grammar.ignore.clone(),
-            );
+            let terminals: Vec<(crate::grammar::SymbolId, crate::grammar::terminal::TerminalDef)> = cg
+                .terminals
+                .iter()
+                .map(|t| (cg.symbols.id(&t.name).expect("terminal interned"), t.clone()))
+                .collect();
+            let lexer_conf = LexerConf::new(terminals, cg.ignore.clone());
 
             let kind = match options.lexer {
                 LexerType::Basic => {
@@ -64,7 +69,7 @@ pub fn build_frontend(
                 }
                 LexerType::Contextual | LexerType::Auto => {
                     let state_terminals = parser.state_terminals();
-                    let always_accept = grammar.ignore.clone();
+                    let always_accept = cg.ignore.clone();
                     let lexer = ContextualLexer::new(&lexer_conf, &state_terminals, always_accept)?;
                     FrontendKind::LalrContextual { parser, lexer }
                 }

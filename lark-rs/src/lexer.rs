@@ -19,29 +19,38 @@
 //! matched by a regex terminal of the same priority (e.g. the keyword `if` inside
 //! the identifier pattern `CNAME`) is *removed* from the alternation, and the
 //! regex match is retyped back to the keyword when the matched text equals it.
-//! This is what makes `if` lex as `IF` while `iffy` stays `NAME`, without any
-//! cross-terminal longest-match scan — and it matches Python Lark exactly.
+//! This is what makes `if` lex as `IF` while `iffy` stays `NAME`.
+//!
+//! Every matched terminal is identified by its interned [`SymbolId`]; the parser
+//! dispatches on that id directly. The token's name is carried only for display.
 
 use std::collections::{HashMap, HashSet};
+
 use regex::Regex;
-use crate::grammar::terminal::{TerminalDef, Pattern};
-use crate::error::{ParseError, GrammarError};
+
+use crate::error::{GrammarError, ParseError};
+use crate::grammar::intern::SymbolId;
+use crate::grammar::terminal::{Pattern, TerminalDef};
 use crate::tree::Token;
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct LexerConf {
-    pub terminals: Vec<TerminalDef>,
-    /// Terminal names to discard after matching (from %ignore).
-    pub ignore: Vec<String>,
-    pub use_bytes: bool,
-    pub g_regex_flags: u32,
+    /// Terminal id paired with its definition.
+    pub terminals: Vec<(SymbolId, TerminalDef)>,
+    /// Terminal ids to discard after matching (from `%ignore`).
+    pub ignore: Vec<SymbolId>,
 }
 
 impl LexerConf {
-    pub fn new(terminals: Vec<TerminalDef>, ignore: Vec<String>) -> Self {
-        LexerConf { terminals, ignore, use_bytes: false, g_regex_flags: 0 }
+    pub fn new(terminals: Vec<(SymbolId, TerminalDef)>, ignore: Vec<SymbolId>) -> Self {
+        LexerConf { terminals, ignore }
+    }
+
+    /// id → name map for token display.
+    fn names(&self) -> HashMap<SymbolId, String> {
+        self.terminals.iter().map(|(id, t)| (*id, t.name.clone())).collect()
     }
 }
 
@@ -49,7 +58,7 @@ impl LexerConf {
 
 pub trait Lexer {
     /// Lex the full input text, returning all tokens (ignoring filtered types).
-    fn lex<'input>(&self, text: &'input str) -> Result<Vec<Token>, ParseError>;
+    fn lex(&self, text: &str) -> Result<Vec<Token>, ParseError>;
 }
 
 // ─── Scanner: one compiled alternation over a set of terminals ────────────────
@@ -58,80 +67,63 @@ pub trait Lexer {
 ///
 /// Matching is leftmost-first (Python-`re` semantics), so the alternation order
 /// breaks ties. The `unless` map carries Lark's keyword retyping (see module
-/// docs).
+/// docs). Capture-group names are derived from the symbol id (`g{n}`), so no
+/// terminal-name sanitization is needed.
 struct Scanner {
     re: Regex,
-    /// Real terminal name + its sanitized regex group name, in alternation order.
-    groups: Vec<(String, String)>,
-    /// regex-terminal-name → (matched-text → keyword-terminal-name).
-    unless: HashMap<String, HashMap<String, String>>,
+    /// (terminal id, capture-group name), in alternation order.
+    groups: Vec<(SymbolId, String)>,
+    /// regex-terminal-id → (matched-text → keyword-terminal-id).
+    unless: HashMap<SymbolId, HashMap<String, SymbolId>>,
 }
 
 impl Scanner {
-    /// Build a scanner from candidate terminals (deduplicated by name).
-    fn build(terminals: &[&TerminalDef]) -> Result<Scanner, GrammarError> {
-        // Deduplicate by name (a terminal can appear via both the state set and
-        // `always_accept`); duplicate capture-group names would not compile.
+    /// Build a scanner from candidate terminals (deduplicated by id).
+    fn build(terminals: &[(SymbolId, &TerminalDef)]) -> Result<Scanner, GrammarError> {
         let mut seen = HashSet::new();
-        let terms: Vec<&TerminalDef> = terminals
-            .iter()
-            .copied()
-            .filter(|t| seen.insert(t.name.as_str()))
-            .collect();
+        let terms: Vec<(SymbolId, &TerminalDef)> =
+            terminals.iter().copied().filter(|(id, _)| seen.insert(*id)).collect();
 
-        // ── unless: embed string terminals fully matched by a same-priority
-        //    regex terminal, and record the retype.
+        // unless: embed string terminals fully matched by a same-priority regex
+        // terminal, and record the retype.
         let unless = compute_unless(&terms)?;
-        let embedded: HashSet<&str> = unless
-            .values()
-            .flat_map(|m| m.values())
-            .map(|s| s.as_str())
-            .collect();
+        let embedded: HashSet<SymbolId> = unless.values().flat_map(|m| m.values().copied()).collect();
 
         // Scanner terminals = everything not embedded, sorted Python-style.
-        let mut scan: Vec<&TerminalDef> = terms
-            .iter()
-            .copied()
-            .filter(|t| !embedded.contains(t.name.as_str()))
-            .collect();
+        let mut scan: Vec<(SymbolId, &TerminalDef)> =
+            terms.iter().copied().filter(|(id, _)| !embedded.contains(id)).collect();
         sort_terminals(&mut scan);
 
         let mut parts = Vec::with_capacity(scan.len());
         let mut groups = Vec::with_capacity(scan.len());
-        for term in scan {
-            let safe = safe_group_name(&term.name);
-            parts.push(format!("(?P<{}>{})", safe, term.pattern.as_regex_str()));
-            groups.push((term.name.clone(), safe));
+        for (id, term) in scan {
+            let group = format!("g{}", id.0);
+            parts.push(format!("(?P<{}>{})", group, term.pattern.as_regex_str()));
+            groups.push((id, group));
         }
         let pattern = parts.join("|");
-        let re = Regex::new(&pattern).map_err(|e| GrammarError::InvalidRegex {
-            pattern: pattern.clone(),
-            reason: e.to_string(),
-        })?;
+        let re = Regex::new(&pattern)
+            .map_err(|e| GrammarError::InvalidRegex { pattern: pattern.clone(), reason: e.to_string() })?;
         Ok(Scanner { re, groups, unless })
     }
 
-    /// Match a single token starting exactly at `pos`. Returns `(type, value)`,
-    /// with keyword retyping already applied. `None` means nothing matched here.
-    fn match_at(&self, text: &str, pos: usize) -> Option<(String, String)> {
+    /// Match a single token starting exactly at `pos`. Returns `(terminal id,
+    /// value)`, with keyword retyping already applied. `None` means nothing
+    /// matched here.
+    fn match_at<'t>(&self, text: &'t str, pos: usize) -> Option<(SymbolId, &'t str)> {
         let caps = self.re.captures_at(text, pos)?;
         let m0 = caps.get(0)?;
-        // captures_at finds the leftmost match at *or after* pos; we only accept
-        // a token that begins exactly at pos. Reject empty matches so a nullable
+        // captures_at finds the leftmost match at *or after* pos; only accept a
+        // token beginning exactly at pos, and reject empty matches so a nullable
         // terminal can never stall the scan.
         if m0.start() != pos || m0.end() == pos {
             return None;
         }
         let value = m0.as_str();
-        for (real, safe) in &self.groups {
-            if caps.name(safe).is_some() {
-                let ty = self
-                    .unless
-                    .get(real)
-                    .and_then(|m| m.get(value))
-                    .cloned()
-                    .unwrap_or_else(|| real.clone());
-                return Some((ty, value.to_string()));
+        for (id, group) in &self.groups {
+            if caps.name(group).is_some() {
+                let ty = self.unless.get(id).and_then(|m| m.get(value)).copied().unwrap_or(*id);
+                return Some((ty, value));
             }
         }
         None
@@ -139,32 +131,25 @@ impl Scanner {
 }
 
 /// For each regex terminal, find the same-priority string terminals it fully
-/// matches; those strings are embedded (dropped from the alternation) and retyped
-/// after the fact. Mirrors Python Lark's `_create_unless`.
+/// matches; those strings are embedded (dropped from the alternation) and
+/// retyped after the fact. Mirrors Python Lark's `_create_unless`.
 fn compute_unless(
-    terms: &[&TerminalDef],
-) -> Result<HashMap<String, HashMap<String, String>>, GrammarError> {
-    let res: Vec<&&TerminalDef> = terms
-        .iter()
-        .filter(|t| matches!(t.pattern, Pattern::Re(_)))
-        .collect();
-    let strs: Vec<&&TerminalDef> = terms
-        .iter()
-        .filter(|t| matches!(t.pattern, Pattern::Str(_)))
-        .collect();
+    terms: &[(SymbolId, &TerminalDef)],
+) -> Result<HashMap<SymbolId, HashMap<String, SymbolId>>, GrammarError> {
+    let res: Vec<&(SymbolId, &TerminalDef)> =
+        terms.iter().filter(|(_, t)| matches!(t.pattern, Pattern::Re(_))).collect();
+    let strs: Vec<&(SymbolId, &TerminalDef)> =
+        terms.iter().filter(|(_, t)| matches!(t.pattern, Pattern::Str(_))).collect();
     if res.is_empty() || strs.is_empty() {
         return Ok(HashMap::new());
     }
 
-    let mut unless: HashMap<String, HashMap<String, String>> = HashMap::new();
-    for re_t in &res {
-        // Anchored full-match form of this regex terminal.
+    let mut unless: HashMap<SymbolId, HashMap<String, SymbolId>> = HashMap::new();
+    for (re_id, re_t) in &res {
         let full_src = format!("^(?:{})$", re_t.pattern.as_regex_str());
-        let full = Regex::new(&full_src).map_err(|e| GrammarError::InvalidRegex {
-            pattern: full_src.clone(),
-            reason: e.to_string(),
-        })?;
-        for s_t in &strs {
+        let full = Regex::new(&full_src)
+            .map_err(|e| GrammarError::InvalidRegex { pattern: full_src.clone(), reason: e.to_string() })?;
+        for (s_id, s_t) in &strs {
             if s_t.priority != re_t.priority {
                 continue;
             }
@@ -173,21 +158,18 @@ fn compute_unless(
                 Pattern::Re(_) => continue,
             };
             if full.is_match(value) {
-                unless
-                    .entry(re_t.name.clone())
-                    .or_default()
-                    .insert(value.clone(), s_t.name.clone());
+                unless.entry(*re_id).or_default().insert(value.clone(), *s_id);
             }
         }
     }
     Ok(unless)
 }
 
-/// Python Lark's terminal ordering: `(-priority, -max_width, -len(value), name)`.
+/// Python Lark's terminal ordering: `(-priority, -max_width, -len(pattern), id)`.
 /// Regex terminals have unbounded `max_width` and therefore sort ahead of fixed
 /// strings; the leftmost-first alternation then matches them greedily.
-fn sort_terminals(terms: &mut [&TerminalDef]) {
-    terms.sort_by(|a, b| {
+fn sort_terminals(terms: &mut [(SymbolId, &TerminalDef)]) {
+    terms.sort_by(|(a_id, a), (b_id, b)| {
         let aw = a.pattern.max_width().unwrap_or(usize::MAX);
         let bw = b.pattern.max_width().unwrap_or(usize::MAX);
         b.priority
@@ -195,13 +177,8 @@ fn sort_terminals(terms: &mut [&TerminalDef]) {
             .then_with(|| bw.cmp(&aw))
             .then_with(|| b.pattern.as_regex_str().len().cmp(&a.pattern.as_regex_str().len()))
             .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a_id.cmp(b_id))
     });
-}
-
-/// A regex named-capture group only accepts `[A-Za-z0-9_]`. Terminal names may
-/// contain `$` (synthetics) or `-` (aliases); rewrite them to a safe form.
-fn safe_group_name(name: &str) -> String {
-    name.replace('$', "DOLLAR").replace('-', "_")
 }
 
 // ─── BasicLexer ──────────────────────────────────────────────────────────────
@@ -209,19 +186,24 @@ fn safe_group_name(name: &str) -> String {
 /// Scans the whole input with a single combined regex over all terminals.
 pub struct BasicLexer {
     scanner: Scanner,
-    ignore: Vec<String>,
+    names: HashMap<SymbolId, String>,
+    ignore: HashSet<SymbolId>,
 }
 
 impl BasicLexer {
     pub fn new(conf: &LexerConf) -> Result<Self, GrammarError> {
-        let refs: Vec<&TerminalDef> = conf.terminals.iter().collect();
+        let refs: Vec<(SymbolId, &TerminalDef)> = conf.terminals.iter().map(|(id, t)| (*id, t)).collect();
         let scanner = Scanner::build(&refs)?;
-        Ok(BasicLexer { scanner, ignore: conf.ignore.clone() })
+        Ok(BasicLexer {
+            scanner,
+            names: conf.names(),
+            ignore: conf.ignore.iter().copied().collect(),
+        })
     }
 }
 
 impl Lexer for BasicLexer {
-    fn lex<'input>(&self, text: &'input str) -> Result<Vec<Token>, ParseError> {
+    fn lex(&self, text: &str) -> Result<Vec<Token>, ParseError> {
         let mut tokens = Vec::new();
         let mut pos = 0;
         let mut line = 1usize;
@@ -229,7 +211,7 @@ impl Lexer for BasicLexer {
 
         while pos < text.len() {
             match self.scanner.match_at(text, pos) {
-                Some((name, value)) => {
+                Some((id, value)) => {
                     let start_pos = pos;
                     let start_line = line;
                     let start_col = col;
@@ -239,10 +221,11 @@ impl Lexer for BasicLexer {
                     }
                     pos += value.len();
 
-                    if !self.ignore.contains(&name) {
+                    if !self.ignore.contains(&id) {
                         tokens.push(Token {
-                            type_: name,
-                            value,
+                            type_id: id,
+                            type_: self.names[&id].clone(),
+                            value: value.to_string(),
                             line: start_line,
                             column: start_col,
                             end_line: line,
@@ -262,7 +245,7 @@ impl Lexer for BasicLexer {
             }
         }
 
-        tokens.push(Token::new("$END", "").with_position(line, col, pos, pos));
+        tokens.push(Token::end().with_position(line, col, pos, pos));
         Ok(tokens)
     }
 }
@@ -276,37 +259,47 @@ impl Lexer for BasicLexer {
 pub struct ContextualLexer {
     /// Per-state scanner. State 0 is the root (fallback) scanner.
     state_scanners: HashMap<usize, Scanner>,
-    ignore: Vec<String>,
+    names: HashMap<SymbolId, String>,
+    ignore: HashSet<SymbolId>,
 }
 
 impl ContextualLexer {
     /// Build a contextual lexer.
     ///
-    /// `state_terminals`: maps LALR state ID → valid terminal names.
-    /// `always_accept`: terminals valid in every state (e.g. `%ignore` whitespace).
+    /// `state_terminals`: LALR state id → valid terminal ids.
+    /// `always_accept`: terminals valid in every state (e.g. `%ignore`).
     pub fn new(
         conf: &LexerConf,
-        state_terminals: &HashMap<usize, Vec<String>>,
-        always_accept: Vec<String>,
+        state_terminals: &HashMap<usize, Vec<SymbolId>>,
+        always_accept: Vec<SymbolId>,
     ) -> Result<Self, GrammarError> {
-        let term_map: HashMap<&str, &TerminalDef> = conf.terminals.iter()
-            .map(|t| (t.name.as_str(), t))
-            .collect();
+        let term_map: HashMap<SymbolId, &TerminalDef> =
+            conf.terminals.iter().map(|(id, t)| (*id, t)).collect();
 
         let mut state_scanners = HashMap::new();
-        for (state_id, valid_names) in state_terminals {
-            let terms: Vec<&TerminalDef> = valid_names.iter()
+        for (state_id, valid_ids) in state_terminals {
+            let terms: Vec<(SymbolId, &TerminalDef)> = valid_ids
+                .iter()
                 .chain(always_accept.iter())
-                .filter_map(|n| term_map.get(n.as_str()).copied())
+                .filter_map(|id| term_map.get(id).map(|t| (*id, *t)))
                 .collect();
-            if terms.is_empty() { continue; }
+            if terms.is_empty() {
+                continue;
+            }
             state_scanners.insert(*state_id, Scanner::build(&terms)?);
         }
 
-        Ok(ContextualLexer { state_scanners, ignore: conf.ignore.clone() })
+        Ok(ContextualLexer {
+            state_scanners,
+            names: conf.names(),
+            ignore: conf.ignore.iter().copied().collect(),
+        })
     }
 
-    pub fn ignore(&self) -> &[String] { &self.ignore }
+    #[inline]
+    pub fn is_ignored(&self, id: SymbolId) -> bool {
+        self.ignore.contains(&id)
+    }
 
     /// Lex the next token at `pos` given the current parser state.
     pub fn next_token(
@@ -322,23 +315,18 @@ impl ContextualLexer {
             None => return Ok(None),
         };
 
-        if let Some((name, value)) = scanner.match_at(text, pos) {
+        if let Some((id, value)) = scanner.match_at(text, pos) {
             let end = pos + value.len();
             // End position is char-based and newline-aware: a token spanning a
-            // newline (e.g. a multi-line comment/string) advances the line and
-            // resets the column, mirroring LexerState::advance_by.
+            // newline advances the line and resets the column.
             let (mut end_line, mut end_column) = (line, col);
             for ch in value.chars() {
-                if ch == '\n' {
-                    end_line += 1;
-                    end_column = 1;
-                } else {
-                    end_column += 1;
-                }
+                if ch == '\n' { end_line += 1; end_column = 1; } else { end_column += 1; }
             }
             return Ok(Some(Token {
-                type_: name,
-                value,
+                type_id: id,
+                type_: self.names[&id].clone(),
+                value: value.to_string(),
                 line,
                 column: col,
                 end_line,
@@ -349,7 +337,7 @@ impl ContextualLexer {
         }
 
         if pos >= text.len() {
-            return Ok(Some(Token::new("$END", "").with_position(line, col, pos, pos)));
+            return Ok(Some(Token::end().with_position(line, col, pos, pos)));
         }
 
         let ch = text[pos..].chars().next().unwrap();

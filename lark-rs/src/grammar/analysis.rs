@@ -1,71 +1,79 @@
-//! Grammar analysis: FIRST, FOLLOW, NULLABLE sets.
-//! These are needed by both the Earley and LALR parsers.
+//! Grammar analysis: NULLABLE and FIRST sets over the interned grammar.
+//!
+//! These feed the LALR(1) lookahead computation (`first_of_seq`). FOLLOW sets
+//! are intentionally absent: the parser uses true LALR(1) lookaheads
+//! (spontaneous-generation + propagation), not SLR FOLLOW sets, so FOLLOW would
+//! be dead weight.
 
-use std::collections::{HashMap, HashSet};
-use super::{Grammar, symbol::*, rule::Rule};
+use std::collections::HashSet;
 
-/// Pre-computed analysis of a grammar.
+use super::intern::{CompiledGrammar, SymbolId};
+
+/// Pre-computed analysis of a grammar. All sets are over interned [`SymbolId`]s.
 #[derive(Debug, Clone)]
 pub struct GrammarAnalysis {
-    /// NULLABLE[A] = true iff A can derive the empty string.
-    pub nullable: HashSet<NonTerminal>,
-    /// FIRST[A] = set of terminals that can start a string derived from A.
-    pub first: HashMap<NonTerminal, HashSet<Terminal>>,
-    /// FOLLOW[A] = set of terminals that can follow A in any sentential form.
-    pub follow: HashMap<NonTerminal, HashSet<Terminal>>,
+    /// `nullable[id]` = the symbol can derive ε (always false for terminals).
+    nullable: Vec<bool>,
+    /// `first[nonterminal_index]` = terminals that can start the non-terminal.
+    first: Vec<HashSet<SymbolId>>,
+    n_terminals: usize,
 }
-
-/// The synthetic end-of-input terminal.
-pub const END_TERMINAL: &str = "$END";
 
 impl GrammarAnalysis {
-    pub fn compute(grammar: &Grammar) -> Self {
-        let nullable = compute_nullable(grammar);
+    pub fn compute(grammar: &CompiledGrammar) -> Self {
+        let n_symbols = grammar.symbols.len();
+        let n_terminals = grammar.n_terminals();
+        let nullable = compute_nullable(grammar, n_symbols);
         let first = compute_first(grammar, &nullable);
-        let follow = compute_follow(grammar, &nullable, &first);
-        GrammarAnalysis { nullable, first, follow }
+        GrammarAnalysis { nullable, first, n_terminals }
     }
 
-    /// FIRST set for a sequence of symbols (handles nullable prefixes).
-    pub fn first_of_seq(&self, seq: &[Symbol]) -> (HashSet<Terminal>, bool) {
+    #[inline]
+    fn is_terminal(&self, id: SymbolId) -> bool {
+        id.index() < self.n_terminals
+    }
+
+    #[inline]
+    pub fn is_nullable(&self, id: SymbolId) -> bool {
+        self.nullable[id.index()]
+    }
+
+    #[inline]
+    fn first_of(&self, nonterminal: SymbolId) -> &HashSet<SymbolId> {
+        &self.first[nonterminal.index() - self.n_terminals]
+    }
+
+    /// FIRST set of a symbol sequence. Returns the terminals that can begin it
+    /// and whether the whole sequence is nullable.
+    pub fn first_of_seq(&self, seq: &[SymbolId]) -> (HashSet<SymbolId>, bool) {
         let mut result = HashSet::new();
-        let mut all_nullable = true;
-        for sym in seq {
-            match sym {
-                Symbol::Terminal(t) => {
-                    result.insert(t.clone());
-                    all_nullable = false;
-                    break;
-                }
-                Symbol::NonTerminal(nt) => {
-                    if let Some(first_nt) = self.first.get(nt) {
-                        result.extend(first_nt.iter().cloned());
-                    }
-                    if !self.nullable.contains(nt) {
-                        all_nullable = false;
-                        break;
-                    }
-                }
+        for &sym in seq {
+            if self.is_terminal(sym) {
+                result.insert(sym);
+                return (result, false);
+            }
+            result.extend(self.first_of(sym).iter().copied());
+            if !self.is_nullable(sym) {
+                return (result, false);
             }
         }
-        (result, all_nullable)
+        (result, true)
     }
 }
 
-fn compute_nullable(grammar: &Grammar) -> HashSet<NonTerminal> {
-    let mut nullable: HashSet<NonTerminal> = HashSet::new();
+fn compute_nullable(grammar: &CompiledGrammar, n_symbols: usize) -> Vec<bool> {
+    let mut nullable = vec![false; n_symbols];
     let mut changed = true;
     while changed {
         changed = false;
         for rule in &grammar.rules {
-            if nullable.contains(&rule.origin) {
+            if nullable[rule.origin.index()] {
                 continue;
             }
-            if rule.expansion.iter().all(|sym| match sym {
-                Symbol::NonTerminal(nt) => nullable.contains(nt),
-                Symbol::Terminal(_) => false,
-            }) {
-                nullable.insert(rule.origin.clone());
+            // Terminals are never nullable, so any terminal in the expansion
+            // (whose slot stays false) blocks this.
+            if rule.expansion.iter().all(|s| nullable[s.index()]) {
+                nullable[rule.origin.index()] = true;
                 changed = true;
             }
         }
@@ -73,134 +81,37 @@ fn compute_nullable(grammar: &Grammar) -> HashSet<NonTerminal> {
     nullable
 }
 
-fn compute_first(
-    grammar: &Grammar,
-    nullable: &HashSet<NonTerminal>,
-) -> HashMap<NonTerminal, HashSet<Terminal>> {
-    let mut first: HashMap<NonTerminal, HashSet<Terminal>> = HashMap::new();
-    // Initialise empty sets for all nonterminals
-    for rule in &grammar.rules {
-        first.entry(rule.origin.clone()).or_default();
-    }
+fn compute_first(grammar: &CompiledGrammar, nullable: &[bool]) -> Vec<HashSet<SymbolId>> {
+    let n_terminals = grammar.n_terminals();
+    let mut first: Vec<HashSet<SymbolId>> = vec![HashSet::new(); grammar.symbols.n_nonterminals()];
+    let nt_index = |id: SymbolId| id.index() - n_terminals;
+    let is_terminal = |id: SymbolId| id.index() < n_terminals;
 
     let mut changed = true;
     while changed {
         changed = false;
         for rule in &grammar.rules {
-            for sym in &rule.expansion {
-                match sym {
-                    Symbol::Terminal(t) => {
-                        let set = first.entry(rule.origin.clone()).or_default();
-                        if set.insert(t.clone()) { changed = true; }
-                        break; // Terminal blocks further propagation
+            let origin = nt_index(rule.origin);
+            for &sym in &rule.expansion {
+                if is_terminal(sym) {
+                    if first[origin].insert(sym) {
+                        changed = true;
                     }
-                    Symbol::NonTerminal(nt) => {
-                        let nt_first: Vec<Terminal> = first
-                            .get(nt)
-                            .map(|s| s.iter().cloned().collect())
-                            .unwrap_or_default();
-                        let set = first.entry(rule.origin.clone()).or_default();
-                        for t in nt_first {
-                            if set.insert(t) { changed = true; }
-                        }
-                        if !nullable.contains(nt) {
-                            break;
-                        }
+                    break; // a terminal blocks further propagation
+                }
+                // Non-terminal: fold in its FIRST set (clone to avoid aliasing
+                // the mutable borrow of `first[origin]`).
+                let src: Vec<SymbolId> = first[nt_index(sym)].iter().copied().collect();
+                for t in src {
+                    if first[origin].insert(t) {
+                        changed = true;
                     }
+                }
+                if !nullable[sym.index()] {
+                    break;
                 }
             }
         }
     }
     first
-}
-
-fn compute_follow(
-    grammar: &Grammar,
-    nullable: &HashSet<NonTerminal>,
-    first: &HashMap<NonTerminal, HashSet<Terminal>>,
-) -> HashMap<NonTerminal, HashSet<Terminal>> {
-    let mut follow: HashMap<NonTerminal, HashSet<Terminal>> = HashMap::new();
-    for rule in &grammar.rules {
-        follow.entry(rule.origin.clone()).or_default();
-        for sym in &rule.expansion {
-            if let Symbol::NonTerminal(nt) = sym {
-                follow.entry(nt.clone()).or_default();
-            }
-        }
-    }
-
-    // Add $END to all start symbols
-    let end_t = Terminal::new(END_TERMINAL);
-    for start in &grammar.start {
-        follow.entry(NonTerminal::new(start)).or_default()
-            .insert(end_t.clone());
-    }
-
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for rule in &grammar.rules {
-            // Walk expansion right-to-left
-            let n = rule.expansion.len();
-            // Trailing FOLLOW: everything in FOLLOW(origin) propagates to last non-nullable suffix
-            let mut trailer: HashSet<Terminal> = follow
-                .get(&rule.origin)
-                .cloned()
-                .unwrap_or_default();
-
-            for i in (0..n).rev() {
-                match &rule.expansion[i] {
-                    Symbol::NonTerminal(nt) => {
-                        let cur = follow.entry(nt.clone()).or_default();
-                        let before = cur.len();
-                        cur.extend(trailer.iter().cloned());
-                        if cur.len() != before { changed = true; }
-
-                        if nullable.contains(nt) {
-                            // Also add FIRST(nt) to trailer
-                            if let Some(f) = first.get(nt) {
-                                trailer.extend(f.iter().cloned());
-                            }
-                        } else {
-                            trailer = first.get(nt).cloned().unwrap_or_default();
-                        }
-                    }
-                    Symbol::Terminal(t) => {
-                        trailer = std::iter::once(t.clone()).collect();
-                    }
-                }
-            }
-        }
-    }
-    follow
-}
-
-/// A pointer into a rule at a given position (used for LR item construction).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RulePtr {
-    pub rule_idx: usize,
-    pub ptr: usize,
-}
-
-impl RulePtr {
-    pub fn new(rule_idx: usize, ptr: usize) -> Self {
-        RulePtr { rule_idx, ptr }
-    }
-
-    /// The symbol expected at the current position (None if at end of rule).
-    pub fn expected<'a>(&self, rules: &'a [Rule]) -> Option<&'a Symbol> {
-        rules[self.rule_idx].expansion.get(self.ptr)
-    }
-
-    pub fn advance(&self) -> Self {
-        RulePtr { rule_idx: self.rule_idx, ptr: self.ptr + 1 }
-    }
-
-    pub fn is_complete(&self, rules: &[Rule]) -> bool {
-        self.ptr >= rules[self.rule_idx].expansion.len()
-    }
-
-    pub fn rule<'a>(&self, rules: &'a [Rule]) -> &'a Rule {
-        &rules[self.rule_idx]
-    }
 }

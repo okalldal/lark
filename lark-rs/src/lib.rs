@@ -6,7 +6,7 @@ pub mod parsers;
 
 pub use error::{LarkError, ParseError, GrammarError};
 pub use grammar::{
-    load_grammar, Grammar,
+    load_grammar, lower, CompiledGrammar, CompiledRule, Grammar, SymbolId, SymbolKind, SymbolTable,
     rule::{Rule, RuleOptions},
     symbol::{Symbol, Terminal, NonTerminal},
     terminal::TerminalDef,
