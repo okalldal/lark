@@ -1144,20 +1144,29 @@ impl GrammarCompiler {
 
     fn compile_value(&mut self, v: Value, parent: &str) -> Result<Symbol, GrammarError> {
         match v {
-            Value::Terminal(name) => Ok(Symbol::Terminal(Terminal::new(name))),
+            // A named terminal reference is filtered iff `_`-prefixed (Lark's
+            // `Terminal(s, filter_out=s.startswith('_'))`).
+            Value::Terminal(name) => {
+                let filter_out = name.starts_with('_');
+                Ok(Symbol::Terminal(Terminal { name, filter_out }))
+            }
             Value::Rule(name) => Ok(Symbol::NonTerminal(NonTerminal::new(name))),
             Value::Literal(lit) => {
+                // An anonymous *string* literal is filtered out of the tree
+                // (keyword-like punctuation); an anonymous *regex* literal is kept,
+                // matching Python Lark. This is a property of the *occurrence*, not
+                // the terminal — the same terminal may be kept elsewhere.
+                let filter_out = matches!(lit, LiteralVal::Str(..));
                 let term_name = self.get_or_create_terminal(lit)?;
-                Ok(Symbol::Terminal(Terminal::new(term_name)))
+                Ok(Symbol::Terminal(Terminal { name: term_name, filter_out }))
             }
             Value::Range(from, to) => {
                 let pat_str = format!("[{}-{}]",
                     regex::escape(&from), regex::escape(&to));
                 let pat = Pattern::Re(PatternRe::new(&pat_str, 0)?);
-                let name = self.fresh_terminal();
                 // A char-range terminal is a regex literal — kept, like `/[a-z]/`.
-                self.terminals.push(TerminalDef::new(&name, pat, 0).with_filter_out(false));
-                Ok(Symbol::Terminal(Terminal::new(name)))
+                let name = self.intern_anon_pattern(pat, None);
+                Ok(Symbol::Terminal(Terminal { name, filter_out: false }))
             }
             Value::TemplateUsage { name, args } => {
                 self.instantiate_template(&name, args, parent)
@@ -1188,23 +1197,30 @@ impl GrammarCompiler {
                 (pat, None)
             }
         };
+        let name = self.intern_anon_pattern(pat, name_hint);
+        self.literal_cache.insert(key, name.clone());
+        Ok(name)
+    }
+
+    /// Intern an anonymous literal/range pattern, returning the terminal name to
+    /// reference it by. Unifies with an existing same-pattern terminal — named or
+    /// anonymous — by adopting its name, exactly as Python Lark's
+    /// `PrepareAnonTerminals` reuses the user terminal's name (so `"a"` lexes as
+    /// `A` when `A: "a"` exists, and an inline `/a/` reuses `A` from `A: /a/`).
+    /// Filtering is *not* keyed on this terminal — each occurrence carries its own
+    /// `filter_out` — so unifying for lexing never changes a token's keep/drop fate.
+    fn intern_anon_pattern(&mut self, pat: Pattern, name_hint: Option<String>) -> String {
+        if let Some(existing) = self.terminals.iter().find(|td| patterns_equivalent(&td.pattern, &pat)) {
+            return existing.name.clone();
+        }
         // Use the clean hint when it is a fresh, valid identifier; otherwise fall
         // back to a generated `__ANON_N` name (always a valid regex group name).
-        // We deliberately do NOT unify with a same-pattern user terminal: a
-        // literal usage is always filter_out, whereas the named terminal may be
-        // kept, so they must stay distinct.
         let name = match name_hint {
             Some(h) if !self.terminals.iter().any(|t| t.name == h) => h,
             _ => self.fresh_terminal(),
         };
-        // Anonymous *string* literals are filtered out of the tree (keyword-like
-        // punctuation); anonymous *regex* literals are kept, matching Python Lark
-        // (a `/regex/` in a rule body produces a kept `__ANON_n` token). The `i`
-        // flag compiles a string to a regex but it is still a string literal.
-        let filter_out = matches!(lit, LiteralVal::Str(..));
-        self.terminals.push(TerminalDef::new(&name, pat, 0).with_filter_out(filter_out));
-        self.literal_cache.insert(key, name.clone());
-        Ok(name)
+        self.terminals.push(TerminalDef::new(&name, pat, 0));
+        name
     }
 
     fn compile_group(
@@ -1291,7 +1307,7 @@ impl GrammarCompiler {
             Symbol::Terminal(t) => {
                 if self.current_keep_all {
                     1
-                } else if self.terminals.iter().any(|td| td.name == t.name && td.filter_out) {
+                } else if t.filter_out {
                     0
                 } else {
                     1
@@ -1402,9 +1418,7 @@ impl GrammarCompiler {
             }
             let regex = &memo[&t.name];
             let pat = Pattern::Re(PatternRe::new(regex.as_str(), 0)?);
-            let filter_out = t.name.starts_with('_');
-            self.terminals
-                .push(TerminalDef::new(&t.name, pat, t.priority).with_filter_out(filter_out));
+            self.terminals.push(TerminalDef::new(&t.name, pat, t.priority));
         }
         Ok(())
     }
@@ -1743,10 +1757,7 @@ impl GrammarCompiler {
                     let registered_name = alias.as_deref().unwrap_or(name.as_str());
                     let pat = Pattern::Re(PatternRe::new(td.1, 0)?);
                     if !self.terminals.iter().any(|t| t.name == registered_name) {
-                        self.terminals.push(
-                            TerminalDef::new(registered_name, pat, 0)
-                                .with_filter_out(registered_name.starts_with('_')),
-                        );
+                        self.terminals.push(TerminalDef::new(registered_name, pat, 0));
                     }
                 }
                 // Rules from common (e.g., %import common.list) are silently skipped for now.
@@ -1768,7 +1779,9 @@ impl GrammarCompiler {
             .collect();
         for (i, pat) in self.ignore_patterns.into_iter().enumerate() {
             let name = format!("__IGNORE_{}", i);
-            self.terminals.push(TerminalDef::new(&name, pat, 0).with_filter_out(true));
+            // `%ignore` tokens never reach the tree (the parse loop skips them), so
+            // they need no per-occurrence filter — they appear in no rule body.
+            self.terminals.push(TerminalDef::new(&name, pat, 0));
         }
 
         // Prune terminals that no rule (or `%ignore`) references. A terminal used
@@ -1828,6 +1841,21 @@ fn terminal_name_hint(s: &str) -> Option<String> {
         return Some(s.to_uppercase());
     }
     None
+}
+
+/// Two patterns are equivalent for terminal unification when they match the same
+/// language: identical regex source *and* identical flags. Python Lark keys its
+/// `term_reverse` map on `Pattern` equality (and raises on a flag mismatch for the
+/// same source); we treat differing flags as simply distinct, so unification never
+/// merges, say, `"a"` with `"a"i`.
+fn patterns_equivalent(a: &Pattern, b: &Pattern) -> bool {
+    fn flags_of(p: &Pattern) -> u32 {
+        match p {
+            Pattern::Str(_) => 0,
+            Pattern::Re(r) => r.flags,
+        }
+    }
+    a.as_regex_str() == b.as_regex_str() && flags_of(a) == flags_of(b)
 }
 
 /// Standard terminal names for common punctuation/operators.

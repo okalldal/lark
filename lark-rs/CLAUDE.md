@@ -158,8 +158,12 @@ Grammar (string-named, name-prefix semantics)
 
 The flags replace the old name-prefix sniffing entirely:
 `is_start` (was `name.starts_with("$root_")`), `transparent` (was a leading `_` /
-`__anon_` check), `filter_out` (per-terminal-id bool), and terminal-vs-non-terminal
-(was a name set + `$` check) is now just `id < n_terminals`.
+`__anon_` check), and terminal-vs-non-terminal (was a name set + `$` check) is now
+just `id < n_terminals`. Token filtering is **per rule position**, not per terminal:
+each `CompiledRule` carries a `filter_pos: Vec<bool>` parallel to its expansion
+(lowered from each `Symbol::Terminal` occurrence's own `filter_out`), so a terminal
+that is unified for lexing can still be kept at one rule position and dropped at
+another — Lark's model (see M6 in `COMPLIANCE_PARITY.md`).
 
 ### LALR Construction Pipeline (`lalr.rs`)
 
@@ -224,13 +228,13 @@ oracle. Three correctness bugs need fixing before Phase 2 starts (see Known Bugs
 | Token positions (line/col) | ✅ | Char-based columns; end_line/end_column newline-aware |
 | Oracle test harness | ✅ | arithmetic, JSON, python_numbers, lalr_core |
 | JSONTestSuite corpus | ✅ | 293/293 oracle agreement |
-| Compliance bank | ✅ | 257 grammars strip-mined from Python Lark's suite; 465/512 ≈ 90.8% agree (XFAIL-gated) |
+| Compliance bank | ✅ | 257 grammars strip-mined from Python Lark's suite; 468/512 ≈ 91.4% agree (XFAIL-gated) |
 | Oracle-coverage enforcement | ✅ | Meta-test + CI freshness gate |
 
 ### ⬜ Phase 2 — Earley + SPPF
 
 **Phase 2 is now eligible to start:** the compliance bank reached the 90% exit
-criterion (currently 465/512 ≈ 90.8%, with every remaining XFAIL triaged and
+criterion (currently 468/512 ≈ 91.4%, with every remaining XFAIL triaged and
 root-caused; see [`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md) for the exit
 criterion and remaining milestones). The roadmap continues in parallel to keep
 climbing the LALR path. All Phase-1 correctness bugs (BUG-1 through BUG-7) are now
@@ -434,15 +438,17 @@ All Phase-1 correctness bugs (BUG-1 through BUG-7) are **done**. The compliance 
 is the regression net: fixing a bug flips XFAIL entries to passing — regenerate
 `xfail.json` and watch parity rise (BUG-3 flipped 3, BUG-7 flipped 8; the
 lexer/terminal-filtering sprint plus two construct-error checks flipped 72, then
-nested-`maybe_placeholders` + oversized-priority flipped 6 more, lifting the bank to 90.8%).
+nested-`maybe_placeholders` + oversized-priority flipped 6 more, then the M6
+per-position-filtering refactor flipped 3, lifting the bank to 91.4%).
 
-**The remaining 47 XFAILs are triaged and sequenced in
+**The remaining 44 XFAILs are triaged and sequenced in
 [`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md)** — all on the LALR path (the bank
 is 100% LALR grammars, so Earley is orthogonal, not a way to climb parity). M1–M3,
-the global-`keep_all_tokens` half of M5, nested `maybe_placeholders` (123/124), and
-the oversized-priority part of M8 (49/50) are done; the remaining milestones are
-M4 (templates), M6 (inline↔named terminal collision), and M8 (EBNF/priority
-residue). That doc
+the global-`keep_all_tokens` half of M5, nested `maybe_placeholders` (123/124), the
+oversized-priority part of M8 (49/50), and the M6 core (per-position token filtering
++ literal/terminal unification, ids 155 & 194/195) are done; the remaining
+milestones are M4 (templates), M8 (EBNF/priority residue), and the 14/15
+terminal-algebra-typing tail of M6. That doc
 also defines the exit criterion that unfreezes Phase 2.
 
 ### Strategy: consolidate the load-bearing abstractions *before* Phase 2

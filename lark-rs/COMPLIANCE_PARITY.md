@@ -4,7 +4,7 @@
 bank says it generalizes beyond JSON/arithmetic. Phase 2 (Earley/SPPF) stays
 frozen until this roadmap is burned down — see the exit criterion at the bottom.
 
-> **Exit criterion reached (2026-06-03):** the bank is at **90.8%** (≥ 90%), with
+> **Exit criterion reached (2026-06-03):** the bank is at **91.4%** (≥ 90%), with
 > every remaining XFAIL triaged and root-caused below. Phase 2 (Earley/SPPF) is
 > now eligible to start; this roadmap continues in parallel to keep climbing the
 > LALR path. See the exit criterion at the bottom.
@@ -19,16 +19,26 @@ on. Hardening that core now means the SPPF forest-walk inherits a *correct*
 shaper instead of 125 latent bugs we'd then be debugging across two engines with
 no oracle to tell us which one is wrong.
 
-## Current state (2026-06-03, after M1–M3 + M5-global + M5-nested + M8-priority)
+## Current state (2026-06-03, after M1–M3 + M5-global + M5-nested + M8-priority + M6-core)
 
 - Bank: **257 grammars, 512 input-cases + construct-error checks**.
-- Agreement: **90.8% (465/512)**; **47 XFAIL entries**, **0 skipped**.
-  (Was 75.6% / 125 XFAIL at the start of this sprint, 89.6% / 53 before the latest
-  two fixes — see "Done" below.)
+- Agreement: **91.4% (468/512)**; **44 XFAIL entries**, **0 skipped**.
+  (Was 75.6% / 125 XFAIL at the start of this sprint, 90.8% / 47 before the M6
+  per-position-filtering refactor — see "Done" below.)
 - Remaining XFAIL shape: `build:<ri>` (8), `construct:<ri>` (4),
-  `parse:<ri>:<ci>` (35).
+  `parse:<ri>:<ci>` (32).
 
-## Done — M5-nested + M8-priority (latest, crossed the 90% exit criterion)
+## Done — M6 per-position token filtering (latest, architectural)
+
+The load-bearing refactor the roadmap flagged for Earley. Filtering moved off the
+per-terminal `filter_out` flag onto a **per-rule-position keep mask**
+(`CompiledRule::filter_pos`), and anonymous literals/ranges now **unify** with an
+existing same-pattern terminal by adopting its name (`intern_anon_pattern`).
+3 XFAILs flipped (47 → 44); full oracle + JSON-corpus + compliance suites green,
+no regressions. Pinned by `tests/test_terminal_unification.rs`. Details in the M6
+milestone below.
+
+## Done — M5-nested + M8-priority (crossed the 90% exit criterion)
 
 Two further root-cause fixes in `loader.rs`, 6 XFAILs flipped (53 → 47), no
 regressions, full oracle + JSON-corpus + compliance suite green. Pinned by
@@ -124,28 +134,36 @@ template.
   an R/R conflict. It is a nullable-EBNF LALR-construction gap (M8-adjacent), not a
   placeholder-counting gap.
 
-### M6 — Inline-pattern ↔ named-terminal collision — ~5 entries
+### M6 — Inline-pattern ↔ named-terminal collision — ✅ core done (155, 194/195); 14/15 remain
 
 **Symptom:** ids 14/15 (`C: "C" | D` terminal algebra typing), 155
 (`start: "a" A` / `A: "a"` — input `aa`), 194/195 (`start: /a/` / `A: /a/`).
 When an inline pattern is identical to a named terminal's pattern, Lark reuses the
 named terminal's type (so the token is `A`, not `__ANON_n`).
 
-**Dead end (tried, reverted):** the obvious fix — dedup an anonymous literal
-against an existing same-pattern terminal (gated on equal `filter_out`) — flips
-194/195 but **regresses 6 other cases**, because Python does not key tree
-filtering on the terminal's `filter_out` at all. It filters per *rule-symbol
-occurrence*: in `start: "a" A`, position 0 (the literal) is dropped and position
-1 (the `A` ref) is kept even though both lex to the *same* unified terminal.
-lark-rs instead carries one `filter_out` per terminal, so once two symbols share
-a terminal they share a keep/drop fate — and merging changes the type of tokens
-in unrelated grammars.
+**✅ Done — the architectural fix landed.** Token filtering moved from a
+per-terminal `filter_out` flag to a **per-rule-position keep mask** (Lark's model):
 
-**Real fix (deferred, architectural):** move token filtering from a per-terminal
-`filter_out` flag to a per-rule-position keep mask (Lark's model). Then
-same-pattern terminals can be unified for *lexing* while each rule position keeps
-its own drop/keep decision. This is the same chokepoint Earley's forest-walk will
-use, so it is worth doing once, carefully — not as a quick dedup.
+- `TerminalDef` no longer carries `filter_out`. Each `Symbol::Terminal`
+  *occurrence* carries its own `filter_out` (string literal → dropped, regex /
+  range / non-`_` named ref → kept), and `lower()` collapses those into
+  `CompiledRule::filter_pos` — a `Vec<bool>` parallel to the expansion. The
+  `TreeBuilder` keeps/drops the token at position `i` by `filter_pos[i]`, so two
+  symbols that share a terminal can still have *different* keep/drop fates.
+- `intern_anon_pattern` now **unifies** an anonymous literal/range with an existing
+  same-pattern terminal (named or anon) by adopting its name — exactly Lark's
+  `PrepareAnonTerminals`. So `"a"` lexes as `A` when `A: "a"` exists (fixes the
+  basic-lexer case 155, which could not parse at all before), and an inline `/a/`
+  reuses `A` (fixes 194/195's `__ANON_0` → `A`).
+
+This is the same chokepoint Earley's forest-walk will reuse: the SPPF→tree
+conversion collects one value per expansion symbol and applies `filter_pos[i]`
+identically. Pinned by `tests/test_terminal_unification.rs`.
+
+**Still open — 14/15** (`start: "a" /b+/ C` with `C: "C" | D`, `D: "D" E`, `E: "e"`).
+These pair the unification above with terminal *algebra* (a terminal referencing
+another). The remaining divergence is in how `C: "C" | D` types its token under
+the contextual lexer, not in filtering — track under terminal-algebra follow-up.
 
 ### M7 — Construct-error parity — 4 entries remaining
 
@@ -195,19 +213,20 @@ each individually.
 | M7a | invalid range + bad import | — | High | ✅ done (PR #15) |
 | M5-nested | nested `maybe_placeholders` (123/124) | — | High | ✅ done |
 | M8-priority | oversized terminal priority (49/50) | — | High | ✅ done |
-| **M6** | per-position token filtering (collision) | 5 | High effort | ⬜ open — architectural, load-bearing for Earley |
+| M6-core | per-position token filtering + unify (155, 194/195) | — | High | ✅ done |
 | **M4** | template tree-shape + higher-order | 12 | Medium | ⬜ open |
 | **M8** | EBNF/priority residue (156–161, 77/78, 108/109, 227/228, + 73/74 conflict) | ~12 | Mixed | ⬜ open |
+| **M6b** | terminal-algebra typing under collision (14/15) | 4 | Medium | ⬜ open |
 | **M7b** | regex collision detection | 2 | Medium | ⬜ open — needs Lark's exact rule reproduced first |
 
-The work so far took the bank from 75.6% to **90.8%** — 78 entries from eight
-root-cause fixes. The remaining 47 are M4, M6, and M8 (the EBNF/priority residue
-absorbed the old "nested-maybe" cluster once 123/124 were fixed and 227/228 + 108/109
-were reclassified as LALR-shape issues), plus regex-collision. M6 touches shared
-lexer/tree-builder code Earley depends on, so it pays double. **Recommended next:**
-M6 — highest value, and the per-position keep-mask it introduces is exactly the
-chokepoint Earley's forest-walk will reuse. With the 90% exit criterion met, Phase 2
-may also begin in parallel.
+The work so far took the bank from 75.6% to **91.4%** — 81 entries from nine
+root-cause fixes. The remaining 44 are M4 (templates), M8 (EBNF/priority residue),
+14/15 (terminal-algebra typing), and regex-collision. The M6 per-position keep mask
+(`filter_pos`) and the SPPF→tree convention it sets — one value per expansion
+symbol, filtered by position — are exactly what Earley's forest-walk will reuse, so
+that chokepoint is now in place. **Recommended next:** M4 (template tree-shape) is
+the largest cluster (~12); Phase 2 (Earley/SPPF) may also begin in parallel now that
+the exit criterion and the shared tree-builder contract are settled.
 
 ## Exit criterion — when Earley unfreezes
 
