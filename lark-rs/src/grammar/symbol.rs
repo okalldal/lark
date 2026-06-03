@@ -41,7 +41,10 @@ pub struct Terminal {
 
 impl Terminal {
     pub fn new(name: impl Into<String>) -> Self {
-        Terminal { name: name.into(), filter_out: false }
+        Terminal {
+            name: name.into(),
+            filter_out: false,
+        }
     }
 }
 

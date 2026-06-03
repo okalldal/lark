@@ -1,12 +1,14 @@
-pub mod symbol;
-pub mod rule;
-pub mod terminal;
-pub mod loader;
 pub mod analysis;
 pub mod intern;
+pub mod loader;
+pub mod rule;
+pub mod symbol;
+pub mod terminal;
 
+pub use intern::{
+    lower, CompiledGrammar, CompiledRule, SymbolId, SymbolInfo, SymbolKind, SymbolTable,
+};
 pub use loader::load_grammar;
-pub use intern::{lower, CompiledGrammar, CompiledRule, SymbolId, SymbolInfo, SymbolKind, SymbolTable};
 
 use rule::Rule;
 use terminal::TerminalDef;

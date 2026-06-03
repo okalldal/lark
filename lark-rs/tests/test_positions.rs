@@ -27,7 +27,9 @@ fn tok(children: &[Child], i: usize) -> &lark_rs::Token {
 fn test_token_positions_multiline_and_unicode() {
     let lark = make_lalr(GRAMMAR);
     let result = lark.parse("<a\nbc>\ncafé").expect("parse");
-    let tree = result.as_tree().expect("start rule is `start: BLOCK NAME`, so the root is a tree");
+    let tree = result
+        .as_tree()
+        .expect("start rule is `start: BLOCK NAME`, so the root is a tree");
     let c = &tree.children;
     assert_eq!(c.len(), 2, "expected BLOCK NAME");
 

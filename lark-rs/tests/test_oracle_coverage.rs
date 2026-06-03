@@ -8,13 +8,11 @@ use std::path::Path;
 /// Grammars knowingly committed without an oracle yet, each with a reason.
 /// Remove an entry the moment you add its oracle. Do NOT add to this list to
 /// silence the test without a genuine reason — that defeats the purpose.
-const QUARANTINE: &[(&str, &str)] = &[
-    (
-        "python2",
-        "6440-line WIP needing an INDENT/DEDENT indenter (Phase 3); not yet \
+const QUARANTINE: &[(&str, &str)] = &[(
+    "python2",
+    "6440-line WIP needing an INDENT/DEDENT indenter (Phase 3); not yet \
          parseable end-to-end.",
-    ),
-];
+)];
 
 fn grammars_dir() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/grammars")

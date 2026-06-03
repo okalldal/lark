@@ -47,9 +47,9 @@ fn test_nested_maybe_placeholders_compose() {
     // outer absent group must emit three Nones, not one (compliance ids 123/124).
     let lark = build("!start: [\"a\" [\"b\" \"c\"]] ", true);
     let cases = [
-        ("", "_,_,_"),       // outer absent: 1 (for "a") + 2 (nested) = 3 placeholders
-        ("a", "a,_,_"),      // outer present, inner absent
-        ("abc", "a,b,c"),    // both present
+        ("", "_,_,_"),    // outer absent: 1 (for "a") + 2 (nested) = 3 placeholders
+        ("a", "a,_,_"),   // outer present, inner absent
+        ("abc", "a,b,c"), // both present
     ];
     for (input, expected) in cases {
         let tree = lark.parse(input).expect("parse").as_tree().unwrap().clone();
@@ -61,8 +61,14 @@ fn test_nested_maybe_placeholders_compose() {
 fn test_single_maybe_unaffected() {
     // A single (non-nested) `[...]` still emits exactly its own kept-slot count.
     let lark = build("!start: [\"a\" \"b\"]", true);
-    assert_eq!(shape(&lark.parse("").unwrap().as_tree().unwrap().children), "_,_");
-    assert_eq!(shape(&lark.parse("ab").unwrap().as_tree().unwrap().children), "a,b");
+    assert_eq!(
+        shape(&lark.parse("").unwrap().as_tree().unwrap().children),
+        "_,_"
+    );
+    assert_eq!(
+        shape(&lark.parse("ab").unwrap().as_tree().unwrap().children),
+        "a,b"
+    );
 }
 
 #[test]

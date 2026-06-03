@@ -50,7 +50,10 @@ impl LexerConf {
 
     /// id → name map for token display.
     fn names(&self) -> HashMap<SymbolId, String> {
-        self.terminals.iter().map(|(id, t)| (*id, t.name.clone())).collect()
+        self.terminals
+            .iter()
+            .map(|(id, t)| (*id, t.name.clone()))
+            .collect()
     }
 }
 
@@ -81,17 +84,24 @@ impl Scanner {
     /// Build a scanner from candidate terminals (deduplicated by id).
     fn build(terminals: &[(SymbolId, &TerminalDef)]) -> Result<Scanner, GrammarError> {
         let mut seen = HashSet::new();
-        let terms: Vec<(SymbolId, &TerminalDef)> =
-            terminals.iter().copied().filter(|(id, _)| seen.insert(*id)).collect();
+        let terms: Vec<(SymbolId, &TerminalDef)> = terminals
+            .iter()
+            .copied()
+            .filter(|(id, _)| seen.insert(*id))
+            .collect();
 
         // unless: embed string terminals fully matched by a same-priority regex
         // terminal, and record the retype.
         let unless = compute_unless(&terms)?;
-        let embedded: HashSet<SymbolId> = unless.values().flat_map(|m| m.values().copied()).collect();
+        let embedded: HashSet<SymbolId> =
+            unless.values().flat_map(|m| m.values().copied()).collect();
 
         // Scanner terminals = everything not embedded, sorted Python-style.
-        let mut scan: Vec<(SymbolId, &TerminalDef)> =
-            terms.iter().copied().filter(|(id, _)| !embedded.contains(id)).collect();
+        let mut scan: Vec<(SymbolId, &TerminalDef)> = terms
+            .iter()
+            .copied()
+            .filter(|(id, _)| !embedded.contains(id))
+            .collect();
         sort_terminals(&mut scan);
 
         let mut parts = Vec::with_capacity(scan.len());
@@ -105,8 +115,10 @@ impl Scanner {
             groups.push((id, group));
         }
         let pattern = parts.join("|");
-        let re = Regex::new(&pattern)
-            .map_err(|e| GrammarError::InvalidRegex { pattern: pattern.clone(), reason: e.to_string() })?;
+        let re = Regex::new(&pattern).map_err(|e| GrammarError::InvalidRegex {
+            pattern: pattern.clone(),
+            reason: e.to_string(),
+        })?;
         Ok(Scanner { re, groups, unless })
     }
 
@@ -125,7 +137,12 @@ impl Scanner {
         let value = m0.as_str();
         for (id, group) in &self.groups {
             if caps.name(group).is_some() {
-                let ty = self.unless.get(id).and_then(|m| m.get(value)).copied().unwrap_or(*id);
+                let ty = self
+                    .unless
+                    .get(id)
+                    .and_then(|m| m.get(value))
+                    .copied()
+                    .unwrap_or(*id);
                 return Some((ty, value));
             }
         }
@@ -139,10 +156,14 @@ impl Scanner {
 fn compute_unless(
     terms: &[(SymbolId, &TerminalDef)],
 ) -> Result<HashMap<SymbolId, HashMap<String, SymbolId>>, GrammarError> {
-    let res: Vec<&(SymbolId, &TerminalDef)> =
-        terms.iter().filter(|(_, t)| matches!(t.pattern, Pattern::Re(_))).collect();
-    let strs: Vec<&(SymbolId, &TerminalDef)> =
-        terms.iter().filter(|(_, t)| matches!(t.pattern, Pattern::Str(_))).collect();
+    let res: Vec<&(SymbolId, &TerminalDef)> = terms
+        .iter()
+        .filter(|(_, t)| matches!(t.pattern, Pattern::Re(_)))
+        .collect();
+    let strs: Vec<&(SymbolId, &TerminalDef)> = terms
+        .iter()
+        .filter(|(_, t)| matches!(t.pattern, Pattern::Str(_)))
+        .collect();
     if res.is_empty() || strs.is_empty() {
         return Ok(HashMap::new());
     }
@@ -150,8 +171,10 @@ fn compute_unless(
     let mut unless: HashMap<SymbolId, HashMap<String, SymbolId>> = HashMap::new();
     for (re_id, re_t) in &res {
         let full_src = format!("^(?:{})$", re_t.pattern.to_inline_regex());
-        let full = Regex::new(&full_src)
-            .map_err(|e| GrammarError::InvalidRegex { pattern: full_src.clone(), reason: e.to_string() })?;
+        let full = Regex::new(&full_src).map_err(|e| GrammarError::InvalidRegex {
+            pattern: full_src.clone(),
+            reason: e.to_string(),
+        })?;
         for (s_id, s_t) in &strs {
             if s_t.priority != re_t.priority {
                 continue;
@@ -161,7 +184,10 @@ fn compute_unless(
                 Pattern::Re(_) => continue,
             };
             if full.is_match(value) {
-                unless.entry(*re_id).or_default().insert(value.clone(), *s_id);
+                unless
+                    .entry(*re_id)
+                    .or_default()
+                    .insert(value.clone(), *s_id);
             }
         }
     }
@@ -178,7 +204,12 @@ fn sort_terminals(terms: &mut [(SymbolId, &TerminalDef)]) {
         b.priority
             .cmp(&a.priority)
             .then_with(|| bw.cmp(&aw))
-            .then_with(|| b.pattern.as_regex_str().len().cmp(&a.pattern.as_regex_str().len()))
+            .then_with(|| {
+                b.pattern
+                    .as_regex_str()
+                    .len()
+                    .cmp(&a.pattern.as_regex_str().len())
+            })
             .then_with(|| a.name.cmp(&b.name))
             .then_with(|| a_id.cmp(b_id))
     });
@@ -195,7 +226,8 @@ pub struct BasicLexer {
 
 impl BasicLexer {
     pub fn new(conf: &LexerConf) -> Result<Self, GrammarError> {
-        let refs: Vec<(SymbolId, &TerminalDef)> = conf.terminals.iter().map(|(id, t)| (*id, t)).collect();
+        let refs: Vec<(SymbolId, &TerminalDef)> =
+            conf.terminals.iter().map(|(id, t)| (*id, t)).collect();
         let scanner = Scanner::build(&refs)?;
         Ok(BasicLexer {
             scanner,
@@ -220,7 +252,12 @@ impl Lexer for BasicLexer {
                     let start_col = col;
 
                     for ch in value.chars() {
-                        if ch == '\n' { line += 1; col = 1; } else { col += 1; }
+                        if ch == '\n' {
+                            line += 1;
+                            col = 1;
+                        } else {
+                            col += 1;
+                        }
                     }
                     pos += value.len();
 
@@ -241,7 +278,10 @@ impl Lexer for BasicLexer {
                 None => {
                     let ch = text[pos..].chars().next().unwrap();
                     return Err(ParseError::UnexpectedCharacter {
-                        ch, line, col, pos,
+                        ch,
+                        line,
+                        col,
+                        pos,
                         expected: "any token".to_string(),
                     });
                 }
@@ -313,7 +353,11 @@ impl ContextualLexer {
         line: usize,
         col: usize,
     ) -> Result<Option<Token>, ParseError> {
-        let scanner = match self.state_scanners.get(&state).or_else(|| self.state_scanners.get(&0)) {
+        let scanner = match self
+            .state_scanners
+            .get(&state)
+            .or_else(|| self.state_scanners.get(&0))
+        {
             Some(s) => s,
             None => return Ok(None),
         };
@@ -324,7 +368,12 @@ impl ContextualLexer {
             // newline advances the line and resets the column.
             let (mut end_line, mut end_column) = (line, col);
             for ch in value.chars() {
-                if ch == '\n' { end_line += 1; end_column = 1; } else { end_column += 1; }
+                if ch == '\n' {
+                    end_line += 1;
+                    end_column = 1;
+                } else {
+                    end_column += 1;
+                }
             }
             return Ok(Some(Token {
                 type_id: id,
@@ -345,7 +394,10 @@ impl ContextualLexer {
 
         let ch = text[pos..].chars().next().unwrap();
         Err(ParseError::UnexpectedCharacter {
-            ch, line, col, pos,
+            ch,
+            line,
+            col,
+            pos,
             expected: "valid token for this state".to_string(),
         })
     }
@@ -363,7 +415,12 @@ pub struct LexerState<'a> {
 
 impl<'a> LexerState<'a> {
     pub fn new(text: &'a str) -> Self {
-        LexerState { text, pos: 0, line: 1, col: 1 }
+        LexerState {
+            text,
+            pos: 0,
+            line: 1,
+            col: 1,
+        }
     }
 
     pub fn is_done(&self) -> bool {
@@ -374,7 +431,12 @@ impl<'a> LexerState<'a> {
     /// newline-aware (columns count characters, not bytes).
     pub fn advance_by(&mut self, n: usize) {
         for ch in self.text[self.pos..self.pos + n].chars() {
-            if ch == '\n' { self.line += 1; self.col = 1; } else { self.col += 1; }
+            if ch == '\n' {
+                self.line += 1;
+                self.col = 1;
+            } else {
+                self.col += 1;
+            }
         }
         self.pos += n;
     }

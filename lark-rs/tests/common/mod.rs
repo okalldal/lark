@@ -1,6 +1,5 @@
 /// Shared test utilities: oracle loading, tree comparison, parser helpers.
-
-use lark_rs::{Lark, LarkOptions, ParserAlgorithm, LexerType, ParseTree, Token, Tree, Child};
+use lark_rs::{Child, Lark, LarkOptions, LexerType, ParseTree, ParserAlgorithm, Token, Tree};
 
 /// Build a LALR + contextual-lexer parser for the given grammar text.
 pub fn make_lalr(grammar_text: &str) -> Lark {
@@ -34,8 +33,7 @@ pub fn load_oracle(suite: &str, name: &str) -> serde_json::Value {
         .join(format!("{name}.json"));
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("Cannot read oracle {}: {e}", path.display()));
-    serde_json::from_str(&text)
-        .unwrap_or_else(|e| panic!("Oracle JSON parse error: {e}"))
+    serde_json::from_str(&text).unwrap_or_else(|e| panic!("Oracle JSON parse error: {e}"))
 }
 
 /// Compare a parse result against the oracle JSON node produced by
@@ -70,10 +68,7 @@ fn match_token(tok: &Token, oracle: &serde_json::Value) -> Result<(), String> {
         return Err(format!("token type '{}' != '{expected_type}'", tok.type_));
     }
     if tok.value != expected_value {
-        return Err(format!(
-            "token value {:?} != {expected_value:?}",
-            tok.value
-        ));
+        return Err(format!("token value {:?} != {expected_value:?}", tok.value));
     }
     Ok(())
 }
@@ -87,7 +82,10 @@ fn match_node_tree(tree: &Tree, oracle: &serde_json::Value) -> Result<(), String
         ));
     }
 
-    let oracle_children = oracle["children"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
+    let oracle_children = oracle["children"]
+        .as_array()
+        .map(|a| a.as_slice())
+        .unwrap_or(&[]);
     if tree.children.len() != oracle_children.len() {
         return Err(format!(
             "In '{}': got {} children, expected {}",
@@ -127,8 +125,7 @@ fn match_node_tree(tree: &Tree, oracle: &serde_json::Value) -> Result<(), String
                         tree.data, tok.type_
                     ));
                 }
-                match_token(tok, oc)
-                    .map_err(|e| format!("In '{}' child {i}: {e}", tree.data))?;
+                match_token(tok, oc).map_err(|e| format!("In '{}' child {i}: {e}", tree.data))?;
             }
         }
     }

@@ -11,9 +11,9 @@
 //! - Aliases: `expansion -> alias_name`
 //! - Directives: `%ignore`, `%import`, `%declare`, `%override`, `%extend`
 
-use std::collections::HashMap;
-use super::{Grammar, symbol::*, rule::*, terminal::*};
+use super::{rule::*, symbol::*, terminal::*, Grammar};
 use crate::error::GrammarError;
+use std::collections::HashMap;
 
 /// Convert grammar text to a compiled [`Grammar`].
 pub fn load_grammar(
@@ -36,8 +36,8 @@ pub fn load_grammar(
 enum Tok {
     Rule(String),
     Terminal(String),
-    String(String, bool),   // value, case_insensitive
-    Regexp(String, u32),    // pattern, flags
+    String(String, bool), // value, case_insensitive
+    Regexp(String, u32),  // pattern, flags
     Number(i32),
     LPar,
     RPar,
@@ -51,9 +51,9 @@ enum Tok {
     Dot,
     DotDot,
     Tilde,
-    Op(char),               // + * ?
-    Arrow,                  // ->
-    RuleModifiers(String),  // !, !?, ?!, ?
+    Op(char),              // + * ?
+    Arrow,                 // ->
+    RuleModifiers(String), // !, !?, ?!, ?
     Ignore,
     Import,
     Declare,
@@ -73,7 +73,13 @@ struct Lexer<'a> {
 
 impl<'a> Lexer<'a> {
     fn new(src: &'a str) -> Self {
-        Lexer { src, pos: 0, line: 1, col: 1, peeked: None }
+        Lexer {
+            src,
+            pos: 0,
+            line: 1,
+            col: 1,
+            peeked: None,
+        }
     }
 
     fn rest(&self) -> &str {
@@ -93,7 +99,9 @@ impl<'a> Lexer<'a> {
     }
 
     fn skip_ws_inline(&mut self) {
-        let n = self.rest().bytes()
+        let n = self
+            .rest()
+            .bytes()
             .take_while(|&b| b == b' ' || b == b'\t')
             .count();
         self.advance(n);
@@ -152,30 +160,46 @@ impl<'a> Lexer<'a> {
                 } else if rest.starts_with("\\\n") || rest.starts_with("\\ \n") {
                     Dispatch::LineContinuation(rest.find('\n').unwrap() + 1)
                 } else if rest.starts_with('\n') || rest.starts_with('\r') {
-                    let n = rest.bytes()
+                    let n = rest
+                        .bytes()
                         .take_while(|&b| b == b'\n' || b == b'\r' || b == b' ' || b == b'\t')
                         .count();
                     Dispatch::Newline(n)
                 } else if rest.starts_with("//") || rest.starts_with('#') {
                     Dispatch::Comment(rest.find('\n').unwrap_or(rest.len()))
                 } else if rest.starts_with("%ignore")
-                    && rest[7..].chars().next().map_or(true, |c| !c.is_alphanumeric() && c != '_')
+                    && rest[7..]
+                        .chars()
+                        .next()
+                        .map_or(true, |c| !c.is_alphanumeric() && c != '_')
                 {
                     Dispatch::Directive("ignore", 7)
                 } else if rest.starts_with("%import")
-                    && rest[7..].chars().next().map_or(true, |c| !c.is_alphanumeric() && c != '_')
+                    && rest[7..]
+                        .chars()
+                        .next()
+                        .map_or(true, |c| !c.is_alphanumeric() && c != '_')
                 {
                     Dispatch::Directive("import", 7)
                 } else if rest.starts_with("%declare")
-                    && rest[8..].chars().next().map_or(true, |c| !c.is_alphanumeric() && c != '_')
+                    && rest[8..]
+                        .chars()
+                        .next()
+                        .map_or(true, |c| !c.is_alphanumeric() && c != '_')
                 {
                     Dispatch::Directive("declare", 8)
                 } else if rest.starts_with("%override")
-                    && rest[9..].chars().next().map_or(true, |c| !c.is_alphanumeric() && c != '_')
+                    && rest[9..]
+                        .chars()
+                        .next()
+                        .map_or(true, |c| !c.is_alphanumeric() && c != '_')
                 {
                     Dispatch::Directive("override", 9)
                 } else if rest.starts_with("%extend")
-                    && rest[7..].chars().next().map_or(true, |c| !c.is_alphanumeric() && c != '_')
+                    && rest[7..]
+                        .chars()
+                        .next()
+                        .map_or(true, |c| !c.is_alphanumeric() && c != '_')
                 {
                     Dispatch::Directive("extend", 7)
                 } else if rest.starts_with("->") {
@@ -217,26 +241,41 @@ impl<'a> Lexer<'a> {
 
             match dispatch {
                 Dispatch::Empty => return Ok(None),
-                Dispatch::LineContinuation(n) => { self.advance(n); continue; }
+                Dispatch::LineContinuation(n) => {
+                    self.advance(n);
+                    continue;
+                }
                 Dispatch::Newline(n) => {
                     self.advance(n);
                     return Ok(Some(Tok::Newline));
                 }
-                Dispatch::Comment(n) => { self.advance(n); continue; }
+                Dispatch::Comment(n) => {
+                    self.advance(n);
+                    continue;
+                }
                 Dispatch::Directive(name, n) => {
                     self.advance(n);
                     return Ok(Some(match name {
-                        "ignore"   => Tok::Ignore,
-                        "import"   => Tok::Import,
-                        "declare"  => Tok::Declare,
+                        "ignore" => Tok::Ignore,
+                        "import" => Tok::Import,
+                        "declare" => Tok::Declare,
                         "override" => Tok::Override,
-                        "extend"   => Tok::Extend,
-                        _          => unreachable!(),
+                        "extend" => Tok::Extend,
+                        _ => unreachable!(),
                     }));
                 }
-                Dispatch::Arrow => { self.advance(2); return Ok(Some(Tok::Arrow)); }
-                Dispatch::DotDot => { self.advance(2); return Ok(Some(Tok::DotDot)); }
-                Dispatch::Dot => { self.advance(1); return Ok(Some(Tok::Dot)); }
+                Dispatch::Arrow => {
+                    self.advance(2);
+                    return Ok(Some(Tok::Arrow));
+                }
+                Dispatch::DotDot => {
+                    self.advance(2);
+                    return Ok(Some(Tok::DotDot));
+                }
+                Dispatch::Dot => {
+                    self.advance(1);
+                    return Ok(Some(Tok::Dot));
+                }
                 Dispatch::RuleModifier(s, n) => {
                     self.advance(n);
                     return Ok(Some(Tok::RuleModifiers(s)));
@@ -253,10 +292,13 @@ impl<'a> Lexer<'a> {
                     self.advance(n);
                     return Ok(Some(match ch {
                         '+' | '*' => Tok::Op(ch),
-                        _ => return Err(GrammarError::SyntaxError {
-                            line: self.line, col: self.col,
-                            msg: format!("Unexpected character: {:?}", ch),
-                        }),
+                        _ => {
+                            return Err(GrammarError::SyntaxError {
+                                line: self.line,
+                                col: self.col,
+                                msg: format!("Unexpected character: {:?}", ch),
+                            })
+                        }
                     }));
                 }
                 Dispatch::Terminal => return self.lex_terminal(),
@@ -276,11 +318,13 @@ impl<'a> Lexer<'a> {
                         '~' => Tok::Tilde,
                         '+' | '*' => Tok::Op(ch),
                         '?' => Tok::Op('?'),
-                        _ => return Err(GrammarError::SyntaxError {
-                            line: self.line,
-                            col: self.col,
-                            msg: format!("Unexpected character: {:?}", ch),
-                        }),
+                        _ => {
+                            return Err(GrammarError::SyntaxError {
+                                line: self.line,
+                                col: self.col,
+                                msg: format!("Unexpected character: {:?}", ch),
+                            })
+                        }
                     }));
                 }
             } // match dispatch
@@ -297,8 +341,10 @@ impl<'a> Lexer<'a> {
                 b'"' => {
                     i += 1;
                     let ci = src[i..].starts_with('i')
-                        && !src[i+1..].starts_with(|c: char| c.is_alphanumeric() || c == '_');
-                    if ci { i += 1; }
+                        && !src[i + 1..].starts_with(|c: char| c.is_alphanumeric() || c == '_');
+                    if ci {
+                        i += 1;
+                    }
                     let raw = &src[1..i - if ci { 2 } else { 1 }];
                     let value = unescape_string(raw);
                     self.advance(i);
@@ -308,7 +354,8 @@ impl<'a> Lexer<'a> {
             }
         }
         Err(GrammarError::SyntaxError {
-            line: self.line, col: self.col,
+            line: self.line,
+            col: self.col,
             msg: "Unterminated string literal".to_string(),
         })
     }
@@ -335,26 +382,41 @@ impl<'a> Lexer<'a> {
             }
         }
         Err(GrammarError::SyntaxError {
-            line: self.line, col: self.col,
+            line: self.line,
+            col: self.col,
             msg: "Unterminated regex literal".to_string(),
         })
     }
 
     fn try_lex_number(&mut self) -> Option<Tok> {
         let rest = self.rest();
-        let sign = if rest.starts_with('-') || rest.starts_with('+') { 1 } else { 0 };
+        let sign = if rest.starts_with('-') || rest.starts_with('+') {
+            1
+        } else {
+            0
+        };
         let after_sign = &rest[sign..];
         if !after_sign.starts_with(|c: char| c.is_ascii_digit()) {
             return None;
         }
-        let len = sign + after_sign.bytes().take_while(|b| b.is_ascii_digit()).count();
+        let len = sign
+            + after_sign
+                .bytes()
+                .take_while(|b| b.is_ascii_digit())
+                .count();
         let digits = &rest[..len];
         // Python Lark priorities are arbitrary-precision ints; we store i32 and
         // saturate, so a huge (negative) priority like `A.-99999999999999999999999`
         // clamps to the extreme rather than failing to lex.
         let n: i32 = match digits.parse::<i128>() {
             Ok(v) => v.clamp(i32::MIN as i128, i32::MAX as i128) as i32,
-            Err(_) => if digits.starts_with('-') { i32::MIN } else { i32::MAX },
+            Err(_) => {
+                if digits.starts_with('-') {
+                    i32::MIN
+                } else {
+                    i32::MAX
+                }
+            }
         };
         self.advance(len);
         Some(Tok::Number(n))
@@ -362,8 +424,11 @@ impl<'a> Lexer<'a> {
 
     fn lex_rule(&mut self) -> Result<Option<Tok>, GrammarError> {
         let rest = self.rest();
-        let len = rest.bytes()
-            .take_while(|&b| b.is_ascii_lowercase() || b.is_ascii_uppercase() || b == b'_' || b.is_ascii_digit())
+        let len = rest
+            .bytes()
+            .take_while(|&b| {
+                b.is_ascii_lowercase() || b.is_ascii_uppercase() || b == b'_' || b.is_ascii_digit()
+            })
             .count();
         let name = rest[..len].to_string();
         self.advance(len);
@@ -372,7 +437,8 @@ impl<'a> Lexer<'a> {
 
     fn lex_terminal(&mut self) -> Result<Option<Tok>, GrammarError> {
         let rest = self.rest();
-        let len = rest.bytes()
+        let len = rest
+            .bytes()
             .take_while(|&b| b.is_ascii_uppercase() || b == b'_' || b.is_ascii_digit())
             .count();
         let name = rest[..len].to_string();
@@ -410,7 +476,10 @@ fn unescape_string(s: &str) -> String {
             Some('u') => push_hex_escape(&mut out, &mut chars, 4, "\\u"),
             Some('U') => push_hex_escape(&mut out, &mut chars, 8, "\\U"),
             // Unknown escape: keep the backslash (regex escapes like `\w`, `\d`).
-            Some(c) => { out.push('\\'); out.push(c); }
+            Some(c) => {
+                out.push('\\');
+                out.push(c);
+            }
             None => out.push('\\'),
         }
     }
@@ -429,7 +498,10 @@ fn push_hex_escape(
     let mut hex = String::with_capacity(n);
     for _ in 0..n {
         match chars.peek() {
-            Some(c) if c.is_ascii_hexdigit() => { hex.push(*c); chars.next(); }
+            Some(c) if c.is_ascii_hexdigit() => {
+                hex.push(*c);
+                chars.next();
+            }
             _ => break,
         }
     }
@@ -439,7 +511,10 @@ fn push_hex_escape(
         .and_then(char::from_u32)
     {
         Some(ch) => out.push(ch),
-        None => { out.push_str(prefix); out.push_str(&hex); }
+        None => {
+            out.push_str(prefix);
+            out.push_str(&hex);
+        }
     }
 }
 
@@ -487,7 +562,11 @@ struct AliasedExpansion {
 #[derive(Debug, Clone)]
 enum Expr {
     Value(Value),
-    Repeat { inner: Box<Expr>, min: usize, max: Option<usize> },
+    Repeat {
+        inner: Box<Expr>,
+        min: usize,
+        max: Option<usize>,
+    },
     Group(Vec<AliasedExpansion>),
     Maybe(Vec<AliasedExpansion>),
 }
@@ -503,8 +582,8 @@ enum Value {
 
 #[derive(Debug, Clone)]
 enum LiteralVal {
-    Str(String, bool),         // value, case-insensitive
-    Re(String, u32),           // pattern, flags
+    Str(String, bool), // value, case-insensitive
+    Re(String, u32),   // pattern, flags
 }
 
 #[derive(Debug, Clone)]
@@ -516,7 +595,7 @@ struct RawTerm {
 
 #[derive(Debug, Clone)]
 struct ImportSpec {
-    path: Vec<String>,   // e.g. ["common"] or [".", "mylib"]
+    path: Vec<String>, // e.g. ["common"] or [".", "mylib"]
     relative: bool,
     names: Option<Vec<String>>,
     alias: Option<String>,
@@ -530,7 +609,9 @@ struct GrammarParser<'a> {
 
 impl<'a> GrammarParser<'a> {
     fn new(src: &'a str) -> Self {
-        GrammarParser { lexer: Lexer::new(src) }
+        GrammarParser {
+            lexer: Lexer::new(src),
+        }
     }
 
     fn err(&self, msg: impl Into<String>) -> GrammarError {
@@ -578,7 +659,9 @@ impl<'a> GrammarParser<'a> {
                 self.lexer.next_tok()?;
                 let expansions = self.parse_expansions()?;
                 self.consume_newline()?;
-                Ok(Some(Item::IgnoreItem(expansions.into_iter().map(|a| a.expansion).collect())))
+                Ok(Some(Item::IgnoreItem(
+                    expansions.into_iter().map(|a| a.expansion).collect(),
+                )))
             }
             Some(Tok::Import) => {
                 self.lexer.next_tok()?;
@@ -630,7 +713,9 @@ impl<'a> GrammarParser<'a> {
         let modifiers = if let Some(Tok::RuleModifiers(_)) = self.lexer.peek_tok()? {
             if let Some(Tok::RuleModifiers(m)) = self.lexer.next_tok()? {
                 m
-            } else { String::new() }
+            } else {
+                String::new()
+            }
         } else {
             String::new()
         };
@@ -666,7 +751,13 @@ impl<'a> GrammarParser<'a> {
         let expansions = self.parse_expansions()?;
         self.consume_newline()?;
 
-        Ok(RawRule { name, modifiers, params, priority, expansions })
+        Ok(RawRule {
+            name,
+            modifiers,
+            params,
+            priority,
+            expansions,
+        })
     }
 
     fn parse_template_params(&mut self) -> Result<Vec<String>, GrammarError> {
@@ -674,10 +765,14 @@ impl<'a> GrammarParser<'a> {
         loop {
             match self.lexer.next_tok()? {
                 Some(Tok::Rule(n)) => params.push(n),
-                other => return Err(self.err(format!("Expected template param name, got {:?}", other))),
+                other => {
+                    return Err(self.err(format!("Expected template param name, got {:?}", other)))
+                }
             }
             match self.lexer.peek_tok()? {
-                Some(Tok::Comma) => { self.lexer.next_tok()?; }
+                Some(Tok::Comma) => {
+                    self.lexer.next_tok()?;
+                }
                 _ => break,
             }
         }
@@ -705,7 +800,11 @@ impl<'a> GrammarParser<'a> {
         let expansions = self.parse_expansions()?;
         self.consume_newline()?;
 
-        Ok(RawTerm { name, priority, expansions })
+        Ok(RawTerm {
+            name,
+            priority,
+            expansions,
+        })
     }
 
     fn parse_expansions(&mut self) -> Result<Vec<AliasedExpansion>, GrammarError> {
@@ -729,7 +828,7 @@ impl<'a> GrammarParser<'a> {
                     self.lexer.next_tok()?;
                     if let Some(Tok::Or) = self.lexer.peek_tok()? {
                         self.lexer.next_tok()?; // consume |
-                        // Allow another newline immediately after |
+                                                // Allow another newline immediately after |
                         if let Some(Tok::Newline) = self.lexer.peek_tok()? {
                             self.lexer.next_tok()?;
                         }
@@ -764,11 +863,7 @@ impl<'a> GrammarParser<'a> {
         let mut exprs = Vec::new();
         loop {
             match self.lexer.peek_tok()? {
-                None
-                | Some(Tok::Newline)
-                | Some(Tok::Or)
-                | Some(Tok::RPar)
-                | Some(Tok::RBra)
+                None | Some(Tok::Newline) | Some(Tok::Or) | Some(Tok::RPar) | Some(Tok::RBra)
                 | Some(Tok::Arrow) => break,
                 _ => exprs.push(self.parse_expr()?),
             }
@@ -781,27 +876,45 @@ impl<'a> GrammarParser<'a> {
         match self.lexer.peek_tok()? {
             Some(Tok::Op('+')) => {
                 self.lexer.next_tok()?;
-                Ok(Expr::Repeat { inner: Box::new(atom), min: 1, max: None })
+                Ok(Expr::Repeat {
+                    inner: Box::new(atom),
+                    min: 1,
+                    max: None,
+                })
             }
             Some(Tok::Op('*')) => {
                 self.lexer.next_tok()?;
-                Ok(Expr::Repeat { inner: Box::new(atom), min: 0, max: None })
+                Ok(Expr::Repeat {
+                    inner: Box::new(atom),
+                    min: 0,
+                    max: None,
+                })
             }
             Some(Tok::Op('?')) => {
                 self.lexer.next_tok()?;
-                Ok(Expr::Repeat { inner: Box::new(atom), min: 0, max: Some(1) })
+                Ok(Expr::Repeat {
+                    inner: Box::new(atom),
+                    min: 0,
+                    max: Some(1),
+                })
             }
             Some(Tok::Tilde) => {
                 self.lexer.next_tok()?;
                 let min = match self.lexer.next_tok()? {
                     Some(Tok::Number(n)) => n as usize,
-                    other => return Err(self.err(format!("Expected number after ~, got {:?}", other))),
+                    other => {
+                        return Err(self.err(format!("Expected number after ~, got {:?}", other)))
+                    }
                 };
                 let max = if let Some(Tok::DotDot) = self.lexer.peek_tok()? {
                     self.lexer.next_tok()?;
                     match self.lexer.next_tok()? {
                         Some(Tok::Number(n)) => Some(n as usize),
-                        other => return Err(self.err(format!("Expected number after .., got {:?}", other))),
+                        other => {
+                            return Err(
+                                self.err(format!("Expected number after .., got {:?}", other))
+                            )
+                        }
                     }
                 } else {
                     Some(min)
@@ -815,7 +928,11 @@ impl<'a> GrammarParser<'a> {
                         )));
                     }
                 }
-                Ok(Expr::Repeat { inner: Box::new(atom), min, max })
+                Ok(Expr::Repeat {
+                    inner: Box::new(atom),
+                    min,
+                    max,
+                })
             }
             _ => Ok(atom),
         }
@@ -859,7 +976,9 @@ impl<'a> GrammarParser<'a> {
                     self.lexer.next_tok()?;
                     match self.lexer.next_tok()? {
                         Some(Tok::String(s2, _)) => Ok(Value::Range(s, s2)),
-                        other => Err(self.err(format!("Expected string after .., got {:?}", other))),
+                        other => {
+                            Err(self.err(format!("Expected string after .., got {:?}", other)))
+                        }
                     }
                 } else {
                     Ok(Value::Literal(LiteralVal::Str(s, _ci)))
@@ -875,7 +994,9 @@ impl<'a> GrammarParser<'a> {
         loop {
             args.push(self.parse_value()?);
             match self.lexer.peek_tok()? {
-                Some(Tok::Comma) => { self.lexer.next_tok()?; }
+                Some(Tok::Comma) => {
+                    self.lexer.next_tok()?;
+                }
                 _ => break,
             }
         }
@@ -924,7 +1045,12 @@ impl<'a> GrammarParser<'a> {
             None
         };
 
-        Ok(ImportSpec { path, relative, names, alias })
+        Ok(ImportSpec {
+            path,
+            relative,
+            names,
+            alias,
+        })
     }
 
     fn parse_name_list(&mut self) -> Result<Vec<String>, GrammarError> {
@@ -935,7 +1061,9 @@ impl<'a> GrammarParser<'a> {
                 other => return Err(self.err(format!("Expected name, got {:?}", other))),
             }
             match self.lexer.peek_tok()? {
-                Some(Tok::Comma) => { self.lexer.next_tok()?; }
+                Some(Tok::Comma) => {
+                    self.lexer.next_tok()?;
+                }
                 _ => break,
             }
         }
@@ -1050,7 +1178,10 @@ impl GrammarCompiler {
     /// `keep_all_tokens` propagates from the enclosing rule so that `!rule` keeps
     /// tokens inside its `[...]`, `(...)`, `*`, `+` sub-expressions too.
     fn anon_opts(&self) -> RuleOptions {
-        RuleOptions { keep_all_tokens: self.current_keep_all, ..RuleOptions::default() }
+        RuleOptions {
+            keep_all_tokens: self.current_keep_all,
+            ..RuleOptions::default()
+        }
     }
 
     fn fresh_terminal(&mut self) -> String {
@@ -1066,7 +1197,12 @@ impl GrammarCompiler {
                 if !r.params.is_empty() {
                     self.templates.insert(
                         r.name.clone(),
-                        (r.params.clone(), r.expansions.clone(), r.modifiers.clone(), r.priority),
+                        (
+                            r.params.clone(),
+                            r.expansions.clone(),
+                            r.modifiers.clone(),
+                            r.priority,
+                        ),
                     );
                 }
             }
@@ -1155,9 +1291,7 @@ impl GrammarCompiler {
             Expr::Value(v) => self.compile_value(v, parent),
             Expr::Group(alts) => self.compile_group(alts, parent, false),
             Expr::Maybe(alts) => self.compile_maybe(alts, parent),
-            Expr::Repeat { inner, min, max } => {
-                self.compile_repeat(*inner, min, max, parent)
-            }
+            Expr::Repeat { inner, min, max } => self.compile_repeat(*inner, min, max, parent),
         }
     }
 
@@ -1177,19 +1311,22 @@ impl GrammarCompiler {
                 // the terminal — the same terminal may be kept elsewhere.
                 let filter_out = matches!(lit, LiteralVal::Str(..));
                 let term_name = self.get_or_create_terminal(lit)?;
-                Ok(Symbol::Terminal(Terminal { name: term_name, filter_out }))
+                Ok(Symbol::Terminal(Terminal {
+                    name: term_name,
+                    filter_out,
+                }))
             }
             Value::Range(from, to) => {
-                let pat_str = format!("[{}-{}]",
-                    regex::escape(&from), regex::escape(&to));
+                let pat_str = format!("[{}-{}]", regex::escape(&from), regex::escape(&to));
                 let pat = Pattern::Re(PatternRe::new(&pat_str, 0)?);
                 // A char-range terminal is a regex literal — kept, like `/[a-z]/`.
                 let name = self.intern_anon_pattern(pat, None);
-                Ok(Symbol::Terminal(Terminal { name, filter_out: false }))
+                Ok(Symbol::Terminal(Terminal {
+                    name,
+                    filter_out: false,
+                }))
             }
-            Value::TemplateUsage { name, args } => {
-                self.instantiate_template(&name, args, parent)
-            }
+            Value::TemplateUsage { name, args } => self.instantiate_template(&name, args, parent),
         }
     }
 
@@ -1201,7 +1338,9 @@ impl GrammarCompiler {
         let (pat, name_hint) = match &lit {
             LiteralVal::Str(s, ci) => {
                 let mut flags = 0;
-                if *ci { flags |= flags::IGNORECASE; }
+                if *ci {
+                    flags |= flags::IGNORECASE;
+                }
                 let pat = if *ci {
                     Pattern::Re(PatternRe::new(&regex::escape(s), flags)?)
                 } else {
@@ -1229,7 +1368,11 @@ impl GrammarCompiler {
     /// Filtering is *not* keyed on this terminal — each occurrence carries its own
     /// `filter_out` — so unifying for lexing never changes a token's keep/drop fate.
     fn intern_anon_pattern(&mut self, pat: Pattern, name_hint: Option<String>) -> String {
-        if let Some(existing) = self.terminals.iter().find(|td| patterns_equivalent(&td.pattern, &pat)) {
+        if let Some(existing) = self
+            .terminals
+            .iter()
+            .find(|td| patterns_equivalent(&td.pattern, &pat))
+        {
             return existing.name.clone();
         }
         // Use the clean hint when it is a fresh, valid identifier; otherwise fall
@@ -1262,7 +1405,8 @@ impl GrammarCompiler {
             let origin = NonTerminal::new(&name);
             let size: usize = syms.iter().map(|s| self.symbol_size(s)).sum();
             self.helper_sizes.insert(name.clone(), size);
-            self.rules.push(Rule::new(origin.clone(), syms, None, self.anon_opts(), 0));
+            self.rules
+                .push(Rule::new(origin.clone(), syms, None, self.anon_opts(), 0));
             return Ok(Symbol::NonTerminal(origin));
         }
         let name = self.fresh_anon_rule("group");
@@ -1319,12 +1463,22 @@ impl GrammarCompiler {
             // nested maybe/group, so nested optionals compose (Lark `FindRuleSize`).
             let size: usize = syms.iter().map(|s| self.symbol_size(s)).sum();
             max_kept = max_kept.max(size);
-            self.rules.push(Rule::new(origin.clone(), syms, alias, self.anon_opts(), order));
+            self.rules.push(Rule::new(
+                origin.clone(),
+                syms,
+                alias,
+                self.anon_opts(),
+                order,
+            ));
         }
         // Record this maybe's size so an enclosing `[...]` counts it recursively.
         self.helper_sizes.insert(name.clone(), max_kept);
-        let empty_opts = RuleOptions { placeholder_count: max_kept, ..self.anon_opts() };
-        self.rules.push(Rule::new(origin.clone(), vec![], None, empty_opts, 100));
+        let empty_opts = RuleOptions {
+            placeholder_count: max_kept,
+            ..self.anon_opts()
+        };
+        self.rules
+            .push(Rule::new(origin.clone(), vec![], None, empty_opts, 100));
         Ok(Symbol::NonTerminal(origin))
     }
 
@@ -1368,7 +1522,13 @@ impl GrammarCompiler {
         }
         let name = self.fresh_anon_rule("plus");
         let nt = NonTerminal::new(&name);
-        self.rules.push(Rule::new(nt.clone(), vec![inner_sym.clone()], None, self.anon_opts(), 0));
+        self.rules.push(Rule::new(
+            nt.clone(),
+            vec![inner_sym.clone()],
+            None,
+            self.anon_opts(),
+            0,
+        ));
         self.rules.push(Rule::new(
             nt.clone(),
             vec![Symbol::NonTerminal(nt.clone()), inner_sym],
@@ -1406,8 +1566,15 @@ impl GrammarCompiler {
                 let size = self.symbol_size(&inner_sym);
                 self.helper_sizes.insert(name.clone(), size);
                 self.nullable_opts.insert(name.clone());
-                self.rules.push(Rule::new(nt.clone(), vec![inner_sym], None, self.anon_opts(), 0));
-                self.rules.push(Rule::new(nt.clone(), vec![], None, self.anon_opts(), 1));
+                self.rules.push(Rule::new(
+                    nt.clone(),
+                    vec![inner_sym],
+                    None,
+                    self.anon_opts(),
+                    0,
+                ));
+                self.rules
+                    .push(Rule::new(nt.clone(), vec![], None, self.anon_opts(), 1));
                 Ok(Symbol::NonTerminal(nt))
             }
             (1, None) => {
@@ -1421,8 +1588,10 @@ impl GrammarCompiler {
                 let name = self.fresh_anon_rule("star");
                 let nt = NonTerminal::new(&name);
                 self.nullable_opts.insert(name.clone());
-                self.rules.push(Rule::new(nt.clone(), vec![plus], None, self.anon_opts(), 0));
-                self.rules.push(Rule::new(nt.clone(), vec![], None, self.anon_opts(), 1));
+                self.rules
+                    .push(Rule::new(nt.clone(), vec![plus], None, self.anon_opts(), 0));
+                self.rules
+                    .push(Rule::new(nt.clone(), vec![], None, self.anon_opts(), 1));
                 Ok(Symbol::NonTerminal(nt))
             }
             (n, Some(m)) if n == m => {
@@ -1430,7 +1599,8 @@ impl GrammarCompiler {
                 let name = self.fresh_anon_rule("rep");
                 let nt = NonTerminal::new(&name);
                 let syms: Vec<Symbol> = std::iter::repeat(inner_sym).take(n).collect();
-                self.rules.push(Rule::new(nt.clone(), syms, None, self.anon_opts(), 0));
+                self.rules
+                    .push(Rule::new(nt.clone(), syms, None, self.anon_opts(), 0));
                 Ok(Symbol::NonTerminal(nt))
             }
             (n, max_opt) => {
@@ -1439,8 +1609,10 @@ impl GrammarCompiler {
                 let name = self.fresh_anon_rule("rep_range");
                 let nt = NonTerminal::new(&name);
                 for count in n..=max_count {
-                    let syms: Vec<Symbol> = std::iter::repeat(inner_sym.clone()).take(count).collect();
-                    self.rules.push(Rule::new(nt.clone(), syms, None, self.anon_opts(), count));
+                    let syms: Vec<Symbol> =
+                        std::iter::repeat(inner_sym.clone()).take(count).collect();
+                    self.rules
+                        .push(Rule::new(nt.clone(), syms, None, self.anon_opts(), count));
                 }
                 Ok(Symbol::NonTerminal(nt))
             }
@@ -1478,7 +1650,8 @@ impl GrammarCompiler {
             }
             let regex = &memo[&t.name];
             let pat = Pattern::Re(PatternRe::new(regex.as_str(), 0)?);
-            self.terminals.push(TerminalDef::new(&t.name, pat, t.priority));
+            self.terminals
+                .push(TerminalDef::new(&t.name, pat, t.priority));
         }
         Ok(())
     }
@@ -1504,7 +1677,9 @@ impl GrammarCompiler {
             if let Some(&(_, src)) = COMMON_TERMINALS.iter().find(|(n, _)| *n == name) {
                 return Ok(src.to_string());
             }
-            return Err(GrammarError::UndefinedTerminal { name: name.to_string() });
+            return Err(GrammarError::UndefinedTerminal {
+                name: name.to_string(),
+            });
         };
         if stack.iter().any(|n| n == name) {
             stack.push(name.to_string());
@@ -1520,7 +1695,9 @@ impl GrammarCompiler {
         for alt in &raw.expansions {
             let mut parts = String::new();
             for expr in &alt.expansion {
-                parts.push_str(&Self::term_expr_regex(expr, by_name, imported, memo, stack)?);
+                parts.push_str(&Self::term_expr_regex(
+                    expr, by_name, imported, memo, stack,
+                )?);
             }
             alts.push(parts);
         }
@@ -1530,7 +1707,10 @@ impl GrammarCompiler {
             alts.pop().unwrap()
         } else {
             alts.sort_by(|a, b| b.len().cmp(&a.len()));
-            alts.into_iter().map(|p| format!("(?:{p})")).collect::<Vec<_>>().join("|")
+            alts.into_iter()
+                .map(|p| format!("(?:{p})"))
+                .collect::<Vec<_>>()
+                .join("|")
         };
         memo.insert(name.to_string(), combined.clone());
         Ok(combined)
@@ -1549,7 +1729,11 @@ impl GrammarCompiler {
         let regex = match expr {
             Expr::Value(Value::Literal(LiteralVal::Str(s, ci))) => {
                 let escaped = regex::escape(s);
-                if *ci { format!("(?i:{escaped})") } else { escaped }
+                if *ci {
+                    format!("(?i:{escaped})")
+                } else {
+                    escaped
+                }
             }
             Expr::Value(Value::Literal(LiteralVal::Re(pattern, flags))) => {
                 // Validate and apply any flags as a scoped group.
@@ -1609,7 +1793,9 @@ impl GrammarCompiler {
         for alt in alts {
             let mut parts = String::new();
             for expr in &alt.expansion {
-                parts.push_str(&Self::term_expr_regex(expr, by_name, imported, memo, stack)?);
+                parts.push_str(&Self::term_expr_regex(
+                    expr, by_name, imported, memo, stack,
+                )?);
             }
             out.push(parts);
         }
@@ -1626,7 +1812,11 @@ impl GrammarCompiler {
         if parts.len() == 1 {
             Ok(parts.remove(0))
         } else {
-            let combined = parts.iter().map(|p| p.as_regex_str()).collect::<Vec<_>>().join("");
+            let combined = parts
+                .iter()
+                .map(|p| p.as_regex_str())
+                .collect::<Vec<_>>()
+                .join("");
             Ok(Pattern::Re(PatternRe::new(&combined, 0)?))
         }
     }
@@ -1635,7 +1825,10 @@ impl GrammarCompiler {
         match expr {
             Expr::Value(Value::Literal(LiteralVal::Str(s, ci))) => {
                 if *ci {
-                    Ok(Pattern::Re(PatternRe::new(&format!("(?i){}", regex::escape(s)), flags::IGNORECASE)?))
+                    Ok(Pattern::Re(PatternRe::new(
+                        &format!("(?i){}", regex::escape(s)),
+                        flags::IGNORECASE,
+                    )?))
                 } else {
                     Ok(Pattern::Str(PatternStr::new(s.as_str())))
                 }
@@ -1647,9 +1840,14 @@ impl GrammarCompiler {
                 let chars: Vec<char> = from.chars().collect();
                 let chare: Vec<char> = to.chars().collect();
                 if chars.len() != 1 || chare.len() != 1 {
-                    return Err(GrammarError::Other { msg: "Range requires single characters".to_string() });
+                    return Err(GrammarError::Other {
+                        msg: "Range requires single characters".to_string(),
+                    });
                 }
-                Ok(Pattern::Re(PatternRe::new(&format!("[{}-{}]", regex::escape(from), regex::escape(to)), 0)?))
+                Ok(Pattern::Re(PatternRe::new(
+                    &format!("[{}-{}]", regex::escape(from), regex::escape(to)),
+                    0,
+                )?))
             }
             Expr::Repeat { inner, min, max } => {
                 let inner_pat = self.expr_to_pattern(inner)?;
@@ -1670,33 +1868,49 @@ impl GrammarCompiler {
                 )?))
             }
             Expr::Group(alts) => {
-                let parts: Vec<String> = alts.iter()
+                let parts: Vec<String> = alts
+                    .iter()
                     .map(|a| {
-                        let parts: Vec<Result<Pattern, GrammarError>> = a.expansion.iter()
+                        let parts: Vec<Result<Pattern, GrammarError>> = a
+                            .expansion
+                            .iter()
                             .map(|e| self.expr_to_pattern(e))
                             .collect();
-                        parts.into_iter()
-                            .collect::<Result<Vec<_>, _>>()
-                            .map(|ps| ps.iter().map(|p| p.as_regex_str().to_string()).collect::<Vec<_>>().join(""))
+                        parts.into_iter().collect::<Result<Vec<_>, _>>().map(|ps| {
+                            ps.iter()
+                                .map(|p| p.as_regex_str().to_string())
+                                .collect::<Vec<_>>()
+                                .join("")
+                        })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                Ok(Pattern::Re(PatternRe::new(&format!("(?:{})", parts.join("|")), 0)?))
+                Ok(Pattern::Re(PatternRe::new(
+                    &format!("(?:{})", parts.join("|")),
+                    0,
+                )?))
             }
             Expr::Maybe(alts) => {
                 let inner_pat = self.expansion_to_pattern(&alts[0].expansion)?;
-                Ok(Pattern::Re(PatternRe::new(&format!("(?:{})?", inner_pat.as_regex_str()), 0)?))
+                Ok(Pattern::Re(PatternRe::new(
+                    &format!("(?:{})?", inner_pat.as_regex_str()),
+                    0,
+                )?))
             }
             // Terminal reference in %ignore — look up the terminal's pattern
             Expr::Value(Value::Terminal(name)) => {
                 if let Some(td) = self.terminals.iter().find(|t| &t.name == name) {
                     Ok(td.pattern.clone())
-                } else if let Some(&(_, pat_str)) = COMMON_TERMINALS.iter().find(|(n, _)| *n == name.as_str()) {
+                } else if let Some(&(_, pat_str)) =
+                    COMMON_TERMINALS.iter().find(|(n, _)| *n == name.as_str())
+                {
                     Ok(Pattern::Re(PatternRe::new(pat_str, 0)?))
                 } else {
                     Err(GrammarError::UndefinedTerminal { name: name.clone() })
                 }
             }
-            _ => Err(GrammarError::Other { msg: format!("Cannot convert {:?} to pattern", expr) }),
+            _ => Err(GrammarError::Other {
+                msg: format!("Cannot convert {:?} to pattern", expr),
+            }),
         }
     }
 
@@ -1706,13 +1920,22 @@ impl GrammarCompiler {
         args: Vec<Value>,
         _parent: &str,
     ) -> Result<Symbol, GrammarError> {
-        let (params, expansions, modifiers, priority) = self.templates.get(name)
-            .ok_or_else(|| GrammarError::UndefinedRule { name: name.to_string() })?
+        let (params, expansions, modifiers, priority) = self
+            .templates
+            .get(name)
+            .ok_or_else(|| GrammarError::UndefinedRule {
+                name: name.to_string(),
+            })?
             .clone();
 
         if params.len() != args.len() {
             return Err(GrammarError::Other {
-                msg: format!("Template {} expects {} args, got {}", name, params.len(), args.len()),
+                msg: format!(
+                    "Template {} expects {} args, got {}",
+                    name,
+                    params.len(),
+                    args.len()
+                ),
             });
         }
 
@@ -1757,7 +1980,13 @@ impl GrammarCompiler {
         for (order, alt) in expansions.into_iter().enumerate() {
             let alias = alt.alias.clone();
             let syms = self.compile_expansion(alt.expansion, &inst_name)?;
-            self.rules.push(Rule::new(origin.clone(), syms, alias, inst_opts.clone(), order));
+            self.rules.push(Rule::new(
+                origin.clone(),
+                syms,
+                alias,
+                inst_opts.clone(),
+                order,
+            ));
         }
         self.current_keep_all = saved_keep_all;
         Ok(Symbol::NonTerminal(origin))
@@ -1767,10 +1996,17 @@ impl GrammarCompiler {
         expansions: &[AliasedExpansion],
         subst: &HashMap<String, Value>,
     ) -> Vec<AliasedExpansion> {
-        expansions.iter().map(|alt| AliasedExpansion {
-            expansion: alt.expansion.iter().map(|e| Self::subst_expr(e, subst)).collect(),
-            alias: alt.alias.clone(),
-        }).collect()
+        expansions
+            .iter()
+            .map(|alt| AliasedExpansion {
+                expansion: alt
+                    .expansion
+                    .iter()
+                    .map(|e| Self::subst_expr(e, subst))
+                    .collect(),
+                alias: alt.alias.clone(),
+            })
+            .collect()
     }
 
     fn subst_expr(expr: &Expr, subst: &HashMap<String, Value>) -> Expr {
@@ -1836,7 +2072,9 @@ impl GrammarCompiler {
             // (e.g. `%import bad_test.NUMBER`) cannot be resolved. Python Lark
             // raises when the module is not found, so we error too instead of
             // silently dropping the imported symbols.
-            return Err(GrammarError::ImportNotFound { path: spec.path.join(".") });
+            return Err(GrammarError::ImportNotFound {
+                path: spec.path.join("."),
+            });
         }
         if is_common {
             for (name, alias) in &names_to_import {
@@ -1844,7 +2082,8 @@ impl GrammarCompiler {
                     let registered_name = alias.as_deref().unwrap_or(name.as_str());
                     let pat = Pattern::Re(PatternRe::new(td.1, 0)?);
                     if !self.terminals.iter().any(|t| t.name == registered_name) {
-                        self.terminals.push(TerminalDef::new(registered_name, pat, 0));
+                        self.terminals
+                            .push(TerminalDef::new(registered_name, pat, 0));
                     }
                 }
                 // Rules from common (e.g., %import common.list) are silently skipped for now.
@@ -1861,9 +2100,7 @@ impl GrammarCompiler {
 
         // Add ignore terminals (one terminal per ignore pattern)
         let n_ignore = self.ignore_patterns.len();
-        let ignore_names: Vec<String> = (0..n_ignore)
-            .map(|i| format!("__IGNORE_{}", i))
-            .collect();
+        let ignore_names: Vec<String> = (0..n_ignore).map(|i| format!("__IGNORE_{}", i)).collect();
         for (i, pat) in self.ignore_patterns.into_iter().enumerate() {
             let name = format!("__IGNORE_{}", i);
             // `%ignore` tokens never reach the tree (the parse loop skips them), so
@@ -1890,7 +2127,8 @@ impl GrammarCompiler {
 
         // Sort terminals by (priority desc, max_width desc, name asc)
         self.terminals.sort_by(|a, b| {
-            b.priority.cmp(&a.priority)
+            b.priority
+                .cmp(&a.priority)
                 .then_with(|| {
                     let bw = b.pattern.max_width().unwrap_or(usize::MAX);
                     let aw = a.pattern.max_width().unwrap_or(usize::MAX);
@@ -1918,12 +2156,19 @@ impl GrammarCompiler {
 fn terminal_name_hint(s: &str) -> Option<String> {
     // Common punctuation uses Python Lark's names (e.g. "," -> COMMA, "(" -> LPAR).
     // Filtering is handled by `filter_out`, not a name prefix, so names are clean.
-    if let Some(&name) = TERMINAL_NAMES.iter().find(|(ch, _)| ch == &s).map(|(_, n)| n) {
+    if let Some(&name) = TERMINAL_NAMES
+        .iter()
+        .find(|(ch, _)| ch == &s)
+        .map(|(_, n)| n)
+    {
         return Some(name.to_string());
     }
     // Keyword-like strings become their uppercase form, but only when that is a
     // valid regex named-capture identifier (must not start with a digit).
-    let first_ok = s.chars().next().is_some_and(|c| c.is_alphabetic() || c == '_');
+    let first_ok = s
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_alphabetic() || c == '_');
     if first_ok && s.chars().all(|c| c.is_alphanumeric() || c == '_') {
         return Some(s.to_uppercase());
     }
@@ -1947,39 +2192,73 @@ fn patterns_equivalent(a: &Pattern, b: &Pattern) -> bool {
 
 /// Standard terminal names for common punctuation/operators.
 static TERMINAL_NAMES: &[(&str, &str)] = &[
-    (".", "DOT"), (",", "COMMA"), (":", "COLON"), (";", "SEMICOLON"),
-    ("+", "PLUS"), ("-", "MINUS"), ("*", "STAR"), ("/", "SLASH"),
-    ("|", "VBAR"), ("?", "QMARK"), ("!", "BANG"), ("@", "AT"),
-    ("#", "HASH"), ("$", "DOLLAR"), ("%", "PERCENT"), ("^", "CIRCUMFLEX"),
-    ("&", "AMPERSAND"), ("_", "UNDERSCORE"), ("<", "LESSTHAN"),
-    (">", "MORETHAN"), ("=", "EQUAL"), ("\"", "DBLQUOTE"), ("'", "QUOTE"),
-    ("`", "BACKQUOTE"), ("~", "TILDE"), ("(", "LPAR"), (")", "RPAR"),
-    ("{", "LBRACE"), ("}", "RBRACE"), ("[", "LSQB"), ("]", "RSQB"),
-    ("\n", "NEWLINE"), ("\t", "TAB"), (" ", "SPACE"),
+    (".", "DOT"),
+    (",", "COMMA"),
+    (":", "COLON"),
+    (";", "SEMICOLON"),
+    ("+", "PLUS"),
+    ("-", "MINUS"),
+    ("*", "STAR"),
+    ("/", "SLASH"),
+    ("|", "VBAR"),
+    ("?", "QMARK"),
+    ("!", "BANG"),
+    ("@", "AT"),
+    ("#", "HASH"),
+    ("$", "DOLLAR"),
+    ("%", "PERCENT"),
+    ("^", "CIRCUMFLEX"),
+    ("&", "AMPERSAND"),
+    ("_", "UNDERSCORE"),
+    ("<", "LESSTHAN"),
+    (">", "MORETHAN"),
+    ("=", "EQUAL"),
+    ("\"", "DBLQUOTE"),
+    ("'", "QUOTE"),
+    ("`", "BACKQUOTE"),
+    ("~", "TILDE"),
+    ("(", "LPAR"),
+    (")", "RPAR"),
+    ("{", "LBRACE"),
+    ("}", "RBRACE"),
+    ("[", "LSQB"),
+    ("]", "RSQB"),
+    ("\n", "NEWLINE"),
+    ("\t", "TAB"),
+    (" ", "SPACE"),
 ];
 
 /// Subset of `common.lark` terminals inlined for %import resolution.
 static COMMON_TERMINALS: &[(&str, &str)] = &[
-    ("DIGIT",           r"[0-9]"),
-    ("HEXDIGIT",        r"[0-9a-fA-F]"),
-    ("INT",             r"[0-9]+"),
-    ("SIGNED_INT",      r"[+-]?[0-9]+"),
-    ("DECIMAL",         r"[0-9]+\.[0-9]*"),
-    ("FLOAT",           r"(?i)(\d+e[+-]?\d+|\d+\.\d*e[+-]?\d+|\d*\.\d+e[+-]?\d+|\d+\.\d*|\d*\.\d+)"),
-    ("SIGNED_FLOAT",    r"[+-]?(\d+e[+-]?\d+|\d+\.\d*e[+-]?\d+|\d*\.\d+e[+-]?\d+|\d+\.\d*|\d*\.\d+)"),
-    ("NUMBER",          r"(\d+\.?\d*|\.\d+)([Ee][+-]?\d+)?"),
-    ("SIGNED_NUMBER",   r"[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([Ee][+-]?[0-9]+)?"),
-    ("LETTER",          r"[a-zA-Z]"),
-    ("WORD",            r"[a-zA-Z]+"),
-    ("CNAME",           r"[_a-zA-Z][_a-zA-Z0-9]*"),
-    ("WS_INLINE",       r"[ \t]+"),
-    ("WS",              r"[ \t\f\r\n]+"),
-    ("NEWLINE",         r"(\r?\n)+"),
-    ("SH_COMMENT",      r"#[^\n]*"),
-    ("CPP_COMMENT",     r"//[^\n]*"),
-    ("C_COMMENT",       r"/\*.*?\*/"),
-    ("STRING",          r#""([^"\\\n\r]|\\.)*?""#),
-    ("ESCAPED_STRING",  r#""([^"\\\n\r]|\\.)*""#),
-    ("LCASE_LETTER",    r"[a-z]"),
-    ("UCASE_LETTER",    r"[A-Z]"),
+    ("DIGIT", r"[0-9]"),
+    ("HEXDIGIT", r"[0-9a-fA-F]"),
+    ("INT", r"[0-9]+"),
+    ("SIGNED_INT", r"[+-]?[0-9]+"),
+    ("DECIMAL", r"[0-9]+\.[0-9]*"),
+    (
+        "FLOAT",
+        r"(?i)(\d+e[+-]?\d+|\d+\.\d*e[+-]?\d+|\d*\.\d+e[+-]?\d+|\d+\.\d*|\d*\.\d+)",
+    ),
+    (
+        "SIGNED_FLOAT",
+        r"[+-]?(\d+e[+-]?\d+|\d+\.\d*e[+-]?\d+|\d*\.\d+e[+-]?\d+|\d+\.\d*|\d*\.\d+)",
+    ),
+    ("NUMBER", r"(\d+\.?\d*|\.\d+)([Ee][+-]?\d+)?"),
+    (
+        "SIGNED_NUMBER",
+        r"[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([Ee][+-]?[0-9]+)?",
+    ),
+    ("LETTER", r"[a-zA-Z]"),
+    ("WORD", r"[a-zA-Z]+"),
+    ("CNAME", r"[_a-zA-Z][_a-zA-Z0-9]*"),
+    ("WS_INLINE", r"[ \t]+"),
+    ("WS", r"[ \t\f\r\n]+"),
+    ("NEWLINE", r"(\r?\n)+"),
+    ("SH_COMMENT", r"#[^\n]*"),
+    ("CPP_COMMENT", r"//[^\n]*"),
+    ("C_COMMENT", r"/\*.*?\*/"),
+    ("STRING", r#""([^"\\\n\r]|\\.)*?""#),
+    ("ESCAPED_STRING", r#""([^"\\\n\r]|\\.)*""#),
+    ("LCASE_LETTER", r"[a-z]"),
+    ("UCASE_LETTER", r"[A-Z]"),
 ];

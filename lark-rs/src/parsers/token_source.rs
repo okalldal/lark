@@ -54,7 +54,10 @@ pub struct PreLexed {
 
 impl PreLexed {
     pub fn new(tokens: Vec<Token>) -> Self {
-        PreLexed { tokens: tokens.into_iter(), current: None }
+        PreLexed {
+            tokens: tokens.into_iter(),
+            current: None,
+        }
     }
 }
 
@@ -85,7 +88,11 @@ pub struct Contextual<'a> {
 
 impl<'a> Contextual<'a> {
     pub fn new(text: &'a str, lexer: &'a ContextualLexer) -> Self {
-        Contextual { lexer, state: LexerState::new(text), current: None }
+        Contextual {
+            lexer,
+            state: LexerState::new(text),
+            current: None,
+        }
     }
 
     /// Lex the next non-ignored token for `parser_state`, or the `$END` token at
@@ -117,7 +124,11 @@ impl<'a> Contextual<'a> {
                 // failure the parser will enrich with its expected-terminal set.
                 Ok(None) | Err(_) => {
                     let ch = self.state.text[self.state.pos..].chars().next().unwrap();
-                    return Err(LexFailure { ch, line: self.state.line, col: self.state.col });
+                    return Err(LexFailure {
+                        ch,
+                        line: self.state.line,
+                        col: self.state.col,
+                    });
                 }
             }
         }
