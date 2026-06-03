@@ -799,6 +799,15 @@ impl<'a> GrammarParser<'a> {
                 } else {
                     Some(min)
                 };
+                // A `~n..m` range with n > m matches nothing; Python Lark rejects it
+                // at construction, so we do too (rather than build a dead rule).
+                if let Some(m) = max {
+                    if min > m {
+                        return Err(self.err(format!(
+                            "Repetition range is empty: min {min} exceeds max {m}"
+                        )));
+                    }
+                }
                 Ok(Expr::Repeat { inner: Box::new(atom), min, max })
             }
             _ => Ok(atom),
@@ -1679,6 +1688,13 @@ impl GrammarCompiler {
         };
 
         let is_common = spec.path.first().map(String::as_str) == Some("common");
+        if !is_common {
+            // Only the bundled `common` library is available; a file/module import
+            // (e.g. `%import bad_test.NUMBER`) cannot be resolved. Python Lark
+            // raises when the module is not found, so we error too instead of
+            // silently dropping the imported symbols.
+            return Err(GrammarError::ImportNotFound { path: spec.path.join(".") });
+        }
         if is_common {
             for (name, alias) in &names_to_import {
                 if let Some(td) = COMMON_TERMINALS.iter().find(|(n, _)| *n == name.as_str()) {

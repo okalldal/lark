@@ -17,18 +17,22 @@ no oracle to tell us which one is wrong.
 ## Current state (2026-06-03, after M1–M3 + M5-global)
 
 - Bank: **257 grammars, 512 input-cases + construct-error checks**.
-- Agreement: **88.9% (455/512)**; **57 XFAIL entries**, **0 skipped**.
-  (Was 75.6% / 125 XFAIL before this sprint — four lexer/terminal-filtering fixes
-  flipped 68 cases; see "Done" below.)
-- Remaining XFAIL shape: `build:<ri>` (10), `construct:<ri>` (8),
-  `parse:<ri>:<ci>` (39, of which 16 are downstream of a build failure and 23 are
-  standalone tree divergences across 19 grammars).
+- Agreement: **89.6% (459/512)**; **53 XFAIL entries**, **0 skipped**.
+  (Was 75.6% / 125 XFAIL before this sprint — see "Done" below.)
+- Remaining XFAIL shape: `build:<ri>` (10), `construct:<ri>` (6),
+  `parse:<ri>:<ci>` (37).
 
-## Done — Sprint "lexer & terminal-filtering parity" (M1, M2, M3, M5-global)
+## Done — Sprint "lexer & terminal-filtering parity" (M1, M2, M3, M5-global) + M7 (partial)
 
-Four root-cause fixes in `loader.rs` / `lexer.rs`, 68 XFAILs flipped, no
+Six root-cause fixes in `loader.rs` / `lexer.rs`, 72 XFAILs flipped (125 → 53), no
 regressions, full oracle + JSON-corpus suite green. Pinned by
-`tests/test_escapes_and_filtering.rs`.
+`tests/test_escapes_and_filtering.rs` and `tests/test_construct_errors.rs`.
+
+In addition to M1–M3 + M5-global below, two **M7** construct-error validations
+landed: an empty repetition range (`"A"~3..2`, min > max) and an unresolvable
+import (`%import bad_test.NUMBER`, a non-`common` module) now fail to build, as
+Python Lark does. The other two M7 cases are deferred (see M7 below): `/e?rez/`
+vs `/erez?/` (regex collision) and `a: "."+` (a real LALR conflict, → M8).
 
 1. **M1 — escape decoding.** `unescape_string` now decodes `\xHH`, `\uHHHH`,
    `\UHHHHHHHH` (plus `\f \v \0`), so string terminals and char-range bounds with
@@ -100,19 +104,34 @@ optionals: ids 123/124 (`!start: ["a" ["b" "c"]]`) and 227/228
 When an inline pattern is identical to a named terminal's pattern, Lark reuses the
 named terminal's type (so the token is `A`, not `__ANON_n`).
 
-**Fix:** in terminal collection, dedup an anonymous pattern against an existing
-named terminal with the same pattern and reuse the named id.
+**Dead end (tried, reverted):** the obvious fix — dedup an anonymous literal
+against an existing same-pattern terminal (gated on equal `filter_out`) — flips
+194/195 but **regresses 6 other cases**, because Python does not key tree
+filtering on the terminal's `filter_out` at all. It filters per *rule-symbol
+occurrence*: in `start: "a" A`, position 0 (the literal) is dropped and position
+1 (the `A` ref) is kept even though both lex to the *same* unified terminal.
+lark-rs instead carries one `filter_out` per terminal, so once two symbols share
+a terminal they share a keep/drop fate — and merging changes the type of tokens
+in unrelated grammars.
 
-### M7 — Construct-error parity — 8 entries
+**Real fix (deferred, architectural):** move token filtering from a per-terminal
+`filter_out` flag to a per-rule-position keep mask (Lark's model). Then
+same-pattern terminals can be unified for *lexing* while each rule position keeps
+its own drop/keep decision. This is the same chokepoint Earley's forest-walk will
+use, so it is worth doing once, carefully — not as a quick dedup.
+
+### M7 — Construct-error parity — 4 entries remaining
 
 lark-rs must *reject at build time* grammars Python Lark rejects:
-- ids 90/91 — `"A"~3..2` invalid repetition range (`min > max`).
-- ids 65/66 — `%import bad_test.NUMBER` from a non-existent module.
-- ids 57/58 — `/e?rez/` vs `/erez?/` regex-terminal collision detection.
-- ids 73/74 — `start: a "."` / `a: "."+` (anonymous-terminal collision).
-
-**Fix:** add the corresponding validation passes; each is small and independent.
-Lowest leverage per fix but removes the "lark-rs is too permissive" class.
+- ✅ ids 90/91 — `"A"~3..2` invalid repetition range (`min > max`). **Done.**
+- ✅ ids 65/66 — `%import bad_test.NUMBER` from a non-existent module. **Done.**
+- ids 57/58 — `/e?rez/` vs `/erez?/`. Lark raises a *terminal collision* error
+  when two regex terminals can match the same input ambiguously; needs Lark's
+  exact collision rule reproduced before implementing (don't guess — over-eager
+  rejection would regress valid overlapping terminals).
+- ids 73/74 — `start: a "."` / `a: "."+`. This is **not** a simple validation: it
+  is a genuine LALR conflict Lark reports as unresolvable but lark-rs resolves
+  (S/R → shift). Belongs with M8 (conflict-detection parity), not here.
 
 ### M8 — Residual EBNF repetition / branch-choice tree-shape — ~6 entries
 
@@ -134,15 +153,16 @@ them last; reproduce each individually.
 | M2 | anonymous regex literals kept | — | High | ✅ done |
 | M3 | case-insensitive terminals | — | High | ✅ done |
 | M5-global | grammar-wide `keep_all_tokens` | — | High | ✅ done |
+| M7a | invalid range + bad import | — | High | ✅ done |
 | M4 | template tree-shape + higher-order | 12 | Medium | ⬜ |
-| M6 | inline↔named terminal collision | 5 | High | ⬜ |
-| M7 | construct-error parity | 8 | High | ⬜ |
-| M8 | EBNF/priority residue | 8 | Mixed | ⬜ |
+| M8 | EBNF/priority residue (+ 73/74 conflict) | ~10 | Mixed | ⬜ |
+| M6 | inline↔named terminal collision | 5 | High effort | ⬜ (needs per-position filter model) |
+| M7b | regex collision detection | 2 | Medium | ⬜ |
 | M5 | nested `maybe_placeholders` | 4 | Medium | ⬜ |
 
-The lexer/terminal-filtering sprint (M1–M3 + M5-global) took the bank from 75.6%
-to **88.9%** — 68 entries from four root-cause fixes. The remaining 57 are
-M4/M6/M7/M8 and nested-maybe. M6 (and the rest of M5) touch shared
+The work so far took the bank from 75.6% to **89.6%** — 72 entries from six
+root-cause fixes. The remaining 53 are M4/M6/M8, regex-collision, and
+nested-maybe. M6 (and the rest of M5) touch shared
 lexer/tree-builder code Earley depends on, so they still pay double.
 
 ## Exit criterion — when Earley unfreezes

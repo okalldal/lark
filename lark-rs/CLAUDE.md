@@ -224,13 +224,13 @@ oracle. Three correctness bugs need fixing before Phase 2 starts (see Known Bugs
 | Token positions (line/col) | ✅ | Char-based columns; end_line/end_column newline-aware |
 | Oracle test harness | ✅ | arithmetic, JSON, python_numbers, lalr_core |
 | JSONTestSuite corpus | ✅ | 293/293 oracle agreement |
-| Compliance bank | ✅ | 257 grammars strip-mined from Python Lark's suite; 455/512 ≈ 88.9% agree (XFAIL-gated) |
+| Compliance bank | ✅ | 257 grammars strip-mined from Python Lark's suite; 459/512 ≈ 89.6% agree (XFAIL-gated) |
 | Oracle-coverage enforcement | ✅ | Meta-test + CI freshness gate |
 
 ### ⬜ Phase 2 — Earley + SPPF
 
 **Phase 2 stays frozen** until the compliance-bank parity climbs further (it is
-currently 455/512 ≈ 88.9%; see [`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md) for
+currently 459/512 ≈ 89.6%; see [`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md) for
 the exit criterion and remaining milestones). All Phase-1 correctness bugs (BUG-1 through BUG-7) are now
 fixed: true LALR(1) lookaheads, fail-loud conflicts, the keyword lexer (BUG-3),
 transparent `_rule` inlining (BUG-4), char-based positions (BUG-5), the Earley
@@ -431,9 +431,9 @@ wild rely on these. Document as a known parity gap when adding Phase-3 grammar l
 All Phase-1 correctness bugs (BUG-1 through BUG-7) are **done**. The compliance bank
 is the regression net: fixing a bug flips XFAIL entries to passing — regenerate
 `xfail.json` and watch parity rise (BUG-3 flipped 3, BUG-7 flipped 8; the
-lexer/terminal-filtering sprint M1–M3 flipped 68, lifting the bank to 88.9%).
+lexer/terminal-filtering sprint plus two construct-error checks flipped 72, lifting the bank to 89.6%).
 
-**The remaining 57 XFAILs are triaged and sequenced in
+**The remaining 53 XFAILs are triaged and sequenced in
 [`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md)** — all on the LALR path (the bank
 is 100% LALR grammars, so Earley is orthogonal, not a way to climb parity). M1–M3
 + the global-`keep_all_tokens` half of M5 are done; the remaining milestones are
