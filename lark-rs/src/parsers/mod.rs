@@ -1,9 +1,11 @@
 pub mod lalr;
 pub mod earley;
 pub mod token_source;
+pub mod tree_builder;
 
 pub use lalr::{build_lalr_table, ParseTable, LalrParser};
 pub use token_source::{Contextual, LexFailure, PreLexed, TokenSource};
+pub use tree_builder::{NodeValue, TreeBuilder};
 
 use crate::grammar::Grammar;
 use crate::lexer::{LexerConf, BasicLexer, ContextualLexer, Lexer};
