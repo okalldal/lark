@@ -58,8 +58,26 @@ pub fn build_frontend(
             // Lower the surface grammar to the interned IR once, then build the
             // parse table and lexer from it.
             let cg = crate::grammar::lower(grammar);
-            let table = build_lalr_table(&cg)?;
+            let table = build_lalr_table(&cg, options.strict)?;
             let parser = LalrParser::new(table);
+
+            // Strict mode: detect regex terminals (collision checking not yet
+            // implemented; matches Python Lark's behavior when interegular is
+            // absent). Next step: real regex intersection via regex-syntax crate.
+            if options.strict {
+                use crate::grammar::terminal::Pattern;
+                let has_regex = cg
+                    .terminals
+                    .iter()
+                    .any(|t| matches!(t.pattern, Pattern::Re(_)));
+                if has_regex {
+                    return Err(LarkError::Grammar(crate::error::GrammarError::Lex {
+                        msg: "interegular must be installed for strict mode. \
+                              Use `pip install 'lark[interegular]'`."
+                            .to_string(),
+                    }));
+                }
+            }
 
             let terminals: Vec<(
                 crate::grammar::SymbolId,
@@ -74,7 +92,7 @@ pub fn build_frontend(
                     )
                 })
                 .collect();
-            let lexer_conf = LexerConf::new(terminals, cg.ignore.clone());
+            let lexer_conf = LexerConf::new(terminals, cg.ignore.clone(), options.g_regex_flags);
 
             let kind = match options.lexer {
                 LexerType::Basic => {

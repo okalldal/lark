@@ -57,6 +57,16 @@ pub struct LarkOptions {
     pub propagate_positions: bool,
     pub keep_all_tokens: bool,
     pub maybe_placeholders: bool,
+    /// Global regex flags applied to every terminal pattern (matches Python's
+    /// `g_regex_flags` option). Uses Python `re` module bit values directly so
+    /// the compliance-bank JSON integers flow through unchanged. For example,
+    /// `re.I` = 2 makes the whole grammar case-insensitive.
+    pub g_regex_flags: u32,
+    /// Strict mode: promote warnings to errors (matches Python Lark's `strict=True`).
+    /// In Python Lark this enables regex-collision checking via `interegular`; in
+    /// lark-rs it raises `GrammarError::Lex` for any grammar that contains regex
+    /// terminals (full DFA-intersection is not yet implemented).
+    pub strict: bool,
 }
 
 impl Default for LarkOptions {
@@ -72,6 +82,8 @@ impl Default for LarkOptions {
             propagate_positions: false,
             keep_all_tokens: false,
             maybe_placeholders: false,
+            g_regex_flags: 0,
+            strict: false,
         }
     }
 }

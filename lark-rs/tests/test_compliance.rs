@@ -41,12 +41,16 @@ fn record_options(rec: &Value) -> LarkOptions {
         Some("basic") => LexerType::Basic,
         _ => LexerType::Contextual,
     };
+    let g_regex_flags = rec["g_regex_flags"].as_u64().unwrap_or(0) as u32;
+    let strict = rec["strict"].as_bool().unwrap_or(false);
     LarkOptions {
         start,
         parser: ParserAlgorithm::Lalr,
         lexer,
         maybe_placeholders: rec["maybe_placeholders"].as_bool().unwrap_or(true),
         keep_all_tokens: rec["keep_all_tokens"].as_bool().unwrap_or(false),
+        g_regex_flags,
+        strict,
         ..Default::default()
     }
 }

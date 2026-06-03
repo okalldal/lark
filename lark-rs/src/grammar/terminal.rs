@@ -72,12 +72,13 @@ impl PatternStr {
     }
 }
 
-/// Regex flags (bit-field matching Python's re module flags subset).
+/// Regex flags (bit-field matching Python's `re` module values so the
+/// compliance-bank JSON integers flow through directly).
 pub mod flags {
-    pub const IGNORECASE: u32 = 1;
-    pub const MULTILINE: u32 = 2;
-    pub const DOTALL: u32 = 4;
-    pub const VERBOSE: u32 = 8;
+    pub const IGNORECASE: u32 = 2; // re.I  = re.IGNORECASE
+    pub const MULTILINE: u32 = 8; // re.M  = re.MULTILINE
+    pub const DOTALL: u32 = 16; // re.S  = re.DOTALL
+    pub const VERBOSE: u32 = 64; // re.X  = re.VERBOSE
 }
 
 #[derive(Debug, Clone)]

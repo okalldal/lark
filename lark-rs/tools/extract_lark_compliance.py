@@ -90,6 +90,8 @@ def _patched_init(self, grammar, **options):
         "start": options.get("start", "start"),
         "maybe_placeholders": options.get("maybe_placeholders", True),
         "keep_all_tokens": options.get("keep_all_tokens", False),
+        "strict": bool(options.get("strict", False)),
+        "g_regex_flags": int(options.get("g_regex_flags", 0)),
     }
     try:
         _orig_init(self, grammar, **options)
@@ -154,7 +156,8 @@ def dedup_and_save():
         if rec["grammar"] is None:
             continue
         key = (rec["grammar"], rec["parser"], rec["lexer"], str(rec["start"]),
-               rec["maybe_placeholders"], rec["keep_all_tokens"], rec["construct_error"])
+               rec["maybe_placeholders"], rec["keep_all_tokens"], rec["construct_error"],
+               rec.get("strict", False), rec.get("g_regex_flags", 0))
         tgt = seen.get(key)
         if tgt is None:
             tgt = {**rec, "cases": []}

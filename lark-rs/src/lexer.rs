@@ -41,11 +41,21 @@ pub struct LexerConf {
     pub terminals: Vec<(SymbolId, TerminalDef)>,
     /// Terminal ids to discard after matching (from `%ignore`).
     pub ignore: Vec<SymbolId>,
+    /// Grammar-wide regex flags (Python `g_regex_flags`; 0 = none).
+    pub g_regex_flags: u32,
 }
 
 impl LexerConf {
-    pub fn new(terminals: Vec<(SymbolId, TerminalDef)>, ignore: Vec<SymbolId>) -> Self {
-        LexerConf { terminals, ignore }
+    pub fn new(
+        terminals: Vec<(SymbolId, TerminalDef)>,
+        ignore: Vec<SymbolId>,
+        g_regex_flags: u32,
+    ) -> Self {
+        LexerConf {
+            terminals,
+            ignore,
+            g_regex_flags,
+        }
     }
 
     /// id → name map for token display.
@@ -82,7 +92,14 @@ struct Scanner {
 
 impl Scanner {
     /// Build a scanner from candidate terminals (deduplicated by id).
-    fn build(terminals: &[(SymbolId, &TerminalDef)]) -> Result<Scanner, GrammarError> {
+    ///
+    /// `g_regex_flags`: grammar-wide flags (Python `g_regex_flags`; 0 = none).
+    /// When non-zero each terminal pattern is wrapped in `(?flags:…)` so the
+    /// flags take effect but do not leak into adjacent alternations.
+    fn build(
+        terminals: &[(SymbolId, &TerminalDef)],
+        g_regex_flags: u32,
+    ) -> Result<Scanner, GrammarError> {
         let mut seen = HashSet::new();
         let terms: Vec<(SymbolId, &TerminalDef)> = terminals
             .iter()
@@ -92,7 +109,7 @@ impl Scanner {
 
         // unless: embed string terminals fully matched by a same-priority regex
         // terminal, and record the retype.
-        let unless = compute_unless(&terms)?;
+        let unless = compute_unless(&terms, g_regex_flags)?;
         let embedded: HashSet<SymbolId> =
             unless.values().flat_map(|m| m.values().copied()).collect();
 
@@ -111,7 +128,14 @@ impl Scanner {
             // `to_inline_regex` keeps per-terminal flags (e.g. `(?i:…)` for a
             // case-insensitive terminal) scoped to this group; `as_regex_str`
             // would drop them, so `"a"i` would not match `A`.
-            parts.push(format!("(?P<{}>{})", group, term.pattern.to_inline_regex()));
+            let inline = term.pattern.to_inline_regex();
+            let pat_str = if g_regex_flags != 0 {
+                let letters = crate::grammar::terminal::flag_letters(g_regex_flags);
+                format!("(?{letters}:{inline})")
+            } else {
+                inline
+            };
+            parts.push(format!("(?P<{group}>{pat_str})"));
             groups.push((id, group));
         }
         let pattern = parts.join("|");
@@ -153,8 +177,13 @@ impl Scanner {
 /// For each regex terminal, find the same-priority string terminals it fully
 /// matches; those strings are embedded (dropped from the alternation) and
 /// retyped after the fact. Mirrors Python Lark's `_create_unless`.
+///
+/// `g_regex_flags` is applied to the full-match regex so that, e.g., with
+/// `re.I` the keyword `"IF"` is correctly retyped even though the regex
+/// terminal matches `[a-zA-Z]+` case-insensitively.
 fn compute_unless(
     terms: &[(SymbolId, &TerminalDef)],
+    g_regex_flags: u32,
 ) -> Result<HashMap<SymbolId, HashMap<String, SymbolId>>, GrammarError> {
     let res: Vec<&(SymbolId, &TerminalDef)> = terms
         .iter()
@@ -170,7 +199,13 @@ fn compute_unless(
 
     let mut unless: HashMap<SymbolId, HashMap<String, SymbolId>> = HashMap::new();
     for (re_id, re_t) in &res {
-        let full_src = format!("^(?:{})$", re_t.pattern.to_inline_regex());
+        let inline = re_t.pattern.to_inline_regex();
+        let full_src = if g_regex_flags != 0 {
+            let letters = crate::grammar::terminal::flag_letters(g_regex_flags);
+            format!("^(?{letters}:{inline})$")
+        } else {
+            format!("^(?:{inline})$")
+        };
         let full = Regex::new(&full_src).map_err(|e| GrammarError::InvalidRegex {
             pattern: full_src.clone(),
             reason: e.to_string(),
@@ -228,7 +263,7 @@ impl BasicLexer {
     pub fn new(conf: &LexerConf) -> Result<Self, GrammarError> {
         let refs: Vec<(SymbolId, &TerminalDef)> =
             conf.terminals.iter().map(|(id, t)| (*id, t)).collect();
-        let scanner = Scanner::build(&refs)?;
+        let scanner = Scanner::build(&refs, conf.g_regex_flags)?;
         Ok(BasicLexer {
             scanner,
             names: conf.names(),
@@ -329,7 +364,7 @@ impl ContextualLexer {
             if terms.is_empty() {
                 continue;
             }
-            state_scanners.insert(*state_id, Scanner::build(&terms)?);
+            state_scanners.insert(*state_id, Scanner::build(&terms, conf.g_regex_flags)?);
         }
 
         Ok(ContextualLexer {

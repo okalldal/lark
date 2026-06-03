@@ -394,7 +394,10 @@ impl<'g> LookaheadComputer<'g> {
 
 // ─── Table construction ───────────────────────────────────────────────────────
 
-pub fn build_lalr_table(grammar: &CompiledGrammar) -> Result<ParseTable, GrammarError> {
+pub fn build_lalr_table(
+    grammar: &CompiledGrammar,
+    strict: bool,
+) -> Result<ParseTable, GrammarError> {
     let rules = &grammar.rules;
     let n_terminals = grammar.n_terminals();
     let n_nonterminals = grammar.symbols.n_nonterminals();
@@ -486,8 +489,19 @@ pub fn build_lalr_table(grammar: &CompiledGrammar) -> Result<ParseTable, Grammar
             };
 
             // Shift/accept wins over reduce (Lark default).
+            // In strict mode, S/R conflicts are reported as errors instead of
+            // silently resolved (matches Python Lark's `strict=True` behavior).
             match &action[state_id][la.index()] {
-                Some(Action::Shift(_)) | Some(Action::Accept) => {}
+                Some(Action::Shift(_)) | Some(Action::Accept) => {
+                    if strict {
+                        let rule_desc = format!(" <{}>", rules[winner]);
+                        conflicts.push(format!(
+                            "Shift/Reduce conflict for terminal {}. [strict-mode]\n\t*{}",
+                            grammar.symbols.name(la),
+                            rule_desc
+                        ));
+                    }
+                }
                 _ => action[state_id][la.index()] = Some(Action::Reduce(winner)),
             }
         }
