@@ -1,5 +1,21 @@
 name: Python type check
-on: [push, pull_request]
+on:
+  push:
+    paths:
+      - 'lark/**'
+      - '*.py'
+      - 'setup.cfg'
+      - 'tox.ini'
+      - '.pre-commit-config.yaml'
+      - '.github/workflows/mypy.yml'
+  pull_request:
+    paths:
+      - 'lark/**'
+      - '*.py'
+      - 'setup.cfg'
+      - 'tox.ini'
+      - '.pre-commit-config.yaml'
+      - '.github/workflows/mypy.yml'
 jobs:
   type:
     runs-on: ubuntu-latest

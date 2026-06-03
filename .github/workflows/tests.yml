@@ -1,5 +1,19 @@
 name: Tests
-on: [push, pull_request]
+on:
+  push:
+    paths:
+      - 'lark/**'
+      - 'tests/**'
+      - '*.py'
+      - 'test-requirements.txt'
+      - '.github/workflows/tests.yml'
+  pull_request:
+    paths:
+      - 'lark/**'
+      - 'tests/**'
+      - '*.py'
+      - 'test-requirements.txt'
+      - '.github/workflows/tests.yml'
 
 jobs:
   build:
