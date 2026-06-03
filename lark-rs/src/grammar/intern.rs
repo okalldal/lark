@@ -375,7 +375,7 @@ mod tests {
     use crate::grammar::load_grammar;
 
     fn compile(src: &str) -> CompiledGrammar {
-        let g = load_grammar(src, &["start".to_string()], false).unwrap();
+        let g = load_grammar(src, &["start".to_string()], false, false).unwrap();
         lower(&g)
     }
 
