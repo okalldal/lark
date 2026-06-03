@@ -367,16 +367,10 @@ impl<'a> LexerState<'a> {
         self.pos >= self.text.len()
     }
 
+    /// Advance `n` bytes, walking the consumed text so line/col stay
+    /// newline-aware (columns count characters, not bytes).
     pub fn advance_by(&mut self, n: usize) {
         for ch in self.text[self.pos..self.pos + n].chars() {
-            if ch == '\n' { self.line += 1; self.col = 1; } else { self.col += 1; }
-        }
-        self.pos += n;
-    }
-
-    /// Advance by `n` bytes, using `value` to track line/col correctly.
-    pub fn advance_by_lines(&mut self, n: usize, value: &str) {
-        for ch in value.chars() {
             if ch == '\n' { self.line += 1; self.col = 1; } else { self.col += 1; }
         }
         self.pos += n;

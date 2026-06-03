@@ -701,7 +701,7 @@ impl LalrParser {
                     match lexer.next_token(lex_state.text, lex_state.pos, current_state, lex_state.line, lex_state.col)? {
                         Some(tok) => {
                             if lexer.is_ignored(tok.type_id) {
-                                lex_state.advance_by_lines(tok.value.len(), &tok.value);
+                                lex_state.advance_by(tok.value.len());
                                 continue;
                             }
                             current_token = Some(tok);

@@ -78,11 +78,25 @@ pub struct SymbolTable {
     infos: Vec<SymbolInfo>,
     by_name: HashMap<String, SymbolId>,
     n_terminals: usize,
+    /// Set once every terminal is interned; from then on `n_terminals` is fixed
+    /// and only non-terminals may be added. Makes the terminal/non-terminal id
+    /// boundary explicit rather than implied by "the first non-terminal".
+    sealed: bool,
 }
 
 impl SymbolTable {
     fn new() -> Self {
-        SymbolTable { infos: Vec::new(), by_name: HashMap::new(), n_terminals: 0 }
+        SymbolTable { infos: Vec::new(), by_name: HashMap::new(), n_terminals: 0, sealed: false }
+    }
+
+    /// Seal the terminal id range: all terminals are interned, so the boundary
+    /// between the terminal range `[0, n_terminals)` and the non-terminal range
+    /// is now fixed — even for a (degenerate) grammar with no non-terminals.
+    /// Must be called after the last terminal and before the first non-terminal.
+    fn seal_terminals(&mut self) {
+        debug_assert!(!self.sealed, "terminal range sealed twice");
+        self.n_terminals = self.infos.len();
+        self.sealed = true;
     }
 
     /// Intern a terminal. Idempotent by name. Must be called for every terminal
@@ -93,6 +107,7 @@ impl SymbolTable {
                 "symbol {name:?} interned as both terminal and non-terminal");
             return id;
         }
+        debug_assert!(!self.sealed, "interning new terminal {name:?} after the range was sealed");
         let id = SymbolId(self.infos.len() as u32);
         self.infos.push(SymbolInfo {
             name: name.to_string(),
@@ -105,8 +120,8 @@ impl SymbolTable {
         id
     }
 
-    /// Intern a non-terminal. Idempotent by name. The first non-terminal seals
-    /// the terminal range (`n_terminals`).
+    /// Intern a non-terminal. Idempotent by name. Requires the terminal range to
+    /// have been sealed first (see [`seal_terminals`](Self::seal_terminals)).
     fn intern_nonterminal(&mut self, name: &str, inline: bool, is_start: bool) -> SymbolId {
         if let Some(&id) = self.by_name.get(name) {
             debug_assert_eq!(self.infos[id.index()].kind, SymbolKind::NonTerminal,
@@ -118,9 +133,7 @@ impl SymbolTable {
             info.is_start |= is_start;
             return id;
         }
-        if self.n_terminals == 0 {
-            self.n_terminals = self.infos.len();
-        }
+        debug_assert!(self.sealed, "interning non-terminal {name:?} before the terminal range was sealed");
         let id = SymbolId(self.infos.len() as u32);
         self.infos.push(SymbolInfo {
             name: name.to_string(),
@@ -271,6 +284,10 @@ pub fn lower(grammar: &Grammar) -> CompiledGrammar {
             }
         }
     }
+
+    // Every terminal is now interned; fix the terminal id range before any
+    // non-terminal is added.
+    symbols.seal_terminals();
 
     // ── Non-terminals: augmented starts, then origins, then referenced. ──────
     for start in &grammar.start {
