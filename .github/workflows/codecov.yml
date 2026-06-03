@@ -1,5 +1,12 @@
 name: Compute coverage and push to Codecov
-on: [push]
+on:
+  push:
+    paths:
+      - 'lark/**'
+      - 'tests/**'
+      - '*.py'
+      - 'test-requirements.txt'
+      - '.github/workflows/codecov.yml'
 jobs:
   run:
     runs-on: ${{ matrix.os }}
