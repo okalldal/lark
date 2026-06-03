@@ -3,8 +3,10 @@ pub mod rule;
 pub mod terminal;
 pub mod loader;
 pub mod analysis;
+pub mod intern;
 
 pub use loader::load_grammar;
+pub use intern::{lower, CompiledGrammar, CompiledRule, SymbolId, SymbolInfo, SymbolKind, SymbolTable};
 
 use std::collections::HashMap;
 use rule::Rule;
