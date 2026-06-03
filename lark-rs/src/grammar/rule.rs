@@ -22,16 +22,6 @@ impl Rule {
         Rule { origin, expansion, alias, options, order }
     }
 
-    /// Convenience: rule with default options and no alias.
-    pub fn simple(origin: NonTerminal, expansion: Vec<Symbol>) -> Self {
-        Rule::new(origin, expansion, None, RuleOptions::default(), 0)
-    }
-
-    /// The name to use for the tree node produced by this rule.
-    pub fn tree_name(&self) -> &str {
-        self.alias.as_deref().unwrap_or(&self.origin.name)
-    }
-
     pub fn is_empty(&self) -> bool {
         self.expansion.is_empty()
     }

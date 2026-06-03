@@ -2,10 +2,16 @@
 
 use std::fmt;
 
+use crate::grammar::intern::SymbolId;
+
 /// A positioned token from the lexer.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Token {
-    /// Terminal type name (e.g. "WORD", "NUMBER").
+    /// Interned terminal id — the parser dispatches on this (an array index),
+    /// never on the name. [`SymbolId::END`] for `$END`; [`SymbolId::UNSET`] for
+    /// tokens not produced by a lexer.
+    pub type_id: SymbolId,
+    /// Terminal type name (e.g. "WORD", "NUMBER"), kept for tree output/display.
     pub type_: String,
     /// The matched text.
     pub value: String,
@@ -20,11 +26,19 @@ pub struct Token {
 impl Token {
     pub fn new(type_: impl Into<String>, value: impl Into<String>) -> Self {
         Token {
+            type_id: SymbolId::UNSET,
             type_: type_.into(),
             value: value.into(),
             line: 0, column: 0, end_line: 0, end_column: 0,
             start_pos: 0, end_pos: 0,
         }
+    }
+
+    /// The synthetic end-of-input token, carrying [`SymbolId::END`].
+    pub fn end() -> Self {
+        let mut t = Token::new("$END", "");
+        t.type_id = SymbolId::END;
+        t
     }
 
     pub fn with_position(mut self, line: usize, col: usize, start: usize, end: usize) -> Self {

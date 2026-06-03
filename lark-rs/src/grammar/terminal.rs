@@ -23,21 +23,6 @@ impl Pattern {
             Pattern::Re(_) => None,
         }
     }
-
-    /// Minimum number of characters (0 for optional patterns).
-    pub fn min_width(&self) -> usize {
-        match self {
-            Pattern::Str(p) => p.value.len(),
-            Pattern::Re(p) => p.min_width,
-        }
-    }
-
-    pub fn flags(&self) -> u32 {
-        match self {
-            Pattern::Str(_) => 0,
-            Pattern::Re(p) => p.flags,
-        }
-    }
 }
 
 impl PartialEq for Pattern {
@@ -80,8 +65,6 @@ pub mod flags {
 pub struct PatternRe {
     pub pattern: String,
     pub flags: u32,
-    /// Minimum number of characters matched (0 for patterns with `*` or `?` at root).
-    pub min_width: usize,
 }
 
 impl PatternRe {
@@ -90,15 +73,11 @@ impl PatternRe {
         let flag_prefix = build_flag_prefix(flags);
         let full = format!("{}{}", flag_prefix, pattern);
         // Validate the regex early to surface grammar errors.
-        let re = Regex::new(&full).map_err(|e| GrammarError::InvalidRegex {
+        Regex::new(&full).map_err(|e| GrammarError::InvalidRegex {
             pattern: pattern.clone(),
             reason: e.to_string(),
         })?;
-        // Rough min-width estimate: count mandatory characters.
-        // A proper implementation would analyse the AST; this covers common cases.
-        let min_width = 0; // Conservative: let the lexer handle it
-        let _ = re;
-        Ok(PatternRe { pattern, flags, min_width })
+        Ok(PatternRe { pattern, flags })
     }
 }
 
@@ -138,12 +117,6 @@ impl TerminalDef {
     pub fn with_filter_out(mut self, filter_out: bool) -> Self {
         self.filter_out = filter_out;
         self
-    }
-
-    /// Terminals that match literal strings with the same content as their name
-    /// are "punctuation" and get filtered from the parse tree by default.
-    pub fn is_anonymous(&self) -> bool {
-        self.name.starts_with("__ANON_")
     }
 }
 

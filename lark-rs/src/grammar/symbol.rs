@@ -12,24 +12,6 @@ impl Symbol {
             Symbol::NonTerminal(nt) => &nt.name,
         }
     }
-
-    pub fn is_term(&self) -> bool {
-        matches!(self, Symbol::Terminal(_))
-    }
-
-    pub fn as_terminal(&self) -> Option<&Terminal> {
-        match self {
-            Symbol::Terminal(t) => Some(t),
-            Symbol::NonTerminal(_) => None,
-        }
-    }
-
-    pub fn as_nonterminal(&self) -> Option<&NonTerminal> {
-        match self {
-            Symbol::NonTerminal(nt) => Some(nt),
-            Symbol::Terminal(_) => None,
-        }
-    }
 }
 
 impl From<Terminal> for Symbol {
@@ -60,10 +42,6 @@ pub struct Terminal {
 impl Terminal {
     pub fn new(name: impl Into<String>) -> Self {
         Terminal { name: name.into(), filter_out: false }
-    }
-
-    pub fn filtered(name: impl Into<String>) -> Self {
-        Terminal { name: name.into(), filter_out: true }
     }
 }
 

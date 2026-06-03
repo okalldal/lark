@@ -89,18 +89,19 @@ Requirements: `pip install lark pre-commit` and the JSONTestSuite submodule
 src/
   lib.rs              Public API: Lark, LarkOptions, ParserAlgorithm, LexerType
   error.rs            LarkError, GrammarError, ParseError
-  tree.rs             Tree, Token, Child  (the parse-tree data structures)
+  tree.rs             Tree, Token (carries type_id: SymbolId), Child
   grammar/
-    mod.rs            load_grammar() entry point
+    mod.rs            load_grammar() entry point; surface Grammar
     loader.rs         .lark syntax lexer + parser + compiler (EBNF → Grammar)
-    analysis.rs       FIRST / FOLLOW / NULLABLE set computation
+    intern.rs         SymbolId/SymbolTable + lower(Grammar) → CompiledGrammar
+    analysis.rs       NULLABLE / FIRST over SymbolId (no FOLLOW — true LALR(1))
     rule.rs           Rule, RuleOptions (expand1, keep_all_tokens, …)
-    symbol.rs         Symbol, Terminal, NonTerminal
+    symbol.rs         Symbol, Terminal, NonTerminal  (surface grammar only)
     terminal.rs       TerminalDef, Pattern, PatternRe, PatternStr
-  lexer.rs            Scanner (shared), BasicLexer, ContextualLexer, LexerState
+  lexer.rs            Scanner (id-based), BasicLexer, ContextualLexer, LexerState
   parsers/
-    mod.rs            ParsingFrontend — wires lexer + parser together
-    lalr.rs           ParseTable, LalrParser, build_lalr_table
+    mod.rs            ParsingFrontend — lowers grammar, wires lexer + parser
+    lalr.rs           Dense ParseTable, LalrParser, build_lalr_table
     earley.rs         Earley + SPPF (Phase 2 — stub)
 
 tests/
@@ -132,33 +133,48 @@ tools/
       → resolve_import(): reads common.lark stubs, registers terminals
       → compile_term(): sorts alts longest-first, builds TerminalDef
       → compile_rule_body(): lowers rule bodies to Symbol sequences
-  → Grammar { rules, terminals, ignore, start }
+  → Grammar { rules, terminals, ignore, start }   (surface, string-named)
 ```
+
+### Interning Pipeline (`intern.rs`)
+
+The surface `Grammar` is **lowered** to a `CompiledGrammar` before the engine
+touches it. Lowering interns every symbol to a `Copy` `SymbolId`, assigning all
+terminal ids first (`$END` = id 0) so terminals occupy `[0, n_terminals)` and
+non-terminals `[n_terminals, len)`. It also synthesizes the augmented start rules
+(`$root_X → X`) and precomputes every tree-shaping flag, so the engine never
+inspects a symbol name again.
+
+```
+Grammar (string-named, name-prefix semantics)
+  → lower()
+      → SymbolTable    intern terminals (id 0 = $END), then non-terminals
+      → CompiledRule   { origin, expansion: Vec<SymbolId>, options,
+                         tree_name, transparent, is_start }   ← flags, not prefixes
+  → CompiledGrammar { symbols, rules, terminals, ignore, start }
+```
+
+The flags replace the old name-prefix sniffing entirely:
+`is_start` (was `name.starts_with("$root_")`), `transparent` (was a leading `_` /
+`__anon_` check), `filter_out` (per-terminal-id bool), and terminal-vs-non-terminal
+(was a name set + `$` check) is now just `id < n_terminals`.
 
 ### LALR Construction Pipeline (`lalr.rs`)
 
-**Actual current state (SLR(1)):**
 ```
-Grammar
-  → GrammarAnalysis   (FIRST / FOLLOW / NULLABLE)
-  → LR0Builder        (closure + goto → item sets / transitions)
-  → build_lalr_table  uses FOLLOW sets for REDUCE lookaheads  ← SLR(1), not LALR(1)
-  → ParseTable        { action[state][terminal] → Shift/Reduce/Accept,
-                        goto[state][nonterminal] → state }
-```
-
-**Intended state (LALR(1)) — not yet wired:**
-```
-Grammar
-  → GrammarAnalysis   (FIRST / FOLLOW / NULLABLE)
-  → LR0Builder        (closure + goto → item sets / transitions)
-  → LookaheadComputer (per-state LALR(1) lookahead propagation) ← WRITTEN, NOT CALLED
-  → build_lalr_table  uses per-state lookaheads for REDUCE
-  → ParseTable
+CompiledGrammar
+  → GrammarAnalysis   (NULLABLE / FIRST over SymbolId; no FOLLOW)
+  → LR0Builder        (closure + goto → item sets / transitions, keyed by SymbolId)
+  → LookaheadComputer (true LALR(1) lookaheads: spontaneous generation + propagation)
+  → build_lalr_table  dense tables, conflict detection by rule priority
+  → ParseTable        { action: Vec<Vec<Option<Action>>>  [state][terminal_id],
+                        goto:   Vec<Vec<Option<u32>>>      [state][nonterminal_index] }
 ```
 
-`LookaheadComputer` (lalr.rs:169) is fully written but never called. Fixing this is the
-top Phase-1 blocker — see **Known Bugs** below.
+Both tables are dense and indexed directly by id — the parse loop is an array
+index per token, never a string hash. Transparent rules splice via a
+`StackValue::Inline` rather than a post-hoc tree-name scan, and ACCEPT is the
+`is_start` flag — no name inspection anywhere on the engine path.
 
 ### Parse-Tree Assembly
 
@@ -415,6 +431,19 @@ is the regression net: fixing a bug flips XFAIL entries to passing — regenerat
 to ~68%). Next: keep widening compliance parity (the remaining XFAILs are unimplemented
 features and structural bugs — measure with the divergence breakdown), then start
 Phase 2 — Earley + SPPF.
+
+### Core IR consolidation (done 2026-06-03)
+
+The engine's spine was migrated off the stringly-typed surface grammar onto an
+interned IR (`intern.rs`): `Copy` `SymbolId`s, typed flags instead of name-prefix
+semantics, and dense array-indexed ACTION/GOTO tables (see the Interning + LALR
+pipelines above). This was the behavior-preserving foundation step — the full
+oracle suite, JSON corpus, and compliance bank stayed green throughout. **Build
+Phase 2 (Earley/SPPF) on `CompiledGrammar`**, keying forest nodes by `SymbolId`,
+not names. Deferred until a profiler justifies them: FIRST/FOLLOW bitsets, the
+DeRemer–Pennello relational lookahead method (the current `lr1_closure` snapshots
+its map each fixpoint iteration — correct but quadratic on large grammars), and
+zero-copy token spans.
 
 ### The compliance bank — your regression net
 
