@@ -100,3 +100,51 @@ fn test_conflict_detection_matches_oracle() {
         }
     }
 }
+
+/// The two `TokenSource` frontends — the basic lexer's pre-lexed stream and the
+/// contextual lexer's lazy stream — must drive the shared LALR loop to identical
+/// trees. This pins the contract that the lexer/parser interface refactor only
+/// changes *how* a token is sourced, never the parse result.
+#[test]
+fn test_basic_and_contextual_lexers_agree() {
+    let grammar = r#"
+start: list
+list: "[" [item ("," item)*] "]"
+item: NUMBER | list
+NUMBER: /[0-9]+/
+%ignore /[ \t]+/
+"#;
+    let build = |lexer: LexerType| {
+        Lark::new(
+            grammar,
+            LarkOptions {
+                parser: ParserAlgorithm::Lalr,
+                lexer,
+                start: vec!["start".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("grammar builds")
+    };
+    let basic = build(LexerType::Basic);
+    let contextual = build(LexerType::Contextual);
+
+    for input in ["[]", "[1]", "[1, 2, 3]", "[1, [2, 3], [ ]]"] {
+        let b = basic.parse(input).unwrap_or_else(|e| panic!("basic {input:?}: {e}"));
+        let c = contextual.parse(input).unwrap_or_else(|e| panic!("contextual {input:?}: {e}"));
+        assert_eq!(
+            b.to_string(),
+            c.to_string(),
+            "basic vs contextual disagree on {input:?}"
+        );
+    }
+
+    // Both frontends must also reject the same malformed input.
+    for bad in ["[", "1]", "[1,]", "[1 2]"] {
+        assert_eq!(
+            basic.parse(bad).is_err(),
+            contextual.parse(bad).is_err(),
+            "basic vs contextual disagree on rejecting {bad:?}"
+        );
+    }
+}

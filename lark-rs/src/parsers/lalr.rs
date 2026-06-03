@@ -19,12 +19,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use crate::error::{GrammarError, ParseError};
 use crate::grammar::analysis::GrammarAnalysis;
 use crate::grammar::intern::{CompiledGrammar, CompiledRule, SymbolId, SymbolTable};
-use crate::lexer::{ContextualLexer, LexerState};
+use crate::lexer::ContextualLexer;
 use crate::tree::{Child, Token, Tree};
+
+use super::token_source::{Contextual, LexFailure, PreLexed, TokenSource};
 
 // ─── Parse table ─────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum Action {
     Shift(usize),  // shift and go to state N
     Reduce(usize), // reduce using rule index N
@@ -644,29 +646,57 @@ impl LalrParser {
         }
     }
 
-    /// Parse a pre-tokenized sequence.
-    pub fn parse(&self, tokens: Vec<Token>, start: Option<&str>) -> Result<Tree, ParseError> {
+    /// Drive the LALR state machine against any [`TokenSource`]. SHIFT consumes a
+    /// token; REDUCE re-reads it; ACCEPT returns the finished tree. The only thing
+    /// that differs between the pre-lexed and contextual frontends is the source,
+    /// so this single loop replaces what used to be two near-identical drivers.
+    fn run<S: TokenSource>(
+        &self,
+        source: &mut S,
+        start: Option<&str>,
+    ) -> Result<Tree, ParseError> {
         let mut state_stack: Vec<usize> = vec![self.initial_state(start)?];
         let mut value_stack: Vec<StackValue> = Vec::new();
-        let mut token_iter = tokens.into_iter().peekable();
 
         loop {
-            let current_state = *state_stack.last().unwrap();
-            let token = token_iter.peek().cloned().unwrap_or_else(Token::end);
+            let state = *state_stack.last().unwrap();
+            let token = match source.peek(state) {
+                Ok(tok) => tok,
+                Err(failure) => return Err(self.lex_failure(state, failure)),
+            };
 
-            match self.table.action_at(current_state, token.type_id) {
+            match self.table.action_at(state, token.type_id).copied() {
                 Some(Action::Shift(next_state)) => {
-                    let tok = token_iter.next().unwrap();
-                    state_stack.push(*next_state);
-                    value_stack.push(StackValue::Token(tok));
+                    source.advance();
+                    state_stack.push(next_state);
+                    value_stack.push(StackValue::Token(token));
                 }
                 Some(Action::Reduce(rule_idx)) => {
-                    self.reduce(*rule_idx, &mut state_stack, &mut value_stack, &token)?;
+                    // Don't advance the source — the same token may be consumed next.
+                    self.reduce(rule_idx, &mut state_stack, &mut value_stack, &token)?;
                 }
                 Some(Action::Accept) => return Self::accept(&mut value_stack),
-                None => return Err(self.unexpected(current_state, &token)),
+                None => return Err(self.unexpected(state, &token)),
             }
         }
+    }
+
+    /// Turn a lexer-level failure (no valid terminal at the position) into a
+    /// parse error, enriched with the terminals expected in `state` — which only
+    /// the parser knows.
+    fn lex_failure(&self, state: usize, f: LexFailure) -> ParseError {
+        ParseError::UnexpectedToken {
+            token: f.ch.to_string(),
+            token_type: String::new(),
+            line: f.line,
+            col: f.col,
+            expected: self.expected_at(state),
+        }
+    }
+
+    /// Parse a pre-tokenized sequence (basic lexer).
+    pub fn parse(&self, tokens: Vec<Token>, start: Option<&str>) -> Result<Tree, ParseError> {
+        self.run(&mut PreLexed::new(tokens), start)
     }
 
     /// Parse using the contextual lexer — lex one token at a time, feeding the
@@ -677,66 +707,7 @@ impl LalrParser {
         lexer: &ContextualLexer,
         start: Option<&str>,
     ) -> Result<Tree, ParseError> {
-        let mut state_stack: Vec<usize> = vec![self.initial_state(start)?];
-        let mut value_stack: Vec<StackValue> = Vec::new();
-        let mut lex_state = LexerState::new(text);
-        let mut current_token: Option<Token> = None;
-
-        loop {
-            let current_state = *state_stack.last().unwrap();
-
-            // Lex the next token for this state if we don't already hold one.
-            // Ignored terminals (whitespace etc.) are transparently consumed.
-            if current_token.is_none() {
-                loop {
-                    if lex_state.is_done() {
-                        current_token = Some(Token::end().with_position(
-                            lex_state.line,
-                            lex_state.col,
-                            lex_state.pos,
-                            lex_state.pos,
-                        ));
-                        break;
-                    }
-                    match lexer.next_token(lex_state.text, lex_state.pos, current_state, lex_state.line, lex_state.col)? {
-                        Some(tok) => {
-                            if lexer.is_ignored(tok.type_id) {
-                                lex_state.advance_by(tok.value.len());
-                                continue;
-                            }
-                            current_token = Some(tok);
-                            break;
-                        }
-                        None => {
-                            let ch: String = lex_state.text[lex_state.pos..].chars().take(1).collect();
-                            return Err(ParseError::UnexpectedToken {
-                                token: ch,
-                                token_type: String::new(),
-                                line: lex_state.line,
-                                col: lex_state.col,
-                                expected: self.expected_at(current_state),
-                            });
-                        }
-                    }
-                }
-            }
-            let token = current_token.as_ref().unwrap().clone();
-
-            match self.table.action_at(current_state, token.type_id) {
-                Some(Action::Shift(next_state)) => {
-                    state_stack.push(*next_state);
-                    value_stack.push(StackValue::Token(token.clone()));
-                    lex_state.advance_by(token.value.len());
-                    current_token = None;
-                }
-                Some(Action::Reduce(rule_idx)) => {
-                    // Don't advance the lexer — the same token may be consumed next.
-                    self.reduce(*rule_idx, &mut state_stack, &mut value_stack, &token)?;
-                }
-                Some(Action::Accept) => return Self::accept(&mut value_stack),
-                None => return Err(self.unexpected(current_state, &token)),
-            }
-        }
+        self.run(&mut Contextual::new(text, lexer), start)
     }
 }
 

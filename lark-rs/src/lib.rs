@@ -13,7 +13,7 @@ pub use grammar::{
 };
 pub use lexer::{Lexer, LexerConf, BasicLexer, ContextualLexer};
 pub use tree::{Tree, Token, Child};
-pub use parsers::{ParserConf, ParseTable, lalr};
+pub use parsers::{ParserConf, ParseTable, lalr, TokenSource, LexFailure};
 
 /// Main entry point — mirrors Python's `Lark(grammar, parser=..., lexer=...)`
 pub struct Lark {
