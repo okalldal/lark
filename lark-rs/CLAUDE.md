@@ -468,9 +468,38 @@ is not "done" until the bank says it generalizes beyond JSON/arithmetic.
    force every consumer to carry the symbol table for a perf win no profiler has
    asked for yet. When it is justified, switch `Tree::data` to `Box<str>`/arena in
    one place.
-4. **Differential fuzzer.** Turn the static oracle into an active one: generate random
-   inputs (then random grammars) and diff lark-rs against Python Lark automatically.
-   Cheap on top of the existing harness; de-risks every subsequent feature.
+4. 🔧 **Differential fuzzer** — *Phase 1 landed.* Turn the static oracle into an
+   active one: generate random inputs (then random grammars) and diff lark-rs
+   against Python Lark automatically. The split mirrors the compliance bank: a
+   committed corpus of *real finds*, grown by an out-of-band discovery process —
+   never a frozen dump of random samples.
+   - **Discovery (out-of-band, never on the PR path):**
+     `tools/fuzz_differential.py` generates grammar-directed + mutated inputs for
+     the trusted grammars and validates them against Python Lark. It does **not**
+     commit what it generates. To hunt for divergences it dumps a throwaway batch
+     (`--out`), `generate_oracles.py` freezes the oracle from it
+     (`LARK_FUZZ_INPUTS=…`), and `cargo test --test test_fuzz_corpus` replays
+     lark-rs against it. The nightly `lark-rs-fuzz.yml` runs exactly this with
+     fresh entropy (seed logged for replay) and uploads the batch as an artifact
+     on a RED. Deterministic given `--seed`; includes a ddmin minimizer.
+   - **Regression (every PR):** `fuzz/inputs.json` is a *small, curated set of
+     minimized finds* (grammar + input + note), the source of truth.
+     `generate_oracles.py::generate_fuzz_corpus()` freezes Python Lark's verdict
+     into `fuzz/corpus.json` (under the freshness gate); `test_fuzz_corpus.rs`
+     replays + diffs via `tree_matches_oracle`. RED = a regression on a known
+     find. Keeping a find: `--minimize` then `--record --input … --note …`.
+   - **The one find so far (recorded, not fixed):** a start-rule
+     `expand1`-to-bare-token parity gap — for input `1`, Python Lark returns a
+     bare `Token`, but lark-rs's `Tree`-typed `parse()` wraps it as
+     `Tree(tok.type_, [tok])` at ACCEPT (`lalr.rs`). Closing it is an API change
+     (a `Tree`-or-`Token` result). It is a **known-open** entry: paired with a
+     documented carve-out in `test_fuzz_corpus.rs` (still checking the token's
+     type+value) that self-deletes once the API is fixed — exactly the
+     compliance-bank xfail discipline. (A find that is *fixed* instead of carved
+     simply becomes a green `tree_matches_oracle` case.)
+   - **Still TODO:** an online Rust-side differ (so the minimizer can shrink while
+     *preserving divergence*, not just parse-success) and random *grammar*
+     fuzzing.
 
 **Then** build **Phase 2 — Earley + SPPF** on `CompiledGrammar`, sharing the
 `TokenSource` and the `TreeBuilder`, keying forest nodes by `SymbolId`.

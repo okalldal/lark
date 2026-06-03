@@ -1,0 +1,7 @@
+[
+  {
+    "grammar": "arithmetic",
+    "input": "1",
+    "note": "KNOWN-OPEN parity gap (paired with a documented carve-out in tests/test_fuzz_corpus.rs::known_bare_token_root_gap). When the start rule collapses via expand1 to a single token, Python Lark returns a bare Token; lark-rs's Tree-typed parse() wraps it as Tree(tok.type_, [tok]) at ACCEPT. Minimized find from the differential fuzzer. Closing it is a parse()-API change; the carve-out self-deletes once lark-rs can return a bare token."
+  }
+]

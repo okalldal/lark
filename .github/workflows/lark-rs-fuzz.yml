@@ -1,0 +1,66 @@
+name: lark-rs differential fuzz (nightly discovery)
+
+# Out-of-band *discovery* tier of the differential fuzzer — never on the PR
+# critical path. It generates a large batch of inputs with fresh entropy, freezes
+# Python Lark's verdict for each (into a throwaway scratch corpus, not the
+# committed one), and replays lark-rs against it. A RED here is a new find: the
+# batch is uploaded as an artifact so it can be minimized (`--minimize`) and kept
+# (`--record`) as a permanent regression case. Nothing is ever committed by this
+# job.
+
+on:
+  schedule:
+    - cron: '0 5 * * *'   # daily, 05:00 UTC
+  workflow_dispatch:
+    inputs:
+      count:
+        description: inputs to generate per run
+        default: '5000'
+      seed:
+        description: RNG seed (blank = derive from the run id, logged for replay)
+        default: ''
+
+defaults:
+  run:
+    working-directory: lark-rs
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Differential fuzz (generate batch, freeze oracle, replay lark-rs)
+        run: |
+          SEED="${{ github.event.inputs.seed }}"
+          [ -z "$SEED" ] && SEED=$(( ${{ github.run_id }} % 2147483647 ))
+          COUNT="${{ github.event.inputs.count }}"
+          [ -z "$COUNT" ] && COUNT=5000
+          echo "::notice::differential fuzz seed=$SEED count=$COUNT (re-run with this seed to reproduce)"
+
+          # Generate into a scratch batch (NOT the committed corpus), freeze the
+          # oracle from it, and replay. RED == lark-rs diverged from Python Lark.
+          python3 tools/fuzz_differential.py --grammar all -n "$COUNT" \
+            --seed "$SEED" --mutate --out "$RUNNER_TEMP/fuzz_batch.json"
+          LARK_FUZZ_INPUTS="$RUNNER_TEMP/fuzz_batch.json" \
+            python3 tools/generate_oracles.py
+          cargo test --test test_fuzz_corpus
+
+      - name: Upload batch on a find
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-find-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/fuzz_batch.json
+            lark-rs/tests/fixtures/oracles/fuzz/corpus.json
