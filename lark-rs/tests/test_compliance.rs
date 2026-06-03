@@ -57,7 +57,7 @@ fn try_build(grammar: &str, opts: LarkOptions) -> Option<Lark> {
 }
 
 /// Parse, treating both errors and panics as "did not parse".
-fn try_parse(lark: &Lark, input: &str) -> Option<lark_rs::Tree> {
+fn try_parse(lark: &Lark, input: &str) -> Option<lark_rs::ParseTree> {
     match catch_unwind(AssertUnwindSafe(|| lark.parse(input))) {
         Ok(Ok(tree)) => Some(tree),
         _ => None,

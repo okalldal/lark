@@ -20,7 +20,7 @@ use crate::error::{GrammarError, ParseError};
 use crate::grammar::analysis::GrammarAnalysis;
 use crate::grammar::intern::{CompiledGrammar, CompiledRule, SymbolId, SymbolTable};
 use crate::lexer::ContextualLexer;
-use crate::tree::{Child, Token, Tree};
+use crate::tree::{ParseTree, Token};
 
 use super::token_source::{Contextual, LexFailure, PreLexed, TokenSource};
 use super::tree_builder::{NodeValue, TreeBuilder};
@@ -584,10 +584,14 @@ impl LalrParser {
     }
 
     /// ACCEPT: the final value on the stack is the parse result.
-    fn accept(value_stack: &mut Vec<NodeValue>) -> Result<Tree, ParseError> {
+    ///
+    /// A `?start` rule (expand1) can collapse to a single token — then the result
+    /// is that bare [`Token`], matching Python Lark, instead of a tree named after
+    /// the terminal. Hence the [`ParseTree`] return type.
+    fn accept(value_stack: &mut Vec<NodeValue>) -> Result<ParseTree, ParseError> {
         match value_stack.pop() {
-            Some(NodeValue::Tree(t)) => Ok(t),
-            Some(NodeValue::Token(tok)) => Ok(Tree::new(tok.type_.clone(), vec![Child::Token(tok)])),
+            Some(NodeValue::Tree(t)) => Ok(ParseTree::Tree(t)),
+            Some(NodeValue::Token(tok)) => Ok(ParseTree::Token(tok)),
             // A start rule is never transparent, so its value is never Inline.
             Some(NodeValue::Inline(_)) | None => {
                 Err(ParseError::UnexpectedEof { line: 0, col: 0, expected: vec![] })
@@ -619,7 +623,7 @@ impl LalrParser {
         &self,
         source: &mut S,
         start: Option<&str>,
-    ) -> Result<Tree, ParseError> {
+    ) -> Result<ParseTree, ParseError> {
         let mut state_stack: Vec<usize> = vec![self.initial_state(start)?];
         let mut value_stack: Vec<NodeValue> = Vec::new();
 
@@ -660,7 +664,7 @@ impl LalrParser {
     }
 
     /// Parse a pre-tokenized sequence (basic lexer).
-    pub fn parse(&self, tokens: Vec<Token>, start: Option<&str>) -> Result<Tree, ParseError> {
+    pub fn parse(&self, tokens: Vec<Token>, start: Option<&str>) -> Result<ParseTree, ParseError> {
         self.run(&mut PreLexed::new(tokens), start)
     }
 
@@ -671,7 +675,7 @@ impl LalrParser {
         text: &str,
         lexer: &ContextualLexer,
         start: Option<&str>,
-    ) -> Result<Tree, ParseError> {
+    ) -> Result<ParseTree, ParseError> {
         self.run(&mut Contextual::new(text, lexer), start)
     }
 }

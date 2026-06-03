@@ -12,7 +12,7 @@ pub use grammar::{
     terminal::TerminalDef,
 };
 pub use lexer::{Lexer, LexerConf, BasicLexer, ContextualLexer};
-pub use tree::{Tree, Token, Child};
+pub use tree::{Tree, Token, Child, ParseTree};
 pub use parsers::{ParserConf, ParseTable, lalr, TokenSource, LexFailure};
 
 /// Main entry point — mirrors Python's `Lark(grammar, parser=..., lexer=...)`
@@ -28,11 +28,16 @@ impl Lark {
         Ok(Lark { grammar, frontend })
     }
 
-    pub fn parse(&self, text: &str) -> Result<Tree, ParseError> {
+    /// Parse `text` from the default start symbol.
+    ///
+    /// Returns a [`ParseTree`] — normally a [`Tree`], but a `?start` rule that
+    /// collapses via expand1 to a single token yields that bare [`Token`], exactly
+    /// as Python Lark does.
+    pub fn parse(&self, text: &str) -> Result<ParseTree, ParseError> {
         self.frontend.parse(text, None)
     }
 
-    pub fn parse_with_start(&self, text: &str, start: &str) -> Result<Tree, ParseError> {
+    pub fn parse_with_start(&self, text: &str, start: &str) -> Result<ParseTree, ParseError> {
         self.frontend.parse(text, Some(start))
     }
 }

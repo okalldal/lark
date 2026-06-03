@@ -244,6 +244,61 @@ impl fmt::Display for Tree {
     }
 }
 
+/// The result of a parse.
+///
+/// Usually a [`Tree`], but a start rule that collapses via `?rule` (expand1) to a
+/// single token yields that bare [`Token`] — exactly as Python Lark does (e.g.
+/// `?start: NUMBER` on input `"1"` returns the `NUMBER` token, not a wrapping
+/// tree). This is the public return type of [`crate::Lark::parse`].
+#[derive(Debug, Clone)]
+pub enum ParseTree {
+    Tree(Tree),
+    Token(Token),
+}
+
+impl ParseTree {
+    pub fn as_tree(&self) -> Option<&Tree> {
+        match self {
+            ParseTree::Tree(t) => Some(t),
+            ParseTree::Token(_) => None,
+        }
+    }
+
+    pub fn as_token(&self) -> Option<&Token> {
+        match self {
+            ParseTree::Token(t) => Some(t),
+            ParseTree::Tree(_) => None,
+        }
+    }
+
+    pub fn is_tree(&self) -> bool {
+        matches!(self, ParseTree::Tree(_))
+    }
+    pub fn is_token(&self) -> bool {
+        matches!(self, ParseTree::Token(_))
+    }
+}
+
+impl From<Tree> for ParseTree {
+    fn from(t: Tree) -> Self {
+        ParseTree::Tree(t)
+    }
+}
+impl From<Token> for ParseTree {
+    fn from(t: Token) -> Self {
+        ParseTree::Token(t)
+    }
+}
+
+impl fmt::Display for ParseTree {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ParseTree::Tree(t) => write!(f, "{t}"),
+            ParseTree::Token(tok) => write!(f, "Token({}, {:?})", tok.type_, tok.value),
+        }
+    }
+}
+
 // Post-order depth-first iterator helper.
 struct IterSubtrees<'a> {
     stack: Vec<&'a Tree>,
