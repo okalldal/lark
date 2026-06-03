@@ -3,9 +3,10 @@
 # Local CI gate — runs exactly what GitHub Actions runs, so a red CI is caught
 # here before pushing instead of after. Mirrors:
 #
-#   * Format       (.github/workflows/mypy.yml)    → pre-commit run --all-files
-#   * lark-rs test (.github/workflows/lark-rs.yml) → cargo test --all
-#                                                     + oracle-freshness gate
+#   * Rust format  (.github/workflows/lark-rs.yml)  → cargo fmt --check --all
+#   * Format       (.github/workflows/mypy.yml)     → pre-commit run --all-files
+#   * lark-rs test (.github/workflows/lark-rs.yml)  → cargo test --all
+#                                                      + oracle-freshness gate
 #
 # Exits non-zero on the first failing gate. Run manually any time:
 #
@@ -25,7 +26,11 @@ REPO_ROOT="$(cd "$LARK_RS_DIR/.." && pwd)"
 note() { printf '\n\033[1;34m▶ %s\033[0m\n' "$1"; }
 fail() { printf '\n\033[1;31m❌ %s\033[0m\n' "$1" >&2; exit 1; }
 
-# 1. Format gate (whole repo) — identical to the CI "Format" job.
+# 1a. Rust format gate — identical to the CI "fmt" job.
+note "Rust format: cargo fmt --check --all"
+( cd "$LARK_RS_DIR" && cargo fmt --check --all ) || fail "cargo fmt --check failed — run 'cargo fmt --all' in lark-rs/"
+
+# 1b. Python/repo format gate (whole repo) — identical to the CI "Format" job.
 note "Format gate: pre-commit run --all-files"
 command -v pre-commit >/dev/null 2>&1 || fail "pre-commit not installed — 'pip install pre-commit'"
 ( cd "$REPO_ROOT" && pre-commit run --all-files ) || fail "Format gate failed (see diff above)"
