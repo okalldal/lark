@@ -17,6 +17,18 @@ defaults:
     working-directory: lark-rs
 
 jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --check --all
+        working-directory: lark-rs
+
   test:
     runs-on: ubuntu-latest
     steps:
