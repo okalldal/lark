@@ -261,6 +261,49 @@ def generate_lalr_core():
     save_oracle("lalr_core", "conflicts", conflicts)
 
 
+def generate_fuzz_corpus():
+    """Derive the differential-fuzz oracle from the committed input corpus.
+
+    `tests/fixtures/oracles/fuzz/inputs.json` is the source of truth (grammar +
+    input pairs grown by tools/fuzz_differential.py). Here we run each input
+    through Python Lark and freeze the (ok, tree|error) result, exactly like the
+    other oracles, so `cargo test --test test_fuzz_corpus` replays it without
+    Python. This step is deterministic — it never generates new inputs — so the
+    CI freshness gate stays stable; only fuzz_differential.py grows inputs.json.
+    """
+    inputs_path = ORACLES_DIR / "fuzz" / "inputs.json"
+    if not inputs_path.exists():
+        print("Fuzz inputs not found — skipping fuzz corpus")
+        return
+
+    print("Generating differential-fuzz corpus oracle...")
+    entries = json.loads(inputs_path.read_text())
+    parsers = {}  # grammar name -> Lark, built once per grammar
+    results = []
+    for entry in entries:
+        grammar = entry["grammar"]
+        if grammar not in parsers:
+            parsers[grammar] = Lark(load_grammar(grammar), parser="lalr",
+                                    lexer="contextual", start="start",
+                                    maybe_placeholders=False)
+        inp = entry["input"]
+        try:
+            tree = parsers[grammar].parse(inp)
+            ok, payload = True, tree_to_dict(tree)
+        except Exception as e:
+            ok, payload = False, str(e)
+        results.append({
+            "grammar": grammar,
+            "input": inp,
+            "ok": ok,
+            "tree": payload if ok else None,
+            "error": payload if not ok else None,
+        })
+    save_oracle("fuzz", "corpus", results)
+    n_ok = sum(1 for r in results if r["ok"])
+    print(f"  {len(results)} cases ({n_ok} parse, {len(results) - n_ok} reject)")
+
+
 def run_case(grammar_text, input_text, parser_type="lalr", start="start"):
     """Return (ok, tree_dict_or_error_msg)."""
     try:
@@ -435,5 +478,6 @@ if __name__ == "__main__":
     generate_terminal_refs()
     generate_python_numbers()
     generate_lalr_core()
+    generate_fuzz_corpus()
     generate_json_corpus_manifest()
     print("\nDone. Commit tests/fixtures/oracles/ to track expected outputs.")

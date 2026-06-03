@@ -468,9 +468,29 @@ is not "done" until the bank says it generalizes beyond JSON/arithmetic.
    force every consumer to carry the symbol table for a perf win no profiler has
    asked for yet. When it is justified, switch `Tree::data` to `Box<str>`/arena in
    one place.
-4. **Differential fuzzer.** Turn the static oracle into an active one: generate random
-   inputs (then random grammars) and diff lark-rs against Python Lark automatically.
-   Cheap on top of the existing harness; de-risks every subsequent feature.
+4. 🔧 **Differential fuzzer** — *Phase 1 landed.* Turn the static oracle into an
+   active one: generate random inputs (then random grammars) and diff lark-rs
+   against Python Lark automatically.
+   - **Generator (discovery tier, manual/nightly):** `tools/fuzz_differential.py`
+     emits grammar-directed + mutated inputs for the trusted grammars, validates
+     them against Python Lark, de-dupes, and grows the committed input corpus.
+     Deterministic given `--seed`; includes a parse-preserving ddmin minimizer.
+     **Never on the PR critical path.**
+   - **Replay (regression tier, every PR):** `fuzz/inputs.json` is the source of
+     truth; `generate_oracles.py::generate_fuzz_corpus()` freezes Python Lark's
+     verdict into `fuzz/corpus.json` (under the freshness gate);
+     `tests/test_fuzz_corpus.rs` replays + diffs via `tree_matches_oracle`. RED =
+     a real divergence. 316 seeded cases agree.
+   - **First find (recorded, not fixed):** the fuzzer immediately surfaced a
+     start-rule `expand1`-to-bare-token parity gap — for input `1`, Python Lark
+     returns a bare `Token`, but lark-rs's `Tree`-typed `parse()` wraps it as
+     `Tree(tok.type_, [tok])` at ACCEPT (`lalr.rs`). Closing it is an API change
+     (a `Tree`-or-`Token` result); the differ forgives *exactly* this one
+     documented wrapping (still checking the token's type+value) and self-deletes
+     the carve-out once the API is fixed.
+   - **Still TODO:** an online Rust-side differ (so the minimizer can shrink while
+     *preserving divergence*, not just parse-success), random *grammar* fuzzing,
+     and a scheduled nightly discovery job that files finds as artifacts.
 
 **Then** build **Phase 2 — Earley + SPPF** on `CompiledGrammar`, sharing the
 `TokenSource` and the `TreeBuilder`, keying forest nodes by `SymbolId`.
