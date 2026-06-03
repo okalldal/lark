@@ -1,17 +1,22 @@
 //! Differential-fuzz corpus replay — the deterministic regression tier.
 //!
-//! `tools/fuzz_differential.py` grows `fuzz/inputs.json` (grammar + input pairs)
-//! by generating random inputs for the trusted grammars; `generate_oracles.py`
-//! freezes Python Lark's verdict for each into `fuzz/corpus.json`. This test
-//! replays that frozen corpus and diffs lark-rs against it using the same
-//! normalization as every other oracle test (`tree_matches_oracle`).
+//! `fuzz/inputs.json` is a small, curated set of *minimized finds* — inputs the
+//! differential fuzzer found to expose a lark-rs ↔ Python-Lark divergence, not
+//! random samples (a divergence on a tight input is one a human can read).
+//! `generate_oracles.py` freezes Python Lark's verdict for each into
+//! `fuzz/corpus.json`; this test replays that frozen corpus and diffs lark-rs
+//! against it using the same normalization as every other oracle test
+//! (`tree_matches_oracle`).
 //!
-//! A RED here means lark-rs diverged from Python Lark on a corpus input — either
-//! a tree-shape mismatch or an accept/reject disagreement. That is precisely the
-//! kind of edge case the fuzzer exists to surface; once committed (and minimized)
-//! it is guarded forever, just like the strip-mined compliance bank. Open-ended
-//! fuzzing stays off the PR critical path — only this deterministic replay runs
-//! in CI.
+//! A RED here means lark-rs regressed on a find — a tree-shape mismatch or an
+//! accept/reject disagreement — and it is guarded forever, just like the
+//! strip-mined compliance bank.
+//!
+//! Open-ended *discovery* stays off the PR critical path: `fuzz_differential.py`
+//! runs explicitly or on a nightly schedule (`lark-rs-fuzz.yml`), generates a
+//! large batch with fresh entropy, and points `LARK_FUZZ_INPUTS` at it so this
+//! same replay diffs lark-rs against the batch. A nightly RED is a new find —
+//! minimize it (`--minimize`), then keep it (`--record`).
 
 mod common;
 

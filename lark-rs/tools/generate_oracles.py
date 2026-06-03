@@ -262,21 +262,28 @@ def generate_lalr_core():
 
 
 def generate_fuzz_corpus():
-    """Derive the differential-fuzz oracle from the committed input corpus.
+    """Derive the differential-fuzz oracle from the committed regression corpus.
 
-    `tests/fixtures/oracles/fuzz/inputs.json` is the source of truth (grammar +
-    input pairs grown by tools/fuzz_differential.py). Here we run each input
-    through Python Lark and freeze the (ok, tree|error) result, exactly like the
-    other oracles, so `cargo test --test test_fuzz_corpus` replays it without
-    Python. This step is deterministic — it never generates new inputs — so the
-    CI freshness gate stays stable; only fuzz_differential.py grows inputs.json.
+    `tests/fixtures/oracles/fuzz/inputs.json` is the source of truth: a small,
+    curated set of *minimized finds* (grammar + input + note) — inputs that
+    actually exposed a lark-rs ↔ Python-Lark divergence — not random samples.
+    Here we run each input through Python Lark and freeze the (ok, tree|error)
+    result, exactly like the other oracles, so `cargo test --test
+    test_fuzz_corpus` replays it without Python. This step is deterministic — it
+    never generates new inputs — so the CI freshness gate stays stable;
+    fuzz_differential.py is the only thing that adds inputs (via `--record`).
+
+    Out-of-band discovery (the nightly job) points `LARK_FUZZ_INPUTS` at a
+    throwaway scratch batch so the same freeze→replay pipeline can diff lark-rs
+    against a large generated batch without committing the haystack.
     """
-    inputs_path = ORACLES_DIR / "fuzz" / "inputs.json"
+    inputs_path = Path(os.environ.get(
+        "LARK_FUZZ_INPUTS", ORACLES_DIR / "fuzz" / "inputs.json"))
     if not inputs_path.exists():
         print("Fuzz inputs not found — skipping fuzz corpus")
         return
 
-    print("Generating differential-fuzz corpus oracle...")
+    print(f"Generating differential-fuzz corpus oracle from {inputs_path}...")
     entries = json.loads(inputs_path.read_text())
     parsers = {}  # grammar name -> Lark, built once per grammar
     results = []
@@ -295,6 +302,7 @@ def generate_fuzz_corpus():
         results.append({
             "grammar": grammar,
             "input": inp,
+            "note": entry.get("note"),  # why this find is guarded (scratch: None)
             "ok": ok,
             "tree": payload if ok else None,
             "error": payload if not ok else None,

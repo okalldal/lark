@@ -36,6 +36,3 @@ repos:
   hooks:
     - id: codespell
       args: ["-L", "nd,iif,ot,datas,crate"]
-      # The differential fuzzer emits random strings; spell-checking generated
-      # fuzz fixtures produces false positives (e.g. an accidental "te").
-      exclude: '^lark-rs/tests/fixtures/oracles/fuzz/.*\.json$'
