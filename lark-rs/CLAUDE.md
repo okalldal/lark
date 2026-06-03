@@ -224,14 +224,16 @@ oracle. Three correctness bugs need fixing before Phase 2 starts (see Known Bugs
 | Token positions (line/col) | ✅ | Char-based columns; end_line/end_column newline-aware |
 | Oracle test harness | ✅ | arithmetic, JSON, python_numbers, lalr_core |
 | JSONTestSuite corpus | ✅ | 293/293 oracle agreement |
-| Compliance bank | ✅ | 257 grammars strip-mined from Python Lark's suite; 459/512 ≈ 89.6% agree (XFAIL-gated) |
+| Compliance bank | ✅ | 257 grammars strip-mined from Python Lark's suite; 465/512 ≈ 90.8% agree (XFAIL-gated) |
 | Oracle-coverage enforcement | ✅ | Meta-test + CI freshness gate |
 
 ### ⬜ Phase 2 — Earley + SPPF
 
-**Phase 2 stays frozen** until the compliance-bank parity climbs further (it is
-currently 459/512 ≈ 89.6%; see [`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md) for
-the exit criterion and remaining milestones). All Phase-1 correctness bugs (BUG-1 through BUG-7) are now
+**Phase 2 is now eligible to start:** the compliance bank reached the 90% exit
+criterion (currently 465/512 ≈ 90.8%, with every remaining XFAIL triaged and
+root-caused; see [`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md) for the exit
+criterion and remaining milestones). The roadmap continues in parallel to keep
+climbing the LALR path. All Phase-1 correctness bugs (BUG-1 through BUG-7) are now
 fixed: true LALR(1) lookaheads, fail-loud conflicts, the keyword lexer (BUG-3),
 transparent `_rule` inlining (BUG-4), char-based positions (BUG-5), the Earley
 fail-loud guard (BUG-6), and recursive templates (BUG-7). The core now fails loudly
@@ -431,14 +433,16 @@ wild rely on these. Document as a known parity gap when adding Phase-3 grammar l
 All Phase-1 correctness bugs (BUG-1 through BUG-7) are **done**. The compliance bank
 is the regression net: fixing a bug flips XFAIL entries to passing — regenerate
 `xfail.json` and watch parity rise (BUG-3 flipped 3, BUG-7 flipped 8; the
-lexer/terminal-filtering sprint plus two construct-error checks flipped 72, lifting the bank to 89.6%).
+lexer/terminal-filtering sprint plus two construct-error checks flipped 72, then
+nested-`maybe_placeholders` + oversized-priority flipped 6 more, lifting the bank to 90.8%).
 
-**The remaining 53 XFAILs are triaged and sequenced in
+**The remaining 47 XFAILs are triaged and sequenced in
 [`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md)** — all on the LALR path (the bank
-is 100% LALR grammars, so Earley is orthogonal, not a way to climb parity). M1–M3
-+ the global-`keep_all_tokens` half of M5 are done; the remaining milestones are
-M4 (templates), M6 (inline↔named terminal collision), M7 (construct-error
-parity), M8 (EBNF/priority residue), and nested `maybe_placeholders`. That doc
+is 100% LALR grammars, so Earley is orthogonal, not a way to climb parity). M1–M3,
+the global-`keep_all_tokens` half of M5, nested `maybe_placeholders` (123/124), and
+the oversized-priority part of M8 (49/50) are done; the remaining milestones are
+M4 (templates), M6 (inline↔named terminal collision), and M8 (EBNF/priority
+residue). That doc
 also defines the exit criterion that unfreezes Phase 2.
 
 ### Strategy: consolidate the load-bearing abstractions *before* Phase 2

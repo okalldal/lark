@@ -348,7 +348,14 @@ impl<'a> Lexer<'a> {
             return None;
         }
         let len = sign + after_sign.bytes().take_while(|b| b.is_ascii_digit()).count();
-        let n: i32 = rest[..len].parse().ok()?;
+        let digits = &rest[..len];
+        // Python Lark priorities are arbitrary-precision ints; we store i32 and
+        // saturate, so a huge (negative) priority like `A.-99999999999999999999999`
+        // clamps to the extreme rather than failing to lex.
+        let n: i32 = match digits.parse::<i128>() {
+            Ok(v) => v.clamp(i32::MIN as i128, i32::MAX as i128) as i32,
+            Err(_) => if digits.starts_with('-') { i32::MIN } else { i32::MAX },
+        };
         self.advance(len);
         Some(Tok::Number(n))
     }
@@ -988,6 +995,13 @@ struct GrammarCompiler {
     /// `keep_all_tokens` of the rule currently being compiled — needed to count
     /// kept symbols for placeholder generation.
     current_keep_all: bool,
+    /// Inlined "rule size" of each anonymous EBNF helper (maybe / optional /
+    /// group), mirroring Python Lark's `FindRuleSize`. An absent `[...]` emits one
+    /// `None` per unit of this size, and a *nested* maybe/group inside a `[...]`
+    /// must contribute its own size (not 0) so placeholders compose recursively.
+    /// `*` / `+` / `~` helpers and transparent `_rules` are deliberately absent
+    /// (size 0), exactly as Lark treats `_`-prefixed symbols as removed.
+    helper_sizes: HashMap<String, usize>,
 }
 
 impl GrammarCompiler {
@@ -1006,6 +1020,7 @@ impl GrammarCompiler {
             maybe_placeholders,
             global_keep_all: keep_all_tokens,
             current_keep_all: keep_all_tokens,
+            helper_sizes: HashMap::new(),
         }
     }
 
@@ -1204,9 +1219,12 @@ impl GrammarCompiler {
         }
         let name = self.fresh_anon_rule("group");
         let origin = NonTerminal::new(&name);
+        let mut max_size = 0;
         for (order, alt) in alts.into_iter().enumerate() {
             let alias = alt.alias.clone();
             let syms = self.compile_expansion(alt.expansion, &name)?;
+            let size: usize = syms.iter().map(|s| self.symbol_size(s)).sum();
+            max_size = max_size.max(size);
             self.rules.push(Rule::new(
                 origin.clone(),
                 syms,
@@ -1215,6 +1233,9 @@ impl GrammarCompiler {
                 order,
             ));
         }
+        // A group is spliced inline; record its size so a `[...]` wrapping it
+        // counts the right number of placeholders (Lark's `FindRuleSize`).
+        self.helper_sizes.insert(name.clone(), max_size);
         if optional {
             // Add empty alternative
             self.rules.push(Rule::new(
@@ -1245,29 +1266,46 @@ impl GrammarCompiler {
         for (order, alt) in alts.into_iter().enumerate() {
             let alias = alt.alias.clone();
             let syms = self.compile_expansion(alt.expansion, &name)?;
-            let kept = syms.iter().filter(|s| self.is_kept_symbol(s)).count();
-            max_kept = max_kept.max(kept);
+            // The empty production emits one `None` per kept slot of the widest
+            // alternative. A slot is a kept token *or* the inlined size of a
+            // nested maybe/group, so nested optionals compose (Lark `FindRuleSize`).
+            let size: usize = syms.iter().map(|s| self.symbol_size(s)).sum();
+            max_kept = max_kept.max(size);
             self.rules.push(Rule::new(origin.clone(), syms, alias, self.anon_opts(), order));
         }
+        // Record this maybe's size so an enclosing `[...]` counts it recursively.
+        self.helper_sizes.insert(name.clone(), max_kept);
         let empty_opts = RuleOptions { placeholder_count: max_kept, ..self.anon_opts() };
         self.rules.push(Rule::new(origin.clone(), vec![], None, empty_opts, 100));
         Ok(Symbol::NonTerminal(origin))
     }
 
-    /// Whether a symbol survives tree filtering (so it counts toward the number of
-    /// `None` placeholders an absent `[...]` must emit). Mirrors the filter applied
-    /// in `apply_rule_options`: tokens are dropped if `_`-prefixed (unless the rule
-    /// keeps all tokens); `_`-prefixed nonterminals are inlined away.
-    fn is_kept_symbol(&self, s: &Symbol) -> bool {
+    /// Number of tree children a symbol contributes to an absent `[...]`'s `None`
+    /// placeholder count — Python Lark's `FindRuleSize`. A kept token is 1, a
+    /// filtered token 0; a named rule is 1, a transparent `_rule` / `*` / `+` / `~`
+    /// helper is 0 (inlined-away, like Lark's `_`-prefixed symbols); a nested
+    /// maybe / optional / group contributes its own recorded inlined size, so
+    /// placeholders compose through arbitrary nesting.
+    fn symbol_size(&self, s: &Symbol) -> usize {
         match s {
             Symbol::Terminal(t) => {
                 if self.current_keep_all {
-                    return true;
+                    1
+                } else if self.terminals.iter().any(|td| td.name == t.name && td.filter_out) {
+                    0
+                } else {
+                    1
                 }
-                // Kept iff the terminal is not filter_out.
-                !self.terminals.iter().any(|td| td.name == t.name && td.filter_out)
             }
-            Symbol::NonTerminal(nt) => !nt.name.starts_with('_'),
+            Symbol::NonTerminal(nt) => {
+                if let Some(&size) = self.helper_sizes.get(&nt.name) {
+                    size
+                } else if nt.name.starts_with('_') {
+                    0
+                } else {
+                    1
+                }
+            }
         }
     }
 
@@ -1282,9 +1320,13 @@ impl GrammarCompiler {
 
         match (min, max) {
             (0, Some(1)) => {
-                // inner? → optional rule
+                // inner? → optional rule. `?` adds no placeholders of its own, but
+                // when nested inside a `[...]` it contributes its inner size to the
+                // outer maybe's count (Lark's `FindRuleSize` takes the present arm).
                 let name = self.fresh_anon_rule("opt");
                 let nt = NonTerminal::new(&name);
+                let size = self.symbol_size(&inner_sym);
+                self.helper_sizes.insert(name.clone(), size);
                 self.rules.push(Rule::new(nt.clone(), vec![inner_sym], None, self.anon_opts(), 0));
                 self.rules.push(Rule::new(nt.clone(), vec![], None, self.anon_opts(), 1));
                 Ok(Symbol::NonTerminal(nt))

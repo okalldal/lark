@@ -4,6 +4,11 @@
 bank says it generalizes beyond JSON/arithmetic. Phase 2 (Earley/SPPF) stays
 frozen until this roadmap is burned down — see the exit criterion at the bottom.
 
+> **Exit criterion reached (2026-06-03):** the bank is at **90.8%** (≥ 90%), with
+> every remaining XFAIL triaged and root-caused below. Phase 2 (Earley/SPPF) is
+> now eligible to start; this roadmap continues in parallel to keep climbing the
+> LALR path. See the exit criterion at the bottom.
+
 ## Why parity before Earley
 
 The bank is **100% LALR grammars** (257/257; zero Earley cases). Implementing
@@ -14,13 +19,30 @@ on. Hardening that core now means the SPPF forest-walk inherits a *correct*
 shaper instead of 125 latent bugs we'd then be debugging across two engines with
 no oracle to tell us which one is wrong.
 
-## Current state (2026-06-03, after M1–M3 + M5-global)
+## Current state (2026-06-03, after M1–M3 + M5-global + M5-nested + M8-priority)
 
 - Bank: **257 grammars, 512 input-cases + construct-error checks**.
-- Agreement: **89.6% (459/512)**; **53 XFAIL entries**, **0 skipped**.
-  (Was 75.6% / 125 XFAIL before this sprint — see "Done" below.)
-- Remaining XFAIL shape: `build:<ri>` (10), `construct:<ri>` (6),
-  `parse:<ri>:<ci>` (37).
+- Agreement: **90.8% (465/512)**; **47 XFAIL entries**, **0 skipped**.
+  (Was 75.6% / 125 XFAIL at the start of this sprint, 89.6% / 53 before the latest
+  two fixes — see "Done" below.)
+- Remaining XFAIL shape: `build:<ri>` (8), `construct:<ri>` (4),
+  `parse:<ri>:<ci>` (35).
+
+## Done — M5-nested + M8-priority (latest, crossed the 90% exit criterion)
+
+Two further root-cause fixes in `loader.rs`, 6 XFAILs flipped (53 → 47), no
+regressions, full oracle + JSON-corpus + compliance suite green. Pinned by
+`tests/test_placeholders_and_priority.rs`.
+
+1. **M5-nested — recursive `maybe_placeholders` (ids 123/124).** Each anonymous
+   maybe/optional/group helper now records its inlined "rule size" (`helper_sizes`),
+   and `symbol_size` sums those recursively when counting an absent `[...]`'s `None`
+   placeholders — mirroring Python Lark's `FindRuleSize`. A `[...]` nested in another
+   `[...]` now contributes its own slot count (so `["a" ["b" "c"]]` empty → 3 Nones).
+2. **M8-priority — oversized terminal priority (ids 49/50).** The grammar lexer now
+   reads a negative priority sign and saturates a value that overflows `i32` to the
+   `i32` extreme, instead of failing to lex. Python Lark's priorities are
+   arbitrary-precision ints; saturating preserves the ordering intent.
 
 ## Done — Sprint "lexer & terminal-filtering parity" (M1, M2, M3, M5-global) + M7 (partial)
 
@@ -85,17 +107,22 @@ applied as a template. Confirm each against the oracle; the higher-order case ma
 need `instantiate_template` to resolve a parameter that resolves to another
 template.
 
-### M5 — `maybe_placeholders` residue (nested `[...]`) — ~4 entries
+### M5 — `maybe_placeholders` residue (nested `[...]`) — ✅ nested done; 227/228 + 108/109 reclassified
 
-The grammar-wide `keep_all_tokens` half is **done**; what remains is *nested*
-optionals: ids 123/124 (`!start: ["a" ["b" "c"]]`) and 227/228
-(`["+"|"-"] float …`). A single `[...]` now emits the right `None` count; a
-`[...]` nested inside another `[...]` does not yet. Build failures 108/109
-(`!start: ("A"?)?`) are the nullable-EBNF shape of the same gap.
-
-**Fix:** make placeholder counting recurse through nested maybe/optional groups
-(the inner group's placeholder slots must surface in the outer empty production).
-`Child::None` and `TreeBuilder` support already exist.
+- ✅ **Nested `[...]` placeholder counting — ids 123/124** (`!start: ["a" ["b" "c"]]`).
+  **Done.** `compile_maybe`/`compile_group`/`opt` now record each helper's inlined
+  "rule size" (`helper_sizes`) and `symbol_size` sums it recursively, mirroring
+  Python Lark's `FindRuleSize`: a `[...]` nested inside another `[...]` contributes
+  its own slot count, so an absent `["a" ["b" "c"]]` emits 3 `None`s, not 1. Pinned
+  by `tests/test_placeholders_and_priority.rs`.
+- **227/228** (`["+"|"-"] float …`) — **reclassified.** The failing case is `1.2`
+  raising `UnexpectedToken`, *not* a placeholder mismatch: `digit* "." …` vs
+  `digit+ exp` is an LALR alternation the engine commits to wrongly. Belongs with
+  M8 (EBNF repetition / branch-choice), not here.
+- **108/109** (`!start: ("A"?)?`) — **reclassified.** This is a *build* failure: two
+  nested nullable optionals reduce-empty in the same state, which lark-rs reports as
+  an R/R conflict. It is a nullable-EBNF LALR-construction gap (M8-adjacent), not a
+  placeholder-counting gap.
 
 ### M6 — Inline-pattern ↔ named-terminal collision — ~5 entries
 
@@ -137,13 +164,20 @@ lark-rs must *reject at build time* grammars Python Lark rejects:
 
 **Symptom:** ids 156/157 (`start: "a"* "b" | "a"+`), 158/159 (`start: "a"+`
 with `keep_all_tokens`), 160/161 (`start: "a"+ "b" | "a"+` — build), 77/78
-(`a.2 | b.1` rule-priority disambiguation — build), 49/50 (oversized priority
-`A.-99999999999999999999999`).
+(`a.2 | b.1` rule-priority disambiguation — build), 108/109 (`!start: ("A"?)?` —
+nested nullable optionals, build R/R), 227/228 (`digit* "." … | digit+ exp` —
+branch-choice parse error on `1.2`).
 
 These are a grab-bag: rule-priority resolution on ambiguous alternations, EBNF
-`+`/`*` filtering under `keep_all_tokens`, and an integer-overflow on priority
-parsing (49/50 — parse the priority as `i64`/bignum-clamped, not `i32`). Take
-them last; reproduce each individually.
+`+`/`*` filtering under `keep_all_tokens`, nullable-EBNF LALR construction, and
+branch-choice on overlapping repetition alternations. Take them last; reproduce
+each individually.
+
+- ✅ **Oversized priority — ids 49/50** (`A.-99999999999999999999999`). **Done.**
+  The grammar lexer now accepts the negative sign and saturates a priority that
+  overflows `i32` to `i32::MIN`/`MAX` (Python Lark uses arbitrary-precision int
+  priorities), so the grammar builds and `ab` lexes as the higher-priority `AB`.
+  Pinned by `tests/test_placeholders_and_priority.rs`.
 
 ## Follow-up tickets / index
 
@@ -159,18 +193,21 @@ them last; reproduce each individually.
 | M3 | case-insensitive terminals | — | High | ✅ done (PR #15) |
 | M5-global | grammar-wide `keep_all_tokens` | — | High | ✅ done (PR #15) |
 | M7a | invalid range + bad import | — | High | ✅ done (PR #15) |
+| M5-nested | nested `maybe_placeholders` (123/124) | — | High | ✅ done |
+| M8-priority | oversized terminal priority (49/50) | — | High | ✅ done |
 | **M6** | per-position token filtering (collision) | 5 | High effort | ⬜ open — architectural, load-bearing for Earley |
 | **M4** | template tree-shape + higher-order | 12 | Medium | ⬜ open |
-| **M8** | EBNF/priority residue (+ 73/74 conflict) | ~10 | Mixed | ⬜ open |
-| **M5** | nested `maybe_placeholders` | 4 | Medium | ⬜ open |
+| **M8** | EBNF/priority residue (156–161, 77/78, 108/109, 227/228, + 73/74 conflict) | ~12 | Mixed | ⬜ open |
 | **M7b** | regex collision detection | 2 | Medium | ⬜ open — needs Lark's exact rule reproduced first |
 
-The work so far took the bank from 75.6% to **89.6%** — 72 entries from six
-root-cause fixes. The remaining 53 are M4/M6/M8, regex-collision, and
-nested-maybe. M6 (and the rest of M5) touch shared lexer/tree-builder code Earley
-depends on, so they still pay double. **Recommended next:** M6 — highest value
-and the per-position keep-mask it introduces is exactly the chokepoint Earley's
-forest-walk will reuse.
+The work so far took the bank from 75.6% to **90.8%** — 78 entries from eight
+root-cause fixes. The remaining 47 are M4, M6, and M8 (the EBNF/priority residue
+absorbed the old "nested-maybe" cluster once 123/124 were fixed and 227/228 + 108/109
+were reclassified as LALR-shape issues), plus regex-collision. M6 touches shared
+lexer/tree-builder code Earley depends on, so it pays double. **Recommended next:**
+M6 — highest value, and the per-position keep-mask it introduces is exactly the
+chokepoint Earley's forest-walk will reuse. With the 90% exit criterion met, Phase 2
+may also begin in parallel.
 
 ## Exit criterion — when Earley unfreezes
 
