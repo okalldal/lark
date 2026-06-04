@@ -1,0 +1,642 @@
+[
+  {
+    "name": "overlap",
+    "grammar": "\nstart: A B\nA: /a+/\nB: /a+/\n",
+    "ambiguity": "resolve",
+    "lexer": "dynamic",
+    "cases": [
+      {
+        "input": "aa",
+        "should_parse": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected end-of-input. Expected one of: \n\t* B\n"
+      },
+      {
+        "input": "aaa",
+        "should_parse": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected end-of-input. Expected one of: \n\t* B\n"
+      }
+    ]
+  },
+  {
+    "name": "overlap",
+    "grammar": "\nstart: A B\nA: /a+/\nB: /a+/\n",
+    "ambiguity": "explicit",
+    "lexer": "dynamic",
+    "cases": [
+      {
+        "input": "aa",
+        "should_parse": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected end-of-input. Expected one of: \n\t* B\n"
+      },
+      {
+        "input": "aaa",
+        "should_parse": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected end-of-input. Expected one of: \n\t* B\n"
+      }
+    ]
+  },
+  {
+    "name": "overlap_complete",
+    "grammar": "\nstart: A B\nA: /a+/\nB: /a+/\n",
+    "ambiguity": "resolve",
+    "lexer": "dynamic_complete",
+    "cases": [
+      {
+        "input": "aa",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "token",
+              "token_type": "B",
+              "value": "a"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "aaa",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "token",
+              "token_type": "B",
+              "value": "aa"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "a",
+        "should_parse": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected end-of-input. Expected one of: \n\t* B\n"
+      }
+    ]
+  },
+  {
+    "name": "overlap_complete",
+    "grammar": "\nstart: A B\nA: /a+/\nB: /a+/\n",
+    "ambiguity": "explicit",
+    "lexer": "dynamic_complete",
+    "cases": [
+      {
+        "input": "aa",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "token",
+              "token_type": "B",
+              "value": "a"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "aaa",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "_ambig",
+          "children": [
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "aa"
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "a"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "a",
+        "should_parse": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected end-of-input. Expected one of: \n\t* B\n"
+      }
+    ]
+  },
+  {
+    "name": "ws",
+    "grammar": "\nstart: A B\nA: \"a\"\nB: \"b\"\n%ignore \" \"\n",
+    "ambiguity": "resolve",
+    "lexer": "dynamic",
+    "cases": [
+      {
+        "input": "ab",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "token",
+              "token_type": "B",
+              "value": "b"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": " a b ",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "token",
+              "token_type": "B",
+              "value": "b"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "a  b",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "token",
+              "token_type": "B",
+              "value": "b"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "a",
+        "should_parse": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected end-of-input. Expected one of: \n\t* B\n"
+      }
+    ]
+  },
+  {
+    "name": "ws",
+    "grammar": "\nstart: A B\nA: \"a\"\nB: \"b\"\n%ignore \" \"\n",
+    "ambiguity": "explicit",
+    "lexer": "dynamic",
+    "cases": [
+      {
+        "input": "ab",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "token",
+              "token_type": "B",
+              "value": "b"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": " a b ",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "token",
+              "token_type": "B",
+              "value": "b"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "a  b",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "token",
+              "token_type": "B",
+              "value": "b"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "a",
+        "should_parse": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected end-of-input. Expected one of: \n\t* B\n"
+      }
+    ]
+  },
+  {
+    "name": "arith",
+    "grammar": "\nstart: sum\n?sum: NUMBER | sum \"+\" NUMBER -> add\nNUMBER: /[0-9]+/\n%ignore \" \"\n",
+    "ambiguity": "resolve",
+    "lexer": "dynamic",
+    "cases": [
+      {
+        "input": "1",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "1"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "1 + 2",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "add",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NUMBER",
+                  "value": "1"
+                },
+                {
+                  "type": "token",
+                  "token_type": "NUMBER",
+                  "value": "2"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "12 + 34",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "add",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NUMBER",
+                  "value": "12"
+                },
+                {
+                  "type": "token",
+                  "token_type": "NUMBER",
+                  "value": "34"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "1 +",
+        "should_parse": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected end-of-input. Expected one of: \n\t* NUMBER\n"
+      }
+    ]
+  },
+  {
+    "name": "arith",
+    "grammar": "\nstart: sum\n?sum: NUMBER | sum \"+\" NUMBER -> add\nNUMBER: /[0-9]+/\n%ignore \" \"\n",
+    "ambiguity": "explicit",
+    "lexer": "dynamic",
+    "cases": [
+      {
+        "input": "1",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "1"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "1 + 2",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "add",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NUMBER",
+                  "value": "1"
+                },
+                {
+                  "type": "token",
+                  "token_type": "NUMBER",
+                  "value": "2"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "12 + 34",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "add",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NUMBER",
+                  "value": "12"
+                },
+                {
+                  "type": "token",
+                  "token_type": "NUMBER",
+                  "value": "34"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "1 +",
+        "should_parse": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected end-of-input. Expected one of: \n\t* NUMBER\n"
+      }
+    ]
+  },
+  {
+    "name": "keyword",
+    "grammar": "\nstart: \"if\" NAME\nNAME: /[a-z]+/\n%ignore \" \"\n",
+    "ambiguity": "resolve",
+    "lexer": "dynamic",
+    "cases": [
+      {
+        "input": "if x",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NAME",
+              "value": "x"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "if foo",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NAME",
+              "value": "foo"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "ifx",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NAME",
+              "value": "x"
+            }
+          ]
+        },
+        "error": null
+      }
+    ]
+  },
+  {
+    "name": "keyword",
+    "grammar": "\nstart: \"if\" NAME\nNAME: /[a-z]+/\n%ignore \" \"\n",
+    "ambiguity": "explicit",
+    "lexer": "dynamic",
+    "cases": [
+      {
+        "input": "if x",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NAME",
+              "value": "x"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "if foo",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NAME",
+              "value": "foo"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "ifx",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NAME",
+              "value": "x"
+            }
+          ]
+        },
+        "error": null
+      }
+    ]
+  }
+]

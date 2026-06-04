@@ -46,6 +46,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::error::ParseError;
 use crate::grammar::intern::{CompiledGrammar, SymbolId};
+use crate::lexer::DynamicMatcher;
 use crate::tree::{Child, ParseTree, Token, Tree};
 
 use super::tree_builder::{NodeValue, TreeBuilder};
@@ -203,6 +204,14 @@ impl ScanSet {
     }
 }
 
+/// A match queued by the **dynamic** scanner, to be acted on at the input step
+/// where it ends (Scott's `delayed_matches`). A token advances the item that
+/// predicted it; an ignored span instead carries the item over unchanged.
+enum Delayed {
+    Tok { item: Item, token: Token },
+    Carry { item: Item },
+}
+
 // ─── Parser ───────────────────────────────────────────────────────────────────
 
 /// An Earley parser over the interned grammar.
@@ -302,7 +311,53 @@ impl EarleyParser {
             .filter(|t| t.type_id != SymbolId::END)
             .collect();
         let (forest, root) = self.build_chart(&toks, start_id)?;
+        // Basic lexer: terminal priorities are consumed by the lexer's terminal
+        // ordering, so they do NOT feed the forest's priority sum.
+        self.forest_to_tree(forest, root, start_id, resolve, false)
+    }
 
+    /// Parse `text` from `start` using the **dynamic lexer** (Phase 2, Sprint 5).
+    ///
+    /// Scanning is integrated into the Earley loop: at each input position the
+    /// only terminals tried are the ones the parser predicts there (the scan set),
+    /// rather than a token stream produced up front. This is what lets Earley parse
+    /// grammars the basic lexer cannot tokenize unambiguously (overlapping
+    /// terminals, terminals that depend on parser context). `complete_lex` is
+    /// Lark's `dynamic_complete`: also explore *shorter* tokenizations of each
+    /// match, so every valid segmentation is considered.
+    pub fn parse_dynamic(
+        &self,
+        text: &str,
+        start: Option<&str>,
+        resolve: bool,
+        complete_lex: bool,
+        matcher: &DynamicMatcher,
+    ) -> Result<ParseTree, ParseError> {
+        let start_id = self
+            .start_id(start)
+            .ok_or_else(|| ParseError::UnexpectedEof {
+                line: 0,
+                col: 0,
+                expected: vec![],
+            })?;
+        let (forest, root) = self.build_chart_dynamic(text, start_id, matcher, complete_lex)?;
+        // Dynamic lexer: there is no terminal-ordering tie-break to consume the
+        // priorities, so they DO feed the forest priority sum (Lark's
+        // ForestSumVisitor — "ignore terminal priorities if the basic lexer is used").
+        self.forest_to_tree(forest, root, start_id, resolve, true)
+    }
+
+    /// Walk the SPPF `forest` from `root` into a [`ParseTree`]. Shared by the
+    /// basic-lexer ([`parse`](Self::parse)) and dynamic-lexer
+    /// ([`parse_dynamic`](Self::parse_dynamic)) entry points.
+    fn forest_to_tree(
+        &self,
+        forest: Forest,
+        root: usize,
+        start_id: SymbolId,
+        resolve: bool,
+        term_priority: bool,
+    ) -> Result<ParseTree, ParseError> {
         // The forest→tree walk recurses to the depth of the parse forest, which is
         // O(input length) for left-recursive list grammars — enough to blow the
         // default stack on a long input. Run it on a generous dedicated stack
@@ -312,7 +367,7 @@ impl EarleyParser {
             std::thread::Builder::new()
                 .stack_size(256 * 1024 * 1024)
                 .spawn_scoped(s, || {
-                    let mut tr = Transformer::new(grammar, &forest, resolve);
+                    let mut tr = Transformer::new(grammar, &forest, resolve, term_priority);
                     let mut visiting = HashSet::new();
                     tr.eval_symbol(root, &mut visiting)
                 })
@@ -571,6 +626,268 @@ impl EarleyParser {
         columns.push(next_col);
         Some((next_scan, next_cache))
     }
+
+    // ─── Dynamic lexer (Sprint 5) ─────────────────────────────────────────────
+
+    /// Build the Earley chart and SPPF over `text` using the dynamic lexer.
+    ///
+    /// Columns are indexed by **character step** `0..=n`; `boundaries[i]` is the
+    /// byte offset where step `i` starts (regex matching is byte-based). The
+    /// predict/complete phase is identical to the basic-lexer path
+    /// ([`predict_and_complete`](Self::predict_and_complete)); only the scanner
+    /// differs — see [`scan_dynamic`](Self::scan_dynamic).
+    fn build_chart_dynamic(
+        &self,
+        text: &str,
+        start_id: SymbolId,
+        matcher: &DynamicMatcher,
+        complete_lex: bool,
+    ) -> Result<(Forest, usize), ParseError> {
+        // Byte offset of every character start, plus the end-of-input offset.
+        let boundaries: Vec<usize> = text
+            .char_indices()
+            .map(|(b, _)| b)
+            .chain(std::iter::once(text.len()))
+            .collect();
+        let n = boundaries.len() - 1;
+        let byte_to_step: HashMap<usize, usize> = boundaries
+            .iter()
+            .enumerate()
+            .map(|(i, &b)| (b, i))
+            .collect();
+
+        // Per-step (line, column), 1-based and newline-aware — for token positions.
+        let mut lines = Vec::with_capacity(n + 1);
+        let mut cols = Vec::with_capacity(n + 1);
+        {
+            let (mut line, mut col) = (1usize, 1usize);
+            let mut chars = text.chars();
+            for _ in 0..=n {
+                lines.push(line);
+                cols.push(col);
+                match chars.next() {
+                    Some('\n') => {
+                        line += 1;
+                        col = 1;
+                    }
+                    Some(_) => col += 1,
+                    None => {}
+                }
+            }
+        }
+
+        let mut forest = Forest::new();
+        let mut columns: Vec<Column> = vec![Column::new()];
+        let mut to_scan = ScanSet::new();
+        let mut delayed: HashMap<usize, Vec<Delayed>> = HashMap::new();
+
+        // Predict the start symbol into column 0 / the scan buffer.
+        if let Some(prods) = self.rules_by_origin.get(&start_id) {
+            for &ri in prods {
+                let item = Item {
+                    rule: ri,
+                    dot: 0,
+                    origin: 0,
+                    node: ForestRef::None,
+                };
+                if self.expects_terminal(&item) {
+                    to_scan.add(item);
+                } else {
+                    columns[0].add(item);
+                }
+            }
+        }
+
+        let mut node_cache: HashMap<(NodeKey, usize), usize> = HashMap::new();
+
+        for i in 0..=n {
+            self.predict_and_complete(i, &mut columns, &mut to_scan, &mut forest, &mut node_cache);
+            if i == n {
+                break;
+            }
+            match self.scan_dynamic(
+                i,
+                start_id,
+                text,
+                &boundaries,
+                &byte_to_step,
+                &lines,
+                &cols,
+                matcher,
+                complete_lex,
+                &mut columns,
+                &to_scan,
+                &mut forest,
+                &mut delayed,
+            ) {
+                Some((next_scan, next_cache)) => {
+                    to_scan = next_scan;
+                    node_cache = next_cache;
+                }
+                None => {
+                    let pos = boundaries[i];
+                    let ch = text[pos..].chars().next().unwrap_or('\u{0}');
+                    return Err(ParseError::UnexpectedCharacter {
+                        ch,
+                        line: lines[i],
+                        col: cols[i],
+                        pos,
+                        expected: "valid token for the dynamic lexer".to_string(),
+                    });
+                }
+            }
+        }
+
+        node_cache
+            .get(&(NodeKey::Sym(start_id), 0))
+            .copied()
+            .map(|root| (forest, root))
+            .ok_or(ParseError::UnexpectedEof {
+                line: *lines.last().unwrap_or(&1),
+                col: *cols.last().unwrap_or(&1),
+                expected: vec![],
+            })
+    }
+
+    /// The dynamic scanner for character step `i`: match each scan-set item's
+    /// predicted terminal at `boundaries[i]` (plus the `%ignore` terminals),
+    /// queuing every hit into `delayed` keyed by the step where it ends; then
+    /// drain whatever completes at step `i+1` into the freshly pushed column.
+    #[allow(clippy::too_many_arguments)]
+    fn scan_dynamic(
+        &self,
+        i: usize,
+        start_id: SymbolId,
+        text: &str,
+        boundaries: &[usize],
+        byte_to_step: &HashMap<usize, usize>,
+        lines: &[usize],
+        cols: &[usize],
+        matcher: &DynamicMatcher,
+        complete_lex: bool,
+        columns: &mut Vec<Column>,
+        to_scan: &ScanSet,
+        forest: &mut Forest,
+        delayed: &mut HashMap<usize, Vec<Delayed>>,
+    ) -> Option<(ScanSet, HashMap<(NodeKey, usize), usize>)> {
+        let pos = boundaries[i];
+        let mk_token = |term: SymbolId, value: &str, end_step: usize| Token {
+            type_id: term,
+            type_: matcher.name(term).to_string(),
+            value: value.to_string(),
+            line: lines[i],
+            column: cols[i],
+            end_line: lines[end_step],
+            end_column: cols[end_step],
+            start_pos: pos,
+            end_pos: boundaries[end_step],
+        };
+
+        // 1) Match each scan-set item's predicted terminal here. A hit is *delayed*
+        //    to the step where it ends, so a longer token is acted on only when the
+        //    parse reaches its end (this is what makes overlapping terminals work).
+        for item in &to_scan.items {
+            let Some(term) = self.expect(item) else {
+                continue;
+            };
+            if let Some(value) = matcher.match_at(term, text, pos) {
+                let end_step = byte_to_step[&(pos + value.len())];
+                let token = mk_token(term, value, end_step);
+                delayed
+                    .entry(end_step)
+                    .or_default()
+                    .push(Delayed::Tok { item: *item, token });
+
+                // dynamic_complete: also queue every shorter prefix tokenization.
+                if complete_lex {
+                    for &cut in &boundaries[i + 1..end_step] {
+                        if let Some(short) = matcher.match_in(term, &text[pos..cut]) {
+                            let es = byte_to_step[&(pos + short.len())];
+                            let token = mk_token(term, short, es);
+                            delayed
+                                .entry(es)
+                                .or_default()
+                                .push(Delayed::Tok { item: *item, token });
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2) Ignored spans (e.g. whitespace): carry every scan-set item — and any
+        //    completed start item — past the span unchanged, so ignored text can
+        //    sit between tokens (and after the last one) without consuming a symbol.
+        for &ig in matcher.ignore() {
+            if let Some(value) = matcher.match_at(ig, text, pos) {
+                let end_step = byte_to_step[&(pos + value.len())];
+                let bucket = delayed.entry(end_step).or_default();
+                for item in &to_scan.items {
+                    bucket.push(Delayed::Carry { item: *item });
+                }
+                for item in &columns[i].items {
+                    if self.is_complete(item)
+                        && item.origin == 0
+                        && self.grammar.rules[item.rule].origin == start_id
+                    {
+                        bucket.push(Delayed::Carry { item: *item });
+                    }
+                }
+            }
+        }
+
+        // 3) Drain the matches that complete at step i+1 into the next column.
+        let mut next_scan = ScanSet::new();
+        let mut next_col = Column::new();
+        let mut next_cache: HashMap<(NodeKey, usize), usize> = HashMap::new();
+
+        for d in delayed.remove(&(i + 1)).unwrap_or_default() {
+            match d {
+                Delayed::Tok { item, token } => {
+                    let key = self.node_key(item.rule, item.dot + 1);
+                    let new_node = forest.get_or_create(&mut next_cache, key, item.origin);
+                    let tok_ref = ForestRef::Tok(forest.add_token(token));
+                    forest.add_family(new_node, item.rule, item.node, tok_ref);
+                    let advanced = Item {
+                        rule: item.rule,
+                        dot: item.dot + 1,
+                        origin: item.origin,
+                        node: ForestRef::Node(new_node),
+                    };
+                    if self.expects_terminal(&advanced) {
+                        next_scan.add(advanced);
+                    } else {
+                        next_col.add(advanced);
+                    }
+                }
+                Delayed::Carry { item } => {
+                    // The item keeps its dot and prefix node; it just reappears in
+                    // the column after the ignored span. A completed item is also
+                    // registered in this column's node cache so the root (and any
+                    // waiting completer) finds it across trailing/inner ignores.
+                    if self.is_complete(&item) {
+                        if let ForestRef::Node(id) = item.node {
+                            let key = NodeKey::Sym(self.grammar.rules[item.rule].origin);
+                            next_cache.entry((key, item.origin)).or_insert(id);
+                        }
+                        next_col.add(item);
+                    } else if self.expects_terminal(&item) {
+                        next_scan.add(item);
+                    } else {
+                        next_col.add(item);
+                    }
+                }
+            }
+        }
+
+        columns.push(next_col);
+
+        // Dead end: nothing advanced into the next column and no match is still
+        // pending further ahead — the input cannot be tokenized from here.
+        if next_scan.items.is_empty() && columns[i + 1].items.is_empty() && delayed.is_empty() {
+            return None;
+        }
+        Some((next_scan, next_cache))
+    }
 }
 
 // ─── Forest → tree conversion ─────────────────────────────────────────────────
@@ -584,6 +901,10 @@ struct Transformer<'a> {
     forest: &'a Forest,
     builder: TreeBuilder<'a>,
     resolve: bool,
+    /// Per-terminal-id priority, summed into the forest priority only when the
+    /// dynamic lexer is used (the basic lexer consumes terminal priorities in its
+    /// terminal ordering). Empty otherwise.
+    term_priority: HashMap<SymbolId, i32>,
     /// Memoized symbol-node values (final assembled trees).
     memo: HashMap<usize, NodeValue>,
     /// Memoized node priorities + the in-progress set for cycle-safe summing.
@@ -592,12 +913,30 @@ struct Transformer<'a> {
 }
 
 impl<'a> Transformer<'a> {
-    fn new(grammar: &'a CompiledGrammar, forest: &'a Forest, resolve: bool) -> Self {
+    fn new(
+        grammar: &'a CompiledGrammar,
+        forest: &'a Forest,
+        resolve: bool,
+        term_priority: bool,
+    ) -> Self {
+        // Map each terminal id to its declared priority (only consulted under the
+        // dynamic lexer; built empty otherwise so the lookup is a no-op).
+        let term_priority = if term_priority {
+            grammar
+                .terminals
+                .iter()
+                .filter_map(|t| grammar.symbols.id(&t.name).map(|id| (id, t.priority)))
+                .filter(|(_, p)| *p != 0)
+                .collect()
+        } else {
+            HashMap::new()
+        };
         Transformer {
             grammar,
             forest,
             builder: TreeBuilder::new(&grammar.rules),
             resolve,
+            term_priority,
             memo: HashMap::new(),
             prio: HashMap::new(),
             prio_visiting: HashSet::new(),
@@ -644,7 +983,14 @@ impl<'a> Transformer<'a> {
         };
         let child = |this: &mut Self, r: ForestRef| match r {
             ForestRef::Node(id) => this.node_priority(id),
-            _ => 0,
+            // A scanned token contributes its terminal's priority — but only under
+            // the dynamic lexer (`term_priority` is empty for the basic lexer).
+            ForestRef::Tok(t) => this
+                .term_priority
+                .get(&this.forest.tokens[t].type_id)
+                .copied()
+                .unwrap_or(0),
+            ForestRef::None => 0,
         };
         base + child(self, packed.left) + child(self, packed.right)
     }

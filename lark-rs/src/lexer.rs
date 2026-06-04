@@ -478,6 +478,83 @@ impl ContextualLexer {
     }
 }
 
+// ─── DynamicMatcher: per-terminal regexes for the Earley dynamic lexer ────────
+
+/// A matcher for Earley's **dynamic lexer** (Phase 2, Sprint 5).
+///
+/// Unlike the [`Scanner`], which scans one combined alternation left-to-right and
+/// hands the parser a fixed token stream, the dynamic lexer matches a *specific*
+/// terminal — the one an Earley item predicts — at a given position, integrating
+/// scanning into the parse loop. Each terminal therefore gets its own compiled
+/// regex, anchored at the query position via [`Regex::find_at`] (a match is
+/// accepted only if it begins exactly at `pos`).
+///
+/// There is **no `unless` keyword retyping** here: the parser context (which items
+/// sit in the scan set) already decides which terminals to try, so `if`-vs-`iffy`
+/// is resolved by the grammar, not by a lexer tie-break. Per-terminal flags
+/// (`(?i:…)`) and `g_regex_flags` are preserved exactly as the basic lexer does.
+pub struct DynamicMatcher {
+    res: HashMap<SymbolId, Regex>,
+    ignore: Vec<SymbolId>,
+    names: HashMap<SymbolId, String>,
+}
+
+impl DynamicMatcher {
+    /// Build a matcher from the same [`LexerConf`] the basic lexer uses, so both
+    /// engines honour identical terminal patterns and global flags.
+    pub fn new(conf: &LexerConf) -> Result<Self, GrammarError> {
+        let prefix = global_flag_prefix(conf.global_flags);
+        let mut res = HashMap::new();
+        for (id, term) in &conf.terminals {
+            let src = format!("{}{}", prefix, term.pattern.to_inline_regex());
+            let re = Regex::new(&src).map_err(|e| GrammarError::InvalidRegex {
+                pattern: src.clone(),
+                reason: e.to_string(),
+            })?;
+            res.insert(*id, re);
+        }
+        Ok(DynamicMatcher {
+            res,
+            ignore: conf.ignore.clone(),
+            names: conf.names(),
+        })
+    }
+
+    /// Match terminal `id` starting exactly at byte `pos` in `text`. Returns the
+    /// matched slice, or `None` if the terminal does not match there (or matches
+    /// empty — a nullable terminal can never advance the scan).
+    pub fn match_at<'t>(&self, id: SymbolId, text: &'t str, pos: usize) -> Option<&'t str> {
+        let re = self.res.get(&id)?;
+        let m = re.find_at(text, pos)?;
+        if m.start() != pos || m.end() == pos {
+            return None;
+        }
+        Some(m.as_str())
+    }
+
+    /// Match terminal `id` against the whole sub-slice `sub` (anchored at its
+    /// start). Used by `dynamic_complete` to explore shorter tokenizations, which
+    /// Python Lark does by re-matching against a truncated string `s[:-j]`.
+    pub fn match_in<'t>(&self, id: SymbolId, sub: &'t str) -> Option<&'t str> {
+        let re = self.res.get(&id)?;
+        let m = re.find(sub)?;
+        if m.start() != 0 || m.end() == 0 {
+            return None;
+        }
+        Some(&sub[..m.end()])
+    }
+
+    /// The `%ignore` terminal ids, tried between tokens by the dynamic scanner.
+    pub fn ignore(&self) -> &[SymbolId] {
+        &self.ignore
+    }
+
+    /// Display name of a terminal id (for the token's `type_`).
+    pub fn name(&self, id: SymbolId) -> &str {
+        self.names.get(&id).map(String::as_str).unwrap_or("")
+    }
+}
+
 // ─── LexerState: tracks position during incremental lexing ───────────────────
 
 /// Mutable state threaded through contextual lexing.
