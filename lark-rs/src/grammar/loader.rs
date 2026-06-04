@@ -1674,8 +1674,8 @@ impl GrammarCompiler {
             return Ok(r.clone());
         }
         let Some(raw) = by_name.get(name) else {
-            if let Some(&(_, src)) = COMMON_TERMINALS.iter().find(|(n, _)| *n == name) {
-                return Ok(src.to_string());
+            if let Some(src) = common_terminals().get(name) {
+                return Ok(src.clone());
             }
             return Err(GrammarError::UndefinedTerminal {
                 name: name.to_string(),
@@ -1900,9 +1900,7 @@ impl GrammarCompiler {
             Expr::Value(Value::Terminal(name)) => {
                 if let Some(td) = self.terminals.iter().find(|t| &t.name == name) {
                     Ok(td.pattern.clone())
-                } else if let Some(&(_, pat_str)) =
-                    COMMON_TERMINALS.iter().find(|(n, _)| *n == name.as_str())
-                {
+                } else if let Some(pat_str) = common_terminals().get(name) {
                     Ok(Pattern::Re(PatternRe::new(pat_str, 0)?))
                 } else {
                     Err(GrammarError::UndefinedTerminal { name: name.clone() })
@@ -2078,9 +2076,9 @@ impl GrammarCompiler {
         }
         if is_common {
             for (name, alias) in &names_to_import {
-                if let Some(td) = COMMON_TERMINALS.iter().find(|(n, _)| *n == name.as_str()) {
+                if let Some(regex) = common_terminals().get(name) {
                     let registered_name = alias.as_deref().unwrap_or(name.as_str());
-                    let pat = Pattern::Re(PatternRe::new(td.1, 0)?);
+                    let pat = Pattern::Re(PatternRe::new(regex, 0)?);
                     if !self.terminals.iter().any(|t| t.name == registered_name) {
                         self.terminals
                             .push(TerminalDef::new(registered_name, pat, 0));
@@ -2228,37 +2226,47 @@ static TERMINAL_NAMES: &[(&str, &str)] = &[
     (" ", "SPACE"),
 ];
 
-/// Subset of `common.lark` terminals inlined for %import resolution.
-static COMMON_TERMINALS: &[(&str, &str)] = &[
-    ("DIGIT", r"[0-9]"),
-    ("HEXDIGIT", r"[0-9a-fA-F]"),
-    ("INT", r"[0-9]+"),
-    ("SIGNED_INT", r"[+-]?[0-9]+"),
-    ("DECIMAL", r"[0-9]+\.[0-9]*"),
-    (
-        "FLOAT",
-        r"(?i)(\d+e[+-]?\d+|\d+\.\d*e[+-]?\d+|\d*\.\d+e[+-]?\d+|\d+\.\d*|\d*\.\d+)",
-    ),
-    (
-        "SIGNED_FLOAT",
-        r"[+-]?(\d+e[+-]?\d+|\d+\.\d*e[+-]?\d+|\d*\.\d+e[+-]?\d+|\d+\.\d*|\d*\.\d+)",
-    ),
-    ("NUMBER", r"(\d+\.?\d*|\.\d+)([Ee][+-]?\d+)?"),
-    (
-        "SIGNED_NUMBER",
-        r"[+-]?([0-9]+\.?[0-9]*|\.[0-9]+)([Ee][+-]?[0-9]+)?",
-    ),
-    ("LETTER", r"[a-zA-Z]"),
-    ("WORD", r"[a-zA-Z]+"),
-    ("CNAME", r"[_a-zA-Z][_a-zA-Z0-9]*"),
-    ("WS_INLINE", r"[ \t]+"),
-    ("WS", r"[ \t\f\r\n]+"),
-    ("NEWLINE", r"(\r?\n)+"),
-    ("SH_COMMENT", r"#[^\n]*"),
-    ("CPP_COMMENT", r"//[^\n]*"),
-    ("C_COMMENT", r"/\*.*?\*/"),
-    ("STRING", r#""([^"\\\n\r]|\\.)*?""#),
-    ("ESCAPED_STRING", r#""([^"\\\n\r]|\\.)*""#),
-    ("LCASE_LETTER", r"[a-z]"),
-    ("UCASE_LETTER", r"[A-Z]"),
-];
+/// Lark's `common.lark`, bundled and compiled once into a `name → inline-regex`
+/// map for `%import common.X` resolution.
+///
+/// Rather than maintain a hand-transcribed regex table (which silently drifts from
+/// Python Lark), we parse our own bundled copy of `common.lark` through the *same*
+/// terminal-algebra path lark-rs uses for user grammars: each terminal's regex is
+/// the loader's own compiled output, so a common terminal cannot lex differently
+/// from the way the same definition would in a user grammar. The pinned fidelity
+/// net is `tests/test_common.rs` (oracles in `fixtures/oracles/common/`).
+///
+/// The bundled copy carries one documented adaptation (the lookbehind in Lark's
+/// escaped-string helpers, which the `regex` crate cannot compile) — see the
+/// header of `src/grammars/common.lark`.
+fn common_terminals() -> &'static HashMap<String, String> {
+    use std::sync::OnceLock;
+    static MAP: OnceLock<HashMap<String, String>> = OnceLock::new();
+    MAP.get_or_init(|| {
+        const COMMON_LARK: &str = include_str!("../grammars/common.lark");
+        // Collect every terminal name so a probe rule keeps them all alive through
+        // dead-terminal pruning (a terminal only referenced by another terminal is
+        // otherwise inlined away and would not be importable).
+        let names: Vec<&str> = COMMON_LARK
+            .lines()
+            .filter_map(|line| {
+                let line = line.trim_start();
+                let name = line.split_once(':')?.0.trim();
+                let is_term_name = !name.is_empty()
+                    && name.starts_with(|c: char| c == '_' || c.is_ascii_uppercase())
+                    && name
+                        .chars()
+                        .all(|c| c == '_' || c.is_ascii_uppercase() || c.is_ascii_digit());
+                is_term_name.then_some(name)
+            })
+            .collect();
+        let probe = format!("{COMMON_LARK}\n__common_probe: {}\n", names.join(" "));
+        let grammar = load_grammar(&probe, &["__common_probe".to_string()], false, false)
+            .expect("bundled common.lark must compile");
+        grammar
+            .terminals
+            .into_iter()
+            .map(|t| (t.name, t.pattern.to_inline_regex()))
+            .collect()
+    })
+}

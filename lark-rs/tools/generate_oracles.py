@@ -639,6 +639,68 @@ def generate_terminal_refs():
     save_oracle("terminal_refs", "cases", results)
 
 
+# ─── common.lark terminal library (Phase 3) ──────────────────────────────────
+#
+# Each user-facing terminal from `lark/grammars/common.lark` is exercised through
+# a grammar that imports it (`start: TERM` / `%import common.TERM`) against
+# representative valid + invalid inputs. lark-rs resolves `%import common.X` by
+# parsing its *own* bundled copy of common.lark through the same terminal-algebra
+# path it uses for user grammars, so these oracles pin that the bundled copy stays
+# faithful to Python Lark rather than drifting (the old hand-transcribed regex
+# table could).
+#
+# (name, [(input, should_parse)])
+COMMON_TERMINAL_CASES = [
+    ("DIGIT",         [("5", True), ("0", True), ("12", False), ("a", False), ("", False)]),
+    ("HEXDIGIT",      [("a", True), ("F", True), ("9", True), ("g", False), ("G", False)]),
+    ("INT",           [("123", True), ("0", True), ("12a", False), ("", False)]),
+    ("SIGNED_INT",    [("5", True), ("+5", True), ("-5", True), ("++5", False)]),
+    ("DECIMAL",       [("1.5", True), ("1.", True), (".5", True), ("1", False)]),
+    ("FLOAT",         [("1e5", True), ("1.5", True), ("1.5e-3", True), (".5e3", True), ("1", False)]),
+    ("SIGNED_FLOAT",  [("-1.5", True), ("+1e3", True), ("1.0", True), ("1", False)]),
+    ("NUMBER",        [("1", True), ("1.5", True), ("1e5", True), ("a", False)]),
+    ("SIGNED_NUMBER", [("-1", True), ("+1.5", True), ("2e2", True)]),
+    ("LETTER",        [("a", True), ("Z", True), ("1", False), ("ab", False)]),
+    ("WORD",          [("abc", True), ("Hello", True), ("ab1", False), ("", False)]),
+    ("CNAME",         [("_foo", True), ("a1", True), ("Bar_2", True), ("1abc", False)]),
+    ("LCASE_LETTER",  [("q", True), ("Q", False)]),
+    ("UCASE_LETTER",  [("Q", True), ("q", False)]),
+    ("WS_INLINE",     [(" ", True), ("\t", True), ("  \t", True), ("\n", False)]),
+    ("WS",            [(" ", True), (" \n\t", True), ("\r\n", True), ("a", False)]),
+    ("CR",            [("\r", True), ("\n", False)]),
+    ("LF",            [("\n", True), ("\r", False)]),
+    ("NEWLINE",       [("\n", True), ("\r\n", True), ("\n\n", True), ("a", False)]),
+    ("SH_COMMENT",    [("# hi", True), ("#", True), ("// hi", False)]),
+    ("CPP_COMMENT",   [("// hi", True), ("//", True), ("# hi", False)]),
+    ("C_COMMENT",     [("/* hi */", True), ("/* a\nb */", True), ("/* x", False)]),
+    ("SQL_COMMENT",   [("-- hi", True), ("--", True), ("# hi", False)]),
+    ("ESCAPED_STRING", [('"hi"', True), ('""', True), (r'"a\"b"', True), ('"x', False)]),
+]
+
+
+def generate_common():
+    print("Generating common.lark terminal oracles...")
+    results = {}
+    for name, cases in COMMON_TERMINAL_CASES:
+        grammar = f"start: {name}\n%import common.{name}\n"
+        recorded = []
+        for inp, should_pass in cases:
+            ok, result = run_case(grammar, inp, parser_type="lalr")
+            if should_pass and not ok:
+                print(f"  WARNING: {name} expected to parse {inp!r}: {result}")
+            if not should_pass and ok:
+                print(f"  WARNING: {name} expected to reject {inp!r}")
+            recorded.append({
+                "input": inp,
+                "should_pass": should_pass,
+                "ok": ok,
+                "tree": result if ok else None,
+                "error": result if not ok else None,
+            })
+        results[name] = recorded
+    save_oracle("common", "cases", results)
+
+
 def generate_json():
     print("Generating JSON oracles...")
     grammar = load_grammar("json")
@@ -704,6 +766,7 @@ if __name__ == "__main__":
     generate_csv()
     generate_keywords()
     generate_terminal_refs()
+    generate_common()
     generate_python_numbers()
     generate_lalr_core()
     generate_earley()
