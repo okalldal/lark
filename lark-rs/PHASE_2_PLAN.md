@@ -132,7 +132,8 @@ The bulk: `lark/parsers/earley_forest.py` (~802 lines).
   Reuse `tree_matches_oracle` verbatim.
 
 Exit: `parser='earley'` produces byte-identical trees to LALR on every
-unambiguous oracle in the repo.
+unambiguous oracle in the repo — **and** parses them within the agreed
+cost-of-generality budget (§10) on the shared perf harness.
 
 ---
 
@@ -215,3 +216,39 @@ The one engine abstraction *not* yet built is the **dynamic-lexer extension to
 Each row = one session, one PR, `scripts/check.sh` green, bank not regressed.
 North star unchanged: **the (now two-engine) compliance percentage**, not the
 feature checklist.
+
+---
+
+## 10. Performance baseline & its implications for these sprints
+
+A perf baseline harness (`cargo bench --bench parse`) + a profiling spike landed
+alongside this plan — see [`BENCH.md`](BENCH.md). It exists so Earley has a *number*
+to be measured against, not a release gate. Three findings change how the sprints
+above are gated:
+
+1. **LALR parse is allocation-bound, decisively** (measured, not assumed): one
+   parse of a 92 KB input does ~301K allocations / 105 MB of churn; ~40% of
+   instructions are `malloc`/`free`/`memcpy`, ~10% SipHash. Of total parse time,
+   **~55% is lexing** (dominated by the `regex` engine + capture handling) and
+   **~32% is reduce/tree-building** (`String` clones, `Tree`/`Vec` allocation).
+
+2. **A cheap, engine-shared lexer win sits *before* Sprint 1.** Two localized
+   inefficiencies in `Scanner::match_at` — capture groups resolved *by name* per
+   token (the SipHash cost) and a fresh `Captures` allocated per match — are pure
+   `lexer.rs` changes that touch no public type. Crucially the **Earley basic and
+   dynamic lexers scan through the same `Scanner`**, so this win is shared, not
+   LALR-only. It is optional pre-work for Sprint 1, not a blocker.
+
+3. **The tree-representation change is now profiler-justified — but defer it past
+   Sprint 2.** The ~32% tree-building cost is exactly the `Box<str>`/arena-label +
+   zero-copy-span change `CLAUDE.md` parks behind the `TreeBuilder` chokepoint. The
+   profiler now asks for it, but it is best made *once the SPPF→tree walk (Sprint
+   2) is a second consumer* of that representation, so both engines co-design it in
+   one pass rather than hardening it against LALR alone.
+
+**Cost-of-generality budget (the Sprint 2 exit add-on).** Earley is O(n³) worst
+case and solves a strictly harder problem, so "slower than LALR" is expected, not a
+regression — but unbounded slowness on *unambiguous* input is. Sprint 2 therefore
+also asserts: on the shared unambiguous workloads, Earley parses within an agreed
+**K×** of LALR, K read off the harness when Sprint 2 lands (a regression *ceiling*,
+not a moving target). The pathological-ambiguous workload is reported, never gated.
