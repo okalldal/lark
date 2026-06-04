@@ -1,0 +1,812 @@
+[
+  {
+    "name": "unambiguous",
+    "grammar": "\nstart: sum\n?sum: product\n    | sum \"+\" product   -> add\n?product: atom\n        | product \"*\" atom -> mul\natom: NUMBER\nNUMBER: /[0-9]+/\n%ignore \" \"\n",
+    "ambiguity": "resolve",
+    "lexer": "basic",
+    "cases": [
+      {
+        "input": "1",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "atom",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NUMBER",
+                  "value": "1"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "1 + 2",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "add",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "atom",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "NUMBER",
+                      "value": "1"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "atom",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "NUMBER",
+                      "value": "2"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "1 + 2 * 3",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "add",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "atom",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "NUMBER",
+                      "value": "1"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "mul",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "atom",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "NUMBER",
+                          "value": "2"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "tree",
+                      "data": "atom",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "NUMBER",
+                          "value": "3"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "",
+        "should_parse": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected end-of-input. Expected one of: \n\t* NUMBER\n"
+      },
+      {
+        "input": "1 +",
+        "should_parse": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected end-of-input. Expected one of: \n\t* NUMBER\n"
+      }
+    ]
+  },
+  {
+    "name": "unambiguous",
+    "grammar": "\nstart: sum\n?sum: product\n    | sum \"+\" product   -> add\n?product: atom\n        | product \"*\" atom -> mul\natom: NUMBER\nNUMBER: /[0-9]+/\n%ignore \" \"\n",
+    "ambiguity": "explicit",
+    "lexer": "basic",
+    "cases": [
+      {
+        "input": "1",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "atom",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NUMBER",
+                  "value": "1"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "1 + 2",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "add",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "atom",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "NUMBER",
+                      "value": "1"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "atom",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "NUMBER",
+                      "value": "2"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "1 + 2 * 3",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "add",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "atom",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "NUMBER",
+                      "value": "1"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "mul",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "atom",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "NUMBER",
+                          "value": "2"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "tree",
+                      "data": "atom",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "NUMBER",
+                          "value": "3"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "",
+        "should_parse": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected end-of-input. Expected one of: \n\t* NUMBER\n"
+      },
+      {
+        "input": "1 +",
+        "should_parse": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected end-of-input. Expected one of: \n\t* NUMBER\n"
+      }
+    ]
+  },
+  {
+    "name": "ambig_root",
+    "grammar": "!start: start start | \"a\"",
+    "ambiguity": "resolve",
+    "lexer": "basic",
+    "cases": [
+      {
+        "input": "a",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "aa",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "aaa",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "start",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "A",
+                      "value": "a"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "start",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "A",
+                      "value": "a"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "",
+        "should_parse": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected end-of-input. Expected one of: \n\t* A\n"
+      }
+    ]
+  },
+  {
+    "name": "ambig_root",
+    "grammar": "!start: start start | \"a\"",
+    "ambiguity": "explicit",
+    "lexer": "basic",
+    "cases": [
+      {
+        "input": "a",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "aa",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "aaa",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "_ambig",
+          "children": [
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "start",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "start",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "A",
+                          "value": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "tree",
+                      "data": "start",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "A",
+                          "value": "a"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "start",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "A",
+                      "value": "a"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "start",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "A",
+                      "value": "a"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "start",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "start",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "A",
+                          "value": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "tree",
+                      "data": "start",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "A",
+                          "value": "a"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "",
+        "should_parse": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected end-of-input. Expected one of: \n\t* A\n"
+      }
+    ]
+  },
+  {
+    "name": "ambig_nested",
+    "grammar": "\nstart: \"(\" inner \")\"\n!inner: inner inner | \"a\"\n%ignore \" \"\n",
+    "ambiguity": "resolve",
+    "lexer": "basic",
+    "cases": [
+      {
+        "input": "(a)",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "inner",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "(aaa)",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "inner",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "inner",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "inner",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "A",
+                          "value": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "tree",
+                      "data": "inner",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "A",
+                          "value": "a"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "inner",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "A",
+                      "value": "a"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "()",
+        "should_parse": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected token Token('RPAR', ')') at line 1, column 2.\nExpected one of: \n\t* A\n"
+      }
+    ]
+  },
+  {
+    "name": "ambig_nested",
+    "grammar": "\nstart: \"(\" inner \")\"\n!inner: inner inner | \"a\"\n%ignore \" \"\n",
+    "ambiguity": "explicit",
+    "lexer": "basic",
+    "cases": [
+      {
+        "input": "(a)",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "inner",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "(aaa)",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "_ambig",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "inner",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "inner",
+                      "children": [
+                        {
+                          "type": "tree",
+                          "data": "inner",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "A",
+                              "value": "a"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "tree",
+                          "data": "inner",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "A",
+                              "value": "a"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "tree",
+                      "data": "inner",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "A",
+                          "value": "a"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "inner",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "inner",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "A",
+                          "value": "a"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "tree",
+                      "data": "inner",
+                      "children": [
+                        {
+                          "type": "tree",
+                          "data": "inner",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "A",
+                              "value": "a"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "tree",
+                          "data": "inner",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "A",
+                              "value": "a"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "()",
+        "should_parse": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected token Token('RPAR', ')') at line 1, column 2.\nExpected one of: \n\t* A\n"
+      }
+    ]
+  }
+]

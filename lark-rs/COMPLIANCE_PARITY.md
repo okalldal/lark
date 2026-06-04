@@ -21,11 +21,19 @@ frozen until this roadmap is burned down — see the exit criterion at the botto
 > and 73/74 (strict shift/reduce). Only 57/58 (strict regex-collision) remains,
 > deferred with cause (needs an `interegular`-equivalent FSM intersection engine).
 
+> **Phase 2 update (Sprint 0 done):** Earley now has its **own** compliance bank —
+> `compliance/earley_bank.json` (147 grammars, 209 cases, 15 explicit-ambiguity),
+> strip-mined from Lark's `TestEarleyBasic` + `TestFullEarleyBasic` and replayed by
+> `test_earley_compliance.rs`, gated by `earley_xfail.json`. It is a *separate*
+> percentage from the LALR bank below (which stays byte-for-byte unchanged). While
+> the Earley engine is a stub, every Earley entry is XFAIL; Sprints 1–4 burn it
+> down. See [`PHASE_2_PLAN.md`](PHASE_2_PLAN.md).
+
 ## Why parity before Earley
 
-The bank is **100% LALR grammars** (257/257; zero Earley cases). Implementing
-Earley would not move the parity number at all — the two are orthogonal work on
-two different engines. Every remaining failure lives on the LALR path, and the
+The (LALR) bank is **100% LALR grammars** (257/257; zero Earley cases). Implementing
+Earley would not move *this* parity number at all — the two are orthogonal work on
+two different engines, and Earley now has its own bank (above). Every remaining failure lives on the LALR path, and the
 shared `TreeBuilder` / `TokenSource` / `CompiledGrammar` that Earley will be built
 on. Hardening that core now means the SPPF forest-walk inherits a *correct*
 shaper instead of 125 latent bugs we'd then be debugging across two engines with

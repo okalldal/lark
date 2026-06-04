@@ -1,7 +1,8 @@
 # Phase 2 — Earley + SPPF: Scope & Implementation Plan
 
-**Status:** planning. Phase 2 is *eligible to start* (compliance bank at 99.6%,
-exit criterion met — see [`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md)).
+**Status:** Sprint 0 (test harness) ✅ done; Sprint 1 (Earley recognizer) is next.
+Phase 2 was unfrozen at 99.6% compliance (exit criterion met — see
+[`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md)).
 
 This document answers four questions before any engine code is written:
 
@@ -48,40 +49,46 @@ session and ends with `scripts/check.sh` green and the bank not regressed.
 
 ---
 
-## 2. Sprint 0 — Test harness for ambiguity (DO THIS FIRST, no engine code)
+## 2. Sprint 0 — Test harness for ambiguity (✅ DONE)
 
-The harness today cannot express what Earley produces. This sprint makes it able
-to, so every later sprint has an oracle to land against. **It writes no parser
-code** — only oracle generation, serialization, matching, and an Earley bank.
+The harness could not express what Earley produces. This sprint made it able to,
+so every later sprint has an oracle to land against. **No parser code** — only
+oracle generation, serialization, matching, and an Earley bank.
 
-Deliverables:
+What landed:
 
-1. **Earley oracle generation** — `tools/generate_oracles.py` learns to parse a
-   grammar with `parser='earley'` at `ambiguity='resolve'` *and*
-   `ambiguity='explicit'`, and to serialize the result.
-2. **`_ambig` node serialization + an ambiguity-aware matcher.** Extend the
-   oracle JSON node format with an `_ambig` node type, and add a
-   `tree_matches_oracle`-style comparator that treats an `_ambig` node's children
-   as an *unordered set of derivations* (Lark does not guarantee `_ambig` child
-   order). `tests/common/mod.rs` gets `make_earley(...)` and
-   `forest_matches_oracle(...)`.
-3. **An Earley compliance bank.** `tools/extract_lark_compliance.py` today
-   instruments only Lark's *LALR* test classes; add the Earley test classes
-   (`test_parser.py`'s Earley suites + the ambiguity tests) so we capture
-   `(grammar, options, input, tree|forest|error)` for Earley into a new
-   `fixtures/oracles/compliance/earley_bank.json`, replayed by a new
-   `test_earley_compliance.rs` gated by its own `earley_xfail.json`.
-4. **A starter set of ambiguous grammars** under `tests/grammars/` (the classic
-   ones: `start: "a" | "a"`, an expression grammar with no precedence, a
-   palindrome/`S: S S | "a"` style highly-ambiguous case).
+1. ✅ **Earley oracle generation** — `tools/generate_oracles.py::generate_earley`
+   parses a curated grammar set with `parser='earley'` at both
+   `ambiguity='resolve'` and `ambiguity='explicit'`, writing
+   `tests/fixtures/oracles/earley/cases.json`. The set covers an *unambiguous*
+   grammar (Earley must match LALR's single tree), an *ambiguity at the root*
+   (`!start: start start | "a"`), and an *ambiguity nested* below the start rule
+   (`(aaa)` → `_ambig` as a child, not the root).
+2. ✅ **`_ambig` matching.** `tree_to_dict` already serializes an `_ambig` node
+   (it is just a `Tree`); the Rust side learned to compare it. `match_node_tree`
+   special-cases `data == "_ambig"` and matches its children as an *unordered set*
+   (Lark does not guarantee `_ambig` child order) via a small backtracking
+   bijection (`match_ambig` / `match_child`). `tests/common/mod.rs` also gained
+   `make_earley(grammar, ambiguity)` and the `earley_unimplemented()` self-gate.
+3. ✅ **Earley compliance bank.** `tools/extract_lark_compliance.py` now also
+   instruments Lark's `TestEarleyBasic` + `TestFullEarleyBasic` classes (basic
+   lexer; dynamic-lexer configs filtered out for Sprint 5) into
+   `compliance/earley_bank.json` — **147 grammars, 209 parse cases, 15
+   explicit-ambiguity**. Replayed by `tests/test_earley_compliance.rs`, gated by
+   `compliance/earley_xfail.json`. The LALR `bank.json` is byte-for-byte unchanged.
+4. ✅ **Self-activating gate.** Both Earley tests probe `earley_unimplemented()`
+   and skip while the backend is a stub, so Sprint 0 lands green; the moment
+   Sprint 1 wires a real Earley frontend the probe flips and the oracles start
+   being enforced — no edit to the tests required (the fuzz-corpus pattern).
+   Every Earley bank entry is currently a uniform XFAIL (350 ids), honestly
+   including construct-error records (a build that fails *because Earley is
+   unimplemented* is not a grammar rejection, so it is not allowed to count as a
+   spurious agreement).
 
-Exit: oracles + bank exist and the new Earley tests are RED-but-gated (every
-Earley case in `earley_xfail.json`, since there is no engine yet). The harness is
-now the spec for Sprints 1–5.
+The harness is now the spec for Sprints 1–5.
 
-> **This is the answer to "do we need to set up / refine the test harness
-> first?" — yes, unambiguously, and it is its own sprint.** Everything after it
-> is gated by it.
+> **This was the answer to "do we need to set up / refine the test harness
+> first?" — yes, and it was its own sprint.** Everything after it is gated by it.
 
 ---
 
@@ -198,7 +205,7 @@ The one engine abstraction *not* yet built is the **dynamic-lexer extension to
 
 | Sprint | Deliverable | Oracle / gate | Engine code? |
 |-------:|-------------|---------------|:------------:|
-| **0** | Ambiguity harness + Earley bank | new Earley oracles, all XFAIL-gated | no |
+| **0 ✅** | Ambiguity harness + Earley bank | new Earley oracles, all XFAIL-gated | no |
 | **1** | Earley recognizer, basic lexer | accept/reject parity (JSON, arithmetic) | yes |
 | **2** | SPPF + unambiguous forest→tree | **every existing oracle, identical to LALR** | yes |
 | **3** | `ambiguity='resolve'` | ambiguous grammars → Lark's chosen tree | yes |
