@@ -45,23 +45,41 @@ fn test_dangling_else_is_lalr_not_slr() {
     }
 }
 
-/// BUG-6: requesting the (unimplemented) Earley backend must fail loudly rather
-/// than silently substituting LALR, which would accept fewer grammars.
+/// BUG-6 (updated for Phase 2, Sprint 2): the Earley backend is now implemented,
+/// so requesting it must *build and parse*, never silently fall back to LALR.
+/// CYK is still unimplemented and must fail loudly rather than substitute another
+/// algorithm — the original "no silent fallback" guarantee, now pinned on the one
+/// backend that is still a stub.
 #[test]
-fn test_earley_errors_instead_of_silent_fallback() {
-    let result = Lark::new(
+fn test_earley_builds_and_cyk_errors_loudly() {
+    // Earley builds and parses (it accepts even grammars LALR cannot build).
+    let earley = Lark::new(
         "start: \"a\"",
         LarkOptions {
             parser: ParserAlgorithm::Earley,
             ..Default::default()
         },
+    )
+    .expect("Earley backend should build (Phase 2, Sprint 2)");
+    assert!(
+        earley.parse("a").is_ok(),
+        "Earley should parse a trivial grammar"
     );
-    match result {
-        Ok(_) => panic!("Earley must not silently fall back to LALR (BUG-6)"),
+
+    // CYK remains unimplemented: fail loudly, do not silently fall back.
+    let cyk = Lark::new(
+        "start: \"a\"",
+        LarkOptions {
+            parser: ParserAlgorithm::Cyk,
+            ..Default::default()
+        },
+    );
+    match cyk {
+        Ok(_) => panic!("CYK must not silently fall back to another backend"),
         Err(LarkError::Grammar(lark_rs::GrammarError::Other { msg })) => {
-            assert!(msg.contains("Earley"), "unexpected error message: {msg}");
+            assert!(msg.contains("CYK"), "unexpected error message: {msg}");
         }
-        Err(e) => panic!("expected an Earley-not-implemented error, got: {e}"),
+        Err(e) => panic!("expected a CYK-not-implemented error, got: {e}"),
     }
 }
 

@@ -15,7 +15,9 @@ use crate::tree::{Child, Token, Tree};
 
 /// A semantic value produced by reducing a rule (or shifting a terminal). It is
 /// the currency on the LALR value stack and, in time, the result of walking an
-/// SPPF node.
+/// SPPF node. `Clone` so the Earley forest-walk can memoize a shared SPPF node's
+/// assembled value (a DAG node is reachable by many parents).
+#[derive(Clone)]
 pub enum NodeValue {
     Token(Token),
     Tree(Tree),

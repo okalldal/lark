@@ -114,8 +114,8 @@ src/
     mod.rs            ParsingFrontend — lowers grammar, wires lexer + parser
     lalr.rs           Dense ParseTable, LalrParser, build_lalr_table
     token_source.rs   TokenSource trait + PreLexed / Contextual (lexer⇄parser API)
-    tree_builder.rs   TreeBuilder — shared rule→tree shaping (LALR + future Earley)
-    earley.rs         Earley + SPPF (Phase 2 — stub)
+    tree_builder.rs   TreeBuilder — shared rule→tree shaping (LALR + Earley)
+    earley.rs         Earley recognizer + SPPF + forest→tree (Phase 2, Sprints 1–2)
 
 tests/
   common/mod.rs       Shared helpers: make_lalr(), load_oracle(), tree_matches_oracle()
@@ -264,20 +264,22 @@ Earley is the second USP. It handles grammars LALR cannot (ambiguous, non-determ
 Requesting `ParserAlgorithm::Earley` now returns an explicit error (was a silent
 LALR fallback).
 
-Sprint plan + scope in [`PHASE_2_PLAN.md`](PHASE_2_PLAN.md). **Sprint 0 (the test
-harness) and Sprint 1 (the Earley recogniser) are done** — see the testing section
-below. Sprint 1 landed `EarleyParser::recognize` (boolean accept/reject, no forest)
-verified by `test_earley_recognizer`; it is deliberately **not** wired into
-`build_frontend` yet, so the tree-comparing Earley oracle tests stay gated until
-Sprint 2 (SPPF + forest→tree) can produce trees. The rest is engine work.
+Sprint plan + scope in [`PHASE_2_PLAN.md`](PHASE_2_PLAN.md). **Sprints 0–2 are
+done.** Sprint 1 landed `EarleyParser::recognize`; Sprint 2 landed the **SPPF +
+forest→tree** walk and wired the Earley frontend into `build_frontend`, flipping
+the oracle gate. Because the curated `test_earley_oracle` is all-or-nothing (no
+XFAIL), Sprint 2 also brought up `ambiguity='resolve'` (the planned Sprint 3) and
+`ambiguity='explicit'` `_ambig` forests (the planned Sprint 4) far enough for the
+whole curated set to pass; the broader bank is the XFAIL-gated burndown net (now
+210/211 ≈ 99.5%). The remaining engine work is the dynamic lexer (Sprint 5).
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Ambiguity test harness (Sprint 0) | ✅ | Earley oracles + `_ambig` set-matcher + Earley compliance bank (147 grammars), all self-gating XFAIL until the engine lands |
-| Earley recogniser | ✅ | Sprint 1: `EarleyParser::recognize` — predict/scan/complete over `SymbolId`, Aycock–Horspool nullable handling; boolean accept/reject (no forest). Verified by `test_earley_recognizer` (parity vs. Python Lark); **not yet wired into `build_frontend`** — Sprint 2 produces trees and flips the oracle gate |
-| SPPF forest construction | ⬜ | Shared Packed Parse Forest (Sprint 2) |
-| Forest → tree conversion | ⬜ | `ambiguity='resolve'` picks one (Sprint 3); reuses `TreeBuilder` |
-| `ambiguity='explicit'` | ⬜ | Returns `_ambig` forests (Sprint 4) |
+| Ambiguity test harness (Sprint 0) | ✅ | Earley oracles + `_ambig` set-matcher + Earley compliance bank (147 grammars), self-activating the moment the frontend builds |
+| Earley recogniser | ✅ | Sprint 1: predict/scan/complete over `SymbolId`. Now reimplemented on top of the Sprint-2 chart (`recognize` = "did the start node build?"), so it accepts exactly what `parse` parses. Verified by `test_earley_recognizer` |
+| SPPF forest construction | ✅ | Sprint 2: Elizabeth Scott's binarized SPPF (symbol / intermediate / packed nodes, arena-allocated by `NodeId`, held-completion nullable handling). Joop-Leo transitives omitted (dead code in the reference) |
+| Forest → tree conversion | ✅ | Sprint 2: `Transformer` walks the SPPF and reuses `TreeBuilder::assemble`; `ambiguity='resolve'` picks the highest-priority derivation (Lark's `ForestSumVisitor` order). Verified ≡ LALR on every unambiguous oracle by `test_earley_parity` |
+| `ambiguity='explicit'` | ✅ | Sprint 2: emits `_ambig` forests; curated cases pass, bank 210/211 (one explicit-ambiguity-through-`_rule`+EBNF-helper case deferred as XFAIL) |
 | Dynamic lexer | ⬜ | Tokenise lazily with parser context (Sprint 5) |
 | `dynamic_complete` | ⬜ | Try all tokenisations (Sprint 5) |
 
