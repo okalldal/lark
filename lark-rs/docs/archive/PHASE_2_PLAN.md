@@ -4,9 +4,10 @@
 forest→tree) wired the Earley frontend and, because the curated oracle gate is
 all-or-nothing, also brought up `ambiguity='resolve'` (Sprint 3) and `'explicit'`
 `_ambig` (Sprint 4) for the curated set; the Earley compliance bank is the
-XFAIL-gated burndown net at 210/211 ≈ 99.5%. **Sprint 5 landed the dynamic lexer +
+XFAIL-gated burndown net at 211/211 (clean, after the `AmbiguousExpander` port).
+**Sprint 5 landed the dynamic lexer +
 `dynamic_complete`** (`build_chart_dynamic`/`scan_dynamic`, `DynamicMatcher`), with
-its own XFAIL-gated bank (`earley_dynamic_bank.json`, 441/454 ≈ 97.1% on first cut).
+its own XFAIL-gated bank (`earley_dynamic_bank.json`, 446/454 ≈ 98.2%).
 Phase 2 was unfrozen at 99.6% LALR compliance (see
 [`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md)).
 
