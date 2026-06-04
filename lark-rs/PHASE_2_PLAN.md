@@ -232,12 +232,16 @@ above are gated:
    **~55% is lexing** (dominated by the `regex` engine + capture handling) and
    **~32% is reduce/tree-building** (`String` clones, `Tree`/`Vec` allocation).
 
-2. **A cheap, engine-shared lexer win sits *before* Sprint 1.** Two localized
-   inefficiencies in `Scanner::match_at` — capture groups resolved *by name* per
-   token (the SipHash cost) and a fresh `Captures` allocated per match — are pure
-   `lexer.rs` changes that touch no public type. Crucially the **Earley basic and
-   dynamic lexers scan through the same `Scanner`**, so this win is shared, not
-   LALR-only. It is optional pre-work for Sprint 1, not a blocker.
+2. ✅ **A cheap, engine-shared lexer win sat *before* Sprint 1 — now landed
+   (perf sprint, 2026-06-04).** Two localized inefficiencies in `Scanner::match_at`
+   — capture groups resolved *by name* per token (the SipHash cost) and a fresh
+   `Captures` allocated per match — were pure `lexer.rs` changes that touch no
+   public type. Resolving each terminal's capture-group index once and reusing a
+   `CaptureLocations` scratch buffer cut allocations 300,957 → 271,892 per
+   `json_large` parse and gave a ~17–20% wall-clock speedup across all parse
+   workloads (see [`BENCH.md`](BENCH.md)). Crucially the **Earley basic and dynamic
+   lexers scan through the same `Scanner`**, so this win is shared, not LALR-only —
+   Sprint 1 inherits it for free.
 
 3. **The tree-representation change is now profiler-justified — but defer it past
    Sprint 2.** The ~32% tree-building cost is exactly the `Box<str>`/arena-label +
