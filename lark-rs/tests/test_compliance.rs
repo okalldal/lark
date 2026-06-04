@@ -12,6 +12,7 @@
 mod common;
 
 use common::tree_matches_oracle;
+use lark_rs::grammar::terminal::flags;
 use lark_rs::{Lark, LarkOptions, LexerType, ParserAlgorithm};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -41,12 +42,28 @@ fn record_options(rec: &Value) -> LarkOptions {
         Some("basic") => LexerType::Basic,
         _ => LexerType::Contextual,
     };
+    // `g_regex_flags` is recorded as canonical `imsx` letters (CPython-flag
+    // independent); map them back to lark-rs's flag bitset.
+    let mut g_regex_flags = 0u32;
+    if let Some(letters) = rec["g_regex_flags"].as_str() {
+        for ch in letters.chars() {
+            g_regex_flags |= match ch {
+                'i' => flags::IGNORECASE,
+                'm' => flags::MULTILINE,
+                's' => flags::DOTALL,
+                'x' => flags::VERBOSE,
+                _ => 0,
+            };
+        }
+    }
     LarkOptions {
         start,
         parser: ParserAlgorithm::Lalr,
         lexer,
         maybe_placeholders: rec["maybe_placeholders"].as_bool().unwrap_or(true),
         keep_all_tokens: rec["keep_all_tokens"].as_bool().unwrap_or(false),
+        strict: rec["strict"].as_bool().unwrap_or(false),
+        g_regex_flags,
         ..Default::default()
     }
 }

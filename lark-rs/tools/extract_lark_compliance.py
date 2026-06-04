@@ -38,6 +38,28 @@ from lark import Lark, Tree, Token  # noqa: E402
 RELATIVE_IMPORT = re.compile(r"%import\s*\.")
 
 
+def flag_letters(g_regex_flags):
+    """Canonical `imsx` letters for a Python ``re`` flag bitset.
+
+    Recorded (rather than the raw int) so the Rust harness is independent of
+    CPython's flag values; ``""`` means no global flags. Mirrors lark-rs's
+    ``grammar::terminal::flag_letters``.
+    """
+    if not g_regex_flags:
+        return ""
+    flags = int(g_regex_flags)
+    letters = ""
+    if flags & re.IGNORECASE:
+        letters += "i"
+    if flags & re.MULTILINE:
+        letters += "m"
+    if flags & re.DOTALL:
+        letters += "s"
+    if flags & re.VERBOSE:
+        letters += "x"
+    return letters
+
+
 def tree_to_dict(node):
     """Convert a Lark parse tree to the same dict shape generate_oracles.py uses."""
     if isinstance(node, Tree):
@@ -90,6 +112,13 @@ def _patched_init(self, grammar, **options):
         "start": options.get("start", "start"),
         "maybe_placeholders": options.get("maybe_placeholders", True),
         "keep_all_tokens": options.get("keep_all_tokens", False),
+        # Behaviour-affecting options that change the *outcome* (whether the
+        # grammar builds, and how it lexes). Recording them keeps the bank
+        # faithful: without `strict`, a strict-only construct error would be
+        # attributed to the default mode; without `g_regex_flags`, a
+        # case-insensitive oracle would be attributed to a case-sensitive grammar.
+        "strict": options.get("strict", False),
+        "g_regex_flags": flag_letters(options.get("g_regex_flags", 0)),
     }
     try:
         _orig_init(self, grammar, **options)
@@ -154,7 +183,8 @@ def dedup_and_save():
         if rec["grammar"] is None:
             continue
         key = (rec["grammar"], rec["parser"], rec["lexer"], str(rec["start"]),
-               rec["maybe_placeholders"], rec["keep_all_tokens"], rec["construct_error"])
+               rec["maybe_placeholders"], rec["keep_all_tokens"], rec["construct_error"],
+               rec["strict"], rec["g_regex_flags"])
         tgt = seen.get(key)
         if tgt is None:
             tgt = {**rec, "cases": []}

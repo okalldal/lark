@@ -4,10 +4,22 @@
 bank says it generalizes beyond JSON/arithmetic. Phase 2 (Earley/SPPF) stays
 frozen until this roadmap is burned down — see the exit criterion at the bottom.
 
-> **Exit criterion reached (2026-06-03):** the bank is at **98.4%** (≥ 90%), with
-> every remaining XFAIL triaged and root-caused below. Phase 2 (Earley/SPPF) is
-> now eligible to start; this roadmap continues in parallel to keep climbing the
-> LALR path. See the exit criterion at the bottom.
+> **Exit criterion reached (2026-06-03):** the bank is at **99.6%** (≥ 90%), with
+> the single remaining XFAIL cluster triaged, root-caused, and deferred below.
+> Phase 2 (Earley/SPPF) is eligible to start; this roadmap continues in parallel
+> to keep climbing the LALR path. See the exit criterion at the bottom.
+
+> **Sprint update (2026-06-03, "compliance parity"):** the supposed "hard tail"
+> was misdiagnosed. Investigating it revealed that **three of the four remaining
+> clusters were extractor-fidelity bugs, not engine parity gaps**: the bank
+> recorded oracles for grammars built with behaviour-changing options
+> (`strict=True`, `g_regex_flags=re.I`) that the extractor *dropped*, so it
+> attributed a strict-only construct error to the default mode, and a
+> case-insensitive parse tree to a case-sensitive grammar. Recording those two
+> options (extractor + Rust harness + `LarkOptions`) and implementing the two
+> small features behind them flipped **6 XFAILs** (8 → 2): 14/15 (`g_regex_flags`)
+> and 73/74 (strict shift/reduce). Only 57/58 (strict regex-collision) remains,
+> deferred with cause (needs an `interegular`-equivalent FSM intersection engine).
 
 ## Why parity before Earley
 
@@ -19,18 +31,53 @@ on. Hardening that core now means the SPPF forest-walk inherits a *correct*
 shaper instead of 125 latent bugs we'd then be debugging across two engines with
 no oracle to tell us which one is wrong.
 
-## Current state (2026-06-03, after M1–M6 + M4 + M8)
+## Current state (2026-06-03, after M1–M8 + the fidelity sprint)
 
 - Bank: **257 grammars, 512 input-cases + construct-error checks**.
-- Agreement: **98.4% (504/512)**; **8 XFAIL entries**, **0 skipped**.
-  (Was 75.6% / 125 XFAIL at the start of this sprint, 94.1% / 30 before M8 — see
-  "Done" below.)
-- Remaining XFAIL shape: `construct:<ri>` (4), `parse:<ri>:<ci>` (4). These are the
-  genuinely-hard tail: regex-collision construct errors (57/58), an LALR
-  conflict-*detection* parity case (73/74), and terminal-algebra token typing
-  (14/15). No more EBNF/template/placeholder/filtering work remains.
+- Agreement: **99.6% (510/512)**; **2 XFAIL entries**, **0 skipped**.
+  (Was 75.6% / 125 XFAIL at the start of the original sprint, 98.4% / 8 before the
+  fidelity sprint — see "Done" below.)
+- Remaining XFAIL shape: `construct:57`, `construct:58` — the **same** grammar
+  (`A: /e?rez/` vs `B: /erez?/`) under `strict=True`, captured once per lexer
+  (contextual + basic). It is a strict-mode regex-collision construct error,
+  **deferred** (needs an `interegular`-equivalent overlap engine; see M7b). No
+  EBNF/template/placeholder/filtering/typing work remains.
 
-## Done — M8 EBNF repetition / branch-choice / nullable (latest)
+### The bank now records two previously-dropped options
+
+`strict` and `g_regex_flags` change the *outcome* of construction/lexing, so the
+extractor and the Rust harness now record and replay them (and `LarkOptions`
+carries both). Before this, the bank was silently infidelious for any grammar the
+Lark suite built with those options — which is exactly what produced 4 of the 8
+"hard tail" XFAILs.
+
+## Done — extractor-fidelity sprint (`strict` + `g_regex_flags`) (latest)
+
+Root cause for 6 of the last 8 XFAILs: the extractor dropped two
+behaviour-changing options, so the bank's oracle did not match the *recorded*
+configuration. Fixed by recording them end-to-end and implementing the two
+features they gate:
+
+- **`g_regex_flags` (ids 14/15).** From Lark's `test_g_regex_flags`, built with
+  `g_regex_flags=re.I` (the test asserts only that it parses; the bank froze the
+  case-insensitive trees). `LarkOptions.g_regex_flags` now threads a flag bitset
+  into `LexerConf`; the `Scanner` prepends a global `(?i)`-style group to the
+  combined regex (and the `unless` membership tests), so **every** terminal —
+  string literals included — matches under the flag without mutating any
+  `TerminalDef`. Zero-cost and zero-risk for the other 508 cases (the flag is 0
+  for them). Pinned by `tests/test_g_regex_flags.rs`.
+- **`strict` shift/reduce (ids 73/74).** `start: a "."` / `a: "."+` is a genuine
+  S/R conflict Lark resolves as a shift by default but rejects under
+  `strict=True`. `LarkOptions.strict` flows into `build_lalr_table`, which now
+  raises `GrammarError::Conflict` on an S/R conflict in strict mode (R/R was
+  already always-fatal, matching Lark). Default mode is unchanged. Pinned by
+  `tests/test_strict_mode.rs`.
+
+This corrected the earlier mis-triage: there was no "terminal-algebra token
+typing" gap (14/15) and no "conflict-*detection* parity" engine gap (73/74) — both
+were the missing options. See the M6b/M8b sections below for the retraction.
+
+## Done — M8 EBNF repetition / branch-choice / nullable
 
 Two root causes, both matching Python Lark: (1) identical `x+`/`x*` occurrences now
 *share* one recurse rule (`plus_helper` + `recurse_cache`, Lark's `rules_cache`),
@@ -194,23 +241,33 @@ This is the same chokepoint Earley's forest-walk will reuse: the SPPF→tree
 conversion collects one value per expansion symbol and applies `filter_pos[i]`
 identically. Pinned by `tests/test_terminal_unification.rs`.
 
-**Still open — 14/15** (`start: "a" /b+/ C` with `C: "C" | D`, `D: "D" E`, `E: "e"`).
-These pair the unification above with terminal *algebra* (a terminal referencing
-another). The remaining divergence is in how `C: "C" | D` types its token under
-the contextual lexer, not in filtering — track under terminal-algebra follow-up.
+**14/15 — ✅ done, and the original triage was wrong.** This was *not* a
+terminal-algebra token-typing gap. The grammar comes from Lark's
+`test_g_regex_flags`, built with `g_regex_flags=re.I`; the bank had frozen the
+case-insensitive trees while recording the grammar as case-sensitive. lark-rs was
+typing the tokens correctly all along — it just lexed case-sensitively because the
+option was never recorded. Fixed by the fidelity sprint (`g_regex_flags` support);
+see the "Done" section above.
 
-### M7 — Construct-error parity — 4 entries remaining
+### M7 — Construct-error parity — 2 entries remaining (57/58, deferred → M7b)
 
 lark-rs must *reject at build time* grammars Python Lark rejects:
 - ✅ ids 90/91 — `"A"~3..2` invalid repetition range (`min > max`). **Done.**
 - ✅ ids 65/66 — `%import bad_test.NUMBER` from a non-existent module. **Done.**
-- ids 57/58 — `/e?rez/` vs `/erez?/`. Lark raises a *terminal collision* error
-  when two regex terminals can match the same input ambiguously; needs Lark's
-  exact collision rule reproduced before implementing (don't guess — over-eager
-  rejection would regress valid overlapping terminals).
-- ids 73/74 — `start: a "."` / `a: "."+`. This is **not** a simple validation: it
-  is a genuine LALR conflict Lark reports as unresolvable but lark-rs resolves
-  (S/R → shift). Belongs with M8 (conflict-detection parity), not here.
+- ids 57/58 — `/e?rez/` vs `/erez?/`, **only under `strict=True`** (confirmed
+  against Lark 1.3.1: builds fine in default mode, raises `LexError` in strict).
+  Lark delegates the check to the **`interegular`** library: it groups regex
+  terminals by priority, compiles each to an FSM, and reports a collision when two
+  same-priority regexes have a non-empty intersection (with a concrete example
+  string). **Deferred — too large for this sprint** (M7b). Reproducing it needs an
+  FSM-intersection-emptiness engine, and the doc's own warning stands: a hand-rolled
+  approximation risks over-rejecting valid overlapping terminals. Now that `strict`
+  is recorded, these two entries are honestly labelled as a strict-mode collision
+  gap rather than a phantom default-mode error.
+- ids 73/74 — `start: a "."` / `a: "."+`, **only under `strict=True`**. ✅ **Done**
+  via the fidelity sprint: it is a genuine S/R conflict that lark-rs (like Lark)
+  resolves as a shift by default, and now raises in strict mode. There was no
+  default-mode conflict-detection gap to close.
 
 ### M8 — Residual EBNF repetition / branch-choice tree-shape — ✅ done
 
@@ -242,10 +299,10 @@ Pinned by `tests/test_ebnf_sharing.rs`.
   priorities), so the grammar builds and `ab` lexes as the higher-priority `AB`.
   Pinned by `tests/test_placeholders_and_priority.rs`.
 
-- **Still open — 73/74** (`start: a "."` / `a: "."+`). A genuine LALR conflict Lark
-  reports as unresolvable but lark-rs resolves (S/R → shift). This is
-  conflict-*detection* parity (report the conflict instead of silently shifting),
-  tracked with the M7 construct-error work, not the repetition tree-shape above.
+- ✅ **73/74 done** (`start: a "."` / `a: "."+`). The conflict was real but only
+  *fatal under `strict=True`* — lark-rs and Lark both resolve it as a shift by
+  default. The fidelity sprint added `strict` and now raises the S/R conflict in
+  strict mode. Not a default-mode conflict-detection gap. See the "Done" section.
 
 ## Follow-up tickets / index
 
@@ -266,19 +323,34 @@ Pinned by `tests/test_ebnf_sharing.rs`.
 | M6-core | per-position token filtering + unify (155, 194/195) | — | High | ✅ done |
 | M4 | template tree-shape + higher-order (2–9, 245/246) | — | Medium | ✅ done |
 | M8 | EBNF repetition / branch-choice / nullable (156/157, 160/161, 77/78, 227/228, 108/109) | — | Mixed | ✅ done |
-| **M6b** | terminal-algebra typing under collision (14/15) | 4 | Medium | ⬜ open |
-| **M7b** | regex collision construct errors (57/58) | 2 | Medium | ⬜ open — needs Lark's exact rule reproduced first |
-| **M8b** | conflict-*detection* parity (73/74) | 2 | Hard | ⬜ open — report S/R conflict instead of silently shifting |
+| ~~M6b~~ | ~~terminal-algebra typing (14/15)~~ → **`g_regex_flags`** | 4 | — | ✅ done (fidelity sprint; mis-triaged) |
+| ~~M8b~~ | ~~conflict-detection parity (73/74)~~ → **strict S/R** | 2 | — | ✅ done (fidelity sprint; strict-only) |
+| **M7b** | strict regex-collision construct errors (57/58) | 2 | Hard | ⬜ deferred — needs an `interegular`-equivalent FSM-intersection engine |
 
-The work so far took the bank from 75.6% to **98.4%** — 117 entries from eleven
-root-cause fixes. The remaining **8** are the genuinely-hard tail: regex-collision
-construct errors (57/58, needs Lark's exact collision rule reproduced first), an
-LALR conflict-*detection* parity case (73/74, requires reporting a shift/reduce
-conflict lark-rs currently auto-resolves), and terminal-algebra token typing
-(14/15). All EBNF / template / placeholder / filtering / priority work is done.
-**Recommended next:** Phase 2 (Earley/SPPF) — the exit criterion is far exceeded and
-the shared `CompiledGrammar` / `TreeBuilder` (`filter_pos`) contract is settled; the
-remaining 8 are niche LALR-side parity items that can proceed in parallel.
+The work took the bank from 75.6% to **99.6%** — 123 entries from thirteen
+root-cause fixes. The remaining **2** (57/58) are a single strict-mode
+regex-collision grammar, deferred with cause (an FSM-intersection-emptiness engine
+is out of scope for one sprint and risks over-rejection). All EBNF / template /
+placeholder / filtering / typing / priority / `g_regex_flags` / strict-conflict
+work is done. **Recommended next:** Phase 2 (Earley/SPPF) — the exit criterion is
+far exceeded and the shared `CompiledGrammar` / `TreeBuilder` (`filter_pos`)
+contract is settled; M7b can proceed in parallel whenever the FSM engine is built.
+
+### M7b — strict regex-collision detection (deferred, with a plan)
+
+**Done-when:** under `strict=True`, lark-rs raises a `LexError`-equivalent when two
+same-priority regex terminals can match a common string, matching Python Lark.
+
+**Why deferred:** Python Lark delegates to `interegular`
+(`lexer.py::_check_regex_collisions`): group terminals by priority, build an FSM per
+regex, and report any pair whose intersection is non-empty (plus an example). lark-rs
+has no FSM layer — the lexer compiles straight to the `regex` crate, which offers no
+intersection/emptiness test. Building a faithful, non-over-rejecting collision
+checker (regex → NFA/DFA → product-construction emptiness, over the exact terminal
+feature set Lark allows) is a self-contained subproject, not a leaf fix. The
+`strict`-mode plumbing it would hang off of is already in place (this sprint), so the
+remaining work is purely the overlap engine. Candidate building block:
+`regex-automata`'s DFA support for the product construction.
 
 ## Exit criterion — when Earley unfreezes
 

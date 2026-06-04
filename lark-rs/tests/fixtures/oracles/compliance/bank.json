@@ -6,6 +6,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -64,6 +66,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -122,6 +126,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -192,6 +198,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -262,6 +270,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -294,6 +304,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -326,6 +338,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -364,6 +378,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -402,6 +418,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -445,6 +463,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -488,6 +508,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -515,6 +537,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -542,6 +566,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -569,6 +595,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -596,6 +624,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "i",
     "construct_error": false,
     "cases": [
       {
@@ -649,6 +679,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "i",
     "construct_error": false,
     "cases": [
       {
@@ -705,6 +737,8 @@
     ],
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": []
   },
@@ -718,6 +752,8 @@
     ],
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": []
   },
@@ -728,6 +764,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -749,6 +787,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -770,6 +810,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": []
   },
@@ -780,6 +822,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": []
   },
@@ -790,6 +834,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -837,6 +883,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -884,6 +932,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -933,6 +983,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -982,6 +1034,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -1047,6 +1101,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -1112,6 +1168,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": []
   },
@@ -1122,6 +1180,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": []
   },
@@ -1132,6 +1192,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": []
   },
@@ -1142,6 +1204,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": []
   },
@@ -1152,6 +1216,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": []
   },
@@ -1162,6 +1228,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": []
   },
@@ -1172,6 +1240,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -1209,6 +1279,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -1246,6 +1318,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -1316,6 +1390,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -1386,6 +1462,8 @@
     "start": "term",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -1430,6 +1508,8 @@
     "start": "term",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -1474,6 +1554,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -1506,6 +1588,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -1538,6 +1622,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -1581,6 +1667,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -1624,6 +1712,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -1655,6 +1745,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": []
   },
@@ -1665,6 +1757,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": []
   },
@@ -1675,6 +1769,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": []
   },
@@ -1685,6 +1781,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": []
   },
@@ -1695,6 +1793,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -1722,6 +1822,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -1749,6 +1851,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -1781,6 +1885,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -1813,6 +1919,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -1845,6 +1953,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -1877,6 +1987,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -1904,6 +2016,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -1931,6 +2045,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": true,
+    "g_regex_flags": "",
     "construct_error": true,
     "error_kind": "LexError",
     "cases": []
@@ -1942,6 +2058,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": true,
+    "g_regex_flags": "",
     "construct_error": true,
     "error_kind": "LexError",
     "cases": []
@@ -1953,6 +2071,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": []
   },
@@ -1963,6 +2083,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": []
   },
@@ -1973,6 +2095,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -2031,6 +2155,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -2089,6 +2215,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -2121,6 +2249,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -2153,6 +2283,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": true,
     "error_kind": "FileNotFoundError",
     "cases": []
@@ -2164,6 +2296,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": true,
     "error_kind": "FileNotFoundError",
     "cases": []
@@ -2175,6 +2309,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -2207,6 +2343,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -2239,6 +2377,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -2271,6 +2411,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -2303,6 +2445,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -2346,6 +2490,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -2389,6 +2535,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": true,
+    "g_regex_flags": "",
     "construct_error": true,
     "error_kind": "GrammarError",
     "cases": []
@@ -2400,6 +2548,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": true,
+    "g_regex_flags": "",
     "construct_error": true,
     "error_kind": "GrammarError",
     "cases": []
@@ -2411,6 +2561,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -2438,6 +2590,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -2465,6 +2619,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -2508,6 +2664,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -2551,6 +2709,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -2578,6 +2738,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -2605,6 +2767,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -2648,6 +2812,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -2691,6 +2857,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -2755,6 +2923,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -2819,6 +2989,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -28645,6 +28817,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -28747,6 +28921,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -28849,6 +29025,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -28898,6 +29076,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -28947,6 +29127,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": true,
     "error_kind": "GrammarError",
     "cases": []
@@ -28958,6 +29140,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": true,
     "error_kind": "GrammarError",
     "cases": []
@@ -28969,6 +29153,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -29303,6 +29489,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -29335,6 +29523,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -29367,6 +29557,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -29399,6 +29591,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -29431,6 +29625,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -29463,6 +29659,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -29495,6 +29693,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -29556,6 +29756,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -29617,6 +29819,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -29669,6 +29873,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -29721,6 +29927,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": []
   },
@@ -29731,6 +29939,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": []
   },
@@ -29741,6 +29951,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -29806,6 +30018,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -29838,6 +30052,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -29870,6 +30086,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -29907,6 +30125,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -29944,6 +30164,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -29976,6 +30198,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -30008,6 +30232,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -30199,6 +30425,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -30390,6 +30618,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -30455,6 +30685,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -30487,6 +30719,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -30519,6 +30753,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -30558,6 +30794,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -30656,6 +30894,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -30688,6 +30928,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -30720,6 +30962,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -30780,6 +31024,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -30840,6 +31086,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -30924,6 +31172,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -31008,6 +31258,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -31062,6 +31314,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -31116,6 +31370,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -31323,6 +31579,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -31530,6 +31788,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -31698,6 +31958,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -31866,6 +32128,8 @@
     "start": "a",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -31925,6 +32189,8 @@
     "start": "a",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -31984,6 +32250,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32017,6 +32285,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32060,6 +32330,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32103,6 +32375,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32146,6 +32420,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32189,6 +32465,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32210,6 +32488,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32231,6 +32511,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32252,6 +32534,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32273,6 +32557,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32294,6 +32580,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32315,6 +32603,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32336,6 +32626,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32357,6 +32649,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32378,6 +32672,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32399,6 +32695,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32420,6 +32718,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32441,6 +32741,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32462,6 +32764,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32483,6 +32787,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32504,6 +32810,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32525,6 +32833,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32552,6 +32862,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32579,6 +32891,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32620,6 +32934,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32661,6 +32977,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": true,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32698,6 +33016,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": true,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32735,6 +33055,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32766,6 +33088,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32797,6 +33121,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32883,6 +33209,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32969,6 +33297,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -32996,6 +33326,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33023,6 +33355,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33072,6 +33406,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33121,6 +33457,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33148,6 +33486,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33175,6 +33515,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33207,6 +33549,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33239,6 +33583,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33266,6 +33612,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33293,6 +33641,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33320,6 +33670,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33347,6 +33699,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33374,6 +33728,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33401,6 +33757,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33433,6 +33791,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33465,6 +33825,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33492,6 +33854,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33519,6 +33883,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33546,6 +33912,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33573,6 +33941,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33600,6 +33970,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33627,6 +33999,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33660,6 +34034,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33693,6 +34069,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33720,6 +34098,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33747,6 +34127,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33774,6 +34156,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33801,6 +34185,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33828,6 +34214,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33855,6 +34243,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33882,6 +34272,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33909,6 +34301,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33952,6 +34346,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -33995,6 +34391,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34022,6 +34420,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34049,6 +34449,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34086,6 +34488,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34123,6 +34527,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34165,6 +34571,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34207,6 +34615,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34244,6 +34654,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34281,6 +34693,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34318,6 +34732,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34355,6 +34771,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34382,6 +34800,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34409,6 +34829,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34441,6 +34863,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34473,6 +34897,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34505,6 +34931,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34537,6 +34965,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34580,6 +35010,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34623,6 +35055,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34650,6 +35084,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34677,6 +35113,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34764,6 +35202,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34801,6 +35241,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34838,6 +35280,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34880,6 +35324,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34922,6 +35368,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -34964,6 +35412,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -35006,6 +35456,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -35048,6 +35500,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -35090,6 +35544,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -35200,6 +35656,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -35310,6 +35768,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -35341,6 +35801,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -35372,6 +35834,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -35393,6 +35857,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": true,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -35427,6 +35893,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -35448,6 +35916,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": true,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -35482,6 +35952,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -35539,6 +36011,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -35596,6 +36070,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -35623,6 +36099,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -35650,6 +36128,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -35677,6 +36157,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -35704,6 +36186,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -45726,6 +46210,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -55748,6 +56234,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -55852,6 +56340,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -55956,6 +56446,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -55989,6 +56481,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -56022,6 +56516,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -56049,6 +56545,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -56076,6 +56574,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -56103,6 +56603,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -56130,6 +56632,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -56202,6 +56706,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -56274,6 +56780,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -56346,6 +56854,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -56418,6 +56928,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {
@@ -56445,6 +56957,8 @@
     "start": "start",
     "maybe_placeholders": true,
     "keep_all_tokens": false,
+    "strict": false,
+    "g_regex_flags": "",
     "construct_error": false,
     "cases": [
       {

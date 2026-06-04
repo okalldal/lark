@@ -41,11 +41,24 @@ pub struct LexerConf {
     pub terminals: Vec<(SymbolId, TerminalDef)>,
     /// Terminal ids to discard after matching (from `%ignore`).
     pub ignore: Vec<SymbolId>,
+    /// Global regex flags (Lark's `g_regex_flags`) applied to every terminal in
+    /// the combined scanner regex. Zero leaves each terminal's own flags as-is.
+    pub global_flags: u32,
 }
 
 impl LexerConf {
     pub fn new(terminals: Vec<(SymbolId, TerminalDef)>, ignore: Vec<SymbolId>) -> Self {
-        LexerConf { terminals, ignore }
+        LexerConf {
+            terminals,
+            ignore,
+            global_flags: 0,
+        }
+    }
+
+    /// Set the global regex flags (builder-style) for `g_regex_flags` support.
+    pub fn with_global_flags(mut self, flags: u32) -> Self {
+        self.global_flags = flags;
+        self
     }
 
     /// id → name map for token display.
@@ -82,7 +95,15 @@ struct Scanner {
 
 impl Scanner {
     /// Build a scanner from candidate terminals (deduplicated by id).
-    fn build(terminals: &[(SymbolId, &TerminalDef)]) -> Result<Scanner, GrammarError> {
+    ///
+    /// `global_flags` is Lark's `g_regex_flags`: a flag bitset applied to the
+    /// whole combined regex (and to the `unless` membership tests) so that, e.g.,
+    /// `IGNORECASE` makes every terminal — string literals included — match
+    /// case-insensitively, without mutating the individual `TerminalDef`s.
+    fn build(
+        terminals: &[(SymbolId, &TerminalDef)],
+        global_flags: u32,
+    ) -> Result<Scanner, GrammarError> {
         let mut seen = HashSet::new();
         let terms: Vec<(SymbolId, &TerminalDef)> = terminals
             .iter()
@@ -92,7 +113,7 @@ impl Scanner {
 
         // unless: embed string terminals fully matched by a same-priority regex
         // terminal, and record the retype.
-        let unless = compute_unless(&terms)?;
+        let unless = compute_unless(&terms, global_flags)?;
         let embedded: HashSet<SymbolId> =
             unless.values().flat_map(|m| m.values().copied()).collect();
 
@@ -114,7 +135,7 @@ impl Scanner {
             parts.push(format!("(?P<{}>{})", group, term.pattern.to_inline_regex()));
             groups.push((id, group));
         }
-        let pattern = parts.join("|");
+        let pattern = format!("{}{}", global_flag_prefix(global_flags), parts.join("|"));
         let re = Regex::new(&pattern).map_err(|e| GrammarError::InvalidRegex {
             pattern: pattern.clone(),
             reason: e.to_string(),
@@ -155,6 +176,7 @@ impl Scanner {
 /// retyped after the fact. Mirrors Python Lark's `_create_unless`.
 fn compute_unless(
     terms: &[(SymbolId, &TerminalDef)],
+    global_flags: u32,
 ) -> Result<HashMap<SymbolId, HashMap<String, SymbolId>>, GrammarError> {
     let res: Vec<&(SymbolId, &TerminalDef)> = terms
         .iter()
@@ -170,7 +192,11 @@ fn compute_unless(
 
     let mut unless: HashMap<SymbolId, HashMap<String, SymbolId>> = HashMap::new();
     for (re_id, re_t) in &res {
-        let full_src = format!("^(?:{})$", re_t.pattern.to_inline_regex());
+        let full_src = format!(
+            "{}^(?:{})$",
+            global_flag_prefix(global_flags),
+            re_t.pattern.to_inline_regex()
+        );
         let full = Regex::new(&full_src).map_err(|e| GrammarError::InvalidRegex {
             pattern: full_src.clone(),
             reason: e.to_string(),
@@ -192,6 +218,19 @@ fn compute_unless(
         }
     }
     Ok(unless)
+}
+
+/// The leading inline-flag group (`(?i)`, `(?im)`, …) for Lark's `g_regex_flags`,
+/// or an empty string when no global flags are set. Placed at the very start of a
+/// pattern it applies to the entire combined regex (every alternation branch),
+/// mirroring `re.compile(pattern, flags=g_regex_flags)`.
+fn global_flag_prefix(global_flags: u32) -> String {
+    let letters = crate::grammar::terminal::flag_letters(global_flags);
+    if letters.is_empty() {
+        String::new()
+    } else {
+        format!("(?{letters})")
+    }
 }
 
 /// Python Lark's terminal ordering: `(-priority, -max_width, -len(pattern), id)`.
@@ -228,7 +267,7 @@ impl BasicLexer {
     pub fn new(conf: &LexerConf) -> Result<Self, GrammarError> {
         let refs: Vec<(SymbolId, &TerminalDef)> =
             conf.terminals.iter().map(|(id, t)| (*id, t)).collect();
-        let scanner = Scanner::build(&refs)?;
+        let scanner = Scanner::build(&refs, conf.global_flags)?;
         Ok(BasicLexer {
             scanner,
             names: conf.names(),
@@ -329,7 +368,7 @@ impl ContextualLexer {
             if terms.is_empty() {
                 continue;
             }
-            state_scanners.insert(*state_id, Scanner::build(&terms)?);
+            state_scanners.insert(*state_id, Scanner::build(&terms, conf.global_flags)?);
         }
 
         Ok(ContextualLexer {
