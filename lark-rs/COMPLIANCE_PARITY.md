@@ -328,28 +328,33 @@ self-contained detail block under **"Active backlog — detail"** below.
 
 | Ticket | Theme | Confidence | Status |
 |--------|-------|------------|--------|
-| **P2-1** | Earley cost-of-generality perf gate — Sprint-2's documented exit criterion (within K× of LALR on unambiguous input) never shipped; `benches/parse.rs` still only has a placeholder | High | ⬜ open |
+| **P2-1** | Earley cost-of-generality perf gate — Sprint-2's documented exit criterion (within K× of LALR on unambiguous input) | High | ✅ resolved — Earley bench wired; constant-K premise disproved (super-linear), criterion downgraded to deferred, super-linearity tracked as **P2-4** |
 | **P2-2** | Earley deferred-XFAIL burndown — nested `_ambig` via `_rule`+EBNF helper (on **both** banks), `%ignore`-of-content, `dynamic_complete` resolve tie-break | Mixed | ⬜ open |
-| **P3-1** | `ESCAPED_STRING` lookbehind-adaptation hardening — parity rests on 4 oracle cases; add adversarial cases to lock the edges (from PR #28 review) | High | ⬜ open |
+| **P3-1** | `ESCAPED_STRING` lookbehind-adaptation hardening — parity rests on 4 oracle cases; add adversarial cases to lock the edges (from PR #28 review) | High | ✅ done — 8 adversarial cases added; lark-rs ≡ Python Lark on all, adaptation confirmed correct |
 | **P2-3** | De-recurse the forest→tree walk — drop the 256 MB scoped-thread stack band-aid for an explicit-stack iterative walk | Medium | ⬜ open (profiler/robustness-gated) |
+| **P2-4** | Earley super-linearity on unambiguous input — implement the Joop-Leo transitive optimization (or a completer reverse-index) so the completer stops rescanning the whole origin column | High | ⬜ open (surfaced by P2-1) |
 
 ### Active backlog — detail
 
-#### P2-1 — Earley cost-of-generality perf gate
+#### P2-1 — Earley cost-of-generality perf gate ✅ RESOLVED (by downgrade)
 
-**Done-when:** the shared bench harness (`cargo bench --bench parse`) re-runs the
-unambiguous bench grammars under `parser='earley'`, records the Earley/LALR ratio
-**K** once, and asserts a regression *ceiling* (Earley stays within K× of LALR on
-unambiguous input). The pathological ambiguous workload is *reported, never gated*.
+**Resolution (2026-06-04 sprint):** the Earley side of the bench harness is wired
+(`benches/parse.rs`): `cargo bench --bench parse` re-runs the unambiguous workloads
+under `parser='earley'`, prints the per-row Earley/LALR ratio + a `ratio` summary
+line, and adds a reported-only pathological-ambiguous workload (`S → S S | "b"`,
+n = 4/8/12/16). **The K× assertion was *not* shipped, on purpose:** wiring the
+measurement up disproved the ticket's constant-K premise. The Earley/LALR ratio is
+not a constant — it grows with input size (≈15×→32×→196× as JSON scales
+0.4K→8.7K→92K on the reference box; json_large = ~3.3 s for 92 KB). That is
+structural: the completer (`earley.rs::predict_and_complete`) rescans the whole
+origin column because the Joop-Leo transitive optimization is deliberately omitted,
+so Earley is super-linear on list-shaped unambiguous input. A single-K ceiling is
+therefore unmeetable pre-Leo, so per this ticket's stated alternative the criterion
+is **downgraded from a Sprint-2 exit criterion to deferred** (`PHASE_2_PLAN.md` §4,
+§10). The ratios are reported as a trend so a future Leo win shows up as the numbers
+dropping. The newly-surfaced super-linearity is tracked as **P2-4**.
 
-**Why open:** `PHASE_2_PLAN.md` §4 (Sprint-2 exit) and §10 (cost-of-generality
-budget) made this an explicit Sprint-2 exit criterion, but only the *correctness*
-half (Earley ≡ LALR trees) shipped. `benches/parse.rs:223` still carries the
-pre-engine placeholder ("Earley/SPPF workloads land here once the engine exists"):
-no Earley benchmark, no K× ceiling. Either wire it up, or downgrade the criterion
-in `PHASE_2_PLAN.md` from "exit criterion" to "deferred, tracked as P2-1".
-
-**Files:** `benches/parse.rs`, `BENCH.md`, `PHASE_2_PLAN.md` §10.
+**Files (shipped):** `benches/parse.rs`, `BENCH.md`, `PHASE_2_PLAN.md` §4 + §10.
 
 #### P2-2 — Earley deferred-XFAIL burndown
 
@@ -377,23 +382,24 @@ disambiguation option, out of scope here.
 **Files:** `src/parsers/earley.rs` (forest→tree walk for cluster 1; `scan_dynamic`
 `%ignore` carry-over for cluster 2; `sorted_families` ordering for cluster 3).
 
-#### P3-1 — `ESCAPED_STRING` lookbehind-adaptation hardening
+#### P3-1 — `ESCAPED_STRING` lookbehind-adaptation hardening ✅ DONE
 
-**Done-when:** the bundled `common.lark` escaped-string adaptation is pinned by
-adversarial oracle cases beyond the current four, and any divergence from Python
-Lark they expose is fixed.
+**Resolution (2026-06-04 sprint):** the four `ESCAPED_STRING` oracle cases grew to
+twelve, adding eight adversarial inputs that exercise the backslash-counting and
+newline edges the lookbehind-free rewrite has to get right:
+`"a\\"` (ends in an escaped backslash then the real quote → accept),
+`"a\"` (trailing `\"` escapes the quote → unterminated, reject),
+`"\\"` (body is one escaped backslash → accept),
+`"\"` (`\"` escapes the only quote → reject),
+`"a\\\"b"` (escaped backslash then escaped quote → accept),
+`"a\nb"` (two-char `\n` escape → accept),
+a *raw* newline in the body (reject), and a backslash directly before a raw newline
+(reject). **lark-rs matches Python Lark on all twelve** (`test_common`), so the
+documented lookbehind-free adaptation in `src/grammars/common.lark` is confirmed
+correct — no grammar change was needed.
 
-**Why open:** the `regex` crate cannot compile Lark's lookbehind escaped-string
-helpers (`_STRING_ESC_INNER: _STRING_INNER /(?<!\\)(\\\\)*?/`), so `src/grammars/
-common.lark` ships a documented lookbehind-free rewrite. It is the standard correct
-equivalent for *well-formed* strings, but parity currently rests on only four
-`ESCAPED_STRING` oracle cases. Add adversarial inputs — a string ending in an
-escaped backslash then quote (`"a\\"`), an embedded newline, a backslash directly
-before a newline — and confirm each matches Python Lark's verdict; fix the
-adaptation if not.
-
-**Files:** `tools/generate_oracles.py` (`COMMON_TERMINAL_CASES`),
-`src/grammars/common.lark`, `tests/fixtures/oracles/common/cases.json` (regenerated).
+**Files (shipped):** `tools/generate_oracles.py` (`COMMON_TERMINAL_CASES`),
+`tests/fixtures/oracles/common/cases.json` (regenerated).
 
 #### P2-3 — De-recurse the forest→tree walk
 
@@ -406,6 +412,33 @@ grammars, so today it runs on a dedicated `std::thread` with a 256 MB stack
 (`src/parsers/earley.rs::forest_to_tree`). It works and is correct, but the fixed
 stack size is a band-aid — a long enough input on a deep grammar can still exceed
 it. Profiler/robustness-gated: defer until a real input or a profiler asks for it.
+
+**Files:** `src/parsers/earley.rs`.
+
+#### P2-4 — Earley super-linearity on unambiguous input
+
+**Done-when:** Earley parses list-shaped *unambiguous* input in time that scales
+roughly linearly with LALR (the Earley/LALR ratio printed by `cargo bench --bench
+parse` stops growing with input size — today ≈15×→32×→196× across 0.4K→8.7K→92K
+JSON).
+
+**Why open:** surfaced by P2-1. The completer
+(`earley.rs::predict_and_complete`, the `originators` filter ~line 522) rescans the
+entire origin column for every completed item, which is O(n²) on right-/list-shaped
+grammars because the Joop-Leo transitive optimization was deliberately omitted
+(documented as "dead code in the reference" — true for *that* reference's shape, but
+it is what keeps Earley linear on LR-regular input). Two candidate fixes, smaller
+first:
+1. **Completer reverse-index** — maintain, per column, a `HashMap<SymbolId,
+   Vec<Item>>` of items keyed by the non-terminal they `expect()`, so the completer
+   does a hash lookup of *just* the waiting items instead of filtering the whole
+   column. Contained, no algorithmic theory; cuts the constant and helps many
+   grammars, though not the asymptotic worst case.
+2. **Joop-Leo transitive items** — the full optimization that makes Earley linear on
+   LR-regular grammars. Larger, the principled fix.
+
+Profiler-justified now (the bench shows it), but a real subproject — not a leaf
+fix — so tracked separately rather than folded into P2-1.
 
 **Files:** `src/parsers/earley.rs`.
 

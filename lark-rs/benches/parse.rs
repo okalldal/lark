@@ -68,8 +68,24 @@ fn lalr_options() -> LarkOptions {
     }
 }
 
+/// Earley with the basic lexer — the engine path the unambiguous cost-of-generality
+/// ratio (P2-1) is measured on. `ambiguity` stays at its `Resolve` default so the
+/// trees are identical to LALR's and the comparison is apples-to-apples.
+fn earley_options() -> LarkOptions {
+    LarkOptions {
+        start: vec!["start".to_string()],
+        parser: ParserAlgorithm::Earley,
+        lexer: LexerType::Basic,
+        ..LarkOptions::default()
+    }
+}
+
 fn build(grammar: &str) -> Lark {
     Lark::new(grammar, lalr_options()).expect("benchmark grammar must build")
+}
+
+fn build_earley(grammar: &str) -> Lark {
+    Lark::new(grammar, earley_options()).expect("benchmark grammar must build (earley)")
 }
 
 /// A JSON array of `records` flat objects, each with `fields` key/value pairs —
@@ -149,7 +165,9 @@ fn measure<F: FnMut()>(mut f: F) -> Stat {
     }
 }
 
-fn run_parse(name: &str, parser: &Lark, input: &str) {
+/// Time one parse workload, emit the `BENCH<TAB>…` trend line + the human row, and
+/// return the median ns/iter (so callers can compute the Earley/LALR ratio).
+fn run_parse(kind: &str, name: &str, parser: &Lark, input: &str) -> f64 {
     let bytes = input.len();
     let stat = measure(|| {
         black_box(
@@ -161,13 +179,14 @@ fn run_parse(name: &str, parser: &Lark, input: &str) {
     // bytes/ns * 1e9 = bytes/s, /1e6 = MB/s  ==>  bytes/ns * 1e3 = MB/s
     let mb_per_s = bytes as f64 / stat.median_ns * 1e3;
     println!(
-        "BENCH\tparse\t{name}\t{bytes}\t{:.0}\t{:.0}\t{mb_per_s:.1}",
+        "BENCH\t{kind}\t{name}\t{bytes}\t{:.0}\t{:.0}\t{mb_per_s:.1}",
         stat.median_ns, stat.min_ns
     );
     println!(
-        "  parse  {name:<16} {bytes:>8} B   {:>10.0} ns/iter (min {:>10.0})   {mb_per_s:>7.1} MB/s",
+        "  {kind:<6} {name:<16} {bytes:>8} B   {:>10.0} ns/iter (min {:>10.0})   {mb_per_s:>7.1} MB/s",
         stat.median_ns, stat.min_ns
     );
+    stat.median_ns
 }
 
 fn run_build(name: &str, grammar: &str) {
@@ -201,27 +220,83 @@ fn main() {
     run_build("arithmetic", ARITH_GRAMMAR);
     println!();
 
-    // --- Parsing throughput --------------------------------------------------
-    println!("Parsing (build once, parse many):");
+    // --- Parsing throughput (LALR) -------------------------------------------
+    // Build the unambiguous workloads once; keep each input + its LALR median so
+    // the Earley section below can compute the cost-of-generality ratio per row.
+    println!("Parsing — LALR (build once, parse many):");
     let json = build(JSON_GRAMMAR);
+    let arith = build(ARITH_GRAMMAR);
+    let mut workloads: Vec<(&str, String)> = Vec::new();
     for (name, records, fields) in [
         ("json_small", 4, 3),
         ("json_medium", 64, 4),
         ("json_large", 512, 5),
     ] {
-        let input = gen_json(records, fields);
-        run_parse(name, &json, &input);
+        workloads.push((name, gen_json(records, fields)));
     }
-
-    let arith = build(ARITH_GRAMMAR);
     for (name, terms) in [("arith_small", 8), ("arith_large", 512)] {
-        let input = gen_arith(terms);
-        run_parse(name, &arith, &input);
+        workloads.push((name, gen_arith(terms)));
     }
 
+    let mut lalr_median: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
+    for (name, input) in &workloads {
+        let parser = if name.starts_with("json") {
+            &json
+        } else {
+            &arith
+        };
+        lalr_median.insert(name, run_parse("parse", name, parser, input));
+    }
+
+    // --- Cost of generality: Earley vs LALR on the SAME unambiguous input -----
+    // Earley solves a strictly harder problem (O(n^3) worst case), so it is
+    // expected to be slower than LALR. We re-run every workload above under
+    // parser='earley' and print the per-row Earley/LALR ratio.
+    //
+    // REPORTED, NOT GATED. P2-1 originally proposed asserting a single constant K×
+    // ceiling here ("Earley within K× of LALR on unambiguous input"). Wiring up
+    // this measurement showed that premise does not hold: the ratio *grows* with
+    // input size (≈15×→35×→193× as JSON scales 0.4K→8.7K→92K). That is structural,
+    // not a regression — the completer rescans the whole origin column
+    // (`earley.rs::predict_and_complete`) because the Joop-Leo transitive
+    // optimization is deliberately omitted, so Earley is super-linear on
+    // list-shaped unambiguous input. A constant-K ceiling is therefore not
+    // achievable until Leo lands. The criterion was downgraded to deferred
+    // (PHASE_2_PLAN.md §10); the Earley super-linearity is tracked as its own
+    // ticket. We still print the ratios so the trend (and any future Leo win) is
+    // visible in the recorded numbers.
     println!();
-    println!("# Earley/SPPF workloads (Phase 2) land here once the engine exists:");
-    println!("#   - the unambiguous grammars above re-run under parser='earley'");
-    println!("#     (cost-of-generality vs LALR, must stay within K x),");
-    println!("#   - plus a pathological ambiguous grammar to expose O(n^3) growth.");
+    println!("Parsing — Earley (basic lexer), cost-of-generality vs LALR (reported, NOT gated):");
+    let json_e = build_earley(JSON_GRAMMAR);
+    let arith_e = build_earley(ARITH_GRAMMAR);
+    let mut worst_ratio = 0.0f64;
+    let mut worst_name = "";
+    for (name, input) in &workloads {
+        let parser = if name.starts_with("json") {
+            &json_e
+        } else {
+            &arith_e
+        };
+        let earley_ns = run_parse("parse_earley", name, parser, input);
+        let ratio = earley_ns / lalr_median[name];
+        println!("  ratio  {name:<16} earley/lalr = {ratio:>6.1}x");
+        if ratio > worst_ratio {
+            worst_ratio = ratio;
+            worst_name = name;
+        }
+    }
+    println!("BENCH\tratio\tearley_over_lalr_max\t0\t{worst_ratio:.2}\t0\t0   ({worst_name})");
+
+    // --- Pathological ambiguous workload (REPORTED, never gated) --------------
+    // S -> S S | "b" has a Catalan number of parses for n b's; the SPPF stays
+    // cubic but the work grows fast. This is the cost-of-generality story, not a
+    // regression — reading a cubic-Earley-on-ambiguous-input number as "slow" is
+    // a category error (BENCH.md §3). Reported so the O(n^3) growth is visible.
+    println!();
+    println!("Parsing — Earley pathological ambiguity (reported, NOT gated):");
+    let ambig = build_earley("start: a\na: a a | \"b\"\n");
+    for n in [4usize, 8, 12, 16] {
+        let input = "b".repeat(n);
+        run_parse("parse_earley_ambig", &format!("ambig_{n}"), &ambig, &input);
+    }
 }

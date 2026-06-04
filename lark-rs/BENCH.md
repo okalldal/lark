@@ -35,9 +35,22 @@ comparison); `median_ns` drives the MB/s. Speedup on a row is
 3. **Rust-Earley vs Rust-LALR** — the *cost of generality*, not "slowness."
    Earley is O(n³) worst case and solves a strictly harder problem; reading a
    cubic-Earley-on-pathological-input number as a regression against LALR is a
-   category error. Sprint 2's exit criterion ("Earley produces trees identical to
-   LALR on unambiguous grammars") is the place to also assert "...and within K× the
-   speed" — pick K off these numbers.
+   category error. `cargo bench --bench parse` now wires this up: it re-runs the
+   unambiguous workloads under `parser='earley'`, prints the per-row Earley/LALR
+   ratio (`parse_earley` rows + a `ratio` line), and adds a reported-only
+   pathological-ambiguous workload (`parse_earley_ambig`).
+
+   **Reported, not gated — and the ratio is *not* a constant.** Sprint 2 originally
+   meant to assert "...and within K× of LALR" here. Wiring the measurement up
+   disproved that premise: the Earley/LALR ratio **grows with input size**
+   (≈15×→32×→196× as JSON scales 0.4K→8.7K→92K on the reference box). That is
+   structural, not a regression — the Earley completer rescans the whole origin
+   column (`earley.rs::predict_and_complete`) because the Joop-Leo transitive
+   optimization is deliberately omitted, making Earley super-linear on list-shaped
+   unambiguous input. So a single-K ceiling is not meaningful pre-Leo; the criterion
+   was downgraded to deferred (`PHASE_2_PLAN.md` §10) and the super-linearity is
+   tracked as **P2-4** (Leo / completer-index). The ratios are printed so a future
+   Leo win shows up as the numbers dropping.
 
 ## Baseline snapshot
 

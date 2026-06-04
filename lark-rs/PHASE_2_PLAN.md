@@ -186,8 +186,9 @@ The bulk: `lark/parsers/earley_forest.py` (~802 lines).
   Reuse `tree_matches_oracle` verbatim.
 
 Exit: `parser='earley'` produces byte-identical trees to LALR on every
-unambiguous oracle in the repo — **and** parses them within the agreed
-cost-of-generality budget (§10) on the shared perf harness.
+unambiguous oracle in the repo. (The cost-of-generality half of this exit — "…and
+within K× of LALR" — was **downgraded to deferred**; see §10: a constant-K ceiling
+is not achievable until the Joop-Leo optimization lands, tracked as P2-4.)
 
 ---
 
@@ -328,16 +329,25 @@ above are gated:
    2) is a second consumer* of that representation, so both engines co-design it in
    one pass rather than hardening it against LALR alone.
 
-**Cost-of-generality budget (the Sprint 2 exit add-on).** Earley is O(n³) worst
-case and solves a strictly harder problem, so "slower than LALR" is expected, not a
-regression — but unbounded slowness on *unambiguous* input is. Sprint 2 therefore
-also asserts: on the shared unambiguous workloads, Earley parses within an agreed
-**K×** of LALR, K read off the harness when Sprint 2 lands (a regression *ceiling*,
-not a moving target). The pathological-ambiguous workload is reported, never gated.
+**Cost-of-generality budget — DEFERRED (was a Sprint 2 exit add-on).** Earley is
+O(n³) worst case and solves a strictly harder problem, so "slower than LALR" is
+expected, not a regression — but unbounded slowness on *unambiguous* input is. The
+add-on originally proposed *asserting* that Earley parses within an agreed **K×** of
+LALR on the shared unambiguous workloads (a regression ceiling, K read off the
+harness).
 
-> **Status (2026-06-04 review): NOT shipped.** Sprint 2 landed the correctness
-> half (Earley ≡ LALR trees) but not this perf gate — `benches/parse.rs` still has
-> only the pre-engine placeholder. Tracked as **P2-1** in
-> [`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md) ("Active backlog"): either wire up
-> the Earley benchmark + K× ceiling, or formally downgrade this from an exit
-> criterion to a deferred item.
+> **Status (2026-06-04, P2-1 resolved by downgrade).** The Earley side of the
+> shared bench harness is now wired (`benches/parse.rs`): it re-runs the
+> unambiguous workloads under `parser='earley'`, prints the per-row Earley/LALR
+> ratio, and adds a reported-only pathological-ambiguous workload. Wiring it up
+> **disproved the constant-K premise**: the ratio *grows* with input size
+> (≈15×→32×→196× as JSON scales 0.4K→8.7K→92K on the reference box). That is
+> structural — the completer rescans the whole origin column
+> (`earley.rs::predict_and_complete`) because the Joop-Leo transitive optimization
+> is deliberately omitted, so Earley is super-linear on list-shaped unambiguous
+> input. A single-K ceiling is therefore not achievable until Leo lands, so per the
+> P2-1 ticket's stated alternative this criterion is **downgraded from an exit
+> criterion to deferred**. The ratios are reported as a trend (so a future Leo win
+> shows up as the numbers dropping). The super-linearity itself is tracked as
+> **P2-4** (Earley Leo / completer-index optimization) in
+> [`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md).
