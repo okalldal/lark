@@ -1217,6 +1217,102 @@
       "ok": false,
       "tree": null,
       "error": "No terminal matches '\"' in the current parser context, at line 1 col 1\n\n\"x\n^\nExpected one of: \n\t* ESCAPED_STRING\n"
+    },
+    {
+      "input": "\"a\\\\\"",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "ESCAPED_STRING",
+            "value": "\"a\\\\\""
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "\"a\\\"",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches '\"' in the current parser context, at line 1 col 1\n\n\"a\\\"\n^\nExpected one of: \n\t* ESCAPED_STRING\n"
+    },
+    {
+      "input": "\"\\\\\"",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "ESCAPED_STRING",
+            "value": "\"\\\\\""
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "\"\\\"",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches '\"' in the current parser context, at line 1 col 1\n\n\"\\\"\n^\nExpected one of: \n\t* ESCAPED_STRING\n"
+    },
+    {
+      "input": "\"a\\\\\\\"b\"",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "ESCAPED_STRING",
+            "value": "\"a\\\\\\\"b\""
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "\"a\\nb\"",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "ESCAPED_STRING",
+            "value": "\"a\\nb\""
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "\"a\nb\"",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches '\"' in the current parser context, at line 1 col 1\n\n\"a\n^\nExpected one of: \n\t* ESCAPED_STRING\n"
+    },
+    {
+      "input": "\"a\\\n\"",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches '\"' in the current parser context, at line 1 col 1\n\n\"a\\\n^\nExpected one of: \n\t* ESCAPED_STRING\n"
     }
   ]
 }

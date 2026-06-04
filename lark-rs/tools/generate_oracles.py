@@ -674,7 +674,21 @@ COMMON_TERMINAL_CASES = [
     ("CPP_COMMENT",   [("// hi", True), ("//", True), ("# hi", False)]),
     ("C_COMMENT",     [("/* hi */", True), ("/* a\nb */", True), ("/* x", False)]),
     ("SQL_COMMENT",   [("-- hi", True), ("--", True), ("# hi", False)]),
-    ("ESCAPED_STRING", [('"hi"', True), ('""', True), (r'"a\"b"', True), ('"x', False)]),
+    # The bundled common.lark replaces Lark's lookbehind escaped-string helpers
+    # (`(?<!\\)(\\\\)*?`) with a lookbehind-free equivalent (P3-1). These
+    # adversarial cases lock the backslash-counting / newline edges against the
+    # oracle so the adaptation can't silently diverge.
+    ("ESCAPED_STRING", [
+        ('"hi"', True), ('""', True), (r'"a\"b"', True), ('"x', False),
+        (r'"a\\"', True),       # ends in an escaped backslash, then the real quote
+        (r'"a\"', False),       # trailing \" escapes the quote → no closing quote
+        (r'"\\"', True),        # body is a single escaped backslash
+        (r'"\"', False),        # \" escapes the only quote → unterminated
+        (r'"a\\\"b"', True),    # escaped backslash then escaped quote, then more
+        (r'"a\nb"', True),      # \n is a two-char escape (backslash + 'n'), well-formed
+        ('"a\nb"', False),      # a *raw* newline in the body is not allowed
+        ('"a\\\n"', False),     # backslash directly before a raw newline
+    ]),
 ]
 
 
