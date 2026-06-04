@@ -275,7 +275,7 @@ impl EarleyParser {
     }
 
     /// Recognize `tokens` from `start`: does the grammar derive this token
-    /// sequence? Reuses the full chart build (and discards the forest), so it
+    /// sequence? Re-uses the full chart build (and discards the forest), so it
     /// accepts exactly what [`parse`](Self::parse) parses.
     ///
     /// A trailing `$END` token (the basic lexer appends one) is ignored.
