@@ -24,9 +24,10 @@
 //! Every matched terminal is identified by its interned [`SymbolId`]; the parser
 //! dispatches on that id directly. The token's name is carried only for display.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use regex::Regex;
+use regex::{CaptureLocations, Regex};
 
 use crate::error::{GrammarError, ParseError};
 use crate::grammar::intern::SymbolId;
@@ -85,12 +86,24 @@ pub trait Lexer {
 /// breaks ties. The `unless` map carries Lark's keyword retyping (see module
 /// docs). Capture-group names are derived from the symbol id (`g{n}`), so no
 /// terminal-name sanitization is needed.
+///
+/// Two allocation-avoidance measures (profiling spike, 2026-06-04 — both shared
+/// by the future Earley engine, which scans through this same `Scanner`):
+///
+///   * each terminal's capture-group *index* is resolved once at build time, so
+///     `match_at` reads the winning group by number instead of hashing a group
+///     *name* per token (the SipHash cost the profiler flagged);
+///   * a single [`CaptureLocations`] scratch buffer is reused across matches
+///     (`captures_read_at`) rather than allocating a fresh `Captures` per token.
 struct Scanner {
     re: Regex,
-    /// (terminal id, capture-group name), in alternation order.
-    groups: Vec<(SymbolId, String)>,
+    /// (terminal id, capture-group index), in alternation order.
+    groups: Vec<(SymbolId, usize)>,
     /// regex-terminal-id → (matched-text → keyword-terminal-id).
     unless: HashMap<SymbolId, HashMap<String, SymbolId>>,
+    /// Reused match-location scratch, sized for `re`. `RefCell` because the hot
+    /// `match_at` runs behind `&self` (the contextual lexer's per-token path).
+    locs: RefCell<CaptureLocations>,
 }
 
 impl Scanner {
@@ -126,38 +139,61 @@ impl Scanner {
         sort_terminals(&mut scan);
 
         let mut parts = Vec::with_capacity(scan.len());
-        let mut groups = Vec::with_capacity(scan.len());
+        let mut group_names = Vec::with_capacity(scan.len());
         for (id, term) in scan {
             let group = format!("g{}", id.0);
             // `to_inline_regex` keeps per-terminal flags (e.g. `(?i:…)` for a
             // case-insensitive terminal) scoped to this group; `as_regex_str`
             // would drop them, so `"a"i` would not match `A`.
             parts.push(format!("(?P<{}>{})", group, term.pattern.to_inline_regex()));
-            groups.push((id, group));
+            group_names.push((id, group));
         }
         let pattern = format!("{}{}", global_flag_prefix(global_flags), parts.join("|"));
         let re = Regex::new(&pattern).map_err(|e| GrammarError::InvalidRegex {
             pattern: pattern.clone(),
             reason: e.to_string(),
         })?;
-        Ok(Scanner { re, groups, unless })
+
+        // Resolve each terminal's named group to its capture *index* once. A
+        // terminal pattern may itself contain capturing groups, so the index is
+        // not the alternation position — read it from `capture_names` (which
+        // enumerates every group in index order, unnamed ones as `None`).
+        let groups = {
+            let name_to_idx: HashMap<&str, usize> = re
+                .capture_names()
+                .enumerate()
+                .filter_map(|(i, n)| n.map(|n| (n, i)))
+                .collect();
+            group_names
+                .iter()
+                .map(|(id, name)| (*id, name_to_idx[name.as_str()]))
+                .collect()
+        };
+
+        let locs = RefCell::new(re.capture_locations());
+        Ok(Scanner {
+            re,
+            groups,
+            unless,
+            locs,
+        })
     }
 
     /// Match a single token starting exactly at `pos`. Returns `(terminal id,
     /// value)`, with keyword retyping already applied. `None` means nothing
     /// matched here.
     fn match_at<'t>(&self, text: &'t str, pos: usize) -> Option<(SymbolId, &'t str)> {
-        let caps = self.re.captures_at(text, pos)?;
-        let m0 = caps.get(0)?;
-        // captures_at finds the leftmost match at *or after* pos; only accept a
-        // token beginning exactly at pos, and reject empty matches so a nullable
+        let mut locs = self.locs.borrow_mut();
+        let m0 = self.re.captures_read_at(&mut locs, text, pos)?;
+        // captures_read_at finds the leftmost match at *or after* pos; only accept
+        // a token beginning exactly at pos, and reject empty matches so a nullable
         // terminal can never stall the scan.
         if m0.start() != pos || m0.end() == pos {
             return None;
         }
         let value = m0.as_str();
-        for (id, group) in &self.groups {
-            if caps.name(group).is_some() {
+        for (id, idx) in &self.groups {
+            if locs.get(*idx).is_some() {
                 let ty = self
                     .unless
                     .get(id)

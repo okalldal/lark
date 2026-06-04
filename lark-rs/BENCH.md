@@ -91,15 +91,26 @@ input size). In the instruction profile, ~40% of all instructions are in
 
 **Two concrete, localized root causes in the lexer** (`src/lexer.rs::match_at`),
 both **shared by the future Earley engine** (it lexes through the same
-`TokenSource`/`Scanner`):
+`TokenSource`/`Scanner`) — **both now FIXED (perf sprint, 2026-06-04):**
 
-1. **Capture group resolved by *name* per token.** `match_at` loops over groups
+1. ✅ **Capture group resolved by *name* per token.** `match_at` looped over groups
    calling `caps.name(group)` (string-keyed → SipHash) on every token — the ~2.5M
-   `hash_one` calls. Fix: resolve each terminal's capture-group *index* once at
-   `Scanner` build, then read by number.
-2. **A fresh `Captures` allocated per match.** `captures_at` makes the regex
-   backtracker `malloc` ~10.7K times per parse. Fix: reuse a `CaptureLocations`
-   scratch buffer across matches (`captures_read_at`).
+   `hash_one` calls. Fixed: each terminal's capture-group *index* is resolved once
+   at `Scanner::build` (from `re.capture_names()`, robust to inner groups in a
+   terminal's own pattern) and read by number in `match_at`.
+2. ✅ **A fresh `Captures` allocated per match.** `captures_at` made the regex
+   backtracker `malloc` per token. Fixed: a single `CaptureLocations` scratch
+   buffer (held in the `Scanner` behind a `RefCell`, since the hot contextual path
+   runs through `&self`) is reused across matches via `captures_read_at`.
+
+**Measured result (same box, `examples/profile_parse`).** Allocations per
+`json_large` parse fell **300,957 → 271,892 blocks** (DHAT), and the per-token
+SipHash group-name lookups are gone entirely. End-to-end this is a **~17–20%
+wall-clock speedup** on the contextual LALR path across every parse workload
+(e.g. `json_large` 27.8 → 22.9 ms, ~3.3 → 4.0 MB/s; `arith_large` 1.21 → 0.97 ms),
+lifting the speedup-vs-Python column accordingly. No public type changed; the full
+oracle suite + compliance bank stayed green. The remaining lexer cost is now the
+`regex` engine itself, not our capture handling.
 
 **The other ~32% is the shared tree representation** — `Tree::data: String`,
 `Token` owned strings, per-node child `Vec`s. This is the "load-bearing
@@ -109,10 +120,11 @@ does — but it is the change best made once Earley is a second consumer of that
 representation.
 
 **Sequencing implication.** The single cheapest, highest-leverage, lowest-risk win
-is the lexer pair (1)+(2): it attacks the larger (~55%) half, is purely local to
-`Scanner`, touches no public type, and benefits both engines — so it is safe to do
-*before* Earley. The tree-representation half is best deferred until Earley exists
-to co-design it.
+was the lexer pair (1)+(2): it attacks the larger (~55%) half, is purely local to
+`Scanner`, touches no public type, and benefits both engines — so it was safe to do
+*before* Earley. ✅ **Landed (perf sprint, 2026-06-04)** — see the measured result
+above. The tree-representation half is still deferred until Earley exists to
+co-design it (see `PHASE_2_PLAN.md` §10).
 
 ## Adding a workload
 
