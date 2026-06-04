@@ -52,6 +52,7 @@ dependencies = [
  "indexmap",
  "pretty_assertions",
  "regex",
+ "regex-automata",
  "serde_json",
  "smallvec",
  "thiserror",

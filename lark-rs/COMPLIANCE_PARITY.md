@@ -4,10 +4,10 @@
 bank says it generalizes beyond JSON/arithmetic. Phase 2 (Earley/SPPF) stays
 frozen until this roadmap is burned down — see the exit criterion at the bottom.
 
-> **Exit criterion reached (2026-06-03):** the bank is at **99.6%** (≥ 90%), with
-> the single remaining XFAIL cluster triaged, root-caused, and deferred below.
-> Phase 2 (Earley/SPPF) is eligible to start; this roadmap continues in parallel
-> to keep climbing the LALR path. See the exit criterion at the bottom.
+> **Roadmap burned down (2026-06-04):** the bank is at **100% (512/512)** and
+> `xfail.json` is empty. The last cluster — M7b, strict-mode regex collision
+> (57/58) — is now implemented (`src/collision.rs`), not deferred. Phase 2
+> (Earley/SPPF) is unblocked with the LALR path fully at parity.
 
 > **Sprint update (2026-06-03, "compliance parity"):** the supposed "hard tail"
 > was misdiagnosed. Investigating it revealed that **three of the four remaining
@@ -34,14 +34,13 @@ no oracle to tell us which one is wrong.
 ## Current state (2026-06-03, after M1–M8 + the fidelity sprint)
 
 - Bank: **257 grammars, 512 input-cases + construct-error checks**.
-- Agreement: **99.6% (510/512)**; **2 XFAIL entries**, **0 skipped**.
+- Agreement: **100% (512/512)**; **0 XFAIL entries**, **0 skipped**.
   (Was 75.6% / 125 XFAIL at the start of the original sprint, 98.4% / 8 before the
-  fidelity sprint — see "Done" below.)
-- Remaining XFAIL shape: `construct:57`, `construct:58` — the **same** grammar
+  fidelity sprint, 99.6% / 2 before M7b — see "Done" below.)
+- The final pair `construct:57` / `construct:58` — the **same** grammar
   (`A: /e?rez/` vs `B: /erez?/`) under `strict=True`, captured once per lexer
-  (contextual + basic). It is a strict-mode regex-collision construct error,
-  **deferred** (needs an `interegular`-equivalent overlap engine; see M7b). No
-  EBNF/template/placeholder/filtering/typing work remains.
+  (contextual + basic) — is now **passing**: M7b's FSM-intersection collision
+  check (`src/collision.rs`) rejects it at construction, matching Lark's `LexError`.
 
 ### The bank now records two previously-dropped options
 
@@ -254,16 +253,16 @@ see the "Done" section above.
 lark-rs must *reject at build time* grammars Python Lark rejects:
 - ✅ ids 90/91 — `"A"~3..2` invalid repetition range (`min > max`). **Done.**
 - ✅ ids 65/66 — `%import bad_test.NUMBER` from a non-existent module. **Done.**
-- ids 57/58 — `/e?rez/` vs `/erez?/`, **only under `strict=True`** (confirmed
+- ✅ ids 57/58 — `/e?rez/` vs `/erez?/`, **only under `strict=True`** (confirmed
   against Lark 1.3.1: builds fine in default mode, raises `LexError` in strict).
-  Lark delegates the check to the **`interegular`** library: it groups regex
-  terminals by priority, compiles each to an FSM, and reports a collision when two
-  same-priority regexes have a non-empty intersection (with a concrete example
-  string). **Deferred — too large for this sprint** (M7b). Reproducing it needs an
-  FSM-intersection-emptiness engine, and the doc's own warning stands: a hand-rolled
-  approximation risks over-rejecting valid overlapping terminals. Now that `strict`
-  is recorded, these two entries are honestly labelled as a strict-mode collision
-  gap rather than a phantom default-mode error.
+  **Done (M7b).** Lark delegates the check to the **`interegular`** library: it
+  groups regex terminals by priority, compiles each to an FSM, and reports a
+  collision when two same-priority regexes have a non-empty intersection (with a
+  concrete example string). lark-rs reproduces this in `src/collision.rs`: each
+  regex → an anchored dense DFA (`regex-automata`), then a BFS over the product
+  automaton finds a string both DFAs fully match (end-of-input match in both). Run
+  from `build_frontend` when `strict`, grouped by priority, regex terminals only.
+  Pinned by `tests/test_regex_collision.rs`. See M7b below.
 - ids 73/74 — `start: a "."` / `a: "."+`, **only under `strict=True`**. ✅ **Done**
   via the fidelity sprint: it is a genuine S/R conflict that lark-rs (like Lark)
   resolves as a shift by default, and now raises in strict mode. There was no
@@ -325,32 +324,42 @@ Pinned by `tests/test_ebnf_sharing.rs`.
 | M8 | EBNF repetition / branch-choice / nullable (156/157, 160/161, 77/78, 227/228, 108/109) | — | Mixed | ✅ done |
 | ~~M6b~~ | ~~terminal-algebra typing (14/15)~~ → **`g_regex_flags`** | 4 | — | ✅ done (fidelity sprint; mis-triaged) |
 | ~~M8b~~ | ~~conflict-detection parity (73/74)~~ → **strict S/R** | 2 | — | ✅ done (fidelity sprint; strict-only) |
-| **M7b** | strict regex-collision construct errors (57/58) | 2 | Hard | ⬜ deferred — needs an `interegular`-equivalent FSM-intersection engine |
+| **M7b** | strict regex-collision construct errors (57/58) | 2 | Hard | ✅ done — FSM-intersection engine (`src/collision.rs`) |
 
-The work took the bank from 75.6% to **99.6%** — 123 entries from thirteen
-root-cause fixes. The remaining **2** (57/58) are a single strict-mode
-regex-collision grammar, deferred with cause (an FSM-intersection-emptiness engine
-is out of scope for one sprint and risks over-rejection). All EBNF / template /
-placeholder / filtering / typing / priority / `g_regex_flags` / strict-conflict
-work is done. **Recommended next:** Phase 2 (Earley/SPPF) — the exit criterion is
-far exceeded and the shared `CompiledGrammar` / `TreeBuilder` (`filter_pos`)
-contract is settled; M7b can proceed in parallel whenever the FSM engine is built.
+The work took the bank from 75.6% to **100%** — 125 entries from fourteen
+root-cause fixes. All EBNF / template / placeholder / filtering / typing / priority /
+`g_regex_flags` / strict-conflict / strict-collision work is done; `xfail.json` is
+empty. **Recommended next:** Phase 2 (Earley/SPPF) — the LALR-path roadmap is fully
+burned down and the shared `CompiledGrammar` / `TreeBuilder` (`filter_pos`) contract
+is settled.
 
-### M7b — strict regex-collision detection (deferred, with a plan)
+### M7b — strict regex-collision detection — ✅ done
 
-**Done-when:** under `strict=True`, lark-rs raises a `LexError`-equivalent when two
-same-priority regex terminals can match a common string, matching Python Lark.
+**Done-when (met):** under `strict=True`, lark-rs raises a `GrammarError::Collision`
+when two same-priority regex terminals can match a common string, matching Python
+Lark's `LexError`.
 
-**Why deferred:** Python Lark delegates to `interegular`
-(`lexer.py::_check_regex_collisions`): group terminals by priority, build an FSM per
-regex, and report any pair whose intersection is non-empty (plus an example). lark-rs
-has no FSM layer — the lexer compiles straight to the `regex` crate, which offers no
-intersection/emptiness test. Building a faithful, non-over-rejecting collision
-checker (regex → NFA/DFA → product-construction emptiness, over the exact terminal
-feature set Lark allows) is a self-contained subproject, not a leaf fix. The
-`strict`-mode plumbing it would hang off of is already in place (this sprint), so the
-remaining work is purely the overlap engine. Candidate building block:
-`regex-automata`'s DFA support for the product construction.
+Python Lark delegates to `interegular` (`lexer.py::_check_regex_collisions`): group
+regex terminals by priority, build an FSM per regex, and report any pair whose
+intersection is non-empty (plus an example). lark-rs has no general FSM layer — the
+lexer compiles straight to the `regex` crate, which offers no intersection/emptiness
+test — so M7b adds a self-contained overlap engine in `src/collision.rs` built on the
+candidate building block the roadmap named: `regex-automata`'s dense DFAs.
+
+- `regex_intersection_example(a, b)` builds an **anchored** dense DFA per regex
+  (`StartKind::Anchored`, so each DFA's language is the set of strings matched in
+  their entirety, not leftmost-search), then BFS over the **product** automaton
+  `(StateID_a, StateID_b)`. A product state where the end-of-input transition lands
+  in a match state in **both** DFAs witnesses a common fully-matched string; the BFS
+  path is the shortest example. The alphabet is the union of both DFAs' byte-class
+  representatives (sound + complete, cheap); visited states are capped so a
+  pathological pair can't hang the build (exhaustion → under-report, never
+  over-reject — the doc's discipline).
+- `check_regex_collisions(terminals)` filters to `Pattern::Re`, groups by priority,
+  and compares same-priority pairs — exactly `_check_regex_collisions`'s grouping.
+  Called from `build_frontend` when `options.strict`; a single all-terminals pass is
+  faithful to both lexers (Python's contextual lexer also builds a `root_lexer` over
+  all terminals, `lexer.py:683`). Pinned by `tests/test_regex_collision.rs`.
 
 ## Exit criterion — when Earley unfreezes
 

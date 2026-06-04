@@ -228,18 +228,17 @@ oracle. Three correctness bugs need fixing before Phase 2 starts (see Known Bugs
 | Token positions (line/col) | ✅ | Char-based columns; end_line/end_column newline-aware |
 | Oracle test harness | ✅ | arithmetic, JSON, python_numbers, lalr_core |
 | JSONTestSuite corpus | ✅ | 293/293 oracle agreement |
-| Compliance bank | ✅ | 257 grammars strip-mined from Python Lark's suite; 510/512 ≈ 99.6% agree (XFAIL-gated) |
-| `strict` mode | ✅ | `strict=True` raises on shift/reduce conflicts (reduce/reduce already fatal), like Lark |
+| Compliance bank | ✅ | 257 grammars strip-mined from Python Lark's suite; 512/512 = 100% agree (xfail.json empty) |
+| `strict` mode | ✅ | `strict=True` raises on shift/reduce conflicts (reduce/reduce already fatal) **and same-priority regex-terminal collisions** (FSM-intersection, `src/collision.rs`), like Lark |
 | `g_regex_flags` | ✅ | Global regex flags (e.g. `IGNORECASE`) applied to every terminal via a combined-regex prefix |
 | Oracle-coverage enforcement | ✅ | Meta-test + CI freshness gate |
 
 ### ⬜ Phase 2 — Earley + SPPF
 
-**Phase 2 is now eligible to start:** the compliance bank reached the 90% exit
-criterion (currently 510/512 ≈ 99.6%, with the single remaining XFAIL cluster
-triaged and deferred with cause; see [`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md)
-for the exit criterion and remaining milestones). The roadmap continues in parallel
-to keep climbing the LALR path. All Phase-1 correctness bugs (BUG-1 through BUG-7) are now
+**Phase 2 is now eligible to start:** the compliance bank is at **100% (512/512)** —
+the LALR-path parity roadmap is fully burned down (`xfail.json` is empty); see
+[`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md) for the milestone history and the exit
+criterion. All Phase-1 correctness bugs (BUG-1 through BUG-7) are now
 fixed: true LALR(1) lookaheads, fail-loud conflicts, the keyword lexer (BUG-3),
 transparent `_rule` inlining (BUG-4), char-based positions (BUG-5), the Earley
 fail-loud guard (BUG-6), and recursive templates (BUG-7). The core now fails loudly
@@ -443,20 +442,18 @@ lexer/terminal-filtering sprint plus two construct-error checks flipped 72, then
 nested-`maybe_placeholders` + oversized-priority flipped 6 more, the M6
 per-position-filtering refactor flipped 3, M4 template tree-shape flipped 14, and
 M8 EBNF-helper sharing + nullable collapse flipped 22, lifting the bank to 98.4%,
-then the extractor-fidelity sprint flipped 6 more to 99.6%).
+then the extractor-fidelity sprint flipped 6 more to 99.6%, and the M7b
+regex-collision engine flipped the last 2 to **100%**).
 
-**The single remaining XFAIL cluster (57/58) is triaged in
-[`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md)** — all on the LALR path (the bank
-is 100% LALR grammars, so Earley is orthogonal, not a way to climb parity). M1–M8
-are done. The fidelity sprint found that 6 of the last 8 XFAILs were **extractor
-bugs, not engine gaps**: the bank dropped `strict` and `g_regex_flags`, so it
-froze strict-only construct errors and case-insensitive trees against grammars
-recorded as default/case-sensitive. Recording both options + implementing them
-(strict S/R raise; global regex flags) flipped 14/15 and 73/74. The only item left
-is 57/58 (strict regex-collision), **deferred** because it needs an
-`interegular`-equivalent FSM-intersection engine (the `strict` plumbing it hangs
-off is already done). That doc also defines the exit criterion that unfreezes
-Phase 2.
+**The bank is now at 100% (512/512); `xfail.json` is empty.** The full milestone
+history is in [`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md). The last cluster (57/58)
+was the strict-mode regex collision `A: /e?rez/` vs `B: /erez?/`: under `strict=True`
+Python Lark rejects two same-priority regex terminals that share a fully-matched
+string (via `interegular`). lark-rs reproduces it with an FSM-intersection-emptiness
+check (`src/collision.rs`): each regex → an anchored dense DFA (`regex-automata`),
+BFS over the product automaton for a state where both reach an end-of-input match.
+Found in `build_frontend` when `strict`, grouped by priority, regex terminals only —
+mirroring `lexer.py::_check_regex_collisions`.
 
 ### Strategy: consolidate the load-bearing abstractions *before* Phase 2
 

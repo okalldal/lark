@@ -28,6 +28,8 @@ pub enum GrammarError {
     ImportNotFound { path: String },
     #[error("Grammar has unresolvable LALR conflicts:\n{report}")]
     Conflict { report: String },
+    #[error("{report}")]
+    Collision { report: String },
     #[error("{msg}")]
     Other { msg: String },
 }

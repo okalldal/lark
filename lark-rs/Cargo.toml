@@ -8,6 +8,7 @@ repository = "https://github.com/lark-parser/lark"
 
 [dependencies]
 regex = "1.10"
+regex-automata = "0.4"
 indexmap = "2"
 thiserror = "1"
 smallvec = "1"

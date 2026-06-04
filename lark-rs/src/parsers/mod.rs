@@ -58,6 +58,11 @@ pub fn build_frontend(
             // Lower the surface grammar to the interned IR once, then build the
             // parse table and lexer from it.
             let cg = crate::grammar::lower(grammar);
+            // strict=True rejects same-priority regex-terminal collisions at
+            // construction (Python Lark's interegular check). Default mode skips it.
+            if options.strict {
+                crate::collision::check_regex_collisions(&cg.terminals)?;
+            }
             let table = build_lalr_table(&cg, options.strict)?;
             let parser = LalrParser::new(table);
 
