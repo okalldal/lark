@@ -314,27 +314,16 @@ Pinned by `tests/test_ebnf_sharing.rs`.
 
 ## Follow-up tickets / index
 
-> **Tracking moved to GitHub Issues** — each open ticket below is now a GitHub
-> issue (linked in the tables). The detail blocks here remain the canonical
-> root-cause / done-when reference; the issue is the work-item to close.
+Open work items are tracked as GitHub Issues, grouped by milestone.
+See **https://github.com/okalldal/lark/milestones** for current status.
 
-### Active backlog (next up)
+The sections below are the canonical **done-when / root-cause specs** for each
+open ticket. They live here because they are richer than an issue body and are
+versioned with the code. Close the linked GitHub issue when a PR ships the fix.
 
-These are the open follow-ups from the Phase-2 review (2026-06-04) plus the Phase-3
-Sprint-1 (`common.lark`) review, ordered by priority. None blocks the roadmap;
-they are the loose ends to land before they get more expensive to fix. Each has a
-self-contained detail block under **"Active backlog — detail"** below.
+### Active backlog specs
 
-| Ticket | Theme | Confidence | Status |
-|--------|-------|------------|--------|
-| **[P2-1](https://github.com/okalldal/lark/issues/31)** | Earley cost-of-generality perf gate — Sprint-2's documented exit criterion (within K× of LALR on unambiguous input) never shipped; `benches/parse.rs` still only has a placeholder | High | ⬜ open |
-| **[P2-2](https://github.com/okalldal/lark/issues/32)** | Earley deferred-XFAIL burndown — nested `_ambig` via `_rule`+EBNF helper (on **both** banks), `%ignore`-of-content, `dynamic_complete` resolve tie-break | Mixed | ⬜ open |
-| **[P3-1](https://github.com/okalldal/lark/issues/34)** | `ESCAPED_STRING` lookbehind-adaptation hardening — parity rests on 4 oracle cases; add adversarial cases to lock the edges (from PR #28 review) | High | ⬜ open |
-| **[P2-3](https://github.com/okalldal/lark/issues/33)** | De-recurse the forest→tree walk — drop the 256 MB scoped-thread stack band-aid for an explicit-stack iterative walk | Medium | ⬜ open (profiler/robustness-gated) |
-
-### Active backlog — detail
-
-#### P2-1 — Earley cost-of-generality perf gate
+#### [P2-1](https://github.com/okalldal/lark/issues/31) — Earley cost-of-generality perf gate
 
 **Done-when:** the shared bench harness (`cargo bench --bench parse`) re-runs the
 unambiguous bench grammars under `parser='earley'`, records the Earley/LALR ratio
@@ -350,7 +339,7 @@ in `PHASE_2_PLAN.md` from "exit criterion" to "deferred, tracked as P2-1".
 
 **Files:** `benches/parse.rs`, `BENCH.md`, `PHASE_2_PLAN.md` §10.
 
-#### P2-2 — Earley deferred-XFAIL burndown
+#### [P2-2](https://github.com/okalldal/lark/issues/32) — Earley deferred-XFAIL burndown
 
 **Done-when:** the Earley XFAIL allow-lists shrink as each cluster is root-caused
 and fixed (regenerate with `LARK_COMPLIANCE_WRITE_XFAIL=1 cargo test --test
@@ -376,7 +365,7 @@ disambiguation option, out of scope here.
 **Files:** `src/parsers/earley.rs` (forest→tree walk for cluster 1; `scan_dynamic`
 `%ignore` carry-over for cluster 2; `sorted_families` ordering for cluster 3).
 
-#### P3-1 — `ESCAPED_STRING` lookbehind-adaptation hardening
+#### [P3-1](https://github.com/okalldal/lark/issues/34) — `ESCAPED_STRING` lookbehind-adaptation hardening
 
 **Done-when:** the bundled `common.lark` escaped-string adaptation is pinned by
 adversarial oracle cases beyond the current four, and any divergence from Python
@@ -394,7 +383,7 @@ adaptation if not.
 **Files:** `tools/generate_oracles.py` (`COMMON_TERMINAL_CASES`),
 `src/grammars/common.lark`, `tests/fixtures/oracles/common/cases.json` (regenerated).
 
-#### P2-3 — De-recurse the forest→tree walk
+#### [P2-3](https://github.com/okalldal/lark/issues/33) — De-recurse the forest→tree walk
 
 **Done-when:** `EarleyParser::forest_to_tree` no longer needs a hand-rolled
 oversized thread stack; the SPPF→tree walk uses an explicit work stack (or bounded
