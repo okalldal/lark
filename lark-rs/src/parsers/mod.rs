@@ -52,6 +52,12 @@ enum FrontendKind {
         parser: LalrParser,
         lexer: ContextualLexer,
     },
+    Earley {
+        parser: EarleyParser,
+        lexer: BasicLexer,
+        /// `ambiguity='resolve'` (pick one tree) vs `'explicit'` (`_ambig` forests).
+        resolve: bool,
+    },
 }
 
 impl ParsingFrontend {
@@ -63,6 +69,14 @@ impl ParsingFrontend {
             }
             FrontendKind::LalrContextual { parser, lexer } => {
                 parser.parse_contextual(text, lexer, start)
+            }
+            FrontendKind::Earley {
+                parser,
+                lexer,
+                resolve,
+            } => {
+                let tokens = lexer.lex(text)?;
+                parser.parse(&tokens, start, *resolve)
             }
         }
     }
@@ -101,17 +115,30 @@ pub fn build_frontend(
             Ok(ParsingFrontend { kind })
         }
         ParserAlgorithm::Earley => {
-            // Phase 2 Sprint 1 landed the Earley *recognizer*
-            // ([`EarleyParser`](earley::EarleyParser)), but the tree-producing
-            // frontend is Sprint 2 (SPPF + forest→tree). Until a forest exists,
-            // fail loudly rather than silently substituting LALR — LALR rejects
-            // grammars Earley accepts, so a silent fallback would give wrong
-            // results on ambiguous grammars. Keeping this guard also keeps the
-            // tree-comparing Earley oracle tests gated until trees are real (see
-            // the `earley.rs` module docs and `common::earley_unimplemented`).
-            Err(LarkError::Grammar(crate::error::GrammarError::Other {
-                msg: "Earley parser not yet implemented".to_string(),
-            }))
+            // Phase 2 Sprint 2: SPPF + forest→tree. Earley always uses the basic
+            // lexer — the contextual lexer narrows terminals by LALR parser state,
+            // which Earley has none of, so `Auto`/`Contextual` resolve to basic.
+            let cg = crate::grammar::lower(grammar);
+            let lexer_conf = basic_lexer_conf(&cg, options.g_regex_flags);
+            let lexer = BasicLexer::new(&lexer_conf)?;
+            let parser = EarleyParser::new(cg);
+            let resolve = match options.ambiguity {
+                crate::Ambiguity::Resolve => true,
+                crate::Ambiguity::Explicit => false,
+                // Returning the raw SPPF (`ambiguity='forest'`) is not supported;
+                // fail loudly rather than silently substituting another mode.
+                crate::Ambiguity::Forest => {
+                    return Err(LarkError::Grammar(crate::error::GrammarError::Other {
+                        msg: "Earley ambiguity='forest' (raw SPPF) is not supported".to_string(),
+                    }))
+                }
+            };
+            let kind = FrontendKind::Earley {
+                parser,
+                lexer,
+                resolve,
+            };
+            Ok(ParsingFrontend { kind })
         }
         ParserAlgorithm::Cyk => Err(LarkError::Grammar(crate::error::GrammarError::Other {
             msg: "CYK parser not yet implemented".to_string(),

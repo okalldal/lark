@@ -86,6 +86,19 @@ pub fn earley_accepts(parser: &EarleyParser, lexer: &BasicLexer, input: &str) ->
     }
 }
 
+/// Build an Earley + basic-lexer parser (ambiguity='resolve') from a grammar file
+/// under tests/grammars/. Used to verify Earley produces the *same* tree as LALR
+/// on unambiguous grammars (Phase 2, Sprint 2 exit criterion).
+pub fn make_earley_from_file(name: &str) -> Lark {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/grammars")
+        .join(format!("{name}.lark"));
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("Cannot read {}: {e}", path.display()));
+    make_earley(&text, Ambiguity::Resolve)
+        .unwrap_or_else(|e| panic!("Earley grammar failed to load: {e}"))
+}
+
 /// Build a LALR + contextual-lexer parser using a grammar file under tests/grammars/.
 pub fn make_lalr_from_file(name: &str) -> Lark {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
