@@ -26,11 +26,12 @@ pub struct Lark {
 
 impl Lark {
     pub fn new(grammar_text: &str, options: LarkOptions) -> Result<Self, LarkError> {
-        let grammar = load_grammar(
+        let grammar = grammar::load_grammar_with_base(
             grammar_text,
             &options.start,
             options.maybe_placeholders,
             options.keep_all_tokens,
+            options.base_path.clone(),
         )?;
         let frontend = parsers::build_frontend(&grammar, &options)?;
         Ok(Lark { grammar, frontend })
@@ -68,6 +69,12 @@ pub struct LarkOptions {
     /// `g_regex_flags`. Zero (the default) leaves every terminal's own flags
     /// untouched.
     pub g_regex_flags: u32,
+    /// Directory that relative `%import .module (...)` (and other non-`common`
+    /// file imports) resolve against. Mirrors the base path Python Lark derives
+    /// from the importing grammar's file. `None` (the default) means file imports
+    /// cannot be resolved — only the bundled `common` library is available, as
+    /// when a grammar is built from an in-memory string with no source location.
+    pub base_path: Option<std::path::PathBuf>,
 }
 
 impl Default for LarkOptions {
@@ -85,6 +92,7 @@ impl Default for LarkOptions {
             maybe_placeholders: false,
             strict: false,
             g_regex_flags: 0,
+            base_path: None,
         }
     }
 }

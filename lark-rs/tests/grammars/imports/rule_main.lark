@@ -1,0 +1,4 @@
+// Relative file import of a rule (and its terminal dependency closure).
+%import .lib (greeting)
+start: greeting "!"
+%ignore " "

@@ -188,7 +188,7 @@ just `id < n_terminals`. Token filtering is **per rule position**, not per termi
 each `CompiledRule` carries a `filter_pos: Vec<bool>` parallel to its expansion
 (lowered from each `Symbol::Terminal` occurrence's own `filter_out`), so a terminal
 that is unified for lexing can still be kept at one rule position and dropped at
-another — Lark's model (see M6 in `COMPLIANCE_PARITY.md`).
+another — Lark's model (per-position token filtering, see `docs/archive/COMPLIANCE_PARITY.md` §M6).
 
 ### LALR Construction Pipeline (`lalr.rs`)
 
@@ -223,10 +223,7 @@ After each REDUCE, `apply_rule_options()` post-processes children:
 
 ## Implementation Status
 
-### 🔧 Phase 1 — LALR + Contextual Lexer (Core working, bugs to fix)
-
-The parser handles JSON, arithmetic, and Python number literals correctly against the
-oracle. Three correctness bugs need fixing before Phase 2 starts (see Known Bugs).
+### ✅ Phase 1 — LALR + Contextual Lexer
 
 | Component | Status | Notes |
 |-----------|--------|-------|
@@ -258,39 +255,15 @@ oracle. Three correctness bugs need fixing before Phase 2 starts (see Known Bugs
 | `g_regex_flags` | ✅ | Global regex flags (e.g. `IGNORECASE`) applied to every terminal via a combined-regex prefix |
 | Oracle-coverage enforcement | ✅ | Meta-test + CI freshness gate |
 
-### ⬜ Phase 2 — Earley + SPPF
+### ✅ Phase 2 — Earley + SPPF
 
-**Phase 2 is now eligible to start:** the compliance bank reached the 90% exit
-criterion (currently 510/512 ≈ 99.6%, with the single remaining XFAIL cluster
-triaged and deferred with cause; see [`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md)
-for the exit criterion and remaining milestones). The roadmap continues in parallel
-to keep climbing the LALR path. All Phase-1 correctness bugs (BUG-1 through BUG-7) are now
-fixed: true LALR(1) lookaheads, fail-loud conflicts, the keyword lexer (BUG-3),
-transparent `_rule` inlining (BUG-4), char-based positions (BUG-5), the Earley
-fail-loud guard (BUG-6), and recursive templates (BUG-7). The core now fails loudly
-instead of silently mis-resolving.
-
-Earley is the second USP. It handles grammars LALR cannot (ambiguous, non-deterministic).
-Requesting `ParserAlgorithm::Earley` now returns an explicit error (was a silent
-LALR fallback).
-
-Sprint plan + scope in [`PHASE_2_PLAN.md`](PHASE_2_PLAN.md). **Sprints 0–5 are
-done — Phase 2 is engine-complete.** Sprint 1 landed `EarleyParser::recognize`;
-Sprint 2 landed the **SPPF + forest→tree** walk and wired the Earley frontend into
-`build_frontend`, flipping the oracle gate. Because the curated `test_earley_oracle`
-is all-or-nothing (no XFAIL), Sprint 2 also brought up `ambiguity='resolve'` (the
-planned Sprint 3) and `ambiguity='explicit'` `_ambig` forests (the planned Sprint 4)
-far enough for the whole curated set to pass; the broader bank is the XFAIL-gated
-burndown net (now 211/211 — clean, after the `AmbiguousExpander` port lifted the
-last explicit-ambiguity-through-`_rule`+EBNF-helper case). **Sprint 5 landed the dynamic lexer +
-`dynamic_complete`** (`build_chart_dynamic`/`scan_dynamic` in `earley.rs`,
-`DynamicMatcher` in `lexer.rs`): scanning is folded into the Earley loop, with its
-own XFAIL-gated bank (`earley_dynamic_bank.json`, 446/454 ≈ 98.2%, after the
-`AmbiguousExpander` port). The remaining XFAILs are `%ignore`-of-content edge cases
-and `dynamic_complete` resolve tie-break ordering (the nested-`_ambig`-through-
-`_rule`+EBNF-helper cluster is now fixed on both banks);
-`priority="invert"` is filtered as an orthogonal, unimplemented disambiguation
-option.
+All six sprints complete. LALR compliance 510/512 ≈ 99.6%; Earley basic bank
+211/211 (clean); dynamic-lexer bank 446/454 ≈ 98.2%. Open items tracked as GitHub
+issues: #32 (XFAIL burndown — cluster 1, "nested `_ambig` through a transparent
+`_rule`/EBNF helper", fixed by porting Lark's `AmbiguousExpander`; the
+`%ignore`-of-content and `dynamic_complete` tie-break clusters remain), #31 (perf
+benchmark), #33 (de-recurse forest walk), #35 (strict regex-collision, deferred —
+needs FSM engine).
 
 | Component | Status | Notes |
 |-----------|--------|-------|
@@ -307,7 +280,7 @@ option.
 | Component | Status | Notes |
 |-----------|--------|-------|
 | Complete `common.lark` stubs | ✅ | The full upstream `common.lark` is bundled (`src/grammars/common.lark`) and parsed through lark-rs's own terminal-algebra loader, not a hand-transcribed regex table — so common terminals can't drift. Added `CR`/`LF`/`SQL_COMMENT` + the `_EXP`/`_STRING_*` helpers; one documented lookbehind adaptation for `ESCAPED_STRING`. Pinned by `test_common.rs` |
-| `%import` from file path | ⬜ | Relative imports |
+| `%import` from file path | ✅ | Relative imports (`%import .module (X, ...)`) resolve against the importing grammar's directory (`LarkOptions.base_path`), load through `load_grammar`, and copy the requested terminal/rule — a rule pulls in its dependency closure, mangled under the module name (Python's `_get_mangle`). Pinned by `test_imports.rs` (oracles in `fixtures/oracles/imports/`, grammars under `tests/grammars/imports/`) |
 | Grammar standard library | ⬜ | SQL, Python, … |
 | Indenter / postlex | ⬜ | Python-style INDENT/DEDENT |
 | Standalone parser gen | ⬜ | Emit self-contained Rust or Python |
@@ -323,119 +296,6 @@ option.
 | C API | ⬜ | `lark_h` crate |
 | `include_lark!` proc-macro | ⬜ | Compile-time grammar validation |
 | Benchmarks vs Python Lark | ⬜ | JSON / Python / SQL |
-
----
-
-## Known Bugs — Must Fix Before Phase 2
-
-These are Phase-1 correctness issues discovered during code review (2026-06-02).
-They pass current tests only because the test grammars (JSON, arithmetic) don't
-exercise the failure modes. Each needs an oracle test that fails, then a fix.
-
-### BUG-1 ✅ FIXED — Parser is now true LALR(1)
-
-**File:** `src/parsers/lalr.rs`
-
-`LookaheadComputer` was rewritten as a canonical LALR(1) lookahead computation
-(spontaneous-generation + propagation with a real LR(1) closure that handles
-ε-rules) and wired into `build_lalr_table`, replacing the SLR FOLLOW-set lookup.
-The previous dead code also baked FOLLOW sets into propagation, so it would not
-have been true LALR even if called.
-
-**Oracle:** `lalr_core/dangling_else` — a grammar that is LALR(1) but not SLR(1)
-builds cleanly and parses identically to Python Lark.
-
-### BUG-2 ✅ FIXED — Conflict detection + rule-priority resolution
-
-**File:** `src/parsers/lalr.rs`, `src/error.rs`
-
-Conflicts are collected during table construction and resolved exactly as Python
-Lark does: S/R → shift (no error); R/R → highest `RuleOptions.priority`, and a tie
-raises the new `GrammarError::Conflict`. R/R is no longer silent last-writer-wins.
-
-**Oracle (outcome parity):** `lalr_core/conflicts` — for each grammar, lark-rs
-errors iff Python Lark raises `GrammarError` at construction.
-
-### BUG-3 ✅ FIXED — Keyword/identifier disambiguation via Lark's `unless`
-
-**File:** `src/lexer.rs`
-
-The earlier diagnosis ("Python guarantees longest-match; match each terminal and
-pick the longest span") was inaccurate. Python Lark's lexer is **not** true
-longest-match: it sorts terminals `(-priority, -max_width, -len(value), name)` and
-takes the first alternation match (leftmost-first, identical to the `regex`
-crate's semantics), **plus** an `unless` callback — a string terminal whose value
-is fully matched by a same-priority regex terminal (e.g. the keyword `if` inside
-`CNAME`) is dropped from the alternation and the regex match is retyped back to the
-keyword when the matched text equals it. That is what makes `if` lex as `IF` while
-`iffy` stays `NAME`, with no cross-terminal length scan.
-
-The fix unifies `BasicLexer`/`ContextualLexer` onto one `Scanner` that implements
-`unless` (computed per state for the contextual lexer, exactly as Python builds one
-`TraditionalLexer` per parser state), and drops the obsolete `MAX_GROUPS = 98`
-chunking (Rust's `regex` crate has no named-group limit).
-
-**Oracle:** `keywords/cases` — `keywords.lark` (un-quarantined) parses `iffy`,
-`elsewhere`, `whiled` as `NAME` and `if`/`while` as keywords, matching Python Lark.
-
-### BUG-4 ✅ FIXED — Transparent `_rule` trees now inlined
-
-**File:** `src/parsers/lalr.rs`
-
-`is_anonymous_rule` now flattens any node whose name starts with `_` — covering
-both `__anon_*` EBNF helpers and `_name` transparent rules — so a `_name` rule's
-children splice into the parent instead of leaking as a `Tree("_name", …)`.
-Aliased rules are exempt: the node carries the alias name (which has no leading
-underscore), so an alias overrides transparency, matching Python Lark.
-
-**Oracle:** `csv/cases` — `csv.lark` (un-quarantined); `_anything` inlines its token
-into `row`. `_anything`'s alternatives overlap on bare letter runs
-(`WORD`/`NON_SEPARATOR_STRING`), so `csv.lark` gives `NON_SEPARATOR_STRING` an
-explicit `.2` priority so the choice is deterministic (see the tie-break rule under
-Testing Philosophy).
-
-### BUG-5 ✅ FIXED — Token positions are char-based and newline-aware
-
-**File:** `src/lexer.rs` (ContextualLexer::next_token)
-
-`next_token` now walks `value.chars()` to compute `end_line`/`end_column`, so columns
-count characters (not bytes — correct for non-ASCII) and a token spanning a newline
-advances the line and resets the column, mirroring `LexerState::advance_by`.
-
-**Oracle:** `tests/test_positions.rs` — expectations taken from Python Lark (a
-multi-line `BLOCK` ending at line 2 col 4; `café` ending at col 5), since the tree
-oracles do not capture positions.
-
-### BUG-6 ✅ FIXED — Earley errors instead of silently falling back
-
-**File:** `src/parsers/mod.rs`, `src/lib.rs`
-
-`ParserAlgorithm::Earley` now returns an explicit "not yet implemented" error
-(matching CYK), and `LarkOptions::default()` uses `Lalr`. Guarded by
-`test_lalr_core::test_earley_errors_instead_of_silent_fallback`.
-
-### BUG-7 ✅ FIXED — Recursive templates memoized; `~N` expanded iteratively
-
-**File:** `src/grammar/loader.rs`
-
-A self-recursive template (`_sep{x,d}: x | _sep{x,d} d x`) used to recurse
-infinitely during instantiation and abort the process. Two root causes, both now
-fixed to match Python Lark (which builds and parses this grammar):
-
-1. **Substitution skipped nested template-usage args** — `subst_expr` cloned a
-   `TemplateUsage` verbatim, so the inner `_sep{item, delim}` never became
-   `_sep{NUMBER, ","}`. Added `subst_value`, which recurses into a usage's args.
-2. **No instantiation memo** — even a correct self-reference recursed forever.
-   `instantiate_template` now memoizes by a canonical `name<args>` key and registers
-   the instance *before* compiling its body, so the self-reference resolves to the
-   rule already being built (a normal recursive rule).
-
-Beyond un-skipping the recursive-template grammar, fix (1) corrected nested template
-substitution generally — 8 compliance-bank XFAIL entries flipped to passing.
-
-The other historical aborter, `"A"~8191`, is already safe: the exact-repetition
-case (`n == m`) inlines the copies into one heap-allocated rule and LR(0) construction
-is iterative, so it no longer blows the stack. `skip.json` is now empty.
 
 ---
 
@@ -478,122 +338,21 @@ wild rely on these. Document as a known parity gap when adding Phase-3 grammar l
 
 ---
 
-## Recommended Work Order (Next Sessions)
+## Open Work
 
-All Phase-1 correctness bugs (BUG-1 through BUG-7) are **done**. The compliance bank
-is the regression net: fixing a bug flips XFAIL entries to passing — regenerate
-`xfail.json` and watch parity rise (BUG-3 flipped 3, BUG-7 flipped 8; the
-lexer/terminal-filtering sprint plus two construct-error checks flipped 72, then
-nested-`maybe_placeholders` + oversized-priority flipped 6 more, the M6
-per-position-filtering refactor flipped 3, M4 template tree-shape flipped 14, and
-M8 EBNF-helper sharing + nullable collapse flipped 22, lifting the bank to 98.4%,
-then the extractor-fidelity sprint flipped 6 more to 99.6%).
+All open tasks are tracked as GitHub issues. Current priority order for Phase 3:
+#39 (`%import` file paths) → #45 (`%declare`) → #41 (Indenter/postlex) → #32
+(Earley XFAIL burndown) → #31 (Earley perf benchmark) → #40 (grammar stdlib) →
+#43 (error recovery) → #42 (standalone parser) → #44 (CYK).
 
-**The single remaining XFAIL cluster (57/58) is triaged in
-[`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md)** — all on the LALR path (the bank
-is 100% LALR grammars, so Earley is orthogonal, not a way to climb parity). M1–M8
-are done. The fidelity sprint found that 6 of the last 8 XFAILs were **extractor
-bugs, not engine gaps**: the bank dropped `strict` and `g_regex_flags`, so it
-froze strict-only construct errors and case-insensitive trees against grammars
-recorded as default/case-sensitive. Recording both options + implementing them
-(strict S/R raise; global regex flags) flipped 14/15 and 73/74. The only item left
-is 57/58 (strict regex-collision), **deferred** because it needs an
-`interegular`-equivalent FSM-intersection engine (the `strict` plumbing it hangs
-off is already done). That doc also defines the exit criterion that unfreezes
-Phase 2.
+Deferred until specialist work is available: #35 (strict regex-collision, needs FSM
+engine), #33 (de-recurse forest walk, profiler-gated).
 
-### Strategy: consolidate the load-bearing abstractions *before* Phase 2
+Phase 4 distribution (#46–#50) follows after Phase 3 is substantially complete.
 
-A 2026-06-03 architecture review settled the sequencing question (feature-complete
-then refactor **vs.** consolidate now). The answer is neither extreme: in a parsing
-toolkit the architecture *is* the product — Earley, CYK, the dynamic lexer, error
-recovery, the indenter and the bindings are *combinations* over the same core
-(lexer × parser × tree-builder × grammar-IR), not independent features. So we
-consolidate the few abstractions every later phase stands on **now** (they get more
-expensive to change each week), and defer the local optimizations until a profiler
-or a feature demands them. This is targeted, not a freeze: each step lands green
-against the oracle suite + compliance bank, and we keep refactoring continuously
-rather than saving a big-bang rewrite for the end.
+---
 
-**North star: the compliance-bank percentage, not the feature checklist.** A feature
-is not "done" until the bank says it generalizes beyond JSON/arithmetic.
-
-**Load-bearing — do before Earley (in order):**
-
-1. ✅ **Terminal algebra** (`loader.rs`) — *Sprint 1, merged (#9).* Terminals can
-   reference other terminals (`C: "C" | D`) with scoped-flag inlining and
-   dead-terminal pruning; parity ~68% → 75.6%.
-2. ✅ **`TokenSource` trait** — *Sprint 2, merged (#10).* `parse`/`parse_contextual`
-   collapsed onto one `LalrParser::run<S: TokenSource>` driver; `PreLexed` +
-   `Contextual` sources. The input interface a future Earley driver consumes too.
-3. ✅ **Shared tree-builder** (`parsers/tree_builder.rs`) — *Sprint 3.* The
-   tree-shaping semantics (filter, transparent splice, `expand1`, placeholders,
-   alias) now live in one `TreeBuilder::assemble`, called by the LALR reducer and
-   (soon) the Earley forest-walk — so the SPPF cannot grow a second, subtly
-   different shaper. This is also the single chokepoint where the node
-   representation can later change. **Deliberately deferred** (now a localized
-   change behind that chokepoint, profiler-gated): interning the *public* tree's
-   labels. A `Tree` is the user-facing output and must stay self-contained
-   (`tree.data == "if_then"`); replacing its owned `String` label with an id would
-   force every consumer to carry the symbol table for a perf win no profiler has
-   asked for yet. When it is justified, switch `Tree::data` to `Box<str>`/arena in
-   one place.
-4. 🔧 **Differential fuzzer** — *Phase 1 landed.* Turn the static oracle into an
-   active one: generate random inputs (then random grammars) and diff lark-rs
-   against Python Lark automatically. The split mirrors the compliance bank: a
-   committed corpus of *real finds*, grown by an out-of-band discovery process —
-   never a frozen dump of random samples.
-   - **Discovery (out-of-band, never on the PR path):**
-     `tools/fuzz_differential.py` generates grammar-directed + mutated inputs for
-     the trusted grammars and validates them against Python Lark. It does **not**
-     commit what it generates. To hunt for divergences it dumps a throwaway batch
-     (`--out`), `generate_oracles.py` freezes the oracle from it
-     (`LARK_FUZZ_INPUTS=…`), and `cargo test --test test_fuzz_corpus` replays
-     lark-rs against it. The nightly `lark-rs-fuzz.yml` runs exactly this with
-     fresh entropy (seed logged for replay) and uploads the batch as an artifact
-     on a RED. Deterministic given `--seed`; includes a ddmin minimizer.
-   - **Regression (every PR):** `fuzz/inputs.json` is a *small, curated set of
-     minimized finds* (grammar + input + note), the source of truth.
-     `generate_oracles.py::generate_fuzz_corpus()` freezes Python Lark's verdict
-     into `fuzz/corpus.json` (under the freshness gate); `test_fuzz_corpus.rs`
-     replays + diffs via `tree_matches_oracle`. RED = a regression on a known
-     find. Keeping a find: `--minimize` then `--record --input … --note …`.
-   - **The one find so far (now FIXED):** a start-rule `expand1`-to-bare-token
-     parity gap — for input `1`, Python Lark returns a bare `Token`, but lark-rs's
-     `Tree`-typed `parse()` wrapped it as `Tree(tok.type_, [tok])` at ACCEPT
-     (`lalr.rs`). Closed by the flagged API change: `parse()` now returns a
-     `ParseTree` (`Tree`-or-`Token`) and ACCEPT yields the bare token directly. As
-     predicted, the self-deleting carve-out in `test_fuzz_corpus.rs`
-     (`known_bare_token_root_gap`) is gone and the find is now a plain green
-     `tree_matches_oracle` case — the find that is *fixed* instead of carved.
-   - **Still TODO:** an online Rust-side differ (so the minimizer can shrink while
-     *preserving divergence*, not just parse-success) and random *grammar*
-     fuzzing.
-
-**Then** build **Phase 2 — Earley + SPPF** on `CompiledGrammar`, sharing the
-`TokenSource` and the `TreeBuilder`, keying forest nodes by `SymbolId`.
-
-**Local — defer deliberately (profiler-gated, nothing is blocked on them):**
-FIRST/FOLLOW bitsets; the DeRemer–Pennello relational lookahead method (the current
-`lr1_closure` snapshots its map each fixpoint iteration — correct but quadratic on
-large grammars); zero-copy token spans; interned/`Box<str>` tree labels; the
-residual name-based lookups (`augmented_start`, `initial_state` still `format!` +
-hash a name the IR was meant to retire).
-
-### Core IR consolidation (done 2026-06-03)
-
-The engine's spine was migrated off the stringly-typed surface grammar onto an
-interned IR (`intern.rs`): `Copy` `SymbolId`s, typed flags instead of name-prefix
-semantics, and dense array-indexed ACTION/GOTO tables (see the Interning + LALR
-pipelines above). This was the behavior-preserving foundation step — the full
-oracle suite, JSON corpus, and compliance bank stayed green throughout. **Build
-Phase 2 (Earley/SPPF) on `CompiledGrammar`**, keying forest nodes by `SymbolId`,
-not names. Deferred until a profiler justifies them: FIRST/FOLLOW bitsets, the
-DeRemer–Pennello relational lookahead method (the current `lr1_closure` snapshots
-its map each fixpoint iteration — correct but quadratic on large grammars), and
-zero-copy token spans.
-
-### The compliance bank — your regression net
+## Compliance Bank — Regression Net
 
 `tools/extract_lark_compliance.py` instruments Python Lark and runs its LALR test
 classes, capturing every `(grammar, options, input, tree|error)` into

@@ -1,0 +1,4 @@
+// Relative file import of terminals from a sibling grammar.
+%import .tokens (NUMBER, NAME)
+start: NAME "=" NUMBER
+%ignore " "
