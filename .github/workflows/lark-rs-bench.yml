@@ -1,0 +1,52 @@
+name: lark-rs perf trend (nightly, recorded — not a gate)
+
+# Recorded performance trend for the LALR engine — the baseline Earley (Phase 2)
+# is measured against. This NEVER fails the build: wall-clock on shared CI runners
+# is too noisy to gate on, and a flaky red perf gate gets muted within a week.
+# It runs the benches, prints the numbers to the log, and uploads them as an
+# artifact so the trend is visible over time. Regressions are read off the trend,
+# not enforced here. See lark-rs/benches/parse.rs and lark-rs/BENCH.md.
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # daily, 06:00 UTC (after the fuzz nightly)
+  workflow_dispatch:
+
+defaults:
+  run:
+    working-directory: lark-rs
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Rust benches (LALR baseline)
+        run: |
+          mkdir -p "$RUNNER_TEMP/bench"
+          echo "## $(date -u +%FT%TZ)  $(uname -srm)" | tee "$RUNNER_TEMP/bench/results.txt"
+          cargo bench --bench parse | tee -a "$RUNNER_TEMP/bench/results.txt"
+
+      - name: Python Lark comparison (the speedup ratio)
+        # Best-effort: the ratio is informational, so a Python hiccup must not fail
+        # the job (it is non-gating anyway).
+        continue-on-error: true
+        run: |
+          python3 tools/bench_compare.py | tee -a "$RUNNER_TEMP/bench/results.txt"
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: lark-rs-bench-${{ github.run_id }}
+          path: ${{ runner.temp }}/bench/results.txt
