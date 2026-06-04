@@ -314,10 +314,9 @@ Pinned by `tests/test_ebnf_sharing.rs`.
 
 ## Follow-up tickets / index
 
-> **GitHub issues are disabled on this repository, so this section is the
-> tracker.** Each open ticket below has a stable ID and a self-contained
-> milestone section above (root cause, compliance-bank ids, proposed fix, files,
-> done-when). If issues get enabled later, lift each ticket into one verbatim.
+> **Tracking moved to GitHub Issues** — each open ticket below is now a GitHub
+> issue (linked in the tables). The detail blocks here remain the canonical
+> root-cause / done-when reference; the issue is the work-item to close.
 
 ### Active backlog (next up)
 
@@ -328,10 +327,10 @@ self-contained detail block under **"Active backlog — detail"** below.
 
 | Ticket | Theme | Confidence | Status |
 |--------|-------|------------|--------|
-| **P2-1** | Earley cost-of-generality perf gate — Sprint-2's documented exit criterion (within K× of LALR on unambiguous input) never shipped; `benches/parse.rs` still only has a placeholder | High | ⬜ open |
-| **P2-2** | Earley deferred-XFAIL burndown — nested `_ambig` via `_rule`+EBNF helper (on **both** banks), `%ignore`-of-content, `dynamic_complete` resolve tie-break | Mixed | ⬜ open |
-| **P3-1** | `ESCAPED_STRING` lookbehind-adaptation hardening — parity rests on 4 oracle cases; add adversarial cases to lock the edges (from PR #28 review) | High | ⬜ open |
-| **P2-3** | De-recurse the forest→tree walk — drop the 256 MB scoped-thread stack band-aid for an explicit-stack iterative walk | Medium | ⬜ open (profiler/robustness-gated) |
+| **[P2-1](https://github.com/okalldal/lark/issues/31)** | Earley cost-of-generality perf gate — Sprint-2's documented exit criterion (within K× of LALR on unambiguous input) never shipped; `benches/parse.rs` still only has a placeholder | High | ⬜ open |
+| **[P2-2](https://github.com/okalldal/lark/issues/32)** | Earley deferred-XFAIL burndown — nested `_ambig` via `_rule`+EBNF helper (on **both** banks), `%ignore`-of-content, `dynamic_complete` resolve tie-break | Mixed | ⬜ open |
+| **[P3-1](https://github.com/okalldal/lark/issues/34)** | `ESCAPED_STRING` lookbehind-adaptation hardening — parity rests on 4 oracle cases; add adversarial cases to lock the edges (from PR #28 review) | High | ⬜ open |
+| **[P2-3](https://github.com/okalldal/lark/issues/33)** | De-recurse the forest→tree walk — drop the 256 MB scoped-thread stack band-aid for an explicit-stack iterative walk | Medium | ⬜ open (profiler/robustness-gated) |
 
 ### Active backlog — detail
 
@@ -425,7 +424,7 @@ it. Profiler/robustness-gated: defer until a real input or a profiler asks for i
 | M8 | EBNF repetition / branch-choice / nullable (156/157, 160/161, 77/78, 227/228, 108/109) | — | Mixed | ✅ done |
 | ~~M6b~~ | ~~terminal-algebra typing (14/15)~~ → **`g_regex_flags`** | 4 | — | ✅ done (fidelity sprint; mis-triaged) |
 | ~~M8b~~ | ~~conflict-detection parity (73/74)~~ → **strict S/R** | 2 | — | ✅ done (fidelity sprint; strict-only) |
-| **M7b** | strict regex-collision construct errors (57/58) | 2 | Hard | ⬜ deferred — needs an `interegular`-equivalent FSM-intersection engine |
+| **[M7b](https://github.com/okalldal/lark/issues/35)** | strict regex-collision construct errors (57/58) | 2 | Hard | ⬜ deferred — needs an `interegular`-equivalent FSM-intersection engine |
 
 The work took the bank from 75.6% to **99.6%** — 123 entries from thirteen
 root-cause fixes. The remaining **2** (57/58) are a single strict-mode
