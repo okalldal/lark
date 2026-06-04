@@ -30,4 +30,3 @@ repos:
     - id: requirements-txt-fixer
     - id: trailing-whitespace
       exclude: '(^tests/.*\.lark|\.svg)$'
-
