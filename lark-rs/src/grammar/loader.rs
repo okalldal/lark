@@ -14,21 +14,54 @@
 use super::{rule::*, symbol::*, terminal::*, Grammar};
 use crate::error::GrammarError;
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 /// Convert grammar text to a compiled [`Grammar`].
+///
+/// File imports (`%import .module (...)`) cannot be resolved through this entry
+/// point — it carries no base path. Use [`load_grammar_with_base`] when the
+/// grammar may import from sibling files.
 pub fn load_grammar(
     grammar_text: &str,
     start: &[String],
     maybe_placeholders: bool,
     keep_all_tokens: bool,
 ) -> Result<Grammar, GrammarError> {
+    load_grammar_with_base(
+        grammar_text,
+        start,
+        maybe_placeholders,
+        keep_all_tokens,
+        None,
+    )
+}
+
+/// Like [`load_grammar`], but `base_path` is the directory that relative file
+/// imports (`%import .module (...)`) resolve against — the directory of the
+/// importing grammar's own file, mirroring Python Lark's `GrammarLoader`.
+pub fn load_grammar_with_base(
+    grammar_text: &str,
+    start: &[String],
+    maybe_placeholders: bool,
+    keep_all_tokens: bool,
+    base_path: Option<PathBuf>,
+) -> Result<Grammar, GrammarError> {
     let mut parser = GrammarParser::new(grammar_text);
     let items = parser.parse_start()?;
 
-    let mut compiler = GrammarCompiler::new(start.to_vec(), maybe_placeholders, keep_all_tokens);
+    let mut compiler = GrammarCompiler::new(
+        start.to_vec(),
+        maybe_placeholders,
+        keep_all_tokens,
+        base_path,
+    );
     compiler.process_items(items)?;
     compiler.compile()
 }
+
+/// Synthetic start rule appended to an imported file so the requested terminals
+/// survive dead-terminal pruning while the file is compiled. Never copied out.
+const IMPORT_PROBE_RULE: &str = "__lark_import_probe";
 
 // ─── Tokenizer ───────────────────────────────────────────────────────────────
 
@@ -1144,10 +1177,19 @@ struct GrammarCompiler {
     /// rather than stacked, which is what Python Lark's distribute+dedup achieves
     /// and what keeps `("A"?)?` from building two ambiguous empty rules.
     nullable_opts: std::collections::HashSet<String>,
+    /// Directory that relative file imports resolve against (the importing
+    /// grammar's directory). `None` when the grammar was built from a string with
+    /// no source location, in which case only `%import common.*` resolves.
+    base_path: Option<PathBuf>,
 }
 
 impl GrammarCompiler {
-    fn new(start: Vec<String>, maybe_placeholders: bool, keep_all_tokens: bool) -> Self {
+    fn new(
+        start: Vec<String>,
+        maybe_placeholders: bool,
+        keep_all_tokens: bool,
+        base_path: Option<PathBuf>,
+    ) -> Self {
         GrammarCompiler {
             start,
             rules: Vec::new(),
@@ -1165,6 +1207,7 @@ impl GrammarCompiler {
             helper_sizes: HashMap::new(),
             recurse_cache: HashMap::new(),
             nullable_opts: std::collections::HashSet::new(),
+            base_path,
         }
     }
 
@@ -2047,33 +2090,34 @@ impl GrammarCompiler {
     }
 
     fn resolve_import(&mut self, spec: ImportSpec) -> Result<(), GrammarError> {
-        // Determine what to import and from which module.
-        //
-        // Two forms:
-        //   %import common.WORD              → path=["common","WORD"], no name list
-        //   %import common.WS -> _WS         → path=["common","WS"], alias=Some("_WS")
-        //   %import common (WORD, INT, ...)  → path=["common"], names=[...]
-        let names_to_import: Vec<(String, Option<String>)> = if let Some(names) = spec.names {
-            // Name list form: no per-name aliases
-            names.into_iter().map(|n| (n, None)).collect()
-        } else if spec.path.len() > 1 {
-            // Single import: last path element is the symbol name; alias may override it.
-            let original = spec.path.last().cloned().unwrap_or_default();
-            vec![(original, spec.alias)]
-        } else {
-            return Ok(()); // nothing to import
-        };
+        // Split the directive into the module path (which file/library to load
+        // from) and the list of `(name, alias)` symbols to import. Three forms:
+        //   %import common.WORD              → module=["common"],  import WORD
+        //   %import common.WS -> _WS         → module=["common"],  import WS as _WS
+        //   %import common (WORD, INT, ...)  → module=["common"],  import each
+        //   %import .tokens (NUMBER, NAME)   → module=["tokens"] (relative file)
+        let (module_path, names_to_import): (Vec<String>, Vec<(String, Option<String>)>) =
+            if let Some(names) = spec.names {
+                // Name-list form: a multi-import cannot carry per-name aliases.
+                (
+                    spec.path.clone(),
+                    names.into_iter().map(|n| (n, None)).collect(),
+                )
+            } else if spec.path.len() > 1 {
+                // Single import: the last path element is the symbol; the leading
+                // elements are the module. An alias may rename it.
+                let original = spec.path.last().cloned().unwrap_or_default();
+                let module = spec.path[..spec.path.len() - 1].to_vec();
+                (module, vec![(original, spec.alias)])
+            } else {
+                return Ok(()); // nothing to import
+            };
 
-        let is_common = spec.path.first().map(String::as_str) == Some("common");
-        if !is_common {
-            // Only the bundled `common` library is available; a file/module import
-            // (e.g. `%import bad_test.NUMBER`) cannot be resolved. Python Lark
-            // raises when the module is not found, so we error too instead of
-            // silently dropping the imported symbols.
-            return Err(GrammarError::ImportNotFound {
-                path: spec.path.join("."),
-            });
-        }
+        // The bundled `common` library is resolved from its compiled regex table,
+        // not the filesystem. Everything else is a file import resolved relative to
+        // the importing grammar's directory. A *relative* `%import .common ...`
+        // (leading dot) is a file, not the library.
+        let is_common = !spec.relative && module_path.first().map(String::as_str) == Some("common");
         if is_common {
             for (name, alias) in &names_to_import {
                 if let Some(regex) = common_terminals().get(name) {
@@ -2086,8 +2130,182 @@ impl GrammarCompiler {
                 }
                 // Rules from common (e.g., %import common.list) are silently skipped for now.
             }
+            return Ok(());
+        }
+
+        self.resolve_file_import(&module_path, &names_to_import)
+    }
+
+    /// Resolve a file import: load and parse a sibling `.lark` file through
+    /// `load_grammar`, then copy the requested terminals/rules (and, for a rule,
+    /// its dependency closure) into this grammar — mirroring Python Lark's
+    /// `GrammarLoader.do_import` + `_remove_unused`.
+    fn resolve_file_import(
+        &mut self,
+        module_path: &[String],
+        names_to_import: &[(String, Option<String>)],
+    ) -> Result<(), GrammarError> {
+        let dotted = module_path.join(".");
+        // Resolve `a.b.c` → `<base>/a/b/c.lark`. Without a base path (grammar built
+        // from a bare string) a file import is unresolvable, exactly as Python Lark
+        // cannot find a relative import with no source location.
+        let base = self
+            .base_path
+            .as_ref()
+            .ok_or_else(|| GrammarError::ImportNotFound {
+                path: dotted.clone(),
+            })?;
+        let mut file = base.clone();
+        for comp in module_path {
+            file.push(comp);
+        }
+        file.set_extension("lark");
+        let text = std::fs::read_to_string(&file).map_err(|_| GrammarError::ImportNotFound {
+            path: dotted.clone(),
+        })?;
+
+        // A pure-terminal file (e.g. `tokens.lark`) has no rule referencing its
+        // terminals, so dead-terminal pruning would drop them. Append a probe rule
+        // that references every requested name so they survive compilation — the
+        // same trick `common_terminals()` uses. The probe is never copied out.
+        let probe_body = names_to_import
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        let probe = format!("{text}\n{IMPORT_PROBE_RULE}: {probe_body}\n");
+        // The imported grammar's own relative imports resolve against *its*
+        // directory, so nested file imports compose.
+        let sub_base = file.parent().map(PathBuf::from);
+        let imported = load_grammar_with_base(
+            &probe,
+            &[IMPORT_PROBE_RULE.to_string()],
+            self.maybe_placeholders,
+            self.global_keep_all,
+            sub_base,
+        )?;
+
+        // Dependency names are namespaced under the module path so an imported
+        // rule's private helpers/terminals never collide with the importing
+        // grammar's. Requested names keep their (aliased) name. Matches Python
+        // Lark's `_get_mangle('__'.join(dotted_path), aliases, ...)`.
+        let prefix = module_path.join("__");
+        for (name, alias) in names_to_import {
+            let final_name = alias.clone().unwrap_or_else(|| name.clone());
+            if imported.terminals.iter().any(|t| &t.name == name) {
+                self.import_terminal(&imported, name, &final_name);
+            } else if imported.rules.iter().any(|r| &r.origin.name == name) {
+                self.import_rule_closure(&imported, name, &final_name, &prefix);
+            } else {
+                return Err(GrammarError::ImportNotFound {
+                    path: format!("{dotted}.{name}"),
+                });
+            }
         }
         Ok(())
+    }
+
+    /// Copy a single compiled terminal from an imported grammar under `final_name`.
+    fn import_terminal(&mut self, imported: &Grammar, name: &str, final_name: &str) {
+        if self.terminals.iter().any(|t| t.name == final_name) {
+            return; // already defined locally — don't shadow it
+        }
+        if let Some(td) = imported.terminals.iter().find(|t| t.name == name) {
+            let mut copy = td.clone();
+            copy.name = final_name.to_string();
+            self.terminals.push(copy);
+        }
+    }
+
+    /// Copy an imported rule plus every rule/terminal it transitively references.
+    /// The requested rule keeps `final_name`; all dependencies are mangled under
+    /// `prefix` (underscore-preserving, so transparent `_rules` stay transparent)
+    /// to avoid colliding with the importing grammar's own symbols.
+    fn import_rule_closure(
+        &mut self,
+        imported: &Grammar,
+        name: &str,
+        final_name: &str,
+        prefix: &str,
+    ) {
+        // Reachable rule origins (BFS from `name`) and the terminals they touch.
+        let mut rule_names: std::collections::HashSet<String> =
+            std::collections::HashSet::from([name.to_string()]);
+        let mut term_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut worklist = vec![name.to_string()];
+        while let Some(rn) = worklist.pop() {
+            for rule in imported.rules.iter().filter(|r| r.origin.name == rn) {
+                for sym in &rule.expansion {
+                    match sym {
+                        Symbol::Terminal(t) => {
+                            term_names.insert(t.name.clone());
+                        }
+                        Symbol::NonTerminal(nt) => {
+                            if rule_names.insert(nt.name.clone()) {
+                                worklist.push(nt.name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Don't re-import a rule already defined locally (Python raises; we keep the
+        // existing definition rather than duplicate the origin).
+        if self.rules.iter().any(|r| r.origin.name == final_name) {
+            return;
+        }
+
+        // Name map: requested symbol → final name; everything else → mangled.
+        let rename = |n: &str| -> String {
+            if n == name {
+                final_name.to_string()
+            } else if let Some(rest) = n.strip_prefix('_') {
+                format!("_{prefix}__{rest}")
+            } else {
+                format!("{prefix}__{n}")
+            }
+        };
+
+        for rule in imported
+            .rules
+            .iter()
+            .filter(|r| rule_names.contains(&r.origin.name))
+        {
+            let origin = NonTerminal::new(rename(&rule.origin.name));
+            let expansion = rule
+                .expansion
+                .iter()
+                .map(|sym| match sym {
+                    Symbol::Terminal(t) => Symbol::Terminal(Terminal {
+                        name: rename(&t.name),
+                        filter_out: t.filter_out,
+                    }),
+                    Symbol::NonTerminal(nt) => {
+                        Symbol::NonTerminal(NonTerminal::new(rename(&nt.name)))
+                    }
+                })
+                .collect();
+            self.rules.push(Rule::new(
+                origin,
+                expansion,
+                rule.alias.clone(),
+                rule.options.clone(),
+                rule.order,
+            ));
+        }
+        for td in imported
+            .terminals
+            .iter()
+            .filter(|t| term_names.contains(&t.name))
+        {
+            let new_name = rename(&td.name);
+            if !self.terminals.iter().any(|t| t.name == new_name) {
+                let mut copy = td.clone();
+                copy.name = new_name;
+                self.terminals.push(copy);
+            }
+        }
     }
 
     fn compile(mut self) -> Result<Grammar, GrammarError> {

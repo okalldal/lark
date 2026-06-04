@@ -1,0 +1,4 @@
+// Rule library imported by rule_main.lark via `%import .lib (greeting)`.
+// `greeting` depends on NAME, which must be copied (mangled) alongside it.
+greeting: "hello" NAME
+NAME: /[a-zA-Z_]\w*/
