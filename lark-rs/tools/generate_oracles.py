@@ -715,6 +715,50 @@ def generate_common():
     save_oracle("common", "cases", results)
 
 
+# Relative file imports (`%import .module (...)`). Each case loads a grammar
+# *from its file* (via Lark.open) so Python resolves imports relative to the
+# grammar's directory — the behaviour lark-rs mirrors with LarkOptions.base_path.
+IMPORTS_CASES = [
+    # (grammar_file_relative_to_GRAMMARS_DIR, input, should_pass)
+    ("imports/main.lark", "x = 42", True),        # import terminals NUMBER, NAME
+    ("imports/main.lark", "1 = 2", False),        # NAME required on the left
+    ("imports/rule_main.lark", "hello world !", True),  # import a rule + its deps
+    ("imports/rule_main.lark", "world !", False),       # `greeting` needs "hello"
+]
+
+
+def run_file_case(grammar_file, input_text):
+    """Return (ok, tree_dict_or_error) loading the grammar from its file path so
+    relative imports resolve against the grammar's directory."""
+    try:
+        lark = Lark.open(str(GRAMMARS_DIR / grammar_file), parser="lalr",
+                         maybe_placeholders=False)
+        tree = lark.parse(input_text)
+        return True, tree_to_dict(tree)
+    except Exception as e:
+        return False, str(e)
+
+
+def generate_imports():
+    print("Generating relative file-import oracles...")
+    results = []
+    for grammar_file, inp, should_pass in IMPORTS_CASES:
+        ok, result = run_file_case(grammar_file, inp)
+        if should_pass and not ok:
+            print(f"  WARNING: expected {grammar_file} to parse {inp!r}: {result}")
+        if not should_pass and ok:
+            print(f"  WARNING: expected {grammar_file} to reject {inp!r}")
+        results.append({
+            "grammar": grammar_file,
+            "input": inp,
+            "should_pass": should_pass,
+            "ok": ok,
+            "tree": result if ok else None,
+            "error": result if not ok else None,
+        })
+    save_oracle("imports", "cases", results)
+
+
 def generate_json():
     print("Generating JSON oracles...")
     grammar = load_grammar("json")
@@ -781,6 +825,7 @@ if __name__ == "__main__":
     generate_keywords()
     generate_terminal_refs()
     generate_common()
+    generate_imports()
     generate_python_numbers()
     generate_lalr_core()
     generate_earley()

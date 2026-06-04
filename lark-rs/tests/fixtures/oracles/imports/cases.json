@@ -1,0 +1,65 @@
+[
+  {
+    "grammar": "imports/main.lark",
+    "input": "x = 42",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "token",
+          "token_type": "NAME",
+          "value": "x"
+        },
+        {
+          "type": "token",
+          "token_type": "NUMBER",
+          "value": "42"
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "grammar": "imports/main.lark",
+    "input": "1 = 2",
+    "should_pass": false,
+    "ok": false,
+    "tree": null,
+    "error": "Unexpected token Token('NUMBER', '1') at line 1, column 1.\nExpected one of: \n\t* NAME\nPrevious tokens: [None]\n"
+  },
+  {
+    "grammar": "imports/rule_main.lark",
+    "input": "hello world !",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "greeting",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "lib__NAME",
+              "value": "world"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "grammar": "imports/rule_main.lark",
+    "input": "world !",
+    "should_pass": false,
+    "ok": false,
+    "tree": null,
+    "error": "Unexpected token Token('lib__NAME', 'world') at line 1, column 1.\nExpected one of: \n\t* HELLO\nPrevious tokens: [None]\n"
+  }
+]

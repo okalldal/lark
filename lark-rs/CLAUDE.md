@@ -277,7 +277,7 @@ issues: #32 (XFAIL burndown), #31 (perf benchmark), #33 (de-recurse forest walk)
 | Component | Status | Notes |
 |-----------|--------|-------|
 | Complete `common.lark` stubs | ✅ | The full upstream `common.lark` is bundled (`src/grammars/common.lark`) and parsed through lark-rs's own terminal-algebra loader, not a hand-transcribed regex table — so common terminals can't drift. Added `CR`/`LF`/`SQL_COMMENT` + the `_EXP`/`_STRING_*` helpers; one documented lookbehind adaptation for `ESCAPED_STRING`. Pinned by `test_common.rs` |
-| `%import` from file path | ⬜ | Relative imports |
+| `%import` from file path | ✅ | Relative imports (`%import .module (X, ...)`) resolve against the importing grammar's directory (`LarkOptions.base_path`), load through `load_grammar`, and copy the requested terminal/rule — a rule pulls in its dependency closure, mangled under the module name (Python's `_get_mangle`). Pinned by `test_imports.rs` (oracles in `fixtures/oracles/imports/`, grammars under `tests/grammars/imports/`) |
 | Grammar standard library | ⬜ | SQL, Python, … |
 | Indenter / postlex | ⬜ | Python-style INDENT/DEDENT |
 | Standalone parser gen | ⬜ | Emit self-contained Rust or Python |
