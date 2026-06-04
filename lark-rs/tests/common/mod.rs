@@ -1,5 +1,8 @@
 /// Shared test utilities: oracle loading, tree comparison, parser helpers.
-use lark_rs::{Child, Lark, LarkOptions, LexerType, ParseTree, ParserAlgorithm, Token, Tree};
+use lark_rs::{
+    Ambiguity, Child, Lark, LarkError, LarkOptions, LexerType, ParseTree, ParserAlgorithm, Token,
+    Tree,
+};
 
 /// Build a LALR + contextual-lexer parser for the given grammar text.
 pub fn make_lalr(grammar_text: &str) -> Lark {
@@ -13,6 +16,38 @@ pub fn make_lalr(grammar_text: &str) -> Lark {
         },
     )
     .unwrap_or_else(|e| panic!("Grammar failed to load: {e}"))
+}
+
+/// Build an Earley + basic-lexer parser for the given grammar text and ambiguity
+/// mode. Returns a `Result`: until the Phase-2 engine lands, building an Earley
+/// parser fails with a "not yet implemented" error, which the Earley oracle tests
+/// detect to gate themselves (see [`earley_unimplemented`]). Earley uses the basic
+/// lexer — the contextual lexer narrows terminals by LALR state, which Earley has
+/// none of.
+pub fn make_earley(grammar_text: &str, ambiguity: Ambiguity) -> Result<Lark, LarkError> {
+    Lark::new(
+        grammar_text,
+        LarkOptions {
+            parser: ParserAlgorithm::Earley,
+            lexer: LexerType::Basic,
+            ambiguity,
+            start: vec!["start".to_string()],
+            ..Default::default()
+        },
+    )
+}
+
+/// True while the Earley backend is still a stub (build returns "not yet
+/// implemented"). The Earley oracle/compliance tests probe this once and skip
+/// themselves while it holds, so Sprint 0 lands green with the harness in place;
+/// the moment Sprint 1 wires up a real Earley frontend, the probe flips and the
+/// same tests start enforcing the oracles. Mirrors the self-activating pattern
+/// the fuzz corpus uses.
+pub fn earley_unimplemented() -> bool {
+    match make_earley("start: \"a\"", Ambiguity::Resolve) {
+        Err(LarkError::Grammar(e)) => format!("{e}").contains("not yet implemented"),
+        _ => false,
+    }
 }
 
 /// Build a LALR + contextual-lexer parser using a grammar file under tests/grammars/.
@@ -95,39 +130,83 @@ fn match_node_tree(tree: &Tree, oracle: &serde_json::Value) -> Result<(), String
         ));
     }
 
+    // `_ambig` is the ambiguity-forest node (parser='earley', ambiguity='explicit'):
+    // its children are the alternative derivations, and Lark does NOT guarantee
+    // their order. Compare them as an unordered set — each oracle alternative must
+    // match exactly one Rust alternative, bijectively.
+    if expected_data == "_ambig" {
+        return match_ambig(&tree.children, oracle_children);
+    }
+
     for (i, (child, oc)) in tree.children.iter().zip(oracle_children.iter()).enumerate() {
-        let node_type = oc["type"].as_str().unwrap_or("?");
-        match child {
-            Child::Tree(subtree) => {
-                if node_type != "tree" {
-                    return Err(format!(
-                        "In '{}' child {i}: Rust has Tree but oracle has '{node_type}'",
-                        tree.data
-                    ));
-                }
-                match_node_tree(subtree, oc)
-                    .map_err(|e| format!("In '{}' child {i}: {e}", tree.data))?;
-            }
-            Child::None => {
-                // maybe_placeholders: a None child matches the oracle's serialized
-                // placeholder {"type": "unknown", "repr": "None"}.
-                if node_type != "unknown" {
-                    return Err(format!(
-                        "In '{}' child {i}: Rust has None placeholder but oracle has '{node_type}'",
-                        tree.data
-                    ));
-                }
-            }
-            Child::Token(tok) => {
-                if node_type != "token" {
-                    return Err(format!(
-                        "In '{}' child {i}: Rust has Token({}) but oracle has '{node_type}'",
-                        tree.data, tok.type_
-                    ));
-                }
-                match_token(tok, oc).map_err(|e| format!("In '{}' child {i}: {e}", tree.data))?;
-            }
-        }
+        match_child(child, oc).map_err(|e| format!("In '{}' child {i}: {e}", tree.data))?;
     }
     Ok(())
+}
+
+/// Compare one `Child` against one oracle node (tree / token / `None` placeholder).
+fn match_child(child: &Child, oracle: &serde_json::Value) -> Result<(), String> {
+    let node_type = oracle["type"].as_str().unwrap_or("?");
+    match child {
+        Child::Tree(subtree) => {
+            if node_type != "tree" {
+                return Err(format!("Rust has Tree but oracle has '{node_type}'"));
+            }
+            match_node_tree(subtree, oracle)
+        }
+        Child::None => {
+            // maybe_placeholders: a None child matches the oracle's serialized
+            // placeholder {"type": "unknown", "repr": "None"}.
+            if node_type != "unknown" {
+                return Err(format!(
+                    "Rust has None placeholder but oracle has '{node_type}'"
+                ));
+            }
+            Ok(())
+        }
+        Child::Token(tok) => {
+            if node_type != "token" {
+                return Err(format!(
+                    "Rust has Token({}) but oracle has '{node_type}'",
+                    tok.type_
+                ));
+            }
+            match_token(tok, oracle)
+        }
+    }
+}
+
+/// Bijectively match an `_ambig` node's alternatives against the oracle's,
+/// ignoring order. Sizes are already checked equal by the caller. Uses
+/// backtracking assignment (the forests are tiny), so a greedy mis-pairing can't
+/// produce a false mismatch.
+fn match_ambig(rust: &[Child], oracle: &[serde_json::Value]) -> Result<(), String> {
+    let mut used = vec![false; rust.len()];
+    if assign(rust, oracle, 0, &mut used) {
+        Ok(())
+    } else {
+        Err(format!(
+            "_ambig: could not match all {} alternatives between Rust and oracle (unordered)",
+            oracle.len()
+        ))
+    }
+}
+
+fn assign(rust: &[Child], oracle: &[serde_json::Value], i: usize, used: &mut [bool]) -> bool {
+    if i == oracle.len() {
+        return true;
+    }
+    for j in 0..rust.len() {
+        if used[j] {
+            continue;
+        }
+        if match_child(&rust[j], &oracle[i]).is_ok() {
+            used[j] = true;
+            if assign(rust, oracle, i + 1, used) {
+                return true;
+            }
+            used[j] = false;
+        }
+    }
+    false
 }

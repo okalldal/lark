@@ -210,8 +210,143 @@ def dedup_and_save():
           f"{n_conflict} construct-error (conflict) grammars")
 
 
+# ─── Earley bank (Phase 2) ───────────────────────────────────────────────────
+#
+# A second bank, captured the same way but from Lark's *Earley* test classes,
+# replayed by tests/test_earley_compliance.rs. Kept entirely separate from the
+# LALR machinery above so bank.json stays byte-identical. Two extra dimensions
+# matter for Earley and are recorded here: `ambiguity` (resolve | explicit) and
+# the lexer (Earley uses basic/dynamic, never the LALR-only contextual lexer).
+# Dynamic-lexer configurations are out of scope until Sprint 5, so they are
+# filtered out — the bank captures what Sprints 1–4 can represent.
+
+_EARLEY_RECORDS = []
+_EARLEY_ATTR = "_lark_rs_earley_record"
+
+
+def representable_earley(grammar, options):
+    """Can lark-rs's Earley (Sprints 1–4: basic lexer) represent this config?"""
+    if not isinstance(grammar, str):
+        return False
+    if options.get("parser", "earley") != "earley":
+        return False
+    lexer = options.get("lexer")
+    # Dynamic / dynamic_complete and custom (callable) lexers are Sprint 5+.
+    if lexer not in (None, "auto", "basic"):
+        return False
+    if options.get("transformer") is not None:
+        return False
+    if options.get("postlex") is not None:
+        return False
+    if RELATIVE_IMPORT.search(grammar):
+        return False
+    return True
+
+
+def _earley_meta(grammar, options):
+    return {
+        "grammar": grammar if isinstance(grammar, str) else None,
+        "parser": options.get("parser", "earley"),
+        "lexer": options.get("lexer", "auto"),
+        "ambiguity": options.get("ambiguity", "resolve"),
+        "start": options.get("start", "start"),
+        "maybe_placeholders": options.get("maybe_placeholders", True),
+        "keep_all_tokens": options.get("keep_all_tokens", False),
+        "strict": options.get("strict", False),
+        "g_regex_flags": flag_letters(options.get("g_regex_flags", 0)),
+    }
+
+
+def _earley_patched_init(self, grammar, **options):
+    rep = representable_earley(grammar, options)
+    meta = _earley_meta(grammar, options)
+    try:
+        _orig_init(self, grammar, **options)
+    except Exception as e:
+        if rep:
+            _EARLEY_RECORDS.append({**meta, "construct_error": True,
+                                    "error_kind": type(e).__name__, "cases": []})
+        raise
+    if rep:
+        rec = {**meta, "construct_error": False, "cases": []}
+        object.__setattr__(self, _EARLEY_ATTR, rec)
+        _EARLEY_RECORDS.append(rec)
+
+
+def _earley_patched_parse(self, text, *args, **kwargs):
+    rec = getattr(self, _EARLEY_ATTR, None)
+    capture = rec is not None and not args and not kwargs and isinstance(text, str)
+    try:
+        result = _orig_parse(self, text, *args, **kwargs)
+        if capture and isinstance(result, Tree):
+            rec["cases"].append({"input": text, "should_parse": True,
+                                 "tree": tree_to_dict(result), "error_kind": None})
+        return result
+    except Exception as e:
+        if capture:
+            rec["cases"].append({"input": text, "should_parse": False,
+                                 "tree": None, "error_kind": type(e).__name__})
+        raise
+
+
+def run_earley_suite():
+    Lark.__init__ = _earley_patched_init
+    Lark.parse = _earley_patched_parse
+    try:
+        import tests.test_parser as tp  # noqa: F401
+
+        loader = unittest.TestLoader()
+        suite = unittest.TestSuite()
+        # Earley test classes that use the basic (not dynamic) lexer.
+        for cls_name in ("TestEarleyBasic", "TestFullEarleyBasic"):
+            cls = getattr(tp, cls_name, None)
+            if cls is not None:
+                suite.addTests(loader.loadTestsFromTestCase(cls))
+        runner = unittest.TextTestRunner(stream=open("/dev/null", "w"), verbosity=0)
+        runner.run(suite)
+    finally:
+        Lark.__init__ = _orig_init
+        Lark.parse = _orig_parse
+
+
+def dedup_and_save_earley():
+    seen = {}
+    for rec in _EARLEY_RECORDS:
+        if rec["grammar"] is None:
+            continue
+        key = (rec["grammar"], rec["parser"], rec["lexer"], rec["ambiguity"],
+               str(rec["start"]), rec["maybe_placeholders"], rec["keep_all_tokens"],
+               rec["construct_error"], rec["strict"], rec["g_regex_flags"])
+        tgt = seen.get(key)
+        if tgt is None:
+            tgt = {**rec, "cases": []}
+            seen[key] = tgt
+        case_inputs = {c["input"] for c in tgt["cases"]}
+        for c in rec["cases"]:
+            if c["input"] not in case_inputs:
+                tgt["cases"].append(c)
+                case_inputs.add(c["input"])
+
+    records = list(seen.values())
+    records.sort(key=lambda r: (r["grammar"], r["ambiguity"], str(r["start"])))
+
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out = OUT_DIR / "earley_bank.json"
+    out.write_text(json.dumps(records, indent=2, ensure_ascii=False) + "\n")
+
+    n_parse = sum(len(r["cases"]) for r in records)
+    n_conflict = sum(1 for r in records if r["construct_error"])
+    n_explicit = sum(1 for r in records if r["ambiguity"] == "explicit")
+    print(f"  wrote {out.relative_to(LARK_RS_DIR)}")
+    print(f"  {len(records)} grammars, {n_parse} parse cases, "
+          f"{n_conflict} construct-error, {n_explicit} explicit-ambiguity grammars")
+
+
 if __name__ == "__main__":
     print("Instrumenting Python Lark and running its LALR test suite...")
     run_suite()
     dedup_and_save()
-    print("Done. Commit tests/fixtures/oracles/compliance/ to track the bank.")
+    print("Instrumenting Python Lark and running its Earley test suite...")
+    run_earley_suite()
+    dedup_and_save_earley()
+    print("Done. Commit tests/fixtures/oracles/compliance/ to track the banks.")

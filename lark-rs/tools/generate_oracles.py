@@ -322,6 +322,111 @@ def run_case(grammar_text, input_text, parser_type="lalr", start="start"):
         return False, str(e)
 
 
+# ─── Earley + SPPF (Phase 2, Sprint 0) ───────────────────────────────────────
+#
+# The Earley engine is the second USP: it parses any CFG, including ambiguous
+# ones, and (with ambiguity='explicit') returns *every* derivation as an `_ambig`
+# node. These curated oracles are the regression net Sprints 1–4 land against:
+#
+#   * an UNAMBIGUOUS grammar — Earley must produce the *same* single tree LALR
+#     does (exercises the forest→tree walk through the shared TreeBuilder:
+#     expand1, aliases, anonymous-token filtering).
+#   * AMBIGUOUS grammars at ambiguity='resolve' (one tree, Lark's choice) and
+#     ambiguity='explicit' (an `_ambig` node whose children are the alternative
+#     derivations, in NO guaranteed order — the Rust matcher compares them as a
+#     set). One grammar is ambiguous at the *root*, one *nested* below it.
+#
+# Each group records its `ambiguity` and `lexer` so the Rust replay
+# (test_earley_oracle.rs) builds the parser the same way Python Lark did.
+
+# Unambiguous expression grammar. `?sum`/`?product` exercise expand1 under the
+# forest walk; `"+"`/`"*"` are anonymous tokens that must be filtered.
+EARLEY_UNAMBIGUOUS_GRAMMAR = r"""
+start: sum
+?sum: product
+    | sum "+" product   -> add
+?product: atom
+        | product "*" atom -> mul
+atom: NUMBER
+NUMBER: /[0-9]+/
+%ignore " "
+"""
+
+# Textbook ambiguous grammar (S → S S | "a"): "aaa" has two parses. `!` keeps the
+# "a" tokens so the two shapes are visible. Ambiguous at the *root*.
+EARLEY_AMBIG_ROOT_GRAMMAR = r'!start: start start | "a"'
+
+# Ambiguity nested below the start rule: `inner` is the ambiguous S→S S|"a", wrapped
+# by anonymous "(" … ")" that get filtered, so the `_ambig` node appears as a
+# *child* of `start`, not at the root.
+EARLEY_AMBIG_NESTED_GRAMMAR = r"""
+start: "(" inner ")"
+!inner: inner inner | "a"
+%ignore " "
+"""
+
+# (name, grammar, [(input, should_parse)])
+EARLEY_GRAMMARS = [
+    ("unambiguous", EARLEY_UNAMBIGUOUS_GRAMMAR, [
+        ("1",        True),
+        ("1 + 2",    True),
+        ("1 + 2 * 3", True),
+        ("",         False),
+        ("1 +",      False),
+    ]),
+    ("ambig_root", EARLEY_AMBIG_ROOT_GRAMMAR, [
+        ("a",   True),
+        ("aa",  True),
+        ("aaa", True),
+        ("",    False),
+    ]),
+    ("ambig_nested", EARLEY_AMBIG_NESTED_GRAMMAR, [
+        ("(a)",   True),
+        ("(aaa)", True),
+        ("()",    False),
+    ]),
+]
+
+
+def generate_earley():
+    print("Generating Earley + SPPF oracles (resolve + explicit ambiguity)...")
+    groups = []
+    for name, grammar, cases in EARLEY_GRAMMARS:
+        for ambiguity in ("resolve", "explicit"):
+            built = []
+            for inp, should_parse in cases:
+                try:
+                    lark = Lark(grammar, parser="earley", lexer="basic",
+                                ambiguity=ambiguity, start="start",
+                                maybe_placeholders=False)
+                    tree = lark.parse(inp)
+                    ok, payload = True, tree_to_dict(tree)
+                except Exception as e:
+                    ok, payload = False, str(e)
+                if should_parse and not ok:
+                    print(f"  WARNING: {name}/{ambiguity} expected to parse {inp!r}: {payload}")
+                built.append({
+                    "input": inp,
+                    "should_parse": should_parse,
+                    "ok": ok,
+                    "tree": payload if ok else None,
+                    "error": payload if not ok else None,
+                })
+            groups.append({
+                "name": name,
+                "grammar": grammar,
+                "ambiguity": ambiguity,
+                "lexer": "basic",
+                "cases": built,
+            })
+    save_oracle("earley", "cases", groups)
+    n_ambig = sum(
+        1 for g in groups for c in g["cases"]
+        if c["ok"] and c["tree"] and c["tree"].get("data") == "_ambig"
+    )
+    print(f"  {len(groups)} groups; {n_ambig} cases have an `_ambig` root forest")
+
+
 def save_oracle(suite, name, data):
     out_dir = ORACLES_DIR / suite
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -486,6 +591,7 @@ if __name__ == "__main__":
     generate_terminal_refs()
     generate_python_numbers()
     generate_lalr_core()
+    generate_earley()
     generate_fuzz_corpus()
     generate_json_corpus_manifest()
     print("\nDone. Commit tests/fixtures/oracles/ to track expected outputs.")
