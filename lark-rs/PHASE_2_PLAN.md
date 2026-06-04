@@ -1,8 +1,8 @@
 # Phase 2 — Earley + SPPF: Scope & Implementation Plan
 
-**Status:** Sprint 0 (test harness) ✅ done; Sprint 1 (Earley recognizer) is next.
-Phase 2 was unfrozen at 99.6% compliance (exit criterion met — see
-[`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md)).
+**Status:** Sprint 0 (test harness) ✅ done; Sprint 1 (Earley recognizer) ✅ done;
+Sprint 2 (SPPF + unambiguous forest→tree) is next. Phase 2 was unfrozen at 99.6%
+compliance (exit criterion met — see [`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md)).
 
 This document answers four questions before any engine code is written:
 
@@ -92,7 +92,30 @@ The harness is now the spec for Sprints 1–5.
 
 ---
 
-## 3. Sprint 1 — Earley recognizer (over `SymbolId`), standard lexer
+## 3. Sprint 1 — Earley recognizer (over `SymbolId`), standard lexer ✅ DONE
+
+**What landed.** [`EarleyParser`](src/parsers/earley.rs) is an Earley recognizer
+over the interned grammar: items keyed by `SymbolId` (rule index + dot + origin),
+one chart `Column` per input position, the predict/scan/complete loop with
+Aycock–Horspool nullable handling (predictions on a nullable non-terminal eagerly
+advance, so ε-derivations complete and the chart terminates — reusing the
+precomputed `NULLABLE` from `analysis.rs`). `recognize(tokens, start) -> bool` is
+boolean accept/reject only — **no forest**.
+
+It is **not** wired into `build_frontend` yet, and that is deliberate: the
+tree-comparing Earley oracle/compliance tests self-activate the moment the Earley
+frontend builds (`common::earley_unimplemented`), so wiring an engine that cannot
+yet produce trees would flip that gate red. Sprint 1 instead verifies the
+recognizer through its own accept/reject oracle, `tests/test_earley_recognizer.rs`
+— parity with Python Lark on the Sprint-0 curated grammars (unambiguous + both
+ambiguous ones) and on the existing JSON and arithmetic grammars. **Sprint 2 is
+what wires the frontend and flips the gate**, because only then are there trees to
+compare. A shared `basic_lexer_conf()` helper now backs both the LALR frontend and
+the recognizer's lexer, so both scan through one identical `Scanner` setup.
+
+The original Sprint-1 design notes follow.
+
+
 
 Map of the oracle source: `lark/parsers/earley.py` (~312 lines) is the
 recognizer; `earley_common.py` (~42) the item type.
@@ -207,7 +230,7 @@ The one engine abstraction *not* yet built is the **dynamic-lexer extension to
 | Sprint | Deliverable | Oracle / gate | Engine code? |
 |-------:|-------------|---------------|:------------:|
 | **0 ✅** | Ambiguity harness + Earley bank | new Earley oracles, all XFAIL-gated | no |
-| **1** | Earley recognizer, basic lexer | accept/reject parity (JSON, arithmetic) | yes |
+| **1 ✅** | Earley recognizer, basic lexer | accept/reject parity (JSON, arithmetic) | yes |
 | **2** | SPPF + unambiguous forest→tree | **every existing oracle, identical to LALR** | yes |
 | **3** | `ambiguity='resolve'` | ambiguous grammars → Lark's chosen tree | yes |
 | **4** | `ambiguity='explicit'` + `_ambig` | set-of-derivations match | yes |

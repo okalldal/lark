@@ -3,15 +3,34 @@ pub mod lalr;
 pub mod token_source;
 pub mod tree_builder;
 
+pub use earley::EarleyParser;
 pub use lalr::{build_lalr_table, LalrParser, ParseTable};
 pub use token_source::{Contextual, LexFailure, PreLexed, TokenSource};
 pub use tree_builder::{NodeValue, TreeBuilder};
 
 use crate::error::{LarkError, ParseError};
-use crate::grammar::Grammar;
+use crate::grammar::{CompiledGrammar, Grammar};
 use crate::lexer::{BasicLexer, ContextualLexer, Lexer, LexerConf};
 use crate::tree::ParseTree;
 use crate::{LarkOptions, LexerType, ParserAlgorithm};
+
+/// Assemble the basic-lexer configuration from an interned grammar: pair every
+/// terminal with its id (the lexer dispatches on the interned id) and carry the
+/// `%ignore` set plus any global regex flags. Shared by the LALR frontend and the
+/// Earley recognizer so both lex through one identical `Scanner` setup.
+pub fn basic_lexer_conf(cg: &CompiledGrammar, g_regex_flags: u32) -> LexerConf {
+    let terminals = cg
+        .terminals
+        .iter()
+        .map(|t| {
+            (
+                cg.symbols.id(&t.name).expect("terminal interned"),
+                t.clone(),
+            )
+        })
+        .collect();
+    LexerConf::new(terminals, cg.ignore.clone()).with_global_flags(g_regex_flags)
+}
 
 #[derive(Debug, Clone)]
 pub struct ParserConf {
@@ -61,21 +80,7 @@ pub fn build_frontend(
             let table = build_lalr_table(&cg, options.strict)?;
             let parser = LalrParser::new(table);
 
-            let terminals: Vec<(
-                crate::grammar::SymbolId,
-                crate::grammar::terminal::TerminalDef,
-            )> = cg
-                .terminals
-                .iter()
-                .map(|t| {
-                    (
-                        cg.symbols.id(&t.name).expect("terminal interned"),
-                        t.clone(),
-                    )
-                })
-                .collect();
-            let lexer_conf = LexerConf::new(terminals, cg.ignore.clone())
-                .with_global_flags(options.g_regex_flags);
+            let lexer_conf = basic_lexer_conf(&cg, options.g_regex_flags);
 
             let kind = match options.lexer {
                 LexerType::Basic => {
@@ -96,9 +101,14 @@ pub fn build_frontend(
             Ok(ParsingFrontend { kind })
         }
         ParserAlgorithm::Earley => {
-            // Phase 2: Earley is not implemented yet. Fail loudly rather than
-            // silently substituting LALR — LALR rejects grammars Earley accepts,
-            // so a silent fallback would give wrong results on ambiguous grammars.
+            // Phase 2 Sprint 1 landed the Earley *recognizer*
+            // ([`EarleyParser`](earley::EarleyParser)), but the tree-producing
+            // frontend is Sprint 2 (SPPF + forest→tree). Until a forest exists,
+            // fail loudly rather than silently substituting LALR — LALR rejects
+            // grammars Earley accepts, so a silent fallback would give wrong
+            // results on ambiguous grammars. Keeping this guard also keeps the
+            // tree-comparing Earley oracle tests gated until trees are real (see
+            // the `earley.rs` module docs and `common::earley_unimplemented`).
             Err(LarkError::Grammar(crate::error::GrammarError::Other {
                 msg: "Earley parser not yet implemented".to_string(),
             }))

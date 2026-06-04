@@ -265,12 +265,16 @@ Requesting `ParserAlgorithm::Earley` now returns an explicit error (was a silent
 LALR fallback).
 
 Sprint plan + scope in [`PHASE_2_PLAN.md`](PHASE_2_PLAN.md). **Sprint 0 (the test
-harness) is done** — see the testing section below; the rest is engine work.
+harness) and Sprint 1 (the Earley recogniser) are done** — see the testing section
+below. Sprint 1 landed `EarleyParser::recognize` (boolean accept/reject, no forest)
+verified by `test_earley_recognizer`; it is deliberately **not** wired into
+`build_frontend` yet, so the tree-comparing Earley oracle tests stay gated until
+Sprint 2 (SPPF + forest→tree) can produce trees. The rest is engine work.
 
 | Component | Status | Notes |
 |-----------|--------|-------|
 | Ambiguity test harness (Sprint 0) | ✅ | Earley oracles + `_ambig` set-matcher + Earley compliance bank (147 grammars), all self-gating XFAIL until the engine lands |
-| Earley recogniser | ⬜ | Aycock/Earley algorithm (Sprint 1) |
+| Earley recogniser | ✅ | Sprint 1: `EarleyParser::recognize` — predict/scan/complete over `SymbolId`, Aycock–Horspool nullable handling; boolean accept/reject (no forest). Verified by `test_earley_recognizer` (parity vs. Python Lark); **not yet wired into `build_frontend`** — Sprint 2 produces trees and flips the oracle gate |
 | SPPF forest construction | ⬜ | Shared Packed Parse Forest (Sprint 2) |
 | Forest → tree conversion | ⬜ | `ambiguity='resolve'` picks one (Sprint 3); reuses `TreeBuilder` |
 | `ambiguity='explicit'` | ⬜ | Returns `_ambig` forests (Sprint 4) |

@@ -13,7 +13,9 @@ pub use grammar::{
     CompiledGrammar, CompiledRule, Grammar, SymbolId, SymbolKind, SymbolTable,
 };
 pub use lexer::{BasicLexer, ContextualLexer, Lexer, LexerConf};
-pub use parsers::{lalr, LexFailure, ParseTable, ParserConf, TokenSource};
+pub use parsers::{
+    basic_lexer_conf, lalr, EarleyParser, LexFailure, ParseTable, ParserConf, TokenSource,
+};
 pub use tree::{Child, ParseTree, Token, Tree};
 
 /// Main entry point — mirrors Python's `Lark(grammar, parser=..., lexer=...)`

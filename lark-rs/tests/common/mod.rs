@@ -1,7 +1,7 @@
 /// Shared test utilities: oracle loading, tree comparison, parser helpers.
 use lark_rs::{
-    Ambiguity, Child, Lark, LarkError, LarkOptions, LexerType, ParseTree, ParserAlgorithm, Token,
-    Tree,
+    basic_lexer_conf, load_grammar, lower, Ambiguity, BasicLexer, Child, EarleyParser, Lark,
+    LarkError, LarkOptions, Lexer, LexerType, ParseTree, ParserAlgorithm, Token, Tree,
 };
 
 /// Build a LALR + contextual-lexer parser for the given grammar text.
@@ -47,6 +47,42 @@ pub fn earley_unimplemented() -> bool {
     match make_earley("start: \"a\"", Ambiguity::Resolve) {
         Err(LarkError::Grammar(e)) => format!("{e}").contains("not yet implemented"),
         _ => false,
+    }
+}
+
+/// Build an Earley recognizer + basic lexer for the given grammar text.
+///
+/// Sprint 1 verifies the recognizer (boolean accept/reject) directly, since the
+/// tree-producing Earley frontend is Sprint 2 — so this bypasses `Lark`/the
+/// frontend and drives [`EarleyParser`] over the basic-lexer token stream.
+pub fn make_earley_recognizer(grammar_text: &str) -> (EarleyParser, BasicLexer) {
+    let grammar = load_grammar(grammar_text, &["start".to_string()], false, false)
+        .unwrap_or_else(|e| panic!("Grammar failed to load: {e}"));
+    let cg = lower(&grammar);
+    let conf = basic_lexer_conf(&cg, 0);
+    let lexer = BasicLexer::new(&conf).unwrap_or_else(|e| panic!("Lexer failed to build: {e}"));
+    let parser = EarleyParser::new(cg);
+    (parser, lexer)
+}
+
+/// Build an Earley recognizer + basic lexer from a grammar file under
+/// tests/grammars/.
+pub fn make_earley_recognizer_from_file(name: &str) -> (EarleyParser, BasicLexer) {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/grammars")
+        .join(format!("{name}.lark"));
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("Cannot read {}: {e}", path.display()));
+    make_earley_recognizer(&text)
+}
+
+/// Lex `input` with the basic lexer and ask the recognizer whether the grammar
+/// derives it. A lexer failure (no valid token) counts as a reject, matching how
+/// Python Lark reports an un-lexable input as a parse failure.
+pub fn earley_accepts(parser: &EarleyParser, lexer: &BasicLexer, input: &str) -> bool {
+    match lexer.lex(input) {
+        Ok(tokens) => parser.recognize(&tokens, Some("start")),
+        Err(_) => false,
     }
 }
 
