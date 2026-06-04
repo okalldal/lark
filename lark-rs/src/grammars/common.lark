@@ -1,0 +1,72 @@
+// Bundled copy of Lark's `lark/grammars/common.lark`, parsed by lark-rs's own
+// grammar loader to resolve `%import common.X`. Keeping the *source* (rather than
+// a hand-transcribed regex table) means every common terminal is compiled by the
+// exact same terminal-algebra path lark-rs uses for user grammars, so it cannot
+// drift from Python Lark.
+//
+// ONE deliberate adaptation from upstream: Lark's escaped-string helpers use a
+// lookbehind —
+//     _STRING_INNER: /.*?/
+//     _STRING_ESC_INNER: _STRING_INNER /(?<!\\)(\\\\)*?/
+// — which the Rust `regex` crate does not support. They are replaced below with a
+// lookbehind-free equivalent that matches the same well-formed quoted strings
+// (a run of non-quote/non-backslash chars or backslash-escapes between quotes).
+// `.` in Python excludes only "\n", so the char class excludes "\n" too.
+
+
+//
+// Numbers
+//
+
+DIGIT: "0".."9"
+HEXDIGIT: "a".."f"|"A".."F"|DIGIT
+
+INT: DIGIT+
+SIGNED_INT: ["+"|"-"] INT
+DECIMAL: INT "." INT? | "." INT
+
+// float = /-?\d+(\.\d+)?([eE][+-]?\d+)?/
+_EXP: ("e"|"E") SIGNED_INT
+FLOAT: INT _EXP | DECIMAL _EXP?
+SIGNED_FLOAT: ["+"|"-"] FLOAT
+
+NUMBER: FLOAT | INT
+SIGNED_NUMBER: ["+"|"-"] NUMBER
+
+//
+// Strings
+//
+_STRING_INNER: /[^"\\\n]|\\./
+_STRING_ESC_INNER: _STRING_INNER*
+
+ESCAPED_STRING : "\"" _STRING_ESC_INNER "\""
+
+
+//
+// Names (Variables)
+//
+LCASE_LETTER: "a".."z"
+UCASE_LETTER: "A".."Z"
+
+LETTER: UCASE_LETTER | LCASE_LETTER
+WORD: LETTER+
+
+CNAME: ("_"|LETTER) ("_"|LETTER|DIGIT)*
+
+
+//
+// Whitespace
+//
+WS_INLINE: (" "|/\t/)+
+WS: /[ \t\f\r\n]/+
+
+CR : /\r/
+LF : /\n/
+NEWLINE: (CR? LF)+
+
+
+// Comments
+SH_COMMENT: /#[^\n]*/
+CPP_COMMENT: /\/\/[^\n]*/
+C_COMMENT: "/*" /(.|\n)*?/ "*/"
+SQL_COMMENT: /--[^\n]*/

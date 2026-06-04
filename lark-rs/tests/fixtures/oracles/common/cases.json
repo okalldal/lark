@@ -1,0 +1,1222 @@
+{
+  "DIGIT": [
+    {
+      "input": "5",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "DIGIT",
+            "value": "5"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "0",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "DIGIT",
+            "value": "0"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "12",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "Unexpected token Token('DIGIT', '2') at line 1, column 2.\nExpected one of: \n\t* $END\nPrevious tokens: [Token('DIGIT', '1')]\n"
+    },
+    {
+      "input": "a",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\na\n^\nExpected one of: \n\t* DIGIT\n"
+    },
+    {
+      "input": "",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* DIGIT\n"
+    }
+  ],
+  "HEXDIGIT": [
+    {
+      "input": "a",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "HEXDIGIT",
+            "value": "a"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "F",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "HEXDIGIT",
+            "value": "F"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "9",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "HEXDIGIT",
+            "value": "9"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "g",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches 'g' in the current parser context, at line 1 col 1\n\ng\n^\nExpected one of: \n\t* HEXDIGIT\n"
+    },
+    {
+      "input": "G",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches 'G' in the current parser context, at line 1 col 1\n\nG\n^\nExpected one of: \n\t* HEXDIGIT\n"
+    }
+  ],
+  "INT": [
+    {
+      "input": "123",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "INT",
+            "value": "123"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "0",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "INT",
+            "value": "0"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "12a",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches 'a' in the current parser context, at line 1 col 3\n\n12a\n  ^\nExpected one of: \n\t* <END-OF-FILE>\n\nPrevious tokens: Token('INT', '12')\n"
+    },
+    {
+      "input": "",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* INT\n"
+    }
+  ],
+  "SIGNED_INT": [
+    {
+      "input": "5",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "SIGNED_INT",
+            "value": "5"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "+5",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "SIGNED_INT",
+            "value": "+5"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "-5",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "SIGNED_INT",
+            "value": "-5"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "++5",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches '+' in the current parser context, at line 1 col 1\n\n++5\n^\nExpected one of: \n\t* SIGNED_INT\n"
+    }
+  ],
+  "DECIMAL": [
+    {
+      "input": "1.5",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "DECIMAL",
+            "value": "1.5"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "1.",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "DECIMAL",
+            "value": "1."
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": ".5",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "DECIMAL",
+            "value": ".5"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "1",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches '1' in the current parser context, at line 1 col 1\n\n1\n^\nExpected one of: \n\t* DECIMAL\n"
+    }
+  ],
+  "FLOAT": [
+    {
+      "input": "1e5",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "FLOAT",
+            "value": "1e5"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "1.5",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "FLOAT",
+            "value": "1.5"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "1.5e-3",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "FLOAT",
+            "value": "1.5e-3"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": ".5e3",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "FLOAT",
+            "value": ".5e3"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "1",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches '1' in the current parser context, at line 1 col 1\n\n1\n^\nExpected one of: \n\t* FLOAT\n"
+    }
+  ],
+  "SIGNED_FLOAT": [
+    {
+      "input": "-1.5",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "SIGNED_FLOAT",
+            "value": "-1.5"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "+1e3",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "SIGNED_FLOAT",
+            "value": "+1e3"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "1.0",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "SIGNED_FLOAT",
+            "value": "1.0"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "1",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches '1' in the current parser context, at line 1 col 1\n\n1\n^\nExpected one of: \n\t* SIGNED_FLOAT\n"
+    }
+  ],
+  "NUMBER": [
+    {
+      "input": "1",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "NUMBER",
+            "value": "1"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "1.5",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "NUMBER",
+            "value": "1.5"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "1e5",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "NUMBER",
+            "value": "1e5"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "a",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\na\n^\nExpected one of: \n\t* NUMBER\n"
+    }
+  ],
+  "SIGNED_NUMBER": [
+    {
+      "input": "-1",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "SIGNED_NUMBER",
+            "value": "-1"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "+1.5",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "SIGNED_NUMBER",
+            "value": "+1.5"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "2e2",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "SIGNED_NUMBER",
+            "value": "2e2"
+          }
+        ]
+      },
+      "error": null
+    }
+  ],
+  "LETTER": [
+    {
+      "input": "a",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "LETTER",
+            "value": "a"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "Z",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "LETTER",
+            "value": "Z"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "1",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches '1' in the current parser context, at line 1 col 1\n\n1\n^\nExpected one of: \n\t* LETTER\n"
+    },
+    {
+      "input": "ab",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "Unexpected token Token('LETTER', 'b') at line 1, column 2.\nExpected one of: \n\t* $END\nPrevious tokens: [Token('LETTER', 'a')]\n"
+    }
+  ],
+  "WORD": [
+    {
+      "input": "abc",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "WORD",
+            "value": "abc"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "Hello",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "WORD",
+            "value": "Hello"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "ab1",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches '1' in the current parser context, at line 1 col 3\n\nab1\n  ^\nExpected one of: \n\t* <END-OF-FILE>\n\nPrevious tokens: Token('WORD', 'ab')\n"
+    },
+    {
+      "input": "",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* WORD\n"
+    }
+  ],
+  "CNAME": [
+    {
+      "input": "_foo",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "CNAME",
+            "value": "_foo"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "a1",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "CNAME",
+            "value": "a1"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "Bar_2",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "CNAME",
+            "value": "Bar_2"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "1abc",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches '1' in the current parser context, at line 1 col 1\n\n1abc\n^\nExpected one of: \n\t* CNAME\n"
+    }
+  ],
+  "LCASE_LETTER": [
+    {
+      "input": "q",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "LCASE_LETTER",
+            "value": "q"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "Q",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches 'Q' in the current parser context, at line 1 col 1\n\nQ\n^\nExpected one of: \n\t* LCASE_LETTER\n"
+    }
+  ],
+  "UCASE_LETTER": [
+    {
+      "input": "Q",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "UCASE_LETTER",
+            "value": "Q"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "q",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches 'q' in the current parser context, at line 1 col 1\n\nq\n^\nExpected one of: \n\t* UCASE_LETTER\n"
+    }
+  ],
+  "WS_INLINE": [
+    {
+      "input": " ",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "WS_INLINE",
+            "value": " "
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "\t",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "WS_INLINE",
+            "value": "\t"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "  \t",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "WS_INLINE",
+            "value": "  \t"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "\n",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches '\n' in the current parser context, at line 1 col 1\n\n\n^\nExpected one of: \n\t* WS_INLINE\n"
+    }
+  ],
+  "WS": [
+    {
+      "input": " ",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "WS",
+            "value": " "
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": " \n\t",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "WS",
+            "value": " \n\t"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "\r\n",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "WS",
+            "value": "\r\n"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "a",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\na\n^\nExpected one of: \n\t* WS\n"
+    }
+  ],
+  "CR": [
+    {
+      "input": "\r",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "CR",
+            "value": "\r"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "\n",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches '\n' in the current parser context, at line 1 col 1\n\n\n^\nExpected one of: \n\t* CR\n"
+    }
+  ],
+  "LF": [
+    {
+      "input": "\n",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "LF",
+            "value": "\n"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "\r",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches '\r' in the current parser context, at line 1 col 1\n\n\r\n^\nExpected one of: \n\t* LF\n"
+    }
+  ],
+  "NEWLINE": [
+    {
+      "input": "\n",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "NEWLINE",
+            "value": "\n"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "\r\n",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "NEWLINE",
+            "value": "\r\n"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "\n\n",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "NEWLINE",
+            "value": "\n\n"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "a",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\na\n^\nExpected one of: \n\t* NEWLINE\n"
+    }
+  ],
+  "SH_COMMENT": [
+    {
+      "input": "# hi",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "SH_COMMENT",
+            "value": "# hi"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "#",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "SH_COMMENT",
+            "value": "#"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "// hi",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches '/' in the current parser context, at line 1 col 1\n\n// hi\n^\nExpected one of: \n\t* SH_COMMENT\n"
+    }
+  ],
+  "CPP_COMMENT": [
+    {
+      "input": "// hi",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "CPP_COMMENT",
+            "value": "// hi"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "//",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "CPP_COMMENT",
+            "value": "//"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "# hi",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches '#' in the current parser context, at line 1 col 1\n\n# hi\n^\nExpected one of: \n\t* CPP_COMMENT\n"
+    }
+  ],
+  "C_COMMENT": [
+    {
+      "input": "/* hi */",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "C_COMMENT",
+            "value": "/* hi */"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "/* a\nb */",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "C_COMMENT",
+            "value": "/* a\nb */"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "/* x",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches '/' in the current parser context, at line 1 col 1\n\n/* x\n^\nExpected one of: \n\t* C_COMMENT\n"
+    }
+  ],
+  "SQL_COMMENT": [
+    {
+      "input": "-- hi",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "SQL_COMMENT",
+            "value": "-- hi"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "--",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "SQL_COMMENT",
+            "value": "--"
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "# hi",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches '#' in the current parser context, at line 1 col 1\n\n# hi\n^\nExpected one of: \n\t* SQL_COMMENT\n"
+    }
+  ],
+  "ESCAPED_STRING": [
+    {
+      "input": "\"hi\"",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "ESCAPED_STRING",
+            "value": "\"hi\""
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "\"\"",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "ESCAPED_STRING",
+            "value": "\"\""
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "\"a\\\"b\"",
+      "should_pass": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "ESCAPED_STRING",
+            "value": "\"a\\\"b\""
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "\"x",
+      "should_pass": false,
+      "ok": false,
+      "tree": null,
+      "error": "No terminal matches '\"' in the current parser context, at line 1 col 1\n\n\"x\n^\nExpected one of: \n\t* ESCAPED_STRING\n"
+    }
+  ]
+}

@@ -128,6 +128,8 @@ tests/
   test_earley_dynamic.rs  Curated dynamic-lexer oracles (overlap, %ignore, dynamic_complete)
   test_earley_compliance.rs  Replays the Earley compliance bank (XFAIL-gated); the Phase-2 regression net
   test_earley_dynamic_compliance.rs  Replays the dynamic-lexer Earley bank (XFAIL-gated)
+  test_common.rs      common.lark terminal library vs oracle (Phase 3) — each
+                      user-facing common terminal lexes as Python Lark's does
   test_oracle_coverage.rs  Meta-test: every grammar needs an oracle or quarantine
   test_json_corpus.rs 293-file JSONTestSuite corpus test
   grammars/           .lark files used by tests (arithmetic.lark, json.lark, …)
@@ -153,7 +155,9 @@ tools/
       → RawRule / RawTerm / ImportSpec AST nodes
   → GrammarCompiler   (lowers AST to Grammar)
       → EBNF expansion: star/plus/opt/group → anonymous rules (__anon_*)
-      → resolve_import(): reads common.lark stubs, registers terminals
+      → resolve_import(): parses the bundled src/grammars/common.lark through this
+        same loader (cached) and copies the requested terminal(s) — no
+        hand-transcribed regex table, so common terminals cannot drift from Lark
       → compile_term(): sorts alts longest-first, builds TerminalDef
       → compile_rule_body(): lowers rule bodies to Symbol sequences
   → Grammar { rules, terminals, ignore, start }   (surface, string-named)
@@ -301,7 +305,7 @@ option.
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| Complete `common.lark` stubs | ⬜ | ~40 common terminals |
+| Complete `common.lark` stubs | ✅ | The full upstream `common.lark` is bundled (`src/grammars/common.lark`) and parsed through lark-rs's own terminal-algebra loader, not a hand-transcribed regex table — so common terminals can't drift. Added `CR`/`LF`/`SQL_COMMENT` + the `_EXP`/`_STRING_*` helpers; one documented lookbehind adaptation for `ESCAPED_STRING`. Pinned by `test_common.rs` |
 | `%import` from file path | ⬜ | Relative imports |
 | Grammar standard library | ⬜ | SQL, Python, … |
 | Indenter / postlex | ⬜ | Python-style INDENT/DEDENT |
