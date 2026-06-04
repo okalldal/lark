@@ -281,13 +281,14 @@ Sprint 2 landed the **SPPF + forest→tree** walk and wired the Earley frontend 
 is all-or-nothing (no XFAIL), Sprint 2 also brought up `ambiguity='resolve'` (the
 planned Sprint 3) and `ambiguity='explicit'` `_ambig` forests (the planned Sprint 4)
 far enough for the whole curated set to pass; the broader bank is the XFAIL-gated
-burndown net (now 210/211 ≈ 99.5%). **Sprint 5 landed the dynamic lexer +
+burndown net (now 211/211 — clean, after the `AmbiguousExpander` port lifted the
+last explicit-ambiguity-through-`_rule`+EBNF-helper case). **Sprint 5 landed the dynamic lexer +
 `dynamic_complete`** (`build_chart_dynamic`/`scan_dynamic` in `earley.rs`,
 `DynamicMatcher` in `lexer.rs`): scanning is folded into the Earley loop, with its
-own XFAIL-gated bank (`earley_dynamic_bank.json`, 441/454 ≈ 97.1% on first cut).
-The remaining XFAILs are `%ignore`-of-content edge cases, `dynamic_complete`
-resolve tie-break ordering, and nested-`_ambig`-through-EBNF-helper cases (the same
-explicit-ambiguity limitation already deferred on the basic-lexer path);
+own XFAIL-gated bank (`earley_dynamic_bank.json`, 446/454 ≈ 98.2%, after the
+`AmbiguousExpander` port). The remaining XFAILs are `%ignore`-of-content edge cases
+and `dynamic_complete` resolve tie-break ordering (the nested-`_ambig`-through-
+`_rule`+EBNF-helper cluster is now fixed on both banks);
 `priority="invert"` is filtered as an orthogonal, unimplemented disambiguation
 option.
 
@@ -297,8 +298,8 @@ option.
 | Earley recogniser | ✅ | Sprint 1: predict/scan/complete over `SymbolId`. Now reimplemented on top of the Sprint-2 chart (`recognize` = "did the start node build?"), so it accepts exactly what `parse` parses. Verified by `test_earley_recognizer` |
 | SPPF forest construction | ✅ | Sprint 2: Elizabeth Scott's binarized SPPF (symbol / intermediate / packed nodes, arena-allocated by `NodeId`, held-completion nullable handling). Joop-Leo transitives omitted (dead code in the reference) |
 | Forest → tree conversion | ✅ | Sprint 2: `Transformer` walks the SPPF and reuses `TreeBuilder::assemble`; `ambiguity='resolve'` picks the highest-priority derivation (Lark's `ForestSumVisitor` order). Verified ≡ LALR on every unambiguous oracle by `test_earley_parity` |
-| `ambiguity='explicit'` | ✅ | Sprint 2: emits `_ambig` forests; curated cases pass, bank 210/211 (one explicit-ambiguity-through-`_rule`+EBNF-helper case deferred as XFAIL) |
-| Dynamic lexer | ✅ | Sprint 5: scanning folded into the Earley loop (`xearley.py` port) — terminals tried at each position are exactly those the parser predicts. `LexerType::Dynamic`. Delayed-match buffer for variable-length tokens + `%ignore` carry-over. Terminal priorities feed the forest sum (the basic lexer consumes them in its ordering; the dynamic lexer does not). Bank 441/454 ≈ 97.1% |
+| `ambiguity='explicit'` | ✅ | Sprint 2: emits `_ambig` forests; curated cases pass, bank 211/211 (clean — the `AmbiguousExpander` port lifts an ambiguous transparent `_rule`/EBNF-helper child's ambiguity up into the parent) |
+| Dynamic lexer | ✅ | Sprint 5: scanning folded into the Earley loop (`xearley.py` port) — terminals tried at each position are exactly those the parser predicts. `LexerType::Dynamic`. Delayed-match buffer for variable-length tokens + `%ignore` carry-over. Terminal priorities feed the forest sum (the basic lexer consumes them in its ordering; the dynamic lexer does not). Bank 446/454 ≈ 98.2% |
 | `dynamic_complete` | ✅ | Sprint 5: `LexerType::DynamicComplete` — also explores every shorter tokenization, so all segmentations are considered |
 
 ### ⬜ Phase 3 — Full Feature Parity

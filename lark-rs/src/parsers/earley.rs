@@ -907,6 +907,11 @@ struct Transformer<'a> {
     term_priority: HashMap<SymbolId, i32>,
     /// Memoized symbol-node values (final assembled trees).
     memo: HashMap<usize, NodeValue>,
+    /// Memoized per-symbol-node derivation lists (the deduped alternative values
+    /// before they are collapsed into a single value / `_ambig`). Shared by
+    /// [`Transformer::eval_symbol`] and the transparent-child ambiguity lifting in
+    /// [`Transformer::expand_packed`].
+    deriv_memo: HashMap<usize, Vec<NodeValue>>,
     /// Memoized node priorities + the in-progress set for cycle-safe summing.
     prio: HashMap<usize, i32>,
     prio_visiting: HashSet<usize>,
@@ -938,6 +943,7 @@ impl<'a> Transformer<'a> {
             resolve,
             term_priority,
             memo: HashMap::new(),
+            deriv_memo: HashMap::new(),
             prio: HashMap::new(),
             prio_visiting: HashSet::new(),
         }
@@ -1028,30 +1034,46 @@ impl<'a> Transformer<'a> {
         idx
     }
 
-    /// Evaluate a real (non-intermediate) symbol node to a single value: the best
-    /// derivation under `resolve`, or an `_ambig` over all of them under explicit.
-    /// Returns `None` if every derivation is discarded (e.g. an ambiguity cycle).
-    fn eval_symbol(&mut self, node_id: usize, visiting: &mut HashSet<usize>) -> Option<NodeValue> {
-        if let Some(v) = self.memo.get(&node_id) {
-            return Some(v.clone());
+    /// Is the symbol node `id` produced by a transparent (`_rule` / `__anon_*`)
+    /// rule? All families of a symbol node share its origin non-terminal, and
+    /// transparency is a property of the origin, so the first family decides.
+    /// Transparent symbols are exactly Lark's `_should_expand` positions — the ones
+    /// whose ambiguity must be lifted into the parent (`AmbiguousExpander`).
+    fn is_transparent_node(&self, id: usize) -> bool {
+        self.forest.nodes[id]
+            .families
+            .first()
+            .map(|p| self.grammar.rules[p.rule].transparent)
+            .unwrap_or(false)
+    }
+
+    /// The deduped list of derivation values for a symbol node. Under `resolve`
+    /// this is the single best derivation (highest priority, first in `sort_key`
+    /// order); under explicit ambiguity it is every distinct derivation. Memoized,
+    /// since a shared SPPF node is reachable from many parents.
+    fn symbol_derivations(
+        &mut self,
+        node_id: usize,
+        visiting: &mut HashSet<usize>,
+    ) -> Vec<NodeValue> {
+        if let Some(d) = self.deriv_memo.get(&node_id) {
+            return d.clone();
         }
         if !visiting.insert(node_id) {
-            return None; // cycle in the forest — discard this family
+            return Vec::new(); // cycle in the forest — discard this family
         }
         let order = self.sorted_families(node_id);
 
-        let result = if self.resolve {
-            let mut chosen = None;
+        let mut derivs: Vec<NodeValue> = Vec::new();
+        if self.resolve {
             for fi in order {
                 let packed = self.forest.nodes[node_id].families[fi];
                 if let Some(list) = self.expand_packed(&packed, visiting).into_iter().next() {
-                    chosen = Some(self.builder.assemble(packed.rule, list));
+                    derivs.push(self.builder.assemble(packed.rule, list));
                     break;
                 }
             }
-            chosen
         } else {
-            let mut derivs: Vec<NodeValue> = Vec::new();
             let mut keys: HashSet<String> = HashSet::new();
             for fi in order {
                 let packed = self.forest.nodes[node_id].families[fi];
@@ -1062,18 +1084,30 @@ impl<'a> Transformer<'a> {
                     }
                 }
             }
-            match derivs.len() {
-                0 => None,
-                1 => Some(derivs.pop().unwrap()),
-                _ => {
-                    let children: Vec<Child> =
-                        derivs.into_iter().map(node_value_to_child).collect();
-                    Some(NodeValue::Tree(Tree::new("_ambig", children)))
-                }
+        }
+
+        visiting.remove(&node_id);
+        self.deriv_memo.insert(node_id, derivs.clone());
+        derivs
+    }
+
+    /// Evaluate a real (non-intermediate) symbol node to a single value: the best
+    /// derivation under `resolve`, or an `_ambig` over all of them under explicit.
+    /// Returns `None` if every derivation is discarded (e.g. an ambiguity cycle).
+    fn eval_symbol(&mut self, node_id: usize, visiting: &mut HashSet<usize>) -> Option<NodeValue> {
+        if let Some(v) = self.memo.get(&node_id) {
+            return Some(v.clone());
+        }
+        let mut derivs = self.symbol_derivations(node_id, visiting);
+        let result = match derivs.len() {
+            0 => None,
+            1 => Some(derivs.pop().unwrap()),
+            _ => {
+                let children: Vec<Child> = derivs.into_iter().map(node_value_to_child).collect();
+                Some(NodeValue::Tree(Tree::new("_ambig", children)))
             }
         };
 
-        visiting.remove(&node_id);
         if let Some(v) = &result {
             self.memo.insert(node_id, v.clone());
         }
@@ -1126,24 +1160,46 @@ impl<'a> Transformer<'a> {
             return Vec::new();
         }
 
-        let right_val: Option<NodeValue> = match packed.right {
-            ForestRef::None => None,
-            ForestRef::Node(id) => match self.eval_symbol(id, visiting) {
-                Some(v) => Some(v),
-                None => return Vec::new(), // right discarded → whole derivation gone
-            },
-            ForestRef::Tok(t) => Some(NodeValue::Token(self.forest.tokens[t].clone())),
+        // The alternative values the right symbol contributes. Normally one — but a
+        // *transparent* (`_rule` / `__anon_*`) child that is itself ambiguous under
+        // explicit ambiguity contributes one alternative per derivation, which we
+        // distribute over the parent's child-lists below. This is Lark's
+        // `AmbiguousExpander`: rather than nest an `_ambig` under the spliced
+        // position, the ambiguity is shifted up so the parent itself becomes the
+        // `_ambig` (`parent(_ambig(a, b))` → `_ambig(parent(a), parent(b))`).
+        let right_alts: Vec<NodeValue> = match packed.right {
+            ForestRef::None => Vec::new(),
+            ForestRef::Node(id) => {
+                if !self.resolve && self.is_transparent_node(id) {
+                    let alts = self.symbol_derivations(id, visiting);
+                    if alts.is_empty() {
+                        return Vec::new(); // right discarded → whole derivation gone
+                    }
+                    alts
+                } else {
+                    match self.eval_symbol(id, visiting) {
+                        Some(v) => vec![v],
+                        None => return Vec::new(), // right discarded → whole derivation gone
+                    }
+                }
+            }
+            ForestRef::Tok(t) => vec![NodeValue::Token(self.forest.tokens[t].clone())],
         };
 
-        lefts
-            .into_iter()
-            .map(|mut list| {
-                if let Some(rv) = &right_val {
-                    list.push(rv.clone());
-                }
-                list
-            })
-            .collect()
+        if right_alts.is_empty() {
+            // ε right: the child-lists are exactly the left prefixes.
+            return lefts;
+        }
+
+        let mut out: Vec<Vec<NodeValue>> = Vec::with_capacity(lefts.len() * right_alts.len());
+        for list in &lefts {
+            for rv in &right_alts {
+                let mut l = list.clone();
+                l.push(rv.clone());
+                out.push(l);
+            }
+        }
+        out
     }
 }
 

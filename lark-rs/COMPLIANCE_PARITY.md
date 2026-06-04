@@ -361,18 +361,27 @@ dropping. The newly-surfaced super-linearity is tracked as **P2-4**.
 **Done-when:** the Earley XFAIL allow-lists shrink as each cluster is root-caused
 and fixed (regenerate with `LARK_COMPLIANCE_WRITE_XFAIL=1 cargo test --test
 test_earley_compliance` / `--test test_earley_dynamic_compliance`, commit the
-shrunk lists). Current state: basic bank **210/211** (1 XFAIL, `parse:44`), dynamic
-bank **441/454** (13 XFAILs).
+shrunk lists). Current state: basic bank **211/211** (0 XFAILs — clean), dynamic
+bank **446/454** (8 XFAILs).
 
 **Clusters, by value:**
-1. **Nested `_ambig` through a transparent `_rule` + an EBNF (`+`) helper** — the
-   single most recurring deferral, appearing on **both** banks (basic `parse:44`;
-   dynamic `parse:96/97/130/131`). Representative: `start: _field+ / _field: f1 |
-   f2 | f3 / …` on input `1M2` at `ambiguity='explicit'`. Highest-value fix; the
-   explicit-ambiguity forest is threaded through an inlined helper and the `_ambig`
-   does not surface at the expected position.
+1. **Nested `_ambig` through a transparent `_rule` + an EBNF (`+`) helper** —
+   ✅ **FIXED.** Was the single most recurring deferral, appearing on **both** banks
+   (basic `parse:44`; dynamic `parse:96/97/130/131`, and `parse:87` as a knock-on).
+   Representative: `start: _field+ / _field: f1 | f2 | f3 / …` on input `1M2` at
+   `ambiguity='explicit'`. Root cause: lark-rs only ever built `_ambig` at the
+   symbol-node level, so an `_ambig` arising *inside* a transparent (`_rule` /
+   `__anon_*`) child was spliced in as `parent(_ambig(…))` instead of being lifted
+   to `_ambig(parent(…), parent(…))`. Fixed by porting Lark's `AmbiguousExpander`:
+   `Transformer::expand_packed` now detects an ambiguous transparent child and
+   distributes each of its derivations as a separate alternative child-list of the
+   parent (so the ambiguity is shifted up the tree). See
+   `src/parsers/earley.rs::{symbol_derivations, is_transparent_node, expand_packed}`.
+   (Lark's `AmbiguousIntermediateExpander` needs no port: lark-rs already enumerates
+   intermediate-node alternatives directly via `expand_intermediate`.)
 2. **`%ignore`-of-content edge cases** — e.g. `%ignore "1"` with overlapping
-   string alternatives (`foo12`, `a12b`): dynamic `parse:16–19, 46–47, 87`.
+   string alternatives (`foo12`, `a12b`): dynamic `parse:16–19, 46–47` (`parse:87`
+   was incidentally fixed by cluster 1).
 3. **`dynamic_complete` resolve tie-break ordering** — segmentation order differs
    from Lark's: dynamic `parse:49, 72`.
 
