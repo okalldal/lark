@@ -334,3 +334,10 @@ regression — but unbounded slowness on *unambiguous* input is. Sprint 2 theref
 also asserts: on the shared unambiguous workloads, Earley parses within an agreed
 **K×** of LALR, K read off the harness when Sprint 2 lands (a regression *ceiling*,
 not a moving target). The pathological-ambiguous workload is reported, never gated.
+
+> **Status (2026-06-04 review): NOT shipped.** Sprint 2 landed the correctness
+> half (Earley ≡ LALR trees) but not this perf gate — `benches/parse.rs` still has
+> only the pre-engine placeholder. Tracked as **P2-1** in
+> [`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md) ("Active backlog"): either wire up
+> the Earley benchmark + K× ceiling, or formally downgrade this from an exit
+> criterion to a deferred item.

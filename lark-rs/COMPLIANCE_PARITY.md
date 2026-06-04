@@ -319,6 +319,98 @@ Pinned by `tests/test_ebnf_sharing.rs`.
 > milestone section above (root cause, compliance-bank ids, proposed fix, files,
 > done-when). If issues get enabled later, lift each ticket into one verbatim.
 
+### Active backlog (next up)
+
+These are the open follow-ups from the Phase-2 review (2026-06-04) plus the Phase-3
+Sprint-1 (`common.lark`) review, ordered by priority. None blocks the roadmap;
+they are the loose ends to land before they get more expensive to fix. Each has a
+self-contained detail block under **"Active backlog — detail"** below.
+
+| Ticket | Theme | Confidence | Status |
+|--------|-------|------------|--------|
+| **P2-1** | Earley cost-of-generality perf gate — Sprint-2's documented exit criterion (within K× of LALR on unambiguous input) never shipped; `benches/parse.rs` still only has a placeholder | High | ⬜ open |
+| **P2-2** | Earley deferred-XFAIL burndown — nested `_ambig` via `_rule`+EBNF helper (on **both** banks), `%ignore`-of-content, `dynamic_complete` resolve tie-break | Mixed | ⬜ open |
+| **P3-1** | `ESCAPED_STRING` lookbehind-adaptation hardening — parity rests on 4 oracle cases; add adversarial cases to lock the edges (from PR #28 review) | High | ⬜ open |
+| **P2-3** | De-recurse the forest→tree walk — drop the 256 MB scoped-thread stack band-aid for an explicit-stack iterative walk | Medium | ⬜ open (profiler/robustness-gated) |
+
+### Active backlog — detail
+
+#### P2-1 — Earley cost-of-generality perf gate
+
+**Done-when:** the shared bench harness (`cargo bench --bench parse`) re-runs the
+unambiguous bench grammars under `parser='earley'`, records the Earley/LALR ratio
+**K** once, and asserts a regression *ceiling* (Earley stays within K× of LALR on
+unambiguous input). The pathological ambiguous workload is *reported, never gated*.
+
+**Why open:** `PHASE_2_PLAN.md` §4 (Sprint-2 exit) and §10 (cost-of-generality
+budget) made this an explicit Sprint-2 exit criterion, but only the *correctness*
+half (Earley ≡ LALR trees) shipped. `benches/parse.rs:223` still carries the
+pre-engine placeholder ("Earley/SPPF workloads land here once the engine exists"):
+no Earley benchmark, no K× ceiling. Either wire it up, or downgrade the criterion
+in `PHASE_2_PLAN.md` from "exit criterion" to "deferred, tracked as P2-1".
+
+**Files:** `benches/parse.rs`, `BENCH.md`, `PHASE_2_PLAN.md` §10.
+
+#### P2-2 — Earley deferred-XFAIL burndown
+
+**Done-when:** the Earley XFAIL allow-lists shrink as each cluster is root-caused
+and fixed (regenerate with `LARK_COMPLIANCE_WRITE_XFAIL=1 cargo test --test
+test_earley_compliance` / `--test test_earley_dynamic_compliance`, commit the
+shrunk lists). Current state: basic bank **210/211** (1 XFAIL, `parse:44`), dynamic
+bank **441/454** (13 XFAILs).
+
+**Clusters, by value:**
+1. **Nested `_ambig` through a transparent `_rule` + an EBNF (`+`) helper** — the
+   single most recurring deferral, appearing on **both** banks (basic `parse:44`;
+   dynamic `parse:96/97/130/131`). Representative: `start: _field+ / _field: f1 |
+   f2 | f3 / …` on input `1M2` at `ambiguity='explicit'`. Highest-value fix; the
+   explicit-ambiguity forest is threaded through an inlined helper and the `_ambig`
+   does not surface at the expected position.
+2. **`%ignore`-of-content edge cases** — e.g. `%ignore "1"` with overlapping
+   string alternatives (`foo12`, `a12b`): dynamic `parse:16–19, 46–47, 87`.
+3. **`dynamic_complete` resolve tie-break ordering** — segmentation order differs
+   from Lark's: dynamic `parse:49, 72`.
+
+`priority="invert"` is *filtered*, not XFAIL'd — an orthogonal, unimplemented
+disambiguation option, out of scope here.
+
+**Files:** `src/parsers/earley.rs` (forest→tree walk for cluster 1; `scan_dynamic`
+`%ignore` carry-over for cluster 2; `sorted_families` ordering for cluster 3).
+
+#### P3-1 — `ESCAPED_STRING` lookbehind-adaptation hardening
+
+**Done-when:** the bundled `common.lark` escaped-string adaptation is pinned by
+adversarial oracle cases beyond the current four, and any divergence from Python
+Lark they expose is fixed.
+
+**Why open:** the `regex` crate cannot compile Lark's lookbehind escaped-string
+helpers (`_STRING_ESC_INNER: _STRING_INNER /(?<!\\)(\\\\)*?/`), so `src/grammars/
+common.lark` ships a documented lookbehind-free rewrite. It is the standard correct
+equivalent for *well-formed* strings, but parity currently rests on only four
+`ESCAPED_STRING` oracle cases. Add adversarial inputs — a string ending in an
+escaped backslash then quote (`"a\\"`), an embedded newline, a backslash directly
+before a newline — and confirm each matches Python Lark's verdict; fix the
+adaptation if not.
+
+**Files:** `tools/generate_oracles.py` (`COMMON_TERMINAL_CASES`),
+`src/grammars/common.lark`, `tests/fixtures/oracles/common/cases.json` (regenerated).
+
+#### P2-3 — De-recurse the forest→tree walk
+
+**Done-when:** `EarleyParser::forest_to_tree` no longer needs a hand-rolled
+oversized thread stack; the SPPF→tree walk uses an explicit work stack (or bounded
+recursion) that cannot overflow on deep left-recursive forests.
+
+**Why open:** the walk recurses to O(input length) on left-recursive list
+grammars, so today it runs on a dedicated `std::thread` with a 256 MB stack
+(`src/parsers/earley.rs::forest_to_tree`). It works and is correct, but the fixed
+stack size is a band-aid — a long enough input on a deep grammar can still exceed
+it. Profiler/robustness-gated: defer until a real input or a profiler asks for it.
+
+**Files:** `src/parsers/earley.rs`.
+
+### Compliance milestones (LALR bank)
+
 | Ticket | Theme | ~entries | Confidence | Status |
 |--------|-------|---------:|------------|--------|
 | M1 | escape decoding `\x \u \U` | — | High | ✅ done (PR #15) |
