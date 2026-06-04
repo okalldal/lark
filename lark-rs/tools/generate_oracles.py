@@ -427,6 +427,121 @@ def generate_earley():
     print(f"  {len(groups)} groups; {n_ambig} cases have an `_ambig` root forest")
 
 
+# ─── Earley dynamic lexer (Phase 2, Sprint 5) ────────────────────────────────
+#
+# The dynamic lexer integrates scanning into the Earley loop: the terminals
+# tried at each position are exactly those the parser predicts there, instead of
+# a token stream fixed up front. These curated grammars exercise what only the
+# dynamic lexer can do:
+#
+#   * overlapping terminals (`A: /a+/  B: /a+/`) that the basic lexer would
+#     tokenize one fixed way — under `dynamic` the regex is greedy (one parse or
+#     none), under `dynamic_complete` *every* segmentation is explored;
+#   * `%ignore` interacting with the dynamic scanner (leading / inner / trailing
+#     whitespace carried across the ignore);
+#   * context-sensitive tokenization where a keyword and an identifier overlap
+#     but the grammar position decides which terminal applies.
+#
+# Each group records the `lexer` ("dynamic" | "dynamic_complete") so the Rust
+# replay (test_earley_dynamic.rs) builds the parser exactly as Python Lark did.
+
+# Overlapping `/a+/` terminals — the canonical dynamic-lexer grammar.
+DYN_OVERLAP_GRAMMAR = r"""
+start: A B
+A: /a+/
+B: /a+/
+"""
+
+# Whitespace handling through the dynamic scanner.
+DYN_WS_GRAMMAR = r"""
+start: A B
+A: "a"
+B: "b"
+%ignore " "
+"""
+
+# Arithmetic with ignored spaces, multi-digit numbers (variable-length tokens).
+DYN_ARITH_GRAMMAR = r"""
+start: sum
+?sum: NUMBER | sum "+" NUMBER -> add
+NUMBER: /[0-9]+/
+%ignore " "
+"""
+
+# A keyword that is a prefix of an identifier; the rule position decides which
+# terminal applies at each spot (dynamic lexing, no contextual-lexer state).
+DYN_KEYWORD_GRAMMAR = r"""
+start: "if" NAME
+NAME: /[a-z]+/
+%ignore " "
+"""
+
+# (name, grammar, lexer, [(input, should_parse)])
+EARLEY_DYNAMIC_GRAMMARS = [
+    ("overlap", DYN_OVERLAP_GRAMMAR, "dynamic", [
+        ("aa", False),    # greedy A eats everything → B starves
+        ("aaa", False),
+    ]),
+    ("overlap_complete", DYN_OVERLAP_GRAMMAR, "dynamic_complete", [
+        ("aa", True),     # unique split a|a
+        ("aaa", True),    # ambiguous: a|aa and aa|a
+        ("a", False),
+    ]),
+    ("ws", DYN_WS_GRAMMAR, "dynamic", [
+        ("ab", True),
+        (" a b ", True),
+        ("a  b", True),
+        ("a", False),
+    ]),
+    ("arith", DYN_ARITH_GRAMMAR, "dynamic", [
+        ("1", True),
+        ("1 + 2", True),
+        ("12 + 34", True),
+        ("1 +", False),
+    ]),
+    ("keyword", DYN_KEYWORD_GRAMMAR, "dynamic", [
+        ("if x", True),
+        ("if foo", True),
+        ("ifx", True),     # "if" then "x" — dynamic lexer splits at the rule boundary
+    ]),
+]
+
+
+def generate_earley_dynamic():
+    print("Generating Earley dynamic-lexer oracles...")
+    groups = []
+    for name, grammar, lexer, cases in EARLEY_DYNAMIC_GRAMMARS:
+        for ambiguity in ("resolve", "explicit"):
+            built = []
+            for inp, should_parse in cases:
+                try:
+                    lark = Lark(grammar, parser="earley", lexer=lexer,
+                                ambiguity=ambiguity, start="start",
+                                maybe_placeholders=False)
+                    tree = lark.parse(inp)
+                    ok, payload = True, tree_to_dict(tree)
+                except Exception as e:
+                    ok, payload = False, str(e)
+                if should_parse and not ok:
+                    print(f"  WARNING: {name}/{lexer}/{ambiguity} expected to parse {inp!r}: {payload}")
+                built.append({
+                    "input": inp,
+                    "should_parse": should_parse,
+                    "ok": ok,
+                    "tree": payload if ok else None,
+                    "error": payload if not ok else None,
+                })
+            groups.append({
+                "name": name,
+                "grammar": grammar,
+                "ambiguity": ambiguity,
+                "lexer": lexer,
+                "cases": built,
+            })
+    save_oracle("earley", "dynamic_cases", groups)
+    print(f"  {len(groups)} dynamic-lexer groups")
+
+
 def save_oracle(suite, name, data):
     out_dir = ORACLES_DIR / suite
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -592,6 +707,7 @@ if __name__ == "__main__":
     generate_python_numbers()
     generate_lalr_core()
     generate_earley()
+    generate_earley_dynamic()
     generate_fuzz_corpus()
     generate_json_corpus_manifest()
     print("\nDone. Commit tests/fixtures/oracles/ to track expected outputs.")

@@ -37,6 +37,30 @@ pub fn make_earley(grammar_text: &str, ambiguity: Ambiguity) -> Result<Lark, Lar
     )
 }
 
+/// Build an Earley parser with the **dynamic lexer** (Sprint 5). `lexer` is
+/// `"dynamic"` or `"dynamic_complete"`; `ambiguity` selects resolve / explicit.
+/// Mirrors how Python Lark is built for the dynamic-lexer oracles and bank.
+pub fn make_earley_dynamic(
+    grammar_text: &str,
+    lexer: &str,
+    ambiguity: Ambiguity,
+) -> Result<Lark, LarkError> {
+    let lexer = match lexer {
+        "dynamic_complete" => LexerType::DynamicComplete,
+        _ => LexerType::Dynamic,
+    };
+    Lark::new(
+        grammar_text,
+        LarkOptions {
+            parser: ParserAlgorithm::Earley,
+            lexer,
+            ambiguity,
+            start: vec!["start".to_string()],
+            ..Default::default()
+        },
+    )
+}
+
 /// True while the Earley backend is still a stub (build returns "not yet
 /// implemented"). The Earley oracle/compliance tests probe this once and skip
 /// themselves while it holds, so Sprint 0 lands green with the harness in place;

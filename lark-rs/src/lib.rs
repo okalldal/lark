@@ -12,7 +12,7 @@ pub use grammar::{
     terminal::TerminalDef,
     CompiledGrammar, CompiledRule, Grammar, SymbolId, SymbolKind, SymbolTable,
 };
-pub use lexer::{BasicLexer, ContextualLexer, Lexer, LexerConf};
+pub use lexer::{BasicLexer, ContextualLexer, DynamicMatcher, Lexer, LexerConf};
 pub use parsers::{
     basic_lexer_conf, lalr, EarleyParser, LexFailure, ParseTable, ParserConf, TokenSource,
 };

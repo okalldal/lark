@@ -1,11 +1,14 @@
 # Phase 2 — Earley + SPPF: Scope & Implementation Plan
 
-**Status:** Sprints 0–2 ✅ done. Sprint 2 (SPPF + forest→tree) wired the Earley
-frontend and, because the curated oracle gate is all-or-nothing, also brought up
-`ambiguity='resolve'` (Sprint 3) and `'explicit'` `_ambig` (Sprint 4) for the
-curated set; the Earley compliance bank is the XFAIL-gated burndown net at 210/211
-≈ 99.5%. The dynamic lexer (Sprint 5) is the remaining engine work. Phase 2 was
-unfrozen at 99.6% LALR compliance (see [`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md)).
+**Status:** Sprints 0–5 ✅ done — **Phase 2 is engine-complete.** Sprint 2 (SPPF +
+forest→tree) wired the Earley frontend and, because the curated oracle gate is
+all-or-nothing, also brought up `ambiguity='resolve'` (Sprint 3) and `'explicit'`
+`_ambig` (Sprint 4) for the curated set; the Earley compliance bank is the
+XFAIL-gated burndown net at 210/211 ≈ 99.5%. **Sprint 5 landed the dynamic lexer +
+`dynamic_complete`** (`build_chart_dynamic`/`scan_dynamic`, `DynamicMatcher`), with
+its own XFAIL-gated bank (`earley_dynamic_bank.json`, 441/454 ≈ 97.1% on first cut).
+Phase 2 was unfrozen at 99.6% LALR compliance (see
+[`COMPLIANCE_PARITY.md`](COMPLIANCE_PARITY.md)).
 
 This document answers four questions before any engine code is written:
 
@@ -211,7 +214,31 @@ Exit: `ambiguity='explicit'` matches Lark's `_ambig` forests on the bank.
 
 ---
 
-## 7. Sprint 5 — Dynamic lexer + `dynamic_complete` (separable; can defer)
+## 7. Sprint 5 — Dynamic lexer + `dynamic_complete` ✅ DONE
+
+**What landed.** A close port of `lark/parsers/xearley.py`:
+[`EarleyParser::build_chart_dynamic`](src/parsers/earley.rs) reuses the existing
+predict/complete phase but replaces the scanner with `scan_dynamic`, which matches
+each scan-set item's *predicted* terminal at the current position via a new
+[`DynamicMatcher`](src/lexer.rs) (one anchored regex per terminal — no `unless`
+retyping, since the parser context already chooses the terminal). Matches are held
+in a `delayed_matches` buffer keyed by the step where they end (so variable-length
+and overlapping terminals work), and `%ignore` spans carry scan-set items — and any
+completed start item — past the ignored text. `dynamic_complete` additionally queues
+every shorter prefix tokenization. Terminal priorities now feed the forest
+`ForestSumVisitor` sum (the basic lexer consumes them in its terminal ordering; the
+dynamic lexer has no such ordering, so they must sum in the forest). Wired through
+`build_frontend` as `FrontendKind::EarleyDynamic` for `LexerType::Dynamic` /
+`DynamicComplete`. Gated by curated oracles (`test_earley_dynamic.rs`,
+`earley/dynamic_cases.json`) and a new XFAIL-gated compliance bank
+(`test_earley_dynamic_compliance.rs`, `earley_dynamic_bank.json` — 441/454 ≈ 97.1%
+strip-mined from Lark's `TestEarleyDynamic[_complete]` + `TestFullEarleyDynamic[_complete]`
+classes). The basic-lexer `earley_bank.json` and the LALR `bank.json` stay
+byte-identical. Remaining XFAILs: `%ignore`-of-content edge cases,
+`dynamic_complete` resolve tie-break ordering, and nested-`_ambig`-through-EBNF-helper
+cases; `priority="invert"` is filtered as an orthogonal unimplemented option.
+
+The original Sprint-5 design notes follow.
 
 `lark/parsers/xearley.py` (~174 lines). This is a **distinct sub-phase** and the
 one piece of *engine* prep that isn't already done:
@@ -262,7 +289,7 @@ The one engine abstraction *not* yet built is the **dynamic-lexer extension to
 | **2 ✅** | SPPF + unambiguous forest→tree | **every existing oracle, identical to LALR** | yes |
 | **3 ✅** | `ambiguity='resolve'` | ambiguous grammars → Lark's chosen tree (landed with Sprint 2) | yes |
 | **4 ✅** | `ambiguity='explicit'` + `_ambig` | set-of-derivations match (landed with Sprint 2; bank 210/211) | yes |
-| **5** | dynamic lexer / `dynamic_complete` | dynamic-lexer Earley cases | yes (TokenSource ext.) |
+| **5 ✅** | dynamic lexer / `dynamic_complete` | dynamic-lexer Earley bank (441/454 ≈ 97.1%) | yes |
 
 Each row = one session, one PR, `scripts/check.sh` green, bank not regressed.
 North star unchanged: **the (now two-engine) compliance percentage**, not the

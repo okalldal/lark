@@ -10,7 +10,7 @@ pub use tree_builder::{NodeValue, TreeBuilder};
 
 use crate::error::{LarkError, ParseError};
 use crate::grammar::{CompiledGrammar, Grammar};
-use crate::lexer::{BasicLexer, ContextualLexer, Lexer, LexerConf};
+use crate::lexer::{BasicLexer, ContextualLexer, DynamicMatcher, Lexer, LexerConf};
 use crate::tree::ParseTree;
 use crate::{LarkOptions, LexerType, ParserAlgorithm};
 
@@ -58,6 +58,14 @@ enum FrontendKind {
         /// `ambiguity='resolve'` (pick one tree) vs `'explicit'` (`_ambig` forests).
         resolve: bool,
     },
+    EarleyDynamic {
+        parser: EarleyParser,
+        matcher: DynamicMatcher,
+        resolve: bool,
+        /// `dynamic_complete`: explore every shorter tokenization, not just the
+        /// longest match at each position.
+        complete_lex: bool,
+    },
 }
 
 impl ParsingFrontend {
@@ -78,6 +86,12 @@ impl ParsingFrontend {
                 let tokens = lexer.lex(text)?;
                 parser.parse(&tokens, start, *resolve)
             }
+            FrontendKind::EarleyDynamic {
+                parser,
+                matcher,
+                resolve,
+                complete_lex,
+            } => parser.parse_dynamic(text, start, *resolve, *complete_lex, matcher),
         }
     }
 }
@@ -115,13 +129,12 @@ pub fn build_frontend(
             Ok(ParsingFrontend { kind })
         }
         ParserAlgorithm::Earley => {
-            // Phase 2 Sprint 2: SPPF + forest→tree. Earley always uses the basic
-            // lexer — the contextual lexer narrows terminals by LALR parser state,
-            // which Earley has none of, so `Auto`/`Contextual` resolve to basic.
+            // Earley never uses the contextual lexer (it narrows terminals by LALR
+            // parser state, which Earley has none of). Its lexer options are the
+            // basic lexer (Sprints 1–4; `Auto`/`Basic`/`Contextual` resolve here)
+            // and the dynamic lexer (Sprint 5; `Dynamic` / `DynamicComplete`).
             let cg = crate::grammar::lower(grammar);
             let lexer_conf = basic_lexer_conf(&cg, options.g_regex_flags);
-            let lexer = BasicLexer::new(&lexer_conf)?;
-            let parser = EarleyParser::new(cg);
             let resolve = match options.ambiguity {
                 crate::Ambiguity::Resolve => true,
                 crate::Ambiguity::Explicit => false,
@@ -133,10 +146,26 @@ pub fn build_frontend(
                     }))
                 }
             };
-            let kind = FrontendKind::Earley {
-                parser,
-                lexer,
-                resolve,
+            let kind = match options.lexer {
+                LexerType::Dynamic | LexerType::DynamicComplete => {
+                    let matcher = DynamicMatcher::new(&lexer_conf)?;
+                    let parser = EarleyParser::new(cg);
+                    FrontendKind::EarleyDynamic {
+                        parser,
+                        matcher,
+                        resolve,
+                        complete_lex: options.lexer == LexerType::DynamicComplete,
+                    }
+                }
+                _ => {
+                    let lexer = BasicLexer::new(&lexer_conf)?;
+                    let parser = EarleyParser::new(cg);
+                    FrontendKind::Earley {
+                        parser,
+                        lexer,
+                        resolve,
+                    }
+                }
             };
             Ok(ParsingFrontend { kind })
         }
