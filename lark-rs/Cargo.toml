@@ -6,6 +6,12 @@ description = "A Rust implementation of the Lark parsing toolkit"
 license = "MIT"
 repository = "https://github.com/lark-parser/lark"
 
+# lark-rs is both the workspace root and a member. The C-API crate (`lark_h`,
+# issue #48) is a sibling member so the CI `cargo test --all` / `cargo fmt
+# --all` run from this directory cover it without any extra step.
+[workspace]
+members = ["lark_h"]
+
 [features]
 # Deterministic work counters for the profile-first perf discipline (#56). Off by
 # default so the normal build and the hot parse path carry zero overhead; turn on

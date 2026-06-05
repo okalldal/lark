@@ -315,7 +315,7 @@ underlying super-linearity has since been removed by the Joop-Leo work (#58).
 |-----------|--------|-------|
 | PyO3 Python binding | ⬜ | Drop-in speedup for Python Lark users |
 | WASM target | ⬜ | Browser/Node.js |
-| C API | ⬜ | `lark_h` crate |
+| C API | ✅ | `lark_h` crate (#48): `#[no_mangle]` surface (`lark_new`/`lark_parse`/`lark_tree_*`/`lark_free`) + committed `lark.h` + C smoke test. lark-rs is now a workspace so `cargo test --all` covers it |
 | `include_lark!` proc-macro | ⬜ | Compile-time grammar validation |
 | Benchmarks vs Python Lark | ✅ | #50: `cargo bench --bench vs_python_lark` — JSON / Python / SQL through both engines, byte-identical inputs, prints MB/s + speedup (~4–6× on the reference box). Results in `BENCH.md` |
 
