@@ -327,7 +327,7 @@ fn main() {
     //     explicit cost (the `expand_packed` clone loop guessed by #56 is linear).
     //   • nulltail (`a: X a opt | X`, `opt:` nullable): the recursive `a` is NOT the
     //     rule's last symbol, so Leo declines (strict-right-recursion only) and it
-    //     stays O(n²) — the KNOWN GAP (`tests/test_known_gaps.rs::gap3`). Reported
+    //     stays O(n²) — the KNOWN GAP #64 (`tests/test_known_gaps.rs::gap3`). Reported
     //     here as the not-linearized contrast to the rows above (ns/byte climbs).
     println!();
     println!(
