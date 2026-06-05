@@ -44,8 +44,6 @@ impl<'g> TreeBuilder<'g> {
     /// the LALR reducer drains them off its value stack; an Earley walk collects
     /// them from a forest node.
     pub fn assemble(&self, rule_idx: usize, child_values: Vec<NodeValue>) -> NodeValue {
-        let rule = &self.rules[rule_idx];
-
         // Flatten child values into the parent's child list: drop filtered
         // punctuation tokens (unless the rule keeps all tokens), and splice the
         // children of an inlined (transparent) sub-rule in place. Inlined children
@@ -55,8 +53,7 @@ impl<'g> TreeBuilder<'g> {
         for (i, value) in child_values.into_iter().enumerate() {
             match value {
                 NodeValue::Token(t) => {
-                    let filtered = rule.filter_pos.get(i).copied().unwrap_or(false);
-                    if rule.options.keep_all_tokens || !filtered {
+                    if self.keep_token(rule_idx, i) {
                         children.push(Child::Token(t));
                     }
                 }
@@ -64,6 +61,24 @@ impl<'g> TreeBuilder<'g> {
                 NodeValue::Inline(cs) => children.extend(cs),
             }
         }
+        self.shape(rule_idx, children)
+    }
+
+    /// Whether the token at expansion position `pos` of `rule_idx` is kept (not a
+    /// filtered punctuation terminal), honoring `keep_all_tokens`. Split out of
+    /// [`assemble`] so a streaming forest walk can apply the *same* per-position
+    /// filtering rule without first materializing a per-symbol value list.
+    pub fn keep_token(&self, rule_idx: usize, pos: usize) -> bool {
+        let rule = &self.rules[rule_idx];
+        rule.options.keep_all_tokens || !rule.filter_pos.get(pos).copied().unwrap_or(false)
+    }
+
+    /// Turn a rule's already-filtered child list into the value its parent sees:
+    /// append `maybe_placeholders`, then splice (transparent), unwrap (`expand1`),
+    /// or wrap in a [`Tree`]. The tail half of [`assemble`], shared with the Earley
+    /// streaming walk so both produce identical shaping.
+    pub fn shape(&self, rule_idx: usize, mut children: Vec<Child>) -> NodeValue {
+        let rule = &self.rules[rule_idx];
 
         // maybe_placeholders: an empty `[...]` production emits one `None` per
         // kept symbol of its widest alternative.
