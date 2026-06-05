@@ -268,10 +268,11 @@ fn main() {
     //   • The completer DID rescan the *whole* origin column (an O(column) `.filter`
     //     per completion) — super-linear on a right-recursive grammar, NOT linear as
     //     once assumed. Fixed by a per-column `waiting` index (the named rescan cost).
-    //   • A residual O(n²) remains on hand-written right recursion (`a: X a | X`):
-    //     non-Leo Earley builds O(n²) completed items there regardless of the rescan
-    //     (Python Lark shares this — Leo is dead code in the reference). Tracked for
-    //     the Joop-Leo optimization, not claimed fixed.
+    //   • Hand-written right recursion (`a: X a | X`) WAS a residual O(n²) (non-Leo
+    //     Earley builds O(n²) completed items, as Python Lark still does). #58
+    //     implemented the Joop-Leo optimization, collapsing it to O(n) — see the
+    //     right-recursion scaling rows below (now flat ns/byte) and the deterministic
+    //     before/after proof in `tests/test_earley_scaling.rs`.
     //   • The `ambiguity='explicit'` walk's guessed culprit (the `expand_packed`
     //     `l = list.clone()` loop) was *disproved* — that loop is linear. The real
     //     cost is the per-node derivation-value rebuild for transparent helpers
@@ -312,24 +313,82 @@ fn main() {
         run_parse("parse_earley_ambig", &format!("ambig_{n}"), &ambig, &input);
     }
 
-    // --- #56 scaling workloads (REPORTED here; GATED deterministically) --------
-    // The two #56 super-linear shapes, as a wall-clock trend. The *gate* for these
-    // is the deterministic work-counter test (`tests/test_earley_scaling.rs`) +
-    // `examples/profile_parse.rs scaling`, NOT these timings — wall-clock is too
-    // noisy to enforce (BENCH.md). Reported so the trend stays visible:
-    //   • rightrec (`a: X a | X`): O(n²) completed items — the omitted-Leo residual.
+    // --- #56 / #58 scaling workloads (REPORTED here; GATED deterministically) --
+    // Super-linear shapes as a wall-clock trend. The *gate* is the deterministic
+    // work-counter test (`tests/test_earley_scaling.rs`) + `examples/profile_parse.rs
+    // scaling`, NOT these timings — wall-clock is too noisy to enforce (BENCH.md).
+    // Reported so the trend stays visible:
+    //   • right recursion, now linearized by Joop-Leo (#58): the canonical
+    //     `a: X a | X`, plus two grammars people actually hand-write as right
+    //     recursion and CANNOT express with `+` (it expands to flat left recursion):
+    //     a right-associative operator `?a: NAME "=" a | NAME` and a separated list
+    //     `lst: ITEM "," lst | ITEM`. ns/byte should stay flat as n grows.
     //   • explicit_list (`X+`, ambiguity='explicit'): O(n²) node-rebuild — the real
     //     explicit cost (the `expand_packed` clone loop guessed by #56 is linear).
+    //   • nulltail (`a: X a opt | X`, `opt:` nullable): the recursive `a` is NOT the
+    //     rule's last symbol, so Leo declines (strict-right-recursion only) and it
+    //     stays O(n²) — the KNOWN GAP (`tests/test_known_gaps.rs::gap3`). Reported
+    //     here as the not-linearized contrast to the rows above (ns/byte climbs).
     println!();
-    println!("Parsing — Earley #56 scaling shapes (reported here; gated in test_earley_scaling):");
+    println!(
+        "Parsing — Earley right-recursion (Joop-Leo #58; reported, gated in test_earley_scaling):"
+    );
     let rightrec = build_earley("start: a\na: X a | X\nX: \"x\"\n");
-    for n in [64usize, 128, 256, 512] {
+    let assign = build_earley("?start: a\n?a: NAME \"=\" a | NAME\nNAME: /[a-z]+/\n");
+    let rrlist = build_earley("start: lst\nlst: ITEM \",\" lst | ITEM\nITEM: \"i\"\n");
+    // KNOWN GAP (gap3): nullable tail after the recursion -> Leo declines -> O(n²).
+    let nulltail = build_earley("start: a\na: X a opt | X\nopt:\nX: \"x\"\n");
+    for n in [64usize, 128, 256, 512, 1024] {
         run_parse(
             "parse_earley_rightrec",
             &format!("rr_{n}"),
             &rightrec,
             &"x".repeat(n),
         );
+        run_parse(
+            "parse_earley_assign",
+            &format!("asn_{n}"),
+            &assign,
+            &vec!["x"; n].join("="),
+        );
+        run_parse(
+            "parse_earley_rrlist",
+            &format!("lst_{n}"),
+            &rrlist,
+            &vec!["i"; n].join(","),
+        );
+        run_parse(
+            "parse_earley_nulltail_GAP",
+            &format!("nt_{n}"),
+            &nulltail,
+            &"x".repeat(n),
+        );
+    }
+    // Headline before/after in WALL CLOCK (only meaningful with `--features
+    // perf-counters`, which exposes the Leo toggle; without it both arms are
+    // identical and this prints ~1.0×). Both arms pay the same counter overhead, so
+    // the ratio is fair. This is the "is the PR worth it?" number in real time.
+    #[cfg(feature = "perf-counters")]
+    {
+        println!();
+        println!("Parsing — Joop-Leo OFF vs ON, wall-clock speedup (right-associative `=` chain):");
+        for n in [256usize, 512, 1024] {
+            let input = vec!["x"; n].join("=");
+            lark_rs::perf::set_leo_disabled(true);
+            let off = measure(|| {
+                black_box(assign.parse(black_box(&input)).expect("must parse"));
+            });
+            lark_rs::perf::set_leo_disabled(false);
+            let on = measure(|| {
+                black_box(assign.parse(black_box(&input)).expect("must parse"));
+            });
+            let speedup = off.median_ns / on.median_ns;
+            println!(
+                "  assign n={n:5}  off {:>10.0} ns   on {:>10.0} ns   speedup {speedup:>5.1}x",
+                off.median_ns, on.median_ns
+            );
+            println!("BENCH\tleo_speedup\tassign_{n}\t0\t{speedup:.2}\t0\t0");
+        }
     }
     let explicit_list = Lark::new(
         "start: X+\nX: \"x\"\n",

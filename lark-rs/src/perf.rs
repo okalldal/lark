@@ -30,11 +30,13 @@
 
 #[cfg(feature = "perf-counters")]
 mod imp {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
     static COMPLETER_SCAN_STEPS: AtomicU64 = AtomicU64::new(0);
     static EXPLICIT_PREFIX_COPIES: AtomicU64 = AtomicU64::new(0);
     static EXPLICIT_NODE_CHILDREN: AtomicU64 = AtomicU64::new(0);
+    static FOREST_NODES: AtomicU64 = AtomicU64::new(0);
+    static LEO_DISABLED: AtomicBool = AtomicBool::new(false);
 
     #[inline]
     pub fn add_completer_scan_steps(n: u64) {
@@ -51,11 +53,22 @@ mod imp {
         EXPLICIT_NODE_CHILDREN.fetch_add(n, Ordering::Relaxed);
     }
 
+    /// Count one SPPF node creation. This is the mode-neutral size metric used to
+    /// prove the Joop-Leo win (#58): the forest is O(n²) nodes on right recursion
+    /// without Leo and O(n) with it — a comparison the scan counter alone cannot
+    /// make (Leo zeroes the scan by skipping the cascade, but the question is
+    /// whether *total* forest work is now linear).
+    #[inline]
+    pub fn add_forest_node() {
+        FOREST_NODES.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Zero every counter. Call before the workload you want to measure.
     pub fn reset() {
         COMPLETER_SCAN_STEPS.store(0, Ordering::Relaxed);
         EXPLICIT_PREFIX_COPIES.store(0, Ordering::Relaxed);
         EXPLICIT_NODE_CHILDREN.store(0, Ordering::Relaxed);
+        FOREST_NODES.store(0, Ordering::Relaxed);
     }
 
     pub fn completer_scan_steps() -> u64 {
@@ -68,6 +81,24 @@ mod imp {
 
     pub fn explicit_node_children() -> u64 {
         EXPLICIT_NODE_CHILDREN.load(Ordering::Relaxed)
+    }
+
+    pub fn forest_nodes() -> u64 {
+        FOREST_NODES.load(Ordering::Relaxed)
+    }
+
+    /// Turn the Joop-Leo optimization off (`true`) or on (`false`). Lets a
+    /// benchmark/test measure the *same* engine with and without Leo, so the
+    /// before/after comparison is apples-to-apples (the "prove it was super-linear
+    /// without the fix" half of #58). Production never touches this — the toggle
+    /// only exists under `perf-counters`.
+    pub fn set_leo_disabled(disabled: bool) {
+        LEO_DISABLED.store(disabled, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub fn leo_disabled() -> bool {
+        LEO_DISABLED.load(Ordering::Relaxed)
     }
 
     /// Whether the counters are live (the `perf-counters` feature is enabled).
@@ -85,6 +116,9 @@ mod imp {
     #[inline]
     pub fn add_explicit_node_children(_n: u64) {}
 
+    #[inline]
+    pub fn add_forest_node() {}
+
     pub fn reset() {}
 
     pub fn completer_scan_steps() -> u64 {
@@ -97,6 +131,17 @@ mod imp {
 
     pub fn explicit_node_children() -> u64 {
         0
+    }
+
+    pub fn forest_nodes() -> u64 {
+        0
+    }
+
+    pub fn set_leo_disabled(_disabled: bool) {}
+
+    #[inline]
+    pub fn leo_disabled() -> bool {
+        false
     }
 
     pub const ENABLED: bool = false;
