@@ -365,6 +365,62 @@ start: "(" inner ")"
 %ignore " "
 """
 
+# ── Joop-Leo right-recursion danger zone (issue #58) ──────────────────────────
+# These four grammars pin the *correctness* invariant the Leo optimization must
+# preserve. Leo linearizes hand-written right recursion by short-circuiting the
+# completer's item cascade — but the SPPF it builds must stay byte-identical to
+# the non-Leo forest (Python Lark's Leo is dead code, so the oracle below is the
+# non-Leo ground truth). Each grammar targets a way upstream's forest
+# reconstruction historically broke (lark-parser/lark#397: "duplicate start
+# symbols"):
+#
+#   * right_rec            — the plain win case `a: X a | X`; Leo SHOULD fire and
+#                            the right-nested tree must be unchanged.
+#   * right_rec_nullable   — the recursion terminates through a nullable rule
+#                            (`a: X a | empty`, `empty:`), so Leo interacts with
+#                            held (ε) completions. (The trailing-bar empty alt
+#                            `a: X a |` is valid Lark but lark-rs's loader does not
+#                            accept it yet — a separate gap — so we use a named
+#                            empty rule, which both engines accept.)
+#   * right_rec_transparent— recursion through a transparent `_tail` helper, whose
+#                            node is inlined away: the tree is identical to
+#                            right_rec, so the Leo path-reconstruction must rebuild
+#                            an inlined intermediate node correctly.
+#   * right_rec_ambig      — two parallel right-recursive chains
+#                            (`start: a | b`, `a: X a | X`, `b: X b | X`): every
+#                            input has a constant 2-way ambiguity at the root, so
+#                            the `_ambig` forest stays shallow at all lengths (no
+#                            dependence on lark-rs's ambiguity-flattening shape).
+#                            Each chain is *individually* a deterministic reduction
+#                            path, so Leo should fire on `a` and `b` independently
+#                            while the root ambiguity is preserved exactly.
+EARLEY_RIGHT_REC_GRAMMAR = r"""
+start: a
+a: X a | X
+X: "x"
+"""
+
+EARLEY_RIGHT_REC_NULLABLE_GRAMMAR = r"""
+start: a
+a: X a | empty
+empty:
+X: "x"
+"""
+
+EARLEY_RIGHT_REC_TRANSPARENT_GRAMMAR = r"""
+start: a
+a: X _tail | X
+_tail: a
+X: "x"
+"""
+
+EARLEY_RIGHT_REC_AMBIG_GRAMMAR = r"""
+start: a | b
+a: X a | X
+b: X b | X
+X: "x"
+"""
+
 # (name, grammar, [(input, should_parse)])
 EARLEY_GRAMMARS = [
     ("unambiguous", EARLEY_UNAMBIGUOUS_GRAMMAR, [
@@ -384,6 +440,29 @@ EARLEY_GRAMMARS = [
         ("(a)",   True),
         ("(aaa)", True),
         ("()",    False),
+    ]),
+    ("right_rec", EARLEY_RIGHT_REC_GRAMMAR, [
+        ("x",   True),
+        ("xx",  True),
+        ("xxx", True),
+        ("xxxx", True),
+        ("",    False),
+    ]),
+    ("right_rec_nullable", EARLEY_RIGHT_REC_NULLABLE_GRAMMAR, [
+        ("",    True),
+        ("x",   True),
+        ("xx",  True),
+        ("xxx", True),
+    ]),
+    ("right_rec_transparent", EARLEY_RIGHT_REC_TRANSPARENT_GRAMMAR, [
+        ("x",   True),
+        ("xx",  True),
+        ("xxx", True),
+    ]),
+    ("right_rec_ambig", EARLEY_RIGHT_REC_AMBIG_GRAMMAR, [
+        ("x",   True),
+        ("xx",  True),
+        ("xxx", True),
     ]),
 ]
 
