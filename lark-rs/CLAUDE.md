@@ -301,7 +301,7 @@ underlying super-linearity has since been removed by the Joop-Leo work (#58).
 | Complete `common.lark` stubs | ✅ | The full upstream `common.lark` is bundled (`src/grammars/common.lark`) and parsed through lark-rs's own terminal-algebra loader, not a hand-transcribed regex table — so common terminals can't drift. Added `CR`/`LF`/`SQL_COMMENT` + the `_EXP`/`_STRING_*` helpers; one documented lookbehind adaptation for `ESCAPED_STRING`. Pinned by `test_common.rs` |
 | `%import` from file path | ✅ | Relative imports (`%import .module (X, ...)`) resolve against the importing grammar's directory (`LarkOptions.base_path`), load through `load_grammar`, and copy the requested terminal/rule — a rule pulls in its dependency closure, mangled under the module name (Python's `_get_mangle`). Pinned by `test_imports.rs` (oracles in `fixtures/oracles/imports/`, grammars under `tests/grammars/imports/`) |
 | `%declare` semantic action | ✅ | `%declare _INDENT _DEDENT` registers pattern-less terminals (`TerminalDef::declared`): interned + reserved a parse-table column, filtered out of every scanner (`basic_lexer_conf`), injected by a postlex hook. Pinned by `test_indenter.rs` |
-| Indenter / postlex | ✅ | `LarkOptions.postlex: Option<Indenter>` (LALR backend). The basic lexer materializes the stream, `Indenter::process` rewrites it (INDENT/DEDENT injection, paren-depth suppression, tab expansion, end-of-input dedent flush — a token-for-token port of Python Lark's `lark.indenter.Indenter`), then the parser replays it. Pinned by `test_indenter.rs` (oracles `indent`/`indent_paren`) |
+| Indenter / postlex | ✅ (basic lexer) | `LarkOptions.postlex: Option<Indenter>` (LALR backend). The basic lexer materializes the stream, `Indenter::process` rewrites it (INDENT/DEDENT injection, paren-depth suppression, tab expansion, end-of-input dedent flush — a token-for-token port of Python Lark's `lark.indenter.Indenter`), then the parser replays it. Pinned by `test_indenter.rs` (oracles `indent`/`indent_paren`). **#67: postlex over the *contextual* lexer is the open follow-up** — the lazy per-state lexer needs a streaming postlex adapter + `always_accept` for the NL terminal |
 | Grammar standard library | ⬜ | SQL, Python, … |
 | Standalone parser gen | ⬜ | Emit self-contained Rust or Python |
 | Error recovery | ⬜ | Insert/delete tokens on failure |
@@ -361,8 +361,9 @@ wild rely on these. Document as a known parity gap when adding Phase-3 grammar l
 ## Open Work
 
 All open tasks are tracked as GitHub issues. #39 (`%import` file paths), #45
-(`%declare`), and #41 (Indenter/postlex) are ✅ done. Current priority order for
-the remaining Phase 3: #32 (Earley XFAIL burndown) → #40 (grammar stdlib) → #43
+(`%declare`), and #41 (Indenter/postlex, basic lexer) are ✅ done. Current
+priority order for the remaining Phase 3: #67 (postlex over the contextual lexer,
+follow-up to #41) → #32 (Earley XFAIL burndown) → #40 (grammar stdlib) → #43
 (error recovery) → #42 (standalone parser) → #44 (CYK).
 
 Deferred until specialist work is available: #35 (strict regex-collision, needs FSM
