@@ -847,11 +847,7 @@ impl<'a> GrammarParser<'a> {
             match self.lexer.peek_tok()? {
                 Some(Tok::Or) => {
                     self.lexer.next_tok()?;
-                    // Allow newline after |
-                    if let Some(Tok::Newline) = self.lexer.peek_tok()? {
-                        self.lexer.next_tok()?;
-                    }
-                    alts.push(self.parse_alias()?);
+                    alts.push(self.parse_alt_after_bar()?);
                 }
                 Some(Tok::Newline) => {
                     // Continuation: newline followed by | on the next line.
@@ -861,11 +857,7 @@ impl<'a> GrammarParser<'a> {
                     self.lexer.next_tok()?;
                     if let Some(Tok::Or) = self.lexer.peek_tok()? {
                         self.lexer.next_tok()?; // consume |
-                                                // Allow another newline immediately after |
-                        if let Some(Tok::Newline) = self.lexer.peek_tok()? {
-                            self.lexer.next_tok()?;
-                        }
-                        alts.push(self.parse_alias()?);
+                        alts.push(self.parse_alt_after_bar()?);
                     } else {
                         // No continuation — the newline is already consumed;
                         // caller's consume_newline() is now optional.
@@ -876,6 +868,23 @@ impl<'a> GrammarParser<'a> {
             }
         }
         Ok(alts)
+    }
+
+    /// Parse the alternative following a `|`. An alternative's content sits on
+    /// the same line as its bar, so a `|` with only a newline (or EOF) after it
+    /// is a trailing empty (ε) alternative — `a: X a |` derives `X a` *or*
+    /// nothing. In that case record an empty expansion and leave the newline as
+    /// the rule terminator, rather than running the empty alternative into the
+    /// next rule (which raised "Expected value, got Some(Colon)"). See issue #62.
+    fn parse_alt_after_bar(&mut self) -> Result<AliasedExpansion, GrammarError> {
+        if matches!(self.lexer.peek_tok()?, None | Some(Tok::Newline)) {
+            Ok(AliasedExpansion {
+                expansion: Vec::new(),
+                alias: None,
+            })
+        } else {
+            self.parse_alias()
+        }
     }
 
     fn parse_alias(&mut self) -> Result<AliasedExpansion, GrammarError> {
