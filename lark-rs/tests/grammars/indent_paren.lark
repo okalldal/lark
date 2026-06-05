@@ -1,0 +1,15 @@
+// Indentation grammar with bracket tracking: inside `LPAR ... RPAR` the Indenter
+// ignores newlines (no INDENT/DEDENT is emitted), so a parenthesised group may
+// span lines without disturbing block structure. Named LPAR/RPAR terminals give
+// the bracket tokens deterministic type names for the Indenter's paren lists.
+start: _NL* stmt+
+?stmt: simple | block
+simple: NAME args? _NL
+args: LPAR NAME RPAR
+block: "if" NAME ":" _NL _INDENT stmt+ _DEDENT
+LPAR: "("
+RPAR: ")"
+NAME: /[a-zA-Z]+/
+_NL: /(\r?\n[ \t]*)+/
+%declare _INDENT _DEDENT
+%ignore " "

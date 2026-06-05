@@ -1,0 +1,15 @@
+// Toy Python-like significant-whitespace grammar.
+//
+// `_INDENT` / `_DEDENT` are `%declare`d: they have no lexer pattern and are
+// injected by the Indenter postlex hook when the indentation depth changes.
+// `_NL` (the newline terminal, `_`-prefixed so it is filtered from the tree)
+// carries the indentation the Indenter measures. Exercises %declare + postlex
+// end-to-end: nested blocks, multi-level dedents, and the end-of-input flush.
+start: _NL* stmt+
+?stmt: simple | block
+simple: NAME _NL
+block: "if" NAME ":" _NL _INDENT stmt+ _DEDENT
+NAME: /[a-zA-Z]+/
+_NL: /(\r?\n[ \t]*)+/
+%declare _INDENT _DEDENT
+%ignore " "

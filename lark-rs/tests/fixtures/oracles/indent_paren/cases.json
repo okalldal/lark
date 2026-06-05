@@ -1,0 +1,154 @@
+{
+  "name": "indent_paren",
+  "open_paren_types": [
+    "LPAR"
+  ],
+  "close_paren_types": [
+    "RPAR"
+  ],
+  "cases": [
+    {
+      "input": "f (x)\n",
+      "should_parse": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "simple",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "NAME",
+                "value": "f"
+              },
+              {
+                "type": "tree",
+                "data": "args",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "LPAR",
+                    "value": "("
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "NAME",
+                    "value": "x"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "RPAR",
+                    "value": ")"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "f (\n   x\n)\n",
+      "should_parse": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "simple",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "NAME",
+                "value": "f"
+              },
+              {
+                "type": "tree",
+                "data": "args",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "LPAR",
+                    "value": "("
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "NAME",
+                    "value": "x"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "RPAR",
+                    "value": ")"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "a\nf (y)\n",
+      "should_parse": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "simple",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "NAME",
+                "value": "a"
+              }
+            ]
+          },
+          {
+            "type": "tree",
+            "data": "simple",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "NAME",
+                "value": "f"
+              },
+              {
+                "type": "tree",
+                "data": "args",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "LPAR",
+                    "value": "("
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "NAME",
+                    "value": "y"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "RPAR",
+                    "value": ")"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "error": null
+    }
+  ]
+}

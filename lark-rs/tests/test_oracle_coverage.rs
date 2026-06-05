@@ -10,8 +10,9 @@ use std::path::Path;
 /// silence the test without a genuine reason — that defeats the purpose.
 const QUARANTINE: &[(&str, &str)] = &[(
     "python2",
-    "6440-line WIP needing an INDENT/DEDENT indenter (Phase 3); not yet \
-         parseable end-to-end.",
+    "6440-line WIP full-Python grammar; the INDENT/DEDENT indenter it needs now \
+         exists (see test_indenter.rs), but the grammar is not yet wired to an \
+         oracle / parseable end-to-end.",
 )];
 
 fn grammars_dir() -> std::path::PathBuf {

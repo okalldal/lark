@@ -1261,7 +1261,7 @@ impl GrammarCompiler {
         for item in items {
             match item {
                 Item::ImportItem(spec) => self.resolve_import(spec)?,
-                Item::DeclareItem(_) => { /* forward declarations — no-op for now */ }
+                Item::DeclareItem(syms) => self.declare_terminals(syms),
                 Item::TermItem(t) => self.raw_terms.push(t),
                 Item::RuleItem(r) if !r.params.is_empty() => { /* template — used on demand */ }
                 Item::RuleItem(r) => rule_items.push(r),
@@ -1658,6 +1658,22 @@ impl GrammarCompiler {
                         .push(Rule::new(nt.clone(), syms, None, self.anon_opts(), count));
                 }
                 Ok(Symbol::NonTerminal(nt))
+            }
+        }
+    }
+
+    /// Register each `%declare`d name as a pattern-less terminal. A declared
+    /// terminal is never lexed — it is interned (so rules can reference it and the
+    /// parse table reserves a column) and injected into the token stream by a
+    /// postlex hook, e.g. an [`Indenter`](crate::postlex::Indenter)'s `_INDENT` /
+    /// `_DEDENT`. Already-defined names are left untouched (an explicit definition
+    /// or import wins, matching how imports are kept in `resolve_terminals`).
+    fn declare_terminals(&mut self, syms: Vec<Symbol>) {
+        for sym in syms {
+            if let Symbol::Terminal(t) = sym {
+                if !self.terminals.iter().any(|td| td.name == t.name) {
+                    self.terminals.push(TerminalDef::declared(&t.name));
+                }
             }
         }
     }
