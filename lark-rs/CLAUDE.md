@@ -274,9 +274,12 @@ All six sprints complete. LALR compliance 510/512 ≈ 99.6%; Earley basic bank
 211/211 (clean); dynamic-lexer bank 446/454 ≈ 98.2%. Open items tracked as GitHub
 issues: #32 (XFAIL burndown — cluster 1, "nested `_ambig` through a transparent
 `_rule`/EBNF helper", fixed by porting Lark's `AmbiguousExpander`; the
-`%ignore`-of-content and `dynamic_complete` tie-break clusters remain), #31 (perf
-benchmark), #33 (de-recurse forest walk), #35 (strict regex-collision, deferred —
-needs FSM engine).
+`%ignore`-of-content and `dynamic_complete` tie-break clusters remain), #33
+(de-recurse forest walk), #35 (strict regex-collision, deferred — needs FSM
+engine). #31 (Earley perf gate) is ✅ done — the shared bench harness re-runs the
+unambiguous workloads under `parser='earley'` and reports the Earley/LALR ratio
+trend (see `BENCH.md`); the constant-K ceiling was downgraded to deferred and the
+underlying super-linearity has since been removed by the Joop-Leo work (#58).
 
 | Component | Status | Notes |
 |-----------|--------|-------|
@@ -355,8 +358,8 @@ wild rely on these. Document as a known parity gap when adding Phase-3 grammar l
 
 All open tasks are tracked as GitHub issues. Current priority order for Phase 3:
 #39 (`%import` file paths) → #45 (`%declare`) → #41 (Indenter/postlex) → #32
-(Earley XFAIL burndown) → #31 (Earley perf benchmark) → #40 (grammar stdlib) →
-#43 (error recovery) → #42 (standalone parser) → #44 (CYK).
+(Earley XFAIL burndown) → #40 (grammar stdlib) → #43 (error recovery) → #42
+(standalone parser) → #44 (CYK).
 
 Deferred until specialist work is available: #35 (strict regex-collision, needs FSM
 engine), #33 (de-recurse forest walk, profiler-gated).
