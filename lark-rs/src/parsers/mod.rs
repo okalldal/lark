@@ -11,7 +11,9 @@ pub use tree_builder::{NodeValue, TreeBuilder};
 use crate::error::{LarkError, ParseError};
 use crate::grammar::intern::SymbolTable;
 use crate::grammar::{CompiledGrammar, Grammar};
-use crate::lexer::{BasicLexer, ContextualLexer, DynamicMatcher, Lexer, LexerConf};
+use crate::lexer::{
+    check_regex_collisions, BasicLexer, ContextualLexer, DynamicMatcher, Lexer, LexerConf,
+};
 use crate::postlex::Indenter;
 use crate::tree::ParseTree;
 use crate::{LarkOptions, LexerType, ParserAlgorithm};
@@ -162,6 +164,10 @@ pub fn build_frontend(
 
             let lexer_conf = basic_lexer_conf(&cg, options.g_regex_flags);
 
+            // strict=True: reject same-priority regex terminals whose languages
+            // overlap (issue #35), matching Python Lark's interegular-backed check.
+            check_regex_collisions(&lexer_conf, options.strict)?;
+
             // Validate the postlex hook's terminal names now, before parsing, so a
             // typo'd nl_type or an undeclared INDENT/DEDENT fails at build time. The
             // basic lexer materializes the whole stream and rewrites it; the
@@ -234,6 +240,9 @@ pub fn build_frontend(
             // and the dynamic lexer (Sprint 5; `Dynamic` / `DynamicComplete`).
             let cg = crate::grammar::lower(grammar);
             let lexer_conf = basic_lexer_conf(&cg, options.g_regex_flags);
+            // strict=True regex-collision check (issue #35); Earley uses the basic
+            // lexer (or the dynamic matcher), so the same terminal set applies.
+            check_regex_collisions(&lexer_conf, options.strict)?;
             let resolve = match options.ambiguity {
                 crate::Ambiguity::Resolve => true,
                 crate::Ambiguity::Explicit => false,

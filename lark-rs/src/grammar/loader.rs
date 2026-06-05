@@ -1372,7 +1372,7 @@ impl GrammarCompiler {
                 let pat_str = format!("[{}-{}]", regex::escape(&from), regex::escape(&to));
                 let pat = Pattern::Re(PatternRe::new(&pat_str, 0)?);
                 // A char-range terminal is a regex literal — kept, like `/[a-z]/`.
-                let name = self.intern_anon_pattern(pat, None);
+                let name = self.intern_anon_pattern(pat, None, false);
                 Ok(Symbol::Terminal(Terminal {
                     name,
                     filter_out: false,
@@ -1387,7 +1387,11 @@ impl GrammarCompiler {
         if let Some(name) = self.literal_cache.get(&key) {
             return Ok(name.clone());
         }
-        let (pat, name_hint) = match &lit {
+        // `string_type` mirrors Python's `pattern.type`: a string literal is a
+        // `PatternStr` even when case-insensitive (only the flag is attached), while
+        // a `/regex/` literal is a `PatternRE`. It gates the strict-mode collision
+        // check (issue #35).
+        let (pat, name_hint, string_type) = match &lit {
             LiteralVal::Str(s, ci) => {
                 let mut flags = 0;
                 if *ci {
@@ -1400,14 +1404,14 @@ impl GrammarCompiler {
                 };
                 // Try to create a human-readable name from the string content
                 let hint = terminal_name_hint(s);
-                (pat, hint)
+                (pat, hint, true)
             }
             LiteralVal::Re(pattern, flags) => {
                 let pat = Pattern::Re(PatternRe::new(pattern.as_str(), *flags)?);
-                (pat, None)
+                (pat, None, false)
             }
         };
-        let name = self.intern_anon_pattern(pat, name_hint);
+        let name = self.intern_anon_pattern(pat, name_hint, string_type);
         self.literal_cache.insert(key, name.clone());
         Ok(name)
     }
@@ -1419,7 +1423,12 @@ impl GrammarCompiler {
     /// `A` when `A: "a"` exists, and an inline `/a/` reuses `A` from `A: /a/`).
     /// Filtering is *not* keyed on this terminal — each occurrence carries its own
     /// `filter_out` — so unifying for lexing never changes a token's keep/drop fate.
-    fn intern_anon_pattern(&mut self, pat: Pattern, name_hint: Option<String>) -> String {
+    fn intern_anon_pattern(
+        &mut self,
+        pat: Pattern,
+        name_hint: Option<String>,
+        string_type: bool,
+    ) -> String {
         if let Some(existing) = self
             .terminals
             .iter()
@@ -1433,7 +1442,8 @@ impl GrammarCompiler {
             Some(h) if !self.terminals.iter().any(|t| t.name == h) => h,
             _ => self.fresh_terminal(),
         };
-        self.terminals.push(TerminalDef::new(&name, pat, 0));
+        self.terminals
+            .push(TerminalDef::new(&name, pat, 0).with_string_type(string_type));
         name
     }
 
@@ -1710,6 +1720,20 @@ impl GrammarCompiler {
             Self::resolve_term_regex(&t.name, &by_name, &imported, &mut memo, &mut Vec::new())?;
         }
 
+        // Classify each terminal as Python would: `pattern.type == "str"` (a plain
+        // string literal) vs `"re"`. lark-rs compiles everything to a regex, so we
+        // recover the distinction structurally here — it gates the strict-mode
+        // collision check (issue #35), which only compares the regex terminals.
+        let imported_str: HashMap<&str, bool> = self
+            .terminals
+            .iter()
+            .map(|t| (t.name.as_str(), t.string_type))
+            .collect();
+        let mut str_memo: HashMap<String, bool> = HashMap::new();
+        for t in &raw_terms {
+            Self::term_is_str(&t.name, &by_name, &imported_str, &mut str_memo);
+        }
+
         // Register in source order so terminal ordering stays stable. A terminal
         // already defined via `%import` is not redefined (import wins).
         for t in &raw_terms {
@@ -1718,10 +1742,82 @@ impl GrammarCompiler {
             }
             let regex = &memo[&t.name];
             let pat = Pattern::Re(PatternRe::new(regex.as_str(), 0)?);
+            let string_type = str_memo.get(&t.name).copied().unwrap_or(false);
             self.terminals
-                .push(TerminalDef::new(&t.name, pat, t.priority));
+                .push(TerminalDef::new(&t.name, pat, t.priority).with_string_type(string_type));
         }
         Ok(())
+    }
+
+    /// Does this terminal reduce to a single string literal (Python's `PatternStr`,
+    /// `pattern.type == "str"`)? Mirrors `TerminalTreeToPattern`: an alternation, a
+    /// concatenation of >1 part, a repetition, a range, or a regex literal all make
+    /// it a `PatternRE`; only a lone string literal (possibly through a single-alt
+    /// group or a reference to another string terminal) stays a `PatternStr`.
+    /// Memoized; assumes the grammar is acyclic (the regex pass already rejected
+    /// cycles).
+    fn term_is_str(
+        name: &str,
+        by_name: &HashMap<&str, &RawTerm>,
+        imported_str: &HashMap<&str, bool>,
+        memo: &mut HashMap<String, bool>,
+    ) -> bool {
+        if let Some(b) = memo.get(name) {
+            return *b;
+        }
+        // A reference to an already-resolved (imported/declared) terminal, or a
+        // common-library terminal (all of which are regex-typed).
+        if let Some(b) = imported_str.get(name) {
+            return *b;
+        }
+        let Some(raw) = by_name.get(name) else {
+            return false; // common-library or unknown → regex-typed
+        };
+        // Guard against the cyclic case the regex pass would already have rejected.
+        memo.insert(name.to_string(), false);
+        let result = Self::alts_are_str(&raw.expansions, by_name, imported_str, memo);
+        memo.insert(name.to_string(), result);
+        result
+    }
+
+    /// Type of a parenthesised/whole-terminal `expansions` node: `str` only when
+    /// there is a single alternative that is itself `str`.
+    fn alts_are_str(
+        alts: &[AliasedExpansion],
+        by_name: &HashMap<&str, &RawTerm>,
+        imported_str: &HashMap<&str, bool>,
+        memo: &mut HashMap<String, bool>,
+    ) -> bool {
+        if alts.len() != 1 {
+            return false;
+        }
+        let expansion = &alts[0].expansion;
+        match expansion.len() {
+            0 => true, // empty PatternStr('')
+            1 => Self::expr_is_str(&expansion[0], by_name, imported_str, memo),
+            _ => false, // concatenation → joined PatternRE
+        }
+    }
+
+    /// Type of a single `Expr` in a terminal body.
+    fn expr_is_str(
+        expr: &Expr,
+        by_name: &HashMap<&str, &RawTerm>,
+        imported_str: &HashMap<&str, bool>,
+        memo: &mut HashMap<String, bool>,
+    ) -> bool {
+        match expr {
+            // A string literal is a PatternStr even when case-insensitive (Python
+            // keeps the type, only attaching the flag).
+            Expr::Value(Value::Literal(LiteralVal::Str(_, _))) => true,
+            Expr::Value(Value::Terminal(referenced)) => {
+                Self::term_is_str(referenced, by_name, imported_str, memo)
+            }
+            // A single-alternative group collapses to its inner pattern's type.
+            Expr::Group(alts) => Self::alts_are_str(alts, by_name, imported_str, memo),
+            // Regex literal, range, repetition, `?`, rule/template ref → PatternRE.
+            _ => false,
+        }
     }
 
     /// Resolve one terminal to its combined regex string, recursing into any

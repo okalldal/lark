@@ -25,9 +25,14 @@
 //! dispatches on that id directly. The token's name is carried only for display.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use regex::{CaptureLocations, Regex};
+use regex_automata::{
+    dfa::{dense, Automaton, StartKind},
+    util::primitives::StateID,
+    Anchored, Input,
+};
 
 use crate::error::{GrammarError, ParseError};
 use crate::grammar::intern::SymbolId;
@@ -267,6 +272,180 @@ fn global_flag_prefix(global_flags: u32) -> String {
     } else {
         format!("(?{letters})")
     }
+}
+
+// ─── Strict-mode regex-collision detection (issue #35) ───────────────────────
+//
+// Python Lark delegates this to `interegular` (`lexer.py::_check_regex_collisions`):
+// it groups the *regex* terminals by priority, compiles each to an FSM, and reports
+// a collision when two same-priority regexes can match a common string — raising a
+// `LexError` under `strict=True` (a warning otherwise).
+//
+// The `regex` crate offers no intersection/emptiness test, so we drop to its
+// `regex-automata` layer. Each terminal's regex is compiled to a **whole-match**
+// DFA (anchored at the start; acceptance is checked only at the end-of-input
+// transition, so the DFA accepts exactly the strings the terminal matches in
+// full). Two terminals collide iff the *product* of their DFAs has a reachable
+// state that is accepting in both — classic product-construction emptiness. A BFS
+// over byte-labelled state pairs both decides emptiness and yields the shortest
+// witness string, which we surface in the error the way interegular surfaces its
+// example overlap.
+//
+// We only ever act in strict mode (Lark's non-strict path just logs a warning,
+// and lark-rs has no warning channel), so this never runs on the default build
+// path — there is zero cost unless the user opts into `strict=True`.
+
+/// Cap on distinct product states explored per terminal pair. A pathological
+/// pair (huge unicode classes, bounded repetitions) could otherwise make the BFS
+/// run for a long time; like Python Lark's `max_time` budget we'd rather *under*-
+/// report a collision than hang. Generous enough that real terminal overlaps —
+/// which are tiny — are always found.
+const MAX_PRODUCT_STATES: usize = 200_000;
+
+/// Build an anchored whole-match DFA for a terminal's regex source, or `None` if
+/// the automaton cannot be built (too large, or an unsupported feature). A failed
+/// build means we silently skip the pair rather than over-reject a valid grammar.
+fn whole_match_dfa(src: &str) -> Option<dense::DFA<Vec<u32>>> {
+    dense::Builder::new()
+        .configure(dense::Config::new().start_kind(StartKind::Anchored))
+        .build(src)
+        .ok()
+}
+
+/// If the languages of `a` and `b` (each matched in full) share a string, return
+/// the shortest such witness as raw bytes; otherwise `None`. Walks the product
+/// automaton breadth-first so the witness is minimal, recording a back-pointer per
+/// product state to reconstruct it.
+fn intersection_witness(a: &dense::DFA<Vec<u32>>, b: &dense::DFA<Vec<u32>>) -> Option<Vec<u8>> {
+    let anchored = Input::new("").anchored(Anchored::Yes);
+    let start = (
+        a.start_state_forward(&anchored).ok()?,
+        b.start_state_forward(&anchored).ok()?,
+    );
+
+    // back-pointer: product state → (predecessor, byte that led here).
+    let mut parent: HashMap<(StateID, StateID), ((StateID, StateID), u8)> = HashMap::new();
+    let mut visited: HashSet<(StateID, StateID)> = HashSet::new();
+    let mut queue: VecDeque<(StateID, StateID)> = VecDeque::new();
+    visited.insert(start);
+    queue.push_back(start);
+
+    while let Some(cur) = queue.pop_front() {
+        let (ca, cb) = cur;
+        // Accepting in both at end-of-input ⇒ the path to here is a common string.
+        if a.is_match_state(a.next_eoi_state(ca)) && b.is_match_state(b.next_eoi_state(cb)) {
+            return Some(reconstruct_witness(&parent, start, cur));
+        }
+        if visited.len() > MAX_PRODUCT_STATES {
+            return None;
+        }
+        for byte in 0u8..=255 {
+            let na = a.next_state(ca, byte);
+            if a.is_dead_state(na) || a.is_quit_state(na) {
+                continue;
+            }
+            let nb = b.next_state(cb, byte);
+            if b.is_dead_state(nb) || b.is_quit_state(nb) {
+                continue;
+            }
+            let next = (na, nb);
+            if visited.insert(next) {
+                parent.insert(next, (cur, byte));
+                queue.push_back(next);
+            }
+        }
+    }
+    None
+}
+
+/// Walk the back-pointers from `target` to `start`, collecting the bytes in order.
+fn reconstruct_witness(
+    parent: &HashMap<(StateID, StateID), ((StateID, StateID), u8)>,
+    start: (StateID, StateID),
+    target: (StateID, StateID),
+) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    let mut cur = target;
+    while cur != start {
+        let (prev, byte) = parent[&cur];
+        bytes.push(byte);
+        cur = prev;
+    }
+    bytes.reverse();
+    bytes
+}
+
+/// Strict-mode collision check (Python Lark's `_check_regex_collisions`). Groups
+/// the configured *regex* terminals by priority and, within each group, reports
+/// the first same-priority pair whose languages overlap. A no-op unless `strict`.
+///
+/// String terminals are excluded — exactly as Python only feeds `pattern.type ==
+/// "re"` terminals to interegular; string/keyword overlaps are handled by the
+/// `unless` retyping, not flagged as collisions.
+pub fn check_regex_collisions(conf: &LexerConf, strict: bool) -> Result<(), GrammarError> {
+    if !strict {
+        return Ok(());
+    }
+    let prefix = global_flag_prefix(conf.global_flags);
+
+    // Regex terminals only (Python feeds interegular just `pattern.type == "re"`),
+    // deduplicated by id, sorted by name so the reported pair is deterministic.
+    // `string_type` flags the terminals Python would represent as a `PatternStr`;
+    // lark-rs compiles those to a regex too, but they must be excluded here or a
+    // keyword like `IF: "if"` would be wrongly reported as colliding with `/[a-z]+/`.
+    let mut seen = HashSet::new();
+    let mut res: Vec<&TerminalDef> = conf
+        .terminals
+        .iter()
+        .filter(|(id, t)| matches!(t.pattern, Pattern::Re(_)) && !t.string_type && seen.insert(*id))
+        .map(|(_, t)| t)
+        .collect();
+    res.sort_by(|x, y| x.name.cmp(&y.name));
+
+    // Group by priority; compare only within a group (Lark's `classify`).
+    let mut by_priority: HashMap<i32, Vec<&TerminalDef>> = HashMap::new();
+    for t in res {
+        by_priority.entry(t.priority).or_default().push(t);
+    }
+
+    // Cache each terminal's DFA — built lazily, reused across every pair it is in.
+    let mut dfa_cache: HashMap<String, Option<dense::DFA<Vec<u32>>>> = HashMap::new();
+    let dfa_for = |t: &TerminalDef, cache: &mut HashMap<String, Option<dense::DFA<Vec<u32>>>>| {
+        let src = format!("{}{}", prefix, t.pattern.to_inline_regex());
+        cache
+            .entry(src.clone())
+            .or_insert_with(|| whole_match_dfa(&src))
+            .as_ref()
+            .map(|d| d.clone())
+    };
+
+    // Iterate groups in a deterministic priority order.
+    let mut priorities: Vec<i32> = by_priority.keys().copied().collect();
+    priorities.sort_unstable();
+    for p in priorities {
+        let group = &by_priority[&p];
+        for i in 0..group.len() {
+            let Some(da) = dfa_for(group[i], &mut dfa_cache) else {
+                continue;
+            };
+            for &other in group.iter().skip(i + 1) {
+                let Some(db) = dfa_for(other, &mut dfa_cache) else {
+                    continue;
+                };
+                if let Some(bytes) = intersection_witness(&da, &db) {
+                    let example = String::from_utf8_lossy(&bytes);
+                    return Err(GrammarError::Other {
+                        msg: format!(
+                            "Collision between Terminals {} and {}.\n\
+                             Both match the string {:?}",
+                            group[i].name, other.name, example
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Python Lark's terminal ordering: `(-priority, -max_width, -len(pattern), id)`.
