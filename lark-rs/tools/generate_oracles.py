@@ -838,6 +838,131 @@ def generate_imports():
     save_oracle("imports", "cases", results)
 
 
+# ─── Grammar standard library (Phase 3, issue #40) ───────────────────────────
+#
+# Beyond `common.lark`, lark-rs bundles the grammars Python Lark ships under
+# `lark/grammars/` — `python.lark`, `unicode.lark`, and `lark.lark` (the grammar
+# of Lark's own syntax) — resolvable via the same `%import <lib>.<X>` directive.
+# Each bundled file is compiled by lark-rs's own loader (never a hand-transcribed
+# table), so these oracles pin that the bundled copy lexes/parses exactly as
+# Python Lark's does and cannot drift.
+#
+# `python.lark` and `lark.lark` carry a few documented lookaround-free adaptations
+# (the Rust `regex` crate has no lookahead/lookbehind — see the header of each
+# bundled file). The cases below deliberately exercise the adapted terminals
+# (STRING/LONG_STRING escapes, the `number` literals, lark's OP/REGEXP) on
+# well-formed input where the adaptation preserves the language, so the suite locks
+# the adaptation against the oracle.
+#
+# Each group is `(name, grammar, [(input, should_parse)])`; the grammar imports
+# from a bundled library exactly as a user would. Mixed terminal + rule imports
+# exercise the closure-copy + name-mangling path (`python__HEX_NUMBER`, …).
+STDLIB_GROUPS = [
+    # unicode.lark — the whitespace terminals. The \xa0 (non-breaking space) cases
+    # are what distinguishes unicode.WS from common.WS, which excludes it.
+    ("unicode_ws_inline", "start: WS_INLINE\n%import unicode.WS_INLINE", [
+        (" ", True), ("\t", True), ("  \t", True), ("\xa0", True),
+        (" \xa0\t", True), ("\n", False), ("a", False), ("", False),
+    ]),
+    ("unicode_ws", "start: WS\n%import unicode.WS", [
+        (" ", True), ("\t\n", True), ("\xa0", True), ("\r\n", True),
+        (" \xa0\f\n", True), ("a", False), ("", False),
+    ]),
+
+    # python.lark — number literals (the `number` rule + its terminal closure,
+    # mangled under `python__`). Covers every base + float/imag form.
+    ("python_number", "start: number\n%import python.number", [
+        ("0", True), ("42", True), ("1000000", True), ("1_000", True),
+        ("0x1F", True), ("0xDEADBEEF", True), ("0X0", True), ("0x_1A", True),
+        ("0o17", True), ("0O7", True), ("0o_7", True),
+        ("0b101", True), ("0B0", True), ("0b_1", True),
+        ("3.14", True), ("3.", True), (".5", True), ("3.14e10", True),
+        ("3.14e-10", True), ("1_0.5", True),
+        ("3j", True), ("3.14j", True), (".5j", True),
+        ("", False), ("abc", False),
+        ("0x", False),    # hex needs a digit
+        ("0123", False),  # leading-zero decimal is rejected (lex vs parse, but rejected)
+    ]),
+    # python string terminals — the lookaround-free escaped-body adaptation.
+    ("python_string", "start: STRING\n%import python.STRING", [
+        ('"hi"', True), ("'a'", True), ('""', True),
+        (r'"a\"b"', True),       # escaped quote inside
+        (r'"a\\"', True),        # ends with an escaped backslash, then the real quote
+        ('r"raw"', True), ('b"bytes"', True), ('f"f"', True), ('rb"x"', True),
+        ('"x', False),           # unterminated
+        ('"a\nb"', False),       # raw newline not allowed in a short string
+    ]),
+    ("python_long_string", "start: LONG_STRING\n%import python.LONG_STRING", [
+        ('"""abc"""', True), ("'''x'''", True), ('""""""', True),
+        ('"""a\nb"""', True),    # newlines allowed in a long string
+        ('"""he said "hi" """', True),
+        ('"""x', False),         # unterminated
+    ]),
+    # The `string` rule pulls in BOTH STRING and LONG_STRING, so this pins the
+    # single-vs-triple-quote disambiguation (handled by terminal ordering since the
+    # `(?!"")` opening guard was adapted away).
+    ("python_string_rule", "start: string\n%import python.string", [
+        ('"x"', True), ('"""x"""', True), ("'y'", True), ("'''y'''", True),
+        ('""', True), ('""""""', True),
+    ]),
+    ("python_name", "start: NAME\n%import python.NAME", [
+        ("foo", True), ("_bar", True), ("Hello", True), ("a1", True),
+        ("1abc", False), ("", False),
+    ]),
+
+    # lark.lark — the grammar of Lark's own syntax. Exercise the adapted OP/REGEXP
+    # terminals plus RULE/TOKEN, then a full end-to-end grammar parse via `start`.
+    ("lark_op", "start: OP\n%import lark.OP", [
+        ("+", True), ("*", True), ("?", True), ("a", False), ("", False),
+    ]),
+    ("lark_regexp", "start: REGEXP\n%import lark.REGEXP", [
+        ("/abc/", True), ("/[0-9]+/", True), (r"/a\/b/", True),
+        ("/x/i", True), (r"/\\/", True), ("abc", False),
+    ]),
+    ("lark_rule", "start: RULE\n%import lark.RULE", [
+        ("foo", True), ("_bar", True), ("?baz", True), ("!qux", True),
+        ("FOO", False), ("", False),
+    ]),
+    ("lark_token", "start: TOKEN\n%import lark.TOKEN", [
+        ("FOO", True), ("_BAR", True), ("A1", True), ("foo", False),
+    ]),
+    # End-to-end: import lark's `start` rule and parse a (whitespace-free) grammar
+    # snippet. `%ignore` does not transfer on a rule import, so the input avoids
+    # inter-token spaces — but this still drives the whole rule closure.
+    ("lark_start", "start: _g\n%import lark.start -> _g", [
+        ('a:"b"\n', True),
+        ('a:"b"|"c"\n', True),
+        ('A:/x/\n', True),
+        ('a:"b"\nc:"d"\n', True),
+        ('', True),              # `start: (_item? _NL)* _item?` accepts empty
+    ]),
+]
+
+
+def generate_stdlib():
+    print("Generating grammar standard-library oracles (python/unicode/lark)...")
+    groups = []
+    for name, grammar, cases in STDLIB_GROUPS:
+        built = []
+        for inp, should_parse in cases:
+            ok, result = run_case(grammar, inp, parser_type="lalr")
+            if should_parse and not ok:
+                print(f"  WARNING: {name} expected to parse {inp!r}: {result}")
+            if not should_parse and ok:
+                print(f"  WARNING: {name} expected to reject {inp!r}")
+            built.append({
+                "input": inp,
+                "should_pass": should_parse,
+                "ok": ok,
+                "tree": result if ok else None,
+                "error": result if not ok else None,
+            })
+        groups.append({"name": name, "grammar": grammar, "cases": built})
+    save_oracle("stdlib", "cases", groups)
+    n_cases = sum(len(g["cases"]) for g in groups)
+    print(f"  {len(groups)} groups, {n_cases} cases")
+
+
 # ─── Indenter / postlex (Phase 3) ────────────────────────────────────────────
 #
 # Python-style significant whitespace via `%declare`d INDENT/DEDENT terminals and
@@ -1003,6 +1128,7 @@ if __name__ == "__main__":
     generate_keywords()
     generate_terminal_refs()
     generate_common()
+    generate_stdlib()
     generate_imports()
     generate_indenter()
     generate_python_numbers()

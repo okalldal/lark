@@ -1,0 +1,11 @@
+// Bundled copy of Lark's `lark/grammars/unicode.lark`, parsed by lark-rs's own
+// grammar loader to resolve `%import unicode.X`. This file is a verbatim copy of
+// upstream — it uses no lookahead/lookbehind, so it needs no adaptation.
+
+// TODO: LETTER, WORD, etc.
+
+//
+// Whitespace
+//
+WS_INLINE: /[ \t\xa0]/+
+WS: /[ \t\xa0\f\r\n]/+

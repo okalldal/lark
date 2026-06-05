@@ -144,6 +144,9 @@ tests/
   test_earley_dynamic_compliance.rs  Replays the dynamic-lexer Earley bank (XFAIL-gated)
   test_common.rs      common.lark terminal library vs oracle (Phase 3) — each
                       user-facing common terminal lexes as Python Lark's does
+  test_stdlib.rs      grammar standard library vs oracle (Phase 3, #40) — the
+                      bundled python/unicode/lark grammars resolve via %import and
+                      lex/parse as Python Lark's do (incl. lookaround adaptations)
   test_indenter.rs    %declare + Indenter/postlex vs oracle (Phase 3) — INDENT/
                       DEDENT injection, nested blocks, dedent errors, paren suppression
   test_oracle_coverage.rs  Meta-test: every grammar needs an oracle or quarantine
@@ -304,7 +307,7 @@ underlying super-linearity has since been removed by the Joop-Leo work (#58).
 | `%import` from file path | ✅ | Relative imports (`%import .module (X, ...)`) resolve against the importing grammar's directory (`LarkOptions.base_path`), load through `load_grammar`, and copy the requested terminal/rule — a rule pulls in its dependency closure, mangled under the module name (Python's `_get_mangle`). Pinned by `test_imports.rs` (oracles in `fixtures/oracles/imports/`, grammars under `tests/grammars/imports/`) |
 | `%declare` semantic action | ✅ | `%declare _INDENT _DEDENT` registers pattern-less terminals (`TerminalDef::declared`): interned + reserved a parse-table column, filtered out of every scanner (`basic_lexer_conf`), injected by a postlex hook. Pinned by `test_indenter.rs` |
 | Indenter / postlex | ✅ (basic + contextual lexer) | `LarkOptions.postlex: Option<Indenter>` (LALR backend), on **both** the basic and the contextual (default) lexer. Basic lexer: materialize the stream, `Indenter::process` rewrites it (INDENT/DEDENT injection, paren-depth suppression, tab expansion, end-of-input dedent flush — a token-for-token port of `lark.indenter.Indenter`), then the parser replays it. **#67: contextual lexer** — the lazy per-state lexer can't be materialized up front, so the indenter runs as a streaming `TokenSource` adapter (`PostlexContextual`) inside the pull loop, driving the shared `IndenterStream` core so it injects a byte-identical stream; the NL terminal is forced into every state's scanner via `always_accept` (Python Lark's `PostLex.always_accept`). Pinned by `test_indenter.rs`, which replays the `indent`/`indent_paren` oracles under both lexers **and** adds `indent_context` — a grammar where the contextual lexer's state-narrowing is load-bearing (`NAME`/`VALUE` overlap, basic lexer provably can't parse it) *while* postlex injects INDENT/DEDENT, so the two mechanisms are pinned together, not just for parity. **#69: a general trait-object postlex** (beyond the built-in `Indenter`) is the remaining follow-up |
-| Grammar standard library | ⬜ | SQL, Python, … |
+| Grammar standard library | ✅ | #40: beyond `common.lark`, lark-rs bundles the grammars Python Lark ships under `lark/grammars/` — `python.lark`, `unicode.lark`, and `lark.lark` (the grammar of Lark's own syntax) — under `src/grammars/`, resolvable via the same `%import <lib>.<X>` directive. Each is parsed by lark-rs's own loader (never a hand-transcribed table) so it cannot drift, and routes through the *same* source-parse + closure-copy + name-mangle path as a relative file import (`%import .module`), so an imported rule pulls in its dependency closure mangled under `<module>__` (and aliases are mangled too — Python parity). `python.lark`/`lark.lark` carry documented lookaround-free adaptations (STRING/LONG_STRING escapes, `DEC_NUMBER`, lark's `OP`/`REGEXP`) since the `regex` crate has no lookahead/lookbehind — the same technique `common.lark`'s `ESCAPED_STRING` uses. Pinned by `test_stdlib.rs` (oracles in `fixtures/oracles/stdlib/`), which exercises the adapted terminals against the Python-Lark oracle plus an end-to-end `%import lark.start` grammar parse. SQL/C/Lua are not in this repo's `lark/grammars/` (upstream ships them separately); bundling them is a follow-up |
 | Standalone parser gen | ⬜ | Emit self-contained Rust or Python |
 | Error recovery | ⬜ | Insert/delete tokens on failure |
 | CYK parser | ⬜ | Highly ambiguous grammars |
@@ -356,7 +359,11 @@ propagation). Conflict detection depends on its precision: SLR FOLLOW sets would
 over-report conflicts, so accurate `GrammarError::Conflict` reporting requires it.
 
 **`regex` crate has no lookahead or backreferences.** Some Python Lark grammars in the
-wild rely on these. Document as a known parity gap when adding Phase-3 grammar library.
+wild rely on these. This is a documented parity gap: the bundled stdlib grammars
+(`src/grammars/python.lark`, `lark.lark`) carry lookaround-free adaptations in their
+file headers (STRING/LONG_STRING escapes, `DEC_NUMBER`, `OP`/`REGEXP`), each
+preserving the matched language on well-formed input — the same technique
+`common.lark`'s `ESCAPED_STRING` uses. `test_stdlib.rs` locks them against the oracle.
 
 ---
 
@@ -364,9 +371,9 @@ wild rely on these. Document as a known parity gap when adding Phase-3 grammar l
 
 All open tasks are tracked as GitHub issues. #39 (`%import` file paths), #45
 (`%declare`), #41 (Indenter/postlex, basic lexer), #67 (postlex over the
-contextual lexer), and #35 (strict regex-collision) are ✅ done. Current priority
-order for the remaining Phase 3: #32 (Earley XFAIL burndown) → #40 (grammar
-stdlib) → #43 (error recovery) → #42 (standalone parser) → #44 (CYK).
+contextual lexer), #35 (strict regex-collision), and #40 (grammar stdlib) are
+✅ done. Current priority order for the remaining Phase 3: #32 (Earley XFAIL
+burndown) → #43 (error recovery) → #42 (standalone parser) → #44 (CYK).
 
 Deferred until specialist work is available: #33 (de-recurse forest walk,
 profiler-gated).

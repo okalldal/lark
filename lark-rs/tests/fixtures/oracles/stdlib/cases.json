@@ -1,0 +1,1823 @@
+[
+  {
+    "name": "unicode_ws_inline",
+    "grammar": "start: WS_INLINE\n%import unicode.WS_INLINE",
+    "cases": [
+      {
+        "input": " ",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "WS_INLINE",
+              "value": " "
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "\t",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "WS_INLINE",
+              "value": "\t"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "  \t",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "WS_INLINE",
+              "value": "  \t"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": " ",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "WS_INLINE",
+              "value": " "
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "  \t",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "WS_INLINE",
+              "value": "  \t"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "\n",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "No terminal matches '\n' in the current parser context, at line 1 col 1\n\n\n^\nExpected one of: \n\t* WS_INLINE\n"
+      },
+      {
+        "input": "a",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\na\n^\nExpected one of: \n\t* WS_INLINE\n"
+      },
+      {
+        "input": "",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* WS_INLINE\n"
+      }
+    ]
+  },
+  {
+    "name": "unicode_ws",
+    "grammar": "start: WS\n%import unicode.WS",
+    "cases": [
+      {
+        "input": " ",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "WS",
+              "value": " "
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "\t\n",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "WS",
+              "value": "\t\n"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": " ",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "WS",
+              "value": " "
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "\r\n",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "WS",
+              "value": "\r\n"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "  \f\n",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "WS",
+              "value": "  \f\n"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "a",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\na\n^\nExpected one of: \n\t* WS\n"
+      },
+      {
+        "input": "",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* WS\n"
+      }
+    ]
+  },
+  {
+    "name": "python_number",
+    "grammar": "start: number\n%import python.number",
+    "cases": [
+      {
+        "input": "0",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__DEC_NUMBER",
+                  "value": "0"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "42",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__DEC_NUMBER",
+                  "value": "42"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "1000000",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__DEC_NUMBER",
+                  "value": "1000000"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "1_000",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__DEC_NUMBER",
+                  "value": "1_000"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "0x1F",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__HEX_NUMBER",
+                  "value": "0x1F"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "0xDEADBEEF",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__HEX_NUMBER",
+                  "value": "0xDEADBEEF"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "0X0",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__HEX_NUMBER",
+                  "value": "0X0"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "0x_1A",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__HEX_NUMBER",
+                  "value": "0x_1A"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "0o17",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__OCT_NUMBER",
+                  "value": "0o17"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "0O7",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__OCT_NUMBER",
+                  "value": "0O7"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "0o_7",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__OCT_NUMBER",
+                  "value": "0o_7"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "0b101",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__BIN_NUMBER",
+                  "value": "0b101"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "0B0",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__BIN_NUMBER",
+                  "value": "0B0"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "0b_1",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__BIN_NUMBER",
+                  "value": "0b_1"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "3.14",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__FLOAT_NUMBER",
+                  "value": "3.14"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "3.",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__FLOAT_NUMBER",
+                  "value": "3."
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": ".5",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__FLOAT_NUMBER",
+                  "value": ".5"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "3.14e10",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__FLOAT_NUMBER",
+                  "value": "3.14e10"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "3.14e-10",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__FLOAT_NUMBER",
+                  "value": "3.14e-10"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "1_0.5",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__FLOAT_NUMBER",
+                  "value": "1_0.5"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "3j",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__IMAG_NUMBER",
+                  "value": "3j"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "3.14j",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__IMAG_NUMBER",
+                  "value": "3.14j"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": ".5j",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "number",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__IMAG_NUMBER",
+                  "value": ".5j"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* \n"
+      },
+      {
+        "input": "abc",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\nabc\n^\nExpected one of: \n\t* python__BIN_NUMBER\n\t* python__DEC_NUMBER\n\t* python__FLOAT_NUMBER\n\t* python__HEX_NUMBER\n\t* python__IMAG_NUMBER\n\t* python__OCT_NUMBER\n"
+      },
+      {
+        "input": "0x",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "No terminal matches 'x' in the current parser context, at line 1 col 2\n\n0x\n ^\nExpected one of: \n\t* <END-OF-FILE>\n\nPrevious tokens: Token('python__DEC_NUMBER', '0')\n"
+      },
+      {
+        "input": "0123",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "No terminal matches '0' in the current parser context, at line 1 col 1\n\n0123\n^\nExpected one of: \n\t* python__BIN_NUMBER\n\t* python__DEC_NUMBER\n\t* python__FLOAT_NUMBER\n\t* python__HEX_NUMBER\n\t* python__IMAG_NUMBER\n\t* python__OCT_NUMBER\n"
+      }
+    ]
+  },
+  {
+    "name": "python_string",
+    "grammar": "start: STRING\n%import python.STRING",
+    "cases": [
+      {
+        "input": "\"hi\"",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "STRING",
+              "value": "\"hi\""
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "'a'",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "STRING",
+              "value": "'a'"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "\"\"",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "STRING",
+              "value": "\"\""
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "\"a\\\"b\"",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "STRING",
+              "value": "\"a\\\"b\""
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "\"a\\\\\"",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "STRING",
+              "value": "\"a\\\\\""
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "r\"raw\"",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "STRING",
+              "value": "r\"raw\""
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "b\"bytes\"",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "STRING",
+              "value": "b\"bytes\""
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "f\"f\"",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "STRING",
+              "value": "f\"f\""
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "rb\"x\"",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "STRING",
+              "value": "rb\"x\""
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "\"x",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "No terminal matches '\"' in the current parser context, at line 1 col 1\n\n\"x\n^\nExpected one of: \n\t* STRING\n"
+      },
+      {
+        "input": "\"a\nb\"",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "No terminal matches '\"' in the current parser context, at line 1 col 1\n\n\"a\n^\nExpected one of: \n\t* STRING\n"
+      }
+    ]
+  },
+  {
+    "name": "python_long_string",
+    "grammar": "start: LONG_STRING\n%import python.LONG_STRING",
+    "cases": [
+      {
+        "input": "\"\"\"abc\"\"\"",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "LONG_STRING",
+              "value": "\"\"\"abc\"\"\""
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "'''x'''",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "LONG_STRING",
+              "value": "'''x'''"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "\"\"\"\"\"\"",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "LONG_STRING",
+              "value": "\"\"\"\"\"\""
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "\"\"\"a\nb\"\"\"",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "LONG_STRING",
+              "value": "\"\"\"a\nb\"\"\""
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "\"\"\"he said \"hi\" \"\"\"",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "LONG_STRING",
+              "value": "\"\"\"he said \"hi\" \"\"\""
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "\"\"\"x",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "No terminal matches '\"' in the current parser context, at line 1 col 1\n\n\"\"\"x\n^\nExpected one of: \n\t* LONG_STRING\n"
+      }
+    ]
+  },
+  {
+    "name": "python_string_rule",
+    "grammar": "start: string\n%import python.string",
+    "cases": [
+      {
+        "input": "\"x\"",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "string",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__STRING",
+                  "value": "\"x\""
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "\"\"\"x\"\"\"",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "string",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__LONG_STRING",
+                  "value": "\"\"\"x\"\"\""
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "'y'",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "string",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__STRING",
+                  "value": "'y'"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "'''y'''",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "string",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__LONG_STRING",
+                  "value": "'''y'''"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "\"\"",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "string",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__STRING",
+                  "value": "\"\""
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "\"\"\"\"\"\"",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "string",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "python__LONG_STRING",
+                  "value": "\"\"\"\"\"\""
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      }
+    ]
+  },
+  {
+    "name": "python_name",
+    "grammar": "start: NAME\n%import python.NAME",
+    "cases": [
+      {
+        "input": "foo",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NAME",
+              "value": "foo"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "_bar",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NAME",
+              "value": "_bar"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "Hello",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NAME",
+              "value": "Hello"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "a1",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NAME",
+              "value": "a1"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "1abc",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "No terminal matches '1' in the current parser context, at line 1 col 1\n\n1abc\n^\nExpected one of: \n\t* NAME\n"
+      },
+      {
+        "input": "",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* NAME\n"
+      }
+    ]
+  },
+  {
+    "name": "lark_op",
+    "grammar": "start: OP\n%import lark.OP",
+    "cases": [
+      {
+        "input": "+",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "OP",
+              "value": "+"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "*",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "OP",
+              "value": "*"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "?",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "OP",
+              "value": "?"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "a",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\na\n^\nExpected one of: \n\t* OP\n"
+      },
+      {
+        "input": "",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* OP\n"
+      }
+    ]
+  },
+  {
+    "name": "lark_regexp",
+    "grammar": "start: REGEXP\n%import lark.REGEXP",
+    "cases": [
+      {
+        "input": "/abc/",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "REGEXP",
+              "value": "/abc/"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "/[0-9]+/",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "REGEXP",
+              "value": "/[0-9]+/"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "/a\\/b/",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "REGEXP",
+              "value": "/a\\/b/"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "/x/i",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "REGEXP",
+              "value": "/x/i"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "/\\\\/",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "REGEXP",
+              "value": "/\\\\/"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "abc",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\nabc\n^\nExpected one of: \n\t* REGEXP\n"
+      }
+    ]
+  },
+  {
+    "name": "lark_rule",
+    "grammar": "start: RULE\n%import lark.RULE",
+    "cases": [
+      {
+        "input": "foo",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "RULE",
+              "value": "foo"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "_bar",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "RULE",
+              "value": "_bar"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "?baz",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "RULE",
+              "value": "?baz"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "!qux",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "RULE",
+              "value": "!qux"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "FOO",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "No terminal matches 'F' in the current parser context, at line 1 col 1\n\nFOO\n^\nExpected one of: \n\t* RULE\n"
+      },
+      {
+        "input": "",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* RULE\n"
+      }
+    ]
+  },
+  {
+    "name": "lark_token",
+    "grammar": "start: TOKEN\n%import lark.TOKEN",
+    "cases": [
+      {
+        "input": "FOO",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "TOKEN",
+              "value": "FOO"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "_BAR",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "TOKEN",
+              "value": "_BAR"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "A1",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "TOKEN",
+              "value": "A1"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "foo",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "No terminal matches 'f' in the current parser context, at line 1 col 1\n\nfoo\n^\nExpected one of: \n\t* TOKEN\n"
+      }
+    ]
+  },
+  {
+    "name": "lark_start",
+    "grammar": "start: _g\n%import lark.start -> _g",
+    "cases": [
+      {
+        "input": "a:\"b\"\n",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "lark__rule",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "lark__RULE",
+                  "value": "a"
+                },
+                {
+                  "type": "tree",
+                  "data": "lark__rule_params",
+                  "children": []
+                },
+                {
+                  "type": "tree",
+                  "data": "lark__literal",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "lark__STRING",
+                      "value": "\"b\""
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "a:\"b\"|\"c\"\n",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "lark__rule",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "lark__RULE",
+                  "value": "a"
+                },
+                {
+                  "type": "tree",
+                  "data": "lark__rule_params",
+                  "children": []
+                },
+                {
+                  "type": "tree",
+                  "data": "lark__expansions",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "lark__literal",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "lark__STRING",
+                          "value": "\"b\""
+                        }
+                      ]
+                    },
+                    {
+                      "type": "tree",
+                      "data": "lark__literal",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "lark__STRING",
+                          "value": "\"c\""
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "A:/x/\n",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "lark__token",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "lark__TOKEN",
+                  "value": "A"
+                },
+                {
+                  "type": "tree",
+                  "data": "lark__token_params",
+                  "children": []
+                },
+                {
+                  "type": "tree",
+                  "data": "lark__literal",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "lark__REGEXP",
+                      "value": "/x/"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "a:\"b\"\nc:\"d\"\n",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "lark__rule",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "lark__RULE",
+                  "value": "a"
+                },
+                {
+                  "type": "tree",
+                  "data": "lark__rule_params",
+                  "children": []
+                },
+                {
+                  "type": "tree",
+                  "data": "lark__literal",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "lark__STRING",
+                      "value": "\"b\""
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "lark__rule",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "lark__RULE",
+                  "value": "c"
+                },
+                {
+                  "type": "tree",
+                  "data": "lark__rule_params",
+                  "children": []
+                },
+                {
+                  "type": "tree",
+                  "data": "lark__literal",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "lark__STRING",
+                      "value": "\"d\""
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": []
+        },
+        "error": null
+      }
+    ]
+  }
+]
