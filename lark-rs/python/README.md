@@ -22,7 +22,7 @@ print(tree.pretty())
 This wraps the `lark-rs` core engine. The constructor accepts the same keyword
 arguments as Python Lark for the options the Rust engine currently supports:
 
-- `parser` — `"earley"` (default), `"lalr"`, `"cyk"` *(CYK not yet implemented)*
+- `parser` — `"earley"` (default), `"lalr"`, `"cyk"`
 - `lexer` — `"auto"`, `"basic"` (alias `"standard"`), `"contextual"`,
   `"dynamic"`, `"dynamic_complete"`
 - `start` — a rule name or a list of rule names

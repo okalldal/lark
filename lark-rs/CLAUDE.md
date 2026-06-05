@@ -132,6 +132,8 @@ src/
     tree_builder.rs   TreeBuilder — shared rule→tree shaping (LALR + Earley)
     earley.rs         Earley recognizer + SPPF + forest→tree (Sprints 1–2) +
                       dynamic lexer build_chart_dynamic/scan_dynamic (Sprint 5)
+    cyk.rs            CYK parser: CNF conversion (TERM/BIN/UNIT + ε-removal) +
+                      O(n³) DP + CNF revert → shared TreeBuilder (Phase 3)
 
 tests/
   common/mod.rs       Shared helpers: make_lalr(), load_oracle(), tree_matches_oracle()
@@ -142,6 +144,7 @@ tests/
   test_earley_dynamic.rs  Curated dynamic-lexer oracles (overlap, %ignore, dynamic_complete)
   test_earley_compliance.rs  Replays the Earley compliance bank (XFAIL-gated); the Phase-2 regression net
   test_earley_dynamic_compliance.rs  Replays the dynamic-lexer Earley bank (XFAIL-gated)
+  test_cyk_compliance.rs  Replays the CYK compliance bank (XFAIL-gated); the Phase-3 CYK regression net
   test_common.rs      common.lark terminal library vs oracle (Phase 3) — each
                       user-facing common terminal lexes as Python Lark's does
   test_indenter.rs    %declare + Indenter/postlex vs oracle (Phase 3) — INDENT/
@@ -154,7 +157,8 @@ tests/
                       dynamic_cases.json — curated dynamic-lexer oracles (Sprint 5)
     compliance/       bank.json + xfail.json + skip.json (LALR);
                       earley_bank.json + earley_xfail.json (Earley basic lexer);
-                      earley_dynamic_bank.json + earley_dynamic_xfail.json (dynamic lexer)
+                      earley_dynamic_bank.json + earley_dynamic_xfail.json (dynamic lexer);
+                      cyk_bank.json + cyk_xfail.json (CYK)
   corpora/            Git submodules for external test corpora (JSONTestSuite)
 
 tools/
@@ -307,7 +311,7 @@ underlying super-linearity has since been removed by the Joop-Leo work (#58).
 | Grammar standard library | ⬜ | SQL, Python, … |
 | Standalone parser gen | ⬜ | Emit self-contained Rust or Python |
 | Error recovery | ⬜ | Insert/delete tokens on failure |
-| CYK parser | ⬜ | Highly ambiguous grammars |
+| CYK parser | ✅ | `parser='cyk'` (#44). Faithful port of Python Lark's `cyk.py`: CNF conversion (TERM lifts non-solitary terminals into `__T_` wrappers, BIN binarizes >2-symbol rules via `__SP_` splits, UNIT eliminates non-terminal unit rules recording the skipped chain) + an O(n³) DP that keeps the lightest derivation per span/non-terminal, then a CNF revert that feeds the shared `TreeBuilder` — so an unambiguous parse is byte-identical to LALR/Earley. lark-rs's nullable `*`/`?`/`+` helpers are transparent, so a reachability prune + ε-removal pass (duplicate each rule over its nullable occurrences; refill omitted transparent positions with an empty splice) reproduces Python's ε-free EBNF expansion without changing the tree; a nullable *non-transparent* rule is a genuine ε-rule CYK can't model and is rejected at build time, matching Python. Uses the basic lexer (no parser-state lexer, like Earley). Pinned by `test_cyk_compliance.rs` — the CYK bank (TestCykBasic) is **124/124 = 100%** oracle agreement (0 XFAIL) — plus inline parity/ambiguity/EBNF unit tests in `cyk.rs` |
 
 ### ⬜ Phase 4 — Distribution
 
@@ -364,9 +368,9 @@ wild rely on these. Document as a known parity gap when adding Phase-3 grammar l
 
 All open tasks are tracked as GitHub issues. #39 (`%import` file paths), #45
 (`%declare`), #41 (Indenter/postlex, basic lexer), #67 (postlex over the
-contextual lexer), and #35 (strict regex-collision) are ✅ done. Current priority
-order for the remaining Phase 3: #32 (Earley XFAIL burndown) → #40 (grammar
-stdlib) → #43 (error recovery) → #42 (standalone parser) → #44 (CYK).
+contextual lexer), #35 (strict regex-collision), and #44 (CYK parser) are ✅ done.
+Current priority order for the remaining Phase 3: #32 (Earley XFAIL burndown) →
+#40 (grammar stdlib) → #43 (error recovery) → #42 (standalone parser).
 
 Deferred until specialist work is available: #33 (de-recurse forest walk,
 profiler-gated).
@@ -389,6 +393,12 @@ grammars). The build fails only on **regressions**. After a fix:
 `LARK_COMPLIANCE_WRITE_XFAIL=1 cargo test --test test_compliance` regenerates the
 allow-list; commit the shrunk `xfail.json`. `LARK_COMPLIANCE_TRACE=1` prints each
 grammar before it runs (use it to find a new process-aborting grammar).
+
+The same script strip-mines three more banks from the other parser test classes:
+`earley_bank.json` (TestEarleyBasic), `earley_dynamic_bank.json` (the dynamic-lexer
+Earley classes), and `cyk_bank.json` (TestCykBasic), replayed by the matching
+`test_*_compliance.rs` harnesses under their own `*_xfail.json` allow-lists. The
+CYK bank is 124/124 = 100% (empty `cyk_xfail.json`).
 
 Enforcement: `tests/test_oracle_coverage.rs` fails the build if a committed grammar has
 neither an oracle nor a `QUARANTINE` entry; CI (`.github/workflows/lark-rs.yml`) also
