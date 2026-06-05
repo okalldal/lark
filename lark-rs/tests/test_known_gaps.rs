@@ -32,17 +32,17 @@ fn earley(grammar: &str, ambiguity: Ambiguity) -> Result<Lark, String> {
     .map_err(|e| e.to_string())
 }
 
-// ─── Gap 1 (#62): loader rejects the trailing-bar empty alternative ────────────
+// ─── Gap 1 (#62, FIXED): loader accepts the trailing-bar empty alternative ─────
 //
 // `a: X a |` is valid Lark: the bar with nothing after it is an empty (ε)
 // production, so `a` derives `X a` or nothing. Python Lark accepts it and parses
 // `"xx"` as a right-nested `a` bottoming out in an empty `a`. lark-rs's grammar
-// loader (`GrammarParser`) does not accept a trailing `|` and raises a syntax
-// error ("Expected value, got Some(Colon)" — it runs the empty alternative into
-// the next rule). The fix lives in the loader's alternation parsing, not the
-// engine. (We use a named empty rule in the #58 oracles to sidestep this.)
+// loader (`GrammarParser`) used to reject a trailing `|`, raising a syntax error
+// ("Expected value, got Some(Colon)" — it ran the empty alternative into the next
+// rule). Fixed in the loader's alternation parsing (`parse_alt_after_bar`): a `|`
+// followed only by a newline/EOF now lowers to an ε production. This test is now a
+// regression guard. (The #58 oracles still use a named empty rule.)
 #[test]
-#[ignore = "known gap #62: loader rejects trailing-bar empty alternative 'a: X a |' (valid Lark)"]
 fn gap1_loader_accepts_trailing_bar_empty_alt() {
     let lark = earley("start: a\na: X a |\nX: \"x\"\n", Ambiguity::Resolve)
         .expect("Python Lark accepts a trailing-bar empty alternative; lark-rs must too");

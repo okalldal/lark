@@ -68,3 +68,36 @@ jobs:
             git --no-pager diff --stat -- tests/fixtures/oracles
             exit 1
           fi
+
+  # The PyO3 binding (lark-rs/python) is a separate cargo package — `cargo test
+  # --all` in the `test` job above does NOT build or test it (it isn't a workspace
+  # member). Build it with maturin and run its round-trip parity suite against the
+  # Python-Lark oracle so the binding is gated on every PR, not just locally.
+  python-binding:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Check formatting (binding crate)
+        run: cargo fmt --check
+        working-directory: lark-rs/python
+
+      - name: Build the binding and run round-trip tests vs Python Lark
+        working-directory: lark-rs/python
+        run: |
+          python -m venv .venv
+          . .venv/bin/activate
+          pip install --upgrade pip
+          pip install maturin lark pytest
+          maturin develop
+          python -m pytest tests/ -v

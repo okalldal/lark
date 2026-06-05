@@ -6,11 +6,12 @@ description = "A Rust implementation of the Lark parsing toolkit"
 license = "MIT"
 repository = "https://github.com/lark-parser/lark"
 
-# `lark-rs` is the workspace root; `lark_proc` is the compile-time `include_lark!`
-# proc-macro (issue #49). Keeping them in one workspace means `cargo test --all`
-# (what CI runs) builds and tests both.
+# lark-rs is the workspace root and a member. Sibling members are the C-API crate
+# (`lark_h`, issue #48) and the compile-time `include_lark!` proc-macro
+# (`lark_proc`, issue #49); keeping them here means the CI `cargo test --all` /
+# `cargo fmt --all` run from this directory cover all three without any extra step.
 [workspace]
-members = ["lark_proc"]
+members = ["lark_h", "lark_proc"]
 
 [features]
 # Deterministic work counters for the profile-first perf discipline (#56). Off by
@@ -21,6 +22,10 @@ perf-counters = []
 
 [dependencies]
 regex = "1.10"
+# Dense-DFA support for the strict-mode regex-collision check (issue #35): the
+# `regex` crate has no intersection/emptiness test, so we drop to its automata
+# layer and run a product construction over two terminals' DFAs.
+regex-automata = "0.4"
 indexmap = "2"
 thiserror = "1"
 smallvec = "1"
@@ -39,6 +44,14 @@ path = "examples/json_parser.rs"
 [[bench]]
 name = "parse"
 path = "benches/parse.rs"
+harness = false
+
+# Cross-engine comparison (lark-rs vs Python Lark) over JSON / Python / SQL
+# workloads (#50). Shells out to benches/vs_python_lark.py for the Python side and
+# prints the per-workload speedup. Recorded trend, not a CI gate — see BENCH.md.
+[[bench]]
+name = "vs_python_lark"
+path = "benches/vs_python_lark.rs"
 harness = false
 
 [profile.release]

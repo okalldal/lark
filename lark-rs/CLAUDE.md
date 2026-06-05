@@ -266,20 +266,22 @@ After each REDUCE, `apply_rule_options()` post-processes children:
 | Token positions (line/col) | ✅ | Char-based columns; end_line/end_column newline-aware |
 | Oracle test harness | ✅ | arithmetic, JSON, python_numbers, lalr_core |
 | JSONTestSuite corpus | ✅ | 293/293 oracle agreement |
-| Compliance bank | ✅ | 257 grammars strip-mined from Python Lark's suite; 510/512 ≈ 99.6% agree (XFAIL-gated) |
-| `strict` mode | ✅ | `strict=True` raises on shift/reduce conflicts (reduce/reduce already fatal), like Lark |
+| Compliance bank | ✅ | 257 grammars strip-mined from Python Lark's suite; 512/512 = 100% agree (XFAIL-gated) |
+| `strict` mode | ✅ | `strict=True` raises on shift/reduce conflicts (reduce/reduce already fatal) **and** on same-priority regex-terminal collisions (#35), like Lark |
+| Strict regex-collision (#35) | ✅ | `strict=True` rejects two same-priority *regex* terminals whose languages overlap, mirroring Python's interegular check. lark-rs has no FSM in `regex`, so each terminal is compiled to a whole-match DFA (`regex-automata`) and a **product-construction** BFS decides intersection-emptiness, reporting the shortest witness string. Excludes string-literal terminals (Python's `PatternStr`) via a `TerminalDef::string_type` flag so a keyword like `IF: "if"` is never flagged against `/[a-z]+/`. `src/lexer.rs::check_regex_collisions` |
 | `g_regex_flags` | ✅ | Global regex flags (e.g. `IGNORECASE`) applied to every terminal via a combined-regex prefix |
 | Oracle-coverage enforcement | ✅ | Meta-test + CI freshness gate |
 
 ### ✅ Phase 2 — Earley + SPPF
 
-All six sprints complete. LALR compliance 510/512 ≈ 99.6%; Earley basic bank
+All six sprints complete. LALR compliance 512/512 = 100%; Earley basic bank
 211/211 (clean); dynamic-lexer bank 446/454 ≈ 98.2%. Open items tracked as GitHub
 issues: #32 (XFAIL burndown — cluster 1, "nested `_ambig` through a transparent
 `_rule`/EBNF helper", fixed by porting Lark's `AmbiguousExpander`; the
 `%ignore`-of-content and `dynamic_complete` tie-break clusters remain), #33
-(de-recurse forest walk), #35 (strict regex-collision, deferred — needs FSM
-engine). #31 (Earley perf gate) is ✅ done — the shared bench harness re-runs the
+(de-recurse forest walk). #35 (strict regex-collision) is ✅ done — a
+`regex-automata` product-construction emptiness test backs the strict-mode check.
+#31 (Earley perf gate) is ✅ done — the shared bench harness re-runs the
 unambiguous workloads under `parser='earley'` and reports the Earley/LALR ratio
 trend (see `BENCH.md`); the constant-K ceiling was downgraded to deferred and the
 underlying super-linearity has since been removed by the Joop-Leo work (#58).
@@ -311,11 +313,11 @@ underlying super-linearity has since been removed by the Joop-Leo work (#58).
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| PyO3 Python binding | ⬜ | Drop-in speedup for Python Lark users |
+| PyO3 Python binding | ✅ | `lark-rs/python/` — a `maturin`/PyO3 crate exposing `Lark` / `Tree` / `Token` with Python Lark's kwargs (`parser`, `lexer`, `start`, `ambiguity`, `propagate_positions`, `keep_all_tokens`, `maybe_placeholders`, `strict`, `g_regex_flags`). `Token` is `str`-like; errors map to `LarkError`/`GrammarError`/`ParseError`. `abi3-py38` wheel via `maturin build`. Round-trip parity pinned against the Python-Lark oracle by `python/tests/test_roundtrip.py` |
 | WASM target | ⬜ | Browser/Node.js |
-| C API | ⬜ | `lark_h` crate |
+| C API | ✅ | `lark_h` crate (#48): `#[no_mangle]` surface (`lark_new`/`lark_parse`/`lark_tree_*`/`lark_free`) + committed `lark.h` + C smoke test. lark-rs is now a workspace so `cargo test --all` covers it |
 | `include_lark!` proc-macro | 🟡 | Compile-time grammar validation (#49). `lark_proc/` crate: `include_lark!("grammars/x.lark")` reads + validates the grammar through the real `Lark` loader at `cargo build`, so a bad grammar is a compiler error (file/line, attributed to the macro span), and generates a typed `XParser` struct with `parse(&str) -> Result<ParseTree, ParseError>`. The grammar source is embedded; the `Lark` is built once per thread (`thread_local!`, since `Lark` is not `Sync`). Pinned by `lark_proc/tests/include_lark.rs` (runtime parsing) and `lark_proc/tests/compile_fail.rs` (a malformed grammar fails `cargo build` with the validation error attributed to the macro span — the headline #49 guarantee, regression-netted). Follow-up: bake the LALR `ParseTable` into `const` data so no table construction happens at runtime (regex lexer still compiles patterns at runtime regardless) |
-| Benchmarks vs Python Lark | ⬜ | JSON / Python / SQL |
+| Benchmarks vs Python Lark | ✅ | #50: `cargo bench --bench vs_python_lark` — JSON / Python / SQL through both engines, byte-identical inputs, prints MB/s + speedup (~4–6× on the reference box). Results in `BENCH.md` |
 
 ---
 
@@ -361,13 +363,13 @@ wild rely on these. Document as a known parity gap when adding Phase-3 grammar l
 ## Open Work
 
 All open tasks are tracked as GitHub issues. #39 (`%import` file paths), #45
-(`%declare`), #41 (Indenter/postlex, basic lexer), and #67 (postlex over the
-contextual lexer) are ✅ done. Current priority order for the remaining Phase 3:
-#32 (Earley XFAIL burndown) → #40 (grammar stdlib) → #43 (error recovery) → #42
-(standalone parser) → #44 (CYK).
+(`%declare`), #41 (Indenter/postlex, basic lexer), #67 (postlex over the
+contextual lexer), and #35 (strict regex-collision) are ✅ done. Current priority
+order for the remaining Phase 3: #32 (Earley XFAIL burndown) → #40 (grammar
+stdlib) → #43 (error recovery) → #42 (standalone parser) → #44 (CYK).
 
-Deferred until specialist work is available: #35 (strict regex-collision, needs FSM
-engine), #33 (de-recurse forest walk, profiler-gated).
+Deferred until specialist work is available: #33 (de-recurse forest walk,
+profiler-gated).
 
 Low-priority API generality: #69 (general trait-object postlex beyond the built-in
 `Indenter`) — split out of #67; the `Indenter` covers the common case, so this is

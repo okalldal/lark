@@ -11,7 +11,10 @@ pub use tree_builder::{NodeValue, TreeBuilder};
 use crate::error::{LarkError, ParseError};
 use crate::grammar::intern::SymbolTable;
 use crate::grammar::{CompiledGrammar, Grammar};
-use crate::lexer::{BasicLexer, ContextualLexer, DynamicMatcher, Lexer, LexerConf};
+use crate::lexer::{
+    check_regex_collisions, check_zero_width_terminals, BasicLexer, ContextualLexer,
+    DynamicMatcher, Lexer, LexerConf,
+};
 use crate::postlex::Indenter;
 use crate::tree::ParseTree;
 use crate::{LarkOptions, LexerType, ParserAlgorithm};
@@ -162,6 +165,17 @@ pub fn build_frontend(
 
             let lexer_conf = basic_lexer_conf(&cg, options.g_regex_flags);
 
+            // Lexer-build validation, mirroring Python Lark's `BasicLexer`
+            // sanitization order: reject zero-width terminals (always), then — under
+            // `strict=True` — reject same-priority regex terminals whose languages
+            // overlap (issue #35). The contextual lexer scopes the collision check
+            // per parser state (Python builds one BasicLexer per state); the basic
+            // lexer compiles every terminal together, so it is one global set.
+            check_zero_width_terminals(&lexer_conf)?;
+            let use_contextual = matches!(options.lexer, LexerType::Contextual | LexerType::Auto);
+            let state_terminals = use_contextual.then(|| parser.state_terminals());
+            check_regex_collisions(&lexer_conf, options.strict, state_terminals.as_ref())?;
+
             // Validate the postlex hook's terminal names now, before parsing, so a
             // typo'd nl_type or an undeclared INDENT/DEDENT fails at build time. The
             // basic lexer materializes the whole stream and rewrites it; the
@@ -257,6 +271,13 @@ pub fn build_frontend(
                     }
                 }
                 _ => {
+                    // The basic lexer is a `BasicLexer`, so it applies the same
+                    // build-time validation as the LALR basic path: zero-width
+                    // rejection (always) and, under `strict`, the global
+                    // regex-collision check. The dynamic lexer (above) has its own
+                    // scanning model and — like Python — skips both.
+                    check_zero_width_terminals(&lexer_conf)?;
+                    check_regex_collisions(&lexer_conf, options.strict, None)?;
                     let lexer = BasicLexer::new(&lexer_conf)?;
                     let parser = EarleyParser::new(cg);
                     FrontendKind::Earley {
