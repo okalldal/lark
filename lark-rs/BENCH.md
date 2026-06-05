@@ -80,9 +80,12 @@ comparison); `median_ns` drives the MB/s. Speedup on a row is
 ## The three comparisons (and what each means)
 
 1. **Rust-LALR vs Python-Lark-LALR** — the defensible "faster than Python Lark"
-   story. This is what `tools/bench_compare.py` lets you compute today.
-2. **Rust-Earley vs Python-Lark-Earley** (once the engine lands) — the same story
-   for the second engine.
+   story. `tools/bench_compare.py` computes it on `parse.rs`'s grammars, and
+   `cargo bench --bench vs_python_lark` reports it directly on the JSON/Python/SQL
+   workloads (see "Cross-engine end-to-end" below).
+2. **Rust-Earley vs Python-Lark-Earley** — the same story for the second engine,
+   now wired into `cargo bench --bench vs_python_lark` (JSON + SQL; ~13–16× on the
+   reference box, since Python Lark's Earley is much slower in absolute terms).
 3. **Rust-Earley vs Rust-LALR** — the *cost of generality*, not "slowness."
    Earley is O(n³) worst case and solves a strictly harder problem; reading a
    cubic-Earley-on-pathological-input number as a regression against LALR is a
@@ -170,10 +173,12 @@ optimization into a tracked delta.
 ## Cross-engine end-to-end: JSON / Python / SQL (issue #50)
 
 `cargo bench --bench vs_python_lark` is the **cross-engine comparison** — the
-number behind the project's "10–100×" goal — over three real workloads, all on
-LALR + the contextual lexer (Lark's primary USP). It is the throughput analog of
-the oracle: lark-rs and Python Lark parse the **same grammar** over the **same
-bytes**, so the ratio is apples-to-apples.
+number behind the project's "10–100×" goal — over three real workloads. It is the
+throughput analog of the oracle: lark-rs and Python Lark parse the **same grammar**
+over the **same bytes**, so the ratio is apples-to-apples. Every workload runs on
+**LALR + the contextual lexer** (Lark's primary USP); JSON and SQL *also* run on
+**Earley**, so the second engine has a cross-engine number too (see "Earley arm"
+below).
 
 - **JSON** — the canonical JSON grammar over a ~92 KB array of records (the
   `json_large` shape from `parse.rs`).
@@ -194,28 +199,56 @@ time the exact same bytes (no generator-drift risk). Both sides assert the
 workload parses before timing, so grammar drift fails loudly rather than silently
 measuring an error path.
 
+### Earley arm (JSON + SQL)
+
+JSON and SQL also run under `parser='earley'` — the second engine — so the
+"Rust-Earley vs Python-Earley" comparison has a number, not just the
+"Rust-Earley vs Rust-LALR" cost-of-generality one in `parse.rs`. The lexer is the
+one each workload needs under Earley: **JSON → basic**, **SQL → dynamic** (the
+basic lexer can't tell the assignment `=` from the comparison `=` in the SQL
+grammar — true in *both* engines, so it's a fair constraint, not a lark-rs gap).
+
+**Python has no Earley row.** Its `Indenter` postlex hook is LALR-only in lark-rs,
+and Python Lark itself refuses postlex with the dynamic lexer
+(`Can't use postlex with a dynamic lexer`) — so there is simply no apples-to-apples
+Earley configuration for a significant-whitespace grammar to compare. Lifting
+postlex onto the Earley engine is future work.
+
 ### Reference run
 
 Machine-specific — **only ratios travel**; capture fresh numbers on your own box.
 
 - `Linux x86_64`, Intel Xeon @ 2.80 GHz, 4 cores, `rustc 1.94.1`, release + LTO.
-- **Python Lark 1.3.1**, CPython 3.11.15 (the in-tree copy), `parser='lalr'`,
-  `lexer='contextual'`. Measured 2026-06-05.
+- **Python Lark 1.3.1**, CPython 3.11.15 (the in-tree copy). LALR rows use
+  `lexer='contextual'`; Earley rows use `lexer='basic'` (JSON) / `'dynamic'` (SQL).
+  Measured 2026-06-05.
 
-| workload | bytes | Rust MB/s | Python MB/s | speedup |
-|----------|------:|----------:|------------:|--------:|
-| JSON   | ~92 KB  | ~4.0 | ~0.8 | **~5.2×** |
-| Python | ~104 KB | ~2.7 | ~0.5 | **~5.4×** |
-| SQL    | ~57 KB  | ~2.7 | ~0.6 | **~4.1×** |
+| engine | workload | bytes | Rust MB/s | Python MB/s | speedup |
+|--------|----------|------:|----------:|------------:|--------:|
+| LALR   | JSON   | ~92 KB  | ~4.3 | ~0.8 | **~5.3×** |
+| LALR   | Python | ~104 KB | ~2.9 | ~0.5 | **~5.8×** |
+| LALR   | SQL    | ~57 KB  | ~2.8 | ~0.7 | **~4.4×** |
+| Earley | JSON   | ~92 KB  | ~0.5 | ~0.04 | **~12.8×** |
+| Earley | SQL    | ~57 KB  | ~0.1 | ~0.009 | **~16.2×** |
 
-**Reading.** lark-rs LALR is currently ~4–6× faster than Python Lark end-to-end —
-consistent with the internal baseline above (~4–5× on JSON/arith). This is real
-but short of the "10–100×" headline: the gap is the deliberately-deferred
-tree-representation work (`Box<str>`/arena labels, zero-copy spans — see the
-profiling findings below; parse throughput is allocation-bound, ~3 allocations per
-input byte, not algorithm-bound). This bench is what turns that remaining headroom
-into a tracked delta: **re-run it after each significant engine change and update
-the table.**
+**Reading.** Two separate stories:
+
+- **LALR** — lark-rs is ~4–6× faster than Python Lark end-to-end, consistent with
+  the internal baseline above (~4–5× on JSON/arith). Real, but short of the
+  "10–100×" headline: the gap is the deliberately-deferred tree-representation work
+  (`Box<str>`/arena labels, zero-copy spans — see the profiling findings below;
+  parse throughput is allocation-bound, ~3 allocations per input byte, not
+  algorithm-bound).
+- **Earley** — the margin is *larger* (~13–16×), because Python Lark's Earley is
+  dramatically slower in absolute terms (multiple seconds per parse here) while
+  lark-rs's Earley stays in the tens-to-hundreds of ms. This is the second engine
+  paying its cost-of-generality (Earley is much slower than LALR *within* lark-rs
+  too — see `parse.rs`), but doing so far more cheaply than the reference
+  implementation. SQL's dynamic lexer is the most expensive configuration, which is
+  exactly where the gap is widest.
+
+This bench turns that remaining LALR headroom into a tracked delta: **re-run it
+after each significant engine change and update the table.**
 
 ## Profiling findings (spike, 2026-06-04)
 

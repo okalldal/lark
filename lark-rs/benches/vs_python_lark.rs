@@ -1,14 +1,22 @@
 //! Cross-engine end-to-end throughput: lark-rs vs Python Lark (issue #50, Phase 4).
 //!
-//! The existing `benches/parse.rs` measures lark-rs *internally* (LALR vs Earley,
-//! scaling shapes). This bench is the **cross-engine comparison** — the number
-//! behind the project's "10–100× faster than Python Lark" goal — over three real
-//! workloads, all on LALR + the contextual lexer (Lark's primary USP):
+//! The existing `benches/parse.rs` measures lark-rs *internally* (LALR vs Earley
+//! cost-of-generality, scaling shapes). This bench is the **cross-engine
+//! comparison** — the number behind the project's "10–100× faster than Python
+//! Lark" goal — over three real workloads:
 //!
 //!   1. **JSON**   — the canonical JSON grammar on a ~92 KB array of records.
 //!   2. **Python** — a significant-whitespace Python subset (driven by the
 //!                   `Indenter` postlex hook) over a representative source file.
 //!   3. **SQL**    — a SELECT/INSERT/UPDATE/DELETE grammar over a batch of statements.
+//!
+//! Each workload is run on **LALR + the contextual lexer** (Lark's primary USP),
+//! and JSON + SQL are *also* run on **Earley** (the second engine) so the
+//! Earley-vs-Python-Earley story has a number too. Python has no Earley row: its
+//! `Indenter` postlex hook is LALR-only in lark-rs, and Python Lark can't pair
+//! postlex with the dynamic lexer either — there is no apples-to-apples Earley
+//! configuration for a significant-whitespace grammar. (The Earley-vs-LALR *cost
+//! of generality* — same engine, same input — lives in `benches/parse.rs`.)
 //!
 //! A single command does the whole comparison:
 //!
@@ -19,8 +27,8 @@
 //! It generates each workload once, times lark-rs, then writes the *byte-identical*
 //! inputs to a temp dir and shells out to `benches/vs_python_lark.py` (the same
 //! grammars, the in-tree Python Lark) so both engines parse the same bytes. It then
-//! prints MB/s for each engine and the `python / rust` speedup per workload. If
-//! Python Lark is unavailable the Rust numbers still print, with a note.
+//! prints MB/s for each engine and the `python / rust` speedup per (engine,
+//! workload). If Python Lark is unavailable the Rust numbers still print, with a note.
 //!
 //! Wired as `harness = false` in Cargo.toml, so `main()` runs directly. Like
 //! `parse.rs` it uses a self-contained `std::time` loop, not a benchmarking crate —
@@ -261,15 +269,6 @@ fn measure<F: FnMut()>(mut f: F) -> Stat {
     }
 }
 
-fn lalr_options() -> LarkOptions {
-    LarkOptions {
-        start: vec!["start".to_string()],
-        parser: ParserAlgorithm::Lalr,
-        lexer: LexerType::Contextual,
-        ..LarkOptions::default()
-    }
-}
-
 fn python_indenter() -> Indenter {
     Indenter {
         nl_type: "_NL".to_string(),
@@ -281,6 +280,103 @@ fn python_indenter() -> Indenter {
     }
 }
 
+#[derive(Clone, Copy)]
+enum Algo {
+    Lalr,
+    Earley,
+}
+
+impl Algo {
+    fn tag(self) -> &'static str {
+        match self {
+            Algo::Lalr => "lalr",
+            Algo::Earley => "earley",
+        }
+    }
+}
+
+fn lexer_name(l: &LexerType) -> &'static str {
+    match l {
+        LexerType::Basic => "basic",
+        LexerType::Contextual => "contextual",
+        LexerType::Dynamic => "dynamic",
+        LexerType::DynamicComplete => "dynamic_complete",
+        _ => "auto",
+    }
+}
+
+/// One (workload, engine) configuration both lark-rs and Python Lark can run.
+/// The list is mirrored in `benches/vs_python_lark.py`.
+struct Config {
+    name: &'static str,
+    algo: Algo,
+    lexer: LexerType,
+    grammar: &'static str,
+    postlex: bool,
+}
+
+/// The LALR row uses the contextual lexer (Lark's USP) on all three workloads.
+/// The Earley row covers the two workloads Earley can run cross-engine: JSON
+/// (basic lexer) and SQL (the *dynamic* lexer — the basic lexer can't tell the
+/// assignment `=` from the comparison `=` here, in either engine). Python is
+/// **omitted under Earley** (postlex is LALR-only); see the module header.
+fn configs() -> Vec<Config> {
+    vec![
+        Config {
+            name: "json",
+            algo: Algo::Lalr,
+            lexer: LexerType::Contextual,
+            grammar: JSON_GRAMMAR,
+            postlex: false,
+        },
+        Config {
+            name: "python",
+            algo: Algo::Lalr,
+            lexer: LexerType::Contextual,
+            grammar: PY_GRAMMAR,
+            postlex: true,
+        },
+        Config {
+            name: "sql",
+            algo: Algo::Lalr,
+            lexer: LexerType::Contextual,
+            grammar: SQL_GRAMMAR,
+            postlex: false,
+        },
+        Config {
+            name: "json",
+            algo: Algo::Earley,
+            lexer: LexerType::Basic,
+            grammar: JSON_GRAMMAR,
+            postlex: false,
+        },
+        Config {
+            name: "sql",
+            algo: Algo::Earley,
+            lexer: LexerType::Dynamic,
+            grammar: SQL_GRAMMAR,
+            postlex: false,
+        },
+    ]
+}
+
+fn build(cfg: &Config) -> Lark {
+    let mut opts = LarkOptions {
+        start: vec!["start".to_string()],
+        parser: match cfg.algo {
+            Algo::Lalr => ParserAlgorithm::Lalr,
+            Algo::Earley => ParserAlgorithm::Earley,
+        },
+        lexer: cfg.lexer.clone(),
+        ..LarkOptions::default()
+    };
+    if cfg.postlex {
+        opts.postlex = Some(python_indenter());
+    }
+    Lark::new(cfg.grammar, opts)
+        .unwrap_or_else(|e| panic!("[{}/{}] grammar must build: {e}", cfg.algo.tag(), cfg.name))
+}
+
 /// One workload's lark-rs result.
 struct RustResult {
     bytes: usize,
@@ -288,22 +384,30 @@ struct RustResult {
     mb_per_s: f64,
 }
 
-fn run_rust(name: &str, parser: &Lark, input: &str) -> RustResult {
+fn run_rust(cfg: &Config, input: &str) -> RustResult {
+    let parser = build(cfg);
     let bytes = input.len();
-    parser
-        .parse(input)
-        .unwrap_or_else(|e| panic!("[{name}] workload must parse in lark-rs: {e}"));
+    parser.parse(input).unwrap_or_else(|e| {
+        panic!(
+            "[{}/{}] workload must parse in lark-rs: {e}",
+            cfg.algo.tag(),
+            cfg.name
+        )
+    });
     let stat = measure(|| {
         black_box(parser.parse(black_box(input)).expect("must parse"));
     });
     let mb_per_s = bytes as f64 / stat.median_ns * 1e3;
+    let (algo, name) = (cfg.algo.tag(), cfg.name);
     println!(
-        "BENCH\trust\t{name}\t{bytes}\t{:.0}\t{:.0}\t{mb_per_s:.1}",
+        "BENCH\trust\t{algo}\t{name}\t{bytes}\t{:.0}\t{:.0}\t{mb_per_s:.1}",
         stat.median_ns, stat.min_ns
     );
     println!(
-        "  rust   {name:<8} {bytes:>8} B   {:>12.0} ns/iter (min {:>12.0})   {mb_per_s:>7.1} MB/s",
-        stat.median_ns, stat.min_ns
+        "  rust {algo:<7} {name:<7} {:<11} {bytes:>8} B   {:>12.0} ns/iter (min {:>12.0})   {mb_per_s:>7.1} MB/s",
+        lexer_name(&cfg.lexer),
+        stat.median_ns,
+        stat.min_ns
     );
     RustResult {
         bytes,
@@ -312,14 +416,15 @@ fn run_rust(name: &str, parser: &Lark, input: &str) -> RustResult {
     }
 }
 
-/// Python Lark's parsed result line (`PYBENCH<TAB>name<TAB>bytes<TAB>median_ns<TAB>min_ns<TAB>mb_per_s`).
+/// One Python Lark result, keyed by `"<algo>/<name>"`.
 struct PyResult {
     median_ns: f64,
     mb_per_s: f64,
 }
 
 /// Write the inputs to a temp dir and shell out to the Python timing script.
-/// Returns the per-workload Python results, or `None` if Python Lark is unavailable.
+/// Returns the per-config Python results (keyed `"<algo>/<name>"`), or `None` if
+/// Python Lark is unavailable.
 fn run_python(inputs: &[(&str, &str)]) -> Option<HashMap<String, PyResult>> {
     let dir = std::env::temp_dir().join("lark_rs_vs_python");
     std::fs::create_dir_all(&dir).ok()?;
@@ -353,19 +458,20 @@ fn run_python(inputs: &[(&str, &str)]) -> Option<HashMap<String, PyResult>> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let mut results = HashMap::new();
     for line in stdout.lines() {
+        // PYBENCH<TAB>algo<TAB>name<TAB>bytes<TAB>median_ns<TAB>min_ns<TAB>mb_per_s
         let cols: Vec<&str> = line.split('\t').collect();
-        if cols.first() != Some(&"PYBENCH") || cols.len() < 6 {
+        if cols.first() != Some(&"PYBENCH") || cols.len() < 7 {
             continue;
         }
-        let name = cols[1].to_string();
-        let median_ns: f64 = cols[3].parse().ok()?;
-        let mb_per_s: f64 = cols[5].parse().ok()?;
+        let (algo, name) = (cols[1], cols[2]);
+        let median_ns: f64 = cols[4].parse().ok()?;
+        let mb_per_s: f64 = cols[6].parse().ok()?;
         println!(
-            "  python {name:<8} {:>8} B   {median_ns:>12.0} ns/iter                          {mb_per_s:>7.1} MB/s",
-            cols[2]
+            "  python {algo:<7} {name:<7} {:>20} B   {median_ns:>12.0} ns/iter                          {mb_per_s:>7.1} MB/s",
+            cols[3]
         );
         results.insert(
-            name,
+            format!("{algo}/{name}"),
             PyResult {
                 median_ns,
                 mb_per_s,
@@ -380,68 +486,73 @@ fn run_python(inputs: &[(&str, &str)]) -> Option<HashMap<String, PyResult>> {
 }
 
 fn main() {
-    println!("# lark-rs vs Python Lark — cross-engine throughput (LALR + contextual lexer)");
+    println!("# lark-rs vs Python Lark — cross-engine throughput (JSON / Python / SQL)");
     println!(
-        "# columns: BENCH<TAB>engine<TAB>name<TAB>bytes<TAB>median_ns<TAB>min_ns<TAB>mb_per_s"
+        "# columns: BENCH<TAB>engine<TAB>algo<TAB>name<TAB>bytes<TAB>median_ns<TAB>min_ns<TAB>mb_per_s"
     );
     println!();
 
-    let json_input = gen_json(512, 5);
-    let python_input = gen_python(220);
-    let sql_input = gen_sql(700);
+    let inputs: HashMap<&str, String> = HashMap::from([
+        ("json", gen_json(512, 5)),
+        ("python", gen_python(220)),
+        ("sql", gen_sql(700)),
+    ]);
 
-    let json = Lark::new(JSON_GRAMMAR, lalr_options()).expect("JSON grammar must build");
-    let sql = Lark::new(SQL_GRAMMAR, lalr_options()).expect("SQL grammar must build");
-    let python = Lark::new(
-        PY_GRAMMAR,
-        LarkOptions {
-            postlex: Some(python_indenter()),
-            ..lalr_options()
-        },
-    )
-    .expect("Python grammar must build");
+    let cfgs = configs();
 
     println!("lark-rs (build once, parse many):");
-    let mut rust: HashMap<&str, RustResult> = HashMap::new();
-    rust.insert("json", run_rust("json", &json, &json_input));
-    rust.insert("python", run_rust("python", &python, &python_input));
-    rust.insert("sql", run_rust("sql", &sql, &sql_input));
+    let mut rust: HashMap<String, RustResult> = HashMap::new();
+    for cfg in &cfgs {
+        let r = run_rust(cfg, &inputs[cfg.name]);
+        rust.insert(format!("{}/{}", cfg.algo.tag(), cfg.name), r);
+    }
     println!();
 
     println!("Python Lark (in-tree, same grammars + byte-identical inputs):");
     let py = run_python(&[
-        ("json", &json_input),
-        ("python", &python_input),
-        ("sql", &sql_input),
+        ("json", &inputs["json"]),
+        ("python", &inputs["python"]),
+        ("sql", &inputs["sql"]),
     ]);
     println!();
 
     // --- Combined speedup table ----------------------------------------------
     println!("Speedup (python_median / rust_median):");
     println!(
-        "  {:<8} {:>12} {:>12} {:>10}",
-        "workload", "rust MB/s", "python MB/s", "speedup"
+        "  {:<7} {:<7} {:>12} {:>12} {:>10}",
+        "algo", "workload", "rust MB/s", "python MB/s", "speedup"
     );
-    if let Some(py) = py {
-        for name in ["json", "python", "sql"] {
-            let r = &rust[name];
-            if let Some(p) = py.get(name) {
+    for cfg in &cfgs {
+        let key = format!("{}/{}", cfg.algo.tag(), cfg.name);
+        let r = &rust[&key];
+        match py.as_ref().and_then(|m| m.get(&key)) {
+            Some(p) => {
                 let speedup = p.median_ns / r.median_ns;
                 println!(
-                    "  {name:<8} {:>12.1} {:>12.1} {speedup:>9.1}x",
-                    r.mb_per_s, p.mb_per_s
+                    "  {:<7} {:<7} {:>12.1} {:>12.1} {speedup:>9.1}x",
+                    cfg.algo.tag(),
+                    cfg.name,
+                    r.mb_per_s,
+                    p.mb_per_s
                 );
-                println!("BENCH\tspeedup\t{name}\t{}\t{speedup:.2}\t0\t0", r.bytes);
+                println!(
+                    "BENCH\tspeedup\t{}\t{}\t{}\t{speedup:.2}\t0\t0",
+                    cfg.algo.tag(),
+                    cfg.name,
+                    r.bytes
+                );
             }
+            None => println!(
+                "  {:<7} {:<7} {:>12.1} {:>12} {:>10}",
+                cfg.algo.tag(),
+                cfg.name,
+                r.mb_per_s,
+                "n/a",
+                "n/a"
+            ),
         }
-    } else {
-        for name in ["json", "python", "sql"] {
-            let r = &rust[name];
-            println!(
-                "  {name:<8} {:>12.1} {:>12} {:>10}",
-                r.mb_per_s, "n/a", "n/a"
-            );
-        }
+    }
+    if py.is_none() {
         println!("  (run `python3 benches/vs_python_lark.py` separately for the Python side)");
     }
 }

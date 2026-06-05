@@ -239,24 +239,34 @@ def measure(fn):
     return samples[0], samples[len(samples) // 2]
 
 
-def build_json():
-    return Lark(JSON_GRAMMAR, parser="lalr", lexer="contextual", start="start")
+GRAMMARS = {"json": JSON_GRAMMAR, "python": PY_GRAMMAR, "sql": SQL_GRAMMAR}
+
+# (algo, workload, lexer, postlex) — mirrored in benches/vs_python_lark.rs.
+# LALR + contextual on all three; Earley on the two workloads it can run
+# cross-engine (JSON/basic, SQL/dynamic). Python has no Earley row: postlex is
+# incompatible with the dynamic lexer, and the basic lexer can't drive the
+# Indenter the way the workload needs — see the .rs module header.
+CONFIGS = [
+    ("lalr", "json", "contextual", False),
+    ("lalr", "python", "contextual", True),
+    ("lalr", "sql", "contextual", False),
+    ("earley", "json", "basic", False),
+    ("earley", "sql", "dynamic", False),
+]
 
 
-def build_python():
-    return Lark(PY_GRAMMAR, parser="lalr", lexer="contextual",
-                postlex=PyIndenter(), start="start")
+def build(algo, name, lexer, postlex):
+    kwargs = dict(parser=algo, lexer=lexer, start="start")
+    if postlex:
+        kwargs["postlex"] = PyIndenter()
+    return Lark(GRAMMARS[name], **kwargs)
 
 
-def build_sql():
-    return Lark(SQL_GRAMMAR, parser="lalr", lexer="contextual", start="start")
-
-
-def emit(name, nbytes, min_ns, median_ns):
+def emit(algo, name, nbytes, min_ns, median_ns):
     mb_per_s = nbytes / median_ns * 1e3
-    print(f"PYBENCH\t{name}\t{nbytes}\t{median_ns:.0f}\t{min_ns:.0f}\t{mb_per_s:.1f}")
+    print(f"PYBENCH\t{algo}\t{name}\t{nbytes}\t{median_ns:.0f}\t{min_ns:.0f}\t{mb_per_s:.1f}")
     print(
-        f"  {name:<8} {nbytes:>8} B   {median_ns:>12.0f} ns/iter "
+        f"  {algo:<7} {name:<7} {nbytes:>8} B   {median_ns:>12.0f} ns/iter "
         f"(min {min_ns:>12.0f})   {mb_per_s:>7.1f} MB/s"
     )
 
@@ -280,17 +290,16 @@ def main():
             "sql": gen_sql(700),
         }
 
-    print(f"# Python Lark {lark.__version__} cross-engine workloads (LALR + contextual lexer)")
-    print("# columns: PYBENCH<TAB>name<TAB>bytes<TAB>median_ns<TAB>min_ns<TAB>mb_per_s")
+    print(f"# Python Lark {lark.__version__} cross-engine workloads (JSON / Python / SQL)")
+    print("# columns: PYBENCH<TAB>algo<TAB>name<TAB>bytes<TAB>median_ns<TAB>min_ns<TAB>mb_per_s")
     print()
 
-    builders = {"json": build_json, "python": build_python, "sql": build_sql}
-    for name in ("json", "python", "sql"):
-        parser = builders[name]()
+    for algo, name, lexer, postlex in CONFIGS:
+        parser = build(algo, name, lexer, postlex)
         text = inputs[name]
         parser.parse(text)  # fail loudly if the workload does not parse
         mn, md = measure(lambda p=parser, t=text: p.parse(t))
-        emit(name, len(text), mn, md)
+        emit(algo, name, len(text), mn, md)
 
 
 if __name__ == "__main__":
