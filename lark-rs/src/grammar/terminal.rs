@@ -161,6 +161,14 @@ pub struct TerminalDef {
     /// [`Indenter`](crate::postlex::Indenter)) injects its tokens into the stream.
     /// The `pattern` field carries a never-used placeholder for these.
     pub declared: bool,
+    /// Whether Python Lark would represent this terminal as a `PatternStr` (a plain
+    /// string literal, `pattern.type == "str"`) rather than a `PatternRE`. lark-rs
+    /// compiles *every* named terminal to a regex `Pattern`, so this flag preserves
+    /// the distinction Python keeps. It matters for the strict-mode regex-collision
+    /// check (issue #35), which — exactly like Python's `_check_regex_collisions` —
+    /// only ever compares the regex terminals (`pattern.type == "re"`); string
+    /// terminals are disambiguated by the lexer's `unless` retyping, not flagged.
+    pub string_type: bool,
 }
 
 impl TerminalDef {
@@ -170,7 +178,14 @@ impl TerminalDef {
             pattern,
             priority,
             declared: false,
+            string_type: false,
         }
+    }
+
+    /// Builder-style setter for [`string_type`](Self::string_type).
+    pub fn with_string_type(mut self, string_type: bool) -> Self {
+        self.string_type = string_type;
+        self
     }
 
     /// A pattern-less `%declare`d terminal (see [`declared`](Self::declared)). The
@@ -182,6 +197,7 @@ impl TerminalDef {
             pattern: Pattern::Str(PatternStr::new("")),
             priority: 0,
             declared: true,
+            string_type: false,
         }
     }
 }

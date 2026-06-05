@@ -15,6 +15,10 @@ perf-counters = []
 
 [dependencies]
 regex = "1.10"
+# Dense-DFA support for the strict-mode regex-collision check (issue #35): the
+# `regex` crate has no intersection/emptiness test, so we drop to its automata
+# layer and run a product construction over two terminals' DFAs.
+regex-automata = "0.4"
 indexmap = "2"
 thiserror = "1"
 smallvec = "1"
