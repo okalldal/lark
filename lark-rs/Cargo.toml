@@ -10,8 +10,15 @@ repository = "https://github.com/lark-parser/lark"
 # (`lark_h`, issue #48) and the compile-time `include_lark!` proc-macro
 # (`lark_proc`, issue #49); keeping them here means the CI `cargo test --all` /
 # `cargo fmt --all` run from this directory cover all three without any extra step.
+#
+# `python/` (the PyO3 binding) is deliberately NOT a member: it is a pyo3
+# `extension-module` cdylib built by `maturin` in its own CI job, and pulling it
+# into `cargo test --all` would force a Python link on every build. It lives inside
+# this directory, so it must be excluded explicitly — otherwise cargo refuses to
+# operate on it standalone ("believes it's in a workspace when it's not").
 [workspace]
 members = ["lark_h", "lark_proc"]
+exclude = ["python"]
 
 [features]
 # Deterministic work counters for the profile-first perf discipline (#56). Off by
