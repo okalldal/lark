@@ -413,3 +413,23 @@ fn node_from_parse_tree(pt: &ParseTree) -> Box<lark_tree_t> {
         ParseTree::Token(t) => node_from_token(t),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // The C smoke test (`csrc/smoke.c`) is compiled by build.rs and linked into
+    // this crate; it builds a JSON grammar through the C API, parses an array and
+    // an object, and walks the tree asserting its structure. Calling it here —
+    // from the crate's own unit-test binary, where the build-script linkage
+    // applies — is the issue #48 done-when: "A C smoke-test parses JSON and
+    // checks the tree structure." A nonzero return means a C-side assertion
+    // failed (diagnostics are printed to stderr by smoke.c).
+    extern "C" {
+        fn lark_h_run_smoke() -> std::ffi::c_int;
+    }
+
+    #[test]
+    fn c_smoke_test() {
+        let rc = unsafe { lark_h_run_smoke() };
+        assert_eq!(rc, 0, "C smoke test (csrc/smoke.c) reported failures");
+    }
+}

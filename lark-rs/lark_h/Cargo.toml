@@ -14,3 +14,8 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 lark-rs = { path = ".." }
+
+[build-dependencies]
+# Compiles the C smoke test (tests/smoke.c) and links it into the crate so the
+# Rust harness can drive it over FFI; see build.rs and tests/c_smoke.rs.
+cc = "1"

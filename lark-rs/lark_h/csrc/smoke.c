@@ -3,9 +3,13 @@
  *
  * Builds a JSON grammar through lark_new, parses two documents through
  * lark_parse, and walks the resulting tree with lark_tree_* to assert the
- * structure matches what Python/Rust Lark produce. Exits 0 on success, prints a
- * diagnostic and exits nonzero on the first mismatch — the Rust harness
- * (tests/c_smoke.rs) treats a nonzero exit as a test failure.
+ * structure matches what Python/Rust Lark produce.
+ *
+ * The entry point is `lark_h_run_smoke()` (not `main`): build.rs compiles this
+ * file with the `cc` crate and links it into the crate, and the unit test in
+ * src/lib.rs calls it over FFI, treating a nonzero return as a failure. That
+ * keeps the test running under a plain `cargo test` — which builds only the
+ * rlib, never a standalone .a/.so to link a separate C executable against.
  */
 #include <stddef.h>
 #include <stdio.h>
@@ -60,7 +64,7 @@ static void check_token(const lark_tree_t *n, const char *type, const char *valu
     CHECK(strcmp(lark_tree_token_value(n), value) == 0, value);
 }
 
-int main(void) {
+int lark_h_run_smoke(void) {
     lark_options_t opts = lark_default_options();
     opts.parser = 1; /* lalr */
     opts.lexer = 2;  /* contextual */
