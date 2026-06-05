@@ -313,7 +313,7 @@ underlying super-linearity has since been removed by the Joop-Leo work (#58).
 
 | Component | Status | Notes |
 |-----------|--------|-------|
-| PyO3 Python binding | ⬜ | Drop-in speedup for Python Lark users |
+| PyO3 Python binding | ✅ | `lark-rs/python/` — a `maturin`/PyO3 crate exposing `Lark` / `Tree` / `Token` with Python Lark's kwargs (`parser`, `lexer`, `start`, `ambiguity`, `propagate_positions`, `keep_all_tokens`, `maybe_placeholders`, `strict`, `g_regex_flags`). `Token` is `str`-like; errors map to `LarkError`/`GrammarError`/`ParseError`. `abi3-py38` wheel via `maturin build`. Round-trip parity pinned against the Python-Lark oracle by `python/tests/test_roundtrip.py` |
 | WASM target | ⬜ | Browser/Node.js |
 | C API | ✅ | `lark_h` crate (#48): `#[no_mangle]` surface (`lark_new`/`lark_parse`/`lark_tree_*`/`lark_free`) + committed `lark.h` + C smoke test. lark-rs is now a workspace so `cargo test --all` covers it |
 | `include_lark!` proc-macro | ⬜ | Compile-time grammar validation |

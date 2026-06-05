@@ -218,6 +218,26 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "Known divergence (#77): undefined symbols are silently accepted as \
+                never-matching terminals instead of being rejected at grammar-load \
+                time. Python Lark raises GrammarError(\"... used but not defined\"). \
+                Remove #[ignore] once the loader validates references."]
+    fn test_undefined_symbol_is_rejected() {
+        // Python Lark rejects a grammar that references an undefined symbol when
+        // the grammar is compiled. lark-rs currently builds it and instead fails
+        // at parse time (the undefined name becomes a terminal that never matches),
+        // so this is gated until the loader gains use-before-definition validation.
+        let res = grammar::load_grammar("start: UNDEFINED\n", &["start".to_string()], false, false);
+        assert!(
+            matches!(
+                res,
+                Err(GrammarError::UndefinedTerminal { .. } | GrammarError::UndefinedRule { .. })
+            ),
+            "expected undefined-symbol rejection, got {res:?}"
+        );
+    }
+
+    #[test]
     fn test_grammar_ignore_directive() {
         let grammar = grammar::load_grammar(
             "start: WORD\nWORD: /[a-z]+/\n%ignore /[ \\t]+/\n",

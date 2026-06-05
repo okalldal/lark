@@ -1,0 +1,24 @@
+[package]
+name = "lark-rs-python"
+version = "0.1.0"
+edition = "2021"
+description = "PyO3 Python bindings for lark-rs — a drop-in speedup for Python Lark"
+license = "MIT"
+repository = "https://github.com/lark-parser/lark"
+
+# The compiled artifact is a Python extension module (`lark_rs`), so it must be a
+# C-compatible dynamic library. `maturin` packages this cdylib into the wheel.
+[lib]
+name = "lark_rs"
+crate-type = ["cdylib"]
+
+[dependencies]
+# The core engine lives one directory up. The binding is a thin adapter that
+# translates Python kwargs to `LarkOptions` and the Rust `Tree`/`Token` types to
+# Python objects — all parsing logic stays in the shared crate.
+# Imported as `lark_core` so the dependency name doesn't collide with this
+# crate's own library name (`lark_rs`, the Python module).
+lark_core = { path = "..", package = "lark-rs" }
+# abi3 builds one wheel that works on CPython 3.8+, so we don't ship a wheel per
+# interpreter version.
+pyo3 = { version = "0.23", features = ["extension-module", "abi3-py38"] }
