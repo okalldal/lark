@@ -39,6 +39,14 @@ name = "parse"
 path = "benches/parse.rs"
 harness = false
 
+# Cross-engine comparison (lark-rs vs Python Lark) over JSON / Python / SQL
+# workloads (#50). Shells out to benches/vs_python_lark.py for the Python side and
+# prints the per-workload speedup. Recorded trend, not a CI gate — see BENCH.md.
+[[bench]]
+name = "vs_python_lark"
+path = "benches/vs_python_lark.rs"
+harness = false
+
 [profile.release]
 opt-level = 3
 lto = true
