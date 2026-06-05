@@ -1,0 +1,4 @@
+// Deliberately broken grammar: the group opened with `(` is never closed, so the
+// lark-rs loader rejects it. `include_lark!` must surface that as a compile error
+// (see tests/compile_fail.rs) rather than letting it reach a runtime parse.
+start: "a" (

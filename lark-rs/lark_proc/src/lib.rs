@@ -239,8 +239,8 @@ fn default_struct_name(rel_path: &str) -> Result<String, String> {
 }
 
 /// Emit the generated parser struct. The grammar source is embedded as a string
-/// literal; `Lark` is built once via `OnceLock`. `include_bytes!` ties the build
-/// to the grammar file so edits force a rebuild.
+/// literal; `Lark` is built once per thread via `thread_local!` (it is not `Sync`).
+/// `include_bytes!` ties the build to the grammar file so edits force a rebuild.
 fn generate(struct_name: &str, source: &str, abs_path: &std::path::Path) -> TokenStream {
     // `{:?}` renders a correctly escaped Rust string literal for both the grammar
     // body and the absolute path.

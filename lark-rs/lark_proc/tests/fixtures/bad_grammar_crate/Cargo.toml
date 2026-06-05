@@ -1,0 +1,16 @@
+# Fixture crate for the `compile_fail` integration test. It deliberately fails to
+# build: `include_lark!` must reject the malformed `bad.lark` grammar at compile
+# time. Its own `[workspace]` table makes it a standalone workspace root, so the
+# parent `lark-rs` workspace (and `cargo test --all` / `cargo fmt --all` in CI)
+# never tries to build it — only `tests/compile_fail.rs` does, on demand.
+[workspace]
+
+[package]
+name = "bad_grammar_crate"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+lark_proc = { path = "../../.." }
+lark-rs = { path = "../../../.." }
