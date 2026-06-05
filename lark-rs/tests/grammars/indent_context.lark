@@ -1,0 +1,23 @@
+// Indentation grammar where the *contextual* lexer's state-narrowing is
+// load-bearing, exercised together with the Indenter postlex hook (issue #67).
+//
+// `NAME` and `VALUE` are two distinct regex terminals that match the *same* span
+// (`/[a-z]+/`). They never share a parser state — `NAME` starts an `assign` (or
+// follows `if`), `VALUE` only appears after `=` — so the contextual lexer lexes
+// each correctly by parser state. The *basic* lexer cannot: it always picks
+// `NAME` (the tie-break winner), so `x = y` fails because `y` is not a `VALUE`.
+//
+// This is the case the #41 `indent`/`indent_paren` grammars do NOT cover: there,
+// basic and contextual produce identical trees, so replaying them on both lexers
+// only checks parity. Here the contextual lexer does work the basic lexer can't,
+// *while* INDENT/DEDENT are being injected — pinning that postlex and contextual
+// narrowing interact correctly. Generated and run under `lexer='contextual'` only.
+start: _NL* stmt+
+?stmt: assign | block
+assign: NAME "=" VALUE _NL
+block: "if" NAME ":" _NL _INDENT stmt+ _DEDENT
+NAME: /[a-z]+/
+VALUE: /[a-z]+/
+_NL: /(\r?\n[ \t]*)+/
+%declare _INDENT _DEDENT
+%ignore " "

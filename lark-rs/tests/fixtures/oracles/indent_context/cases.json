@@ -1,0 +1,196 @@
+{
+  "name": "indent_context",
+  "open_paren_types": [],
+  "close_paren_types": [],
+  "cases": [
+    {
+      "input": "x = y\n",
+      "should_parse": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "assign",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "NAME",
+                "value": "x"
+              },
+              {
+                "type": "token",
+                "token_type": "VALUE",
+                "value": "y"
+              }
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "a = b\nc = d\n",
+      "should_parse": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "assign",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "NAME",
+                "value": "a"
+              },
+              {
+                "type": "token",
+                "token_type": "VALUE",
+                "value": "b"
+              }
+            ]
+          },
+          {
+            "type": "tree",
+            "data": "assign",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "NAME",
+                "value": "c"
+              },
+              {
+                "type": "token",
+                "token_type": "VALUE",
+                "value": "d"
+              }
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "if a:\n    x = y\n",
+      "should_parse": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "block",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "NAME",
+                "value": "a"
+              },
+              {
+                "type": "tree",
+                "data": "assign",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "NAME",
+                    "value": "x"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "VALUE",
+                    "value": "y"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "if a:\n    x = y\n    p = q\nz = w\n",
+      "should_parse": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "block",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "NAME",
+                "value": "a"
+              },
+              {
+                "type": "tree",
+                "data": "assign",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "NAME",
+                    "value": "x"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "VALUE",
+                    "value": "y"
+                  }
+                ]
+              },
+              {
+                "type": "tree",
+                "data": "assign",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "NAME",
+                    "value": "p"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "VALUE",
+                    "value": "q"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tree",
+            "data": "assign",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "NAME",
+                "value": "z"
+              },
+              {
+                "type": "token",
+                "token_type": "VALUE",
+                "value": "w"
+              }
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "if a:\nx = y\n",
+      "should_parse": false,
+      "ok": false,
+      "tree": null,
+      "error": "Unexpected token Token('NAME', 'x') at line 2, column 1.\nExpected one of: \n\t* _INDENT\nPrevious tokens: [Token('_NL', '\\n')]\n"
+    }
+  ]
+}

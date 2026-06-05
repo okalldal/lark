@@ -866,6 +866,25 @@ INDENTER_GROUPS = [
     ]),
 ]
 
+# Indenter grammars where the *contextual* lexer's state-narrowing is load-bearing
+# (issue #67). `NAME` and `VALUE` are distinct regex terminals matching the same
+# span, disambiguated only by parser state — so these are generated and replayed
+# under `lexer='contextual'` only (the basic lexer cannot parse them; it always
+# picks `NAME`). This pins that postlex and contextual narrowing interact, which
+# the `indent`/`indent_paren` grammars cannot (there basic == contextual).
+#
+# (grammar_file, open_paren_types, close_paren_types, [(input, should_parse)])
+INDENTER_CONTEXTUAL_GROUPS = [
+    ("indent_context", [], [], [
+        ("x = y\n",                               True),   # top-level assign (VALUE needs state)
+        ("a = b\nc = d\n",                        True),   # two assigns
+        ("if a:\n    x = y\n",                    True),   # block with one assign
+        ("if a:\n    x = y\n    p = q\nz = w\n",  True),   # block + assigns + dedent
+        ("if a:\nx = y\n",                        False),  # block body needs INDENT
+    ]),
+]
+
+
 
 def generate_indenter():
     from lark.indenter import Indenter
@@ -873,43 +892,49 @@ def generate_indenter():
     print("Generating Indenter / postlex oracles...")
     # One oracle suite per grammar file (suite name == grammar stem) so the
     # oracle-coverage meta-test maps each tests/grammars/<name>.lark to its dir.
-    for name, open_types, close_types, cases in INDENTER_GROUPS:
-        grammar = load_grammar(name)
+    # The `indent`/`indent_paren` grammars are generated with `lexer='basic'` (the
+    # lexer lark-rs's materialized postlex path uses, and which produces trees
+    # identical to the contextual lexer for them). The `indent_context` grammar is
+    # generated with `lexer='contextual'` — the basic lexer cannot parse it (#67).
+    for groups, lexer in [(INDENTER_GROUPS, "basic"),
+                          (INDENTER_CONTEXTUAL_GROUPS, "contextual")]:
+        for name, open_types, close_types, cases in groups:
+            grammar = load_grammar(name)
 
-        class _TI(Indenter):
-            NL_type = "_NL"
-            OPEN_PAREN_types = open_types
-            CLOSE_PAREN_types = close_types
-            INDENT_type = "_INDENT"
-            DEDENT_type = "_DEDENT"
-            tab_len = 8
+            class _TI(Indenter):
+                NL_type = "_NL"
+                OPEN_PAREN_types = open_types
+                CLOSE_PAREN_types = close_types
+                INDENT_type = "_INDENT"
+                DEDENT_type = "_DEDENT"
+                tab_len = 8
 
-        built = []
-        for inp, should_parse in cases:
-            try:
-                lark = Lark(grammar, parser="lalr", lexer="basic",
-                            postlex=_TI(), start="start", maybe_placeholders=False)
-                tree = lark.parse(inp)
-                ok, payload = True, tree_to_dict(tree)
-            except Exception as e:
-                ok, payload = False, str(e)
-            if should_parse and not ok:
-                print(f"  WARNING: {name} expected to parse {inp!r}: {payload}")
-            if not should_parse and ok:
-                print(f"  WARNING: {name} expected to reject {inp!r}")
-            built.append({
-                "input": inp,
-                "should_parse": should_parse,
-                "ok": ok,
-                "tree": payload if ok else None,
-                "error": payload if not ok else None,
+            built = []
+            for inp, should_parse in cases:
+                try:
+                    lark = Lark(grammar, parser="lalr", lexer=lexer,
+                                postlex=_TI(), start="start", maybe_placeholders=False)
+                    tree = lark.parse(inp)
+                    ok, payload = True, tree_to_dict(tree)
+                except Exception as e:
+                    ok, payload = False, str(e)
+                if should_parse and not ok:
+                    print(f"  WARNING: {name} expected to parse {inp!r}: {payload}")
+                if not should_parse and ok:
+                    print(f"  WARNING: {name} expected to reject {inp!r}")
+                built.append({
+                    "input": inp,
+                    "should_parse": should_parse,
+                    "ok": ok,
+                    "tree": payload if ok else None,
+                    "error": payload if not ok else None,
+                })
+            save_oracle(name, "cases", {
+                "name": name,
+                "open_paren_types": open_types,
+                "close_paren_types": close_types,
+                "cases": built,
             })
-        save_oracle(name, "cases", {
-            "name": name,
-            "open_paren_types": open_types,
-            "close_paren_types": close_types,
-            "cases": built,
-        })
 
 
 def generate_json():

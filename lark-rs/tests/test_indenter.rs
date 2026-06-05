@@ -109,6 +109,67 @@ fn test_indenter_oracle() {
     assert!(checked > 0, "no indenter cases were checked");
 }
 
+/// Postlex over the contextual lexer where the lexer's state-narrowing is
+/// *load-bearing* (issue #67). In `indent_context.lark`, `NAME` and `VALUE` are
+/// two regex terminals matching the same span; only the parser state tells them
+/// apart. This is the case `test_indenter_oracle` can't cover — there basic and
+/// contextual agree, so replaying both only checks parity.
+///
+/// Two things are asserted:
+///   1. the contextual lexer parses every oracle case (postlex + narrowing work
+///      together, with INDENT/DEDENT injected mid-stream);
+///   2. the *basic* lexer genuinely *cannot* parse a case the contextual lexer
+///      accepts — proving the contextual path does real work, so the test is
+///      adversarial, not a tautology.
+#[test]
+fn test_indenter_contextual_narrowing() {
+    let name = "indent_context";
+    let group = load_oracle(name, "cases");
+    let lark = make_indenter(
+        &grammar_text(name),
+        LexerType::Contextual,
+        strs(&group["open_paren_types"]),
+        strs(&group["close_paren_types"]),
+    );
+
+    let mut checked = 0;
+    for case in group["cases"].as_array().unwrap() {
+        let input = case["input"].as_str().unwrap();
+        let should_parse = case["should_parse"].as_bool().unwrap();
+        let oracle_ok = case["ok"].as_bool().unwrap();
+
+        match lark.parse(input) {
+            Ok(tree) => {
+                assert!(
+                    oracle_ok,
+                    "[{name}] {input:?}: lark-rs parsed but Python Lark rejected it"
+                );
+                if let Err(e) = tree_matches_oracle(&tree, &case["tree"]) {
+                    panic!("[{name}] {input:?}: tree mismatch: {e}\n got: {tree}");
+                }
+            }
+            Err(e) => assert!(
+                !oracle_ok && !should_parse,
+                "[{name}] {input:?}: lark-rs rejected ({e}) but Python Lark accepted it"
+            ),
+        }
+        checked += 1;
+    }
+    assert!(checked > 0, "no indent_context cases were checked");
+
+    // The contextual lexer is load-bearing: the same grammar on the *basic* lexer
+    // must fail an input the contextual lexer accepts (`y` lexes as `NAME`, never
+    // the `VALUE` the rule needs). If this ever starts passing, the grammar no
+    // longer exercises contextual narrowing and the test above is back to a parity
+    // check.
+    let basic = make_indenter(&grammar_text(name), LexerType::Basic, vec![], vec![]);
+    assert!(
+        basic.parse("x = y\n").is_err(),
+        "basic lexer unexpectedly parsed a contextual-only grammar — \
+         indent_context no longer pins contextual narrowing"
+    );
+}
+
 /// A grammar that uses an Indenter terminal it never `%declare`d (here the
 /// grammar declares nothing) must fail to build with a clear message, not panic
 /// or silently inject untyped tokens.
