@@ -15,9 +15,35 @@
 //! (paren tracking, tab expansion, end-of-stream dedent flush) matches it
 //! token-for-token so the oracle trees are identical.
 
-use crate::error::ParseError;
+use crate::error::{GrammarError, ParseError};
 use crate::grammar::intern::{SymbolId, SymbolTable};
 use crate::tree::Token;
+
+/// The subset of a [`Token`]'s position a synthetic token borrows. Copied off the
+/// triggering token so the hot loop never clones a whole `Token` just to remember
+/// "where the last one was" for the end-of-stream DEDENT flush.
+#[derive(Clone, Copy)]
+struct Pos {
+    line: usize,
+    column: usize,
+    end_line: usize,
+    end_column: usize,
+    start_pos: usize,
+    end_pos: usize,
+}
+
+impl Pos {
+    fn of(t: &Token) -> Self {
+        Pos {
+            line: t.line,
+            column: t.column,
+            end_line: t.end_line,
+            end_column: t.end_column,
+            start_pos: t.start_pos,
+            end_pos: t.end_pos,
+        }
+    }
+}
 
 /// Injects `INDENT` / `DEDENT` tokens based on indentation, mirroring Python
 /// Lark's `Indenter`.
@@ -53,6 +79,42 @@ impl Default for Indenter {
 }
 
 impl Indenter {
+    /// Check, at build time, that every terminal name this Indenter *requires*
+    /// resolves to a grammar symbol — closing the silent-misparse footgun where a
+    /// typo'd `nl_type` (or an undeclared INDENT/DEDENT) turns the hook into a
+    /// no-op and the grammar quietly mis-parses instead of erroring.
+    ///
+    /// `open_paren_types` / `close_paren_types` are intentionally *not* required to
+    /// exist: Python Lark treats an unknown bracket name as simply never matching,
+    /// and the built-in defaults (`LPAR`/`LSQB`/`LBRACE`) name brackets a given
+    /// grammar may legitimately not define. Validating them would reject those
+    /// valid setups, so we match Python's leniency there.
+    pub fn validate(&self, symbols: &SymbolTable) -> Result<(), GrammarError> {
+        if symbols.id(&self.nl_type).is_none() {
+            return Err(GrammarError::Other {
+                msg: format!(
+                    "postlex Indenter nl_type {:?} is not a terminal in the grammar — \
+                     the Indenter measures indentation off it",
+                    self.nl_type
+                ),
+            });
+        }
+        for (label, name) in [
+            ("indent_type", &self.indent_type),
+            ("dedent_type", &self.dedent_type),
+        ] {
+            if symbols.id(name).is_none() {
+                return Err(GrammarError::Other {
+                    msg: format!(
+                        "postlex Indenter {label} {name:?} is not declared in the grammar \
+                         (add `%declare {name}`)"
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Transform `tokens` (a fully-lexed stream ending in the synthetic `$END`
     /// token) by injecting INDENT/DEDENT around newline tokens.
     ///
@@ -74,14 +136,30 @@ impl Indenter {
         // *before* it, exactly where Python Lark's generator emits the trailing
         // DEDENTs (after the input loop, before the parser sees end of input).
         let mut end_token: Option<Token> = None;
-        // Last real token seen, for borrowing a position onto flushed DEDENTs.
-        let mut last_pos: Option<Token> = None;
+        // Position of the last real token seen, borrowed onto flushed DEDENTs
+        // (Python's `Token.new_borrow_pos(DEDENT, '', token)`). Only the position
+        // is kept, so the loop never clones a whole `Token` here.
+        let mut last_pos: Option<Pos> = None;
 
         for tok in tokens {
             if tok.type_id == SymbolId::END {
                 end_token = Some(tok);
                 break;
             }
+
+            let cur = Pos::of(&tok);
+            last_pos = Some(cur);
+            // Decide the paren-depth delta from the token's type *before* it may be
+            // moved into `out`; apply it *after* yielding, matching Python's order
+            // (handle_NL / yield first, then adjust paren_level). A newline is never
+            // a bracket, so its delta is always 0.
+            let delta: i32 = if self.open_paren_types.iter().any(|t| t == &tok.type_) {
+                1
+            } else if self.close_paren_types.iter().any(|t| t == &tok.type_) {
+                -1
+            } else {
+                0
+            };
 
             if tok.type_ == self.nl_type {
                 self.handle_nl(
@@ -93,25 +171,29 @@ impl Indenter {
                     dedent_id,
                 )?;
             } else {
-                out.push(tok.clone());
+                out.push(tok); // moved, not cloned
             }
 
-            if self.open_paren_types.iter().any(|t| t == &tok.type_) {
-                paren_level += 1;
-            } else if self.close_paren_types.iter().any(|t| t == &tok.type_) {
-                paren_level = paren_level
-                    .checked_sub(1)
-                    .ok_or_else(|| ParseError::Postlex {
-                        msg: format!("unbalanced closing bracket {:?}", tok.value),
-                    })?;
+            match delta {
+                1 => paren_level += 1,
+                -1 => {
+                    paren_level = paren_level
+                        .checked_sub(1)
+                        .ok_or_else(|| ParseError::Postlex {
+                            msg: format!(
+                                "unbalanced closing bracket at line {}, column {}",
+                                cur.line, cur.column
+                            ),
+                        })?
+                }
+                _ => {}
             }
-            last_pos = Some(tok);
         }
 
         // End of stream: close every still-open indentation level.
         while indent_stack.len() > 1 {
             indent_stack.pop();
-            out.push(self.make_token(dedent_id, &self.dedent_type, "", last_pos.as_ref()));
+            out.push(self.make_token(dedent_id, &self.dedent_type, "", last_pos));
         }
 
         out.push(end_token.unwrap_or_else(Token::end));
@@ -146,14 +228,15 @@ impl Indenter {
         let indent =
             indent_str.matches(' ').count() + indent_str.matches('\t').count() * self.tab_len;
 
+        let pos = Some(Pos::of(token));
         let top = *indent_stack.last().expect("indent stack never empty");
         if indent > top {
             indent_stack.push(indent);
-            out.push(self.make_token(indent_id, &self.indent_type, indent_str, Some(token)));
+            out.push(self.make_token(indent_id, &self.indent_type, indent_str, pos));
         } else {
             while indent < *indent_stack.last().expect("indent stack never empty") {
                 indent_stack.pop();
-                out.push(self.make_token(dedent_id, &self.dedent_type, indent_str, Some(token)));
+                out.push(self.make_token(dedent_id, &self.dedent_type, indent_str, pos));
             }
             if indent != *indent_stack.last().expect("indent stack never empty") {
                 return Err(ParseError::Postlex {
@@ -168,22 +251,27 @@ impl Indenter {
         Ok(())
     }
 
-    /// Build a synthetic token, borrowing its position from `borrow` (the newline
-    /// it was triggered by), like Python Lark's `Token.new_borrow_pos`.
-    fn make_token(&self, id: SymbolId, name: &str, value: &str, borrow: Option<&Token>) -> Token {
+    /// Build a synthetic token, borrowing its position from `pos` (the newline it
+    /// was triggered by, or the last token for the EOF flush), like Python Lark's
+    /// `Token.new_borrow_pos`. `None` (an empty stream) leaves zeroed positions.
+    fn make_token(&self, id: SymbolId, name: &str, value: &str, pos: Option<Pos>) -> Token {
         let mut t = Token::new(name, value);
         t.type_id = id;
-        if let Some(b) = borrow {
-            t.line = b.line;
-            t.column = b.column;
-            t.end_line = b.end_line;
-            t.end_column = b.end_column;
-            t.start_pos = b.start_pos;
-            t.end_pos = b.end_pos;
+        if let Some(p) = pos {
+            t.line = p.line;
+            t.column = p.column;
+            t.end_line = p.end_line;
+            t.end_column = p.end_column;
+            t.start_pos = p.start_pos;
+            t.end_pos = p.end_pos;
         }
         t
     }
 
+    /// Resolve a `%declare`d terminal's interned id. This duplicates the existence
+    /// check in [`validate`](Self::validate); when `process` is reached through
+    /// `Lark`/`build_frontend` that check has already passed, so this is a
+    /// belt-and-suspenders guard for callers that invoke `process` directly.
     fn declared_id(&self, symbols: &SymbolTable, name: &str) -> Result<SymbolId, ParseError> {
         symbols.id(name).ok_or_else(|| ParseError::Postlex {
             msg: format!(

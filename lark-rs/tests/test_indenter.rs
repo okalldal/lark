@@ -10,7 +10,7 @@
 mod common;
 
 use common::{load_oracle, tree_matches_oracle};
-use lark_rs::{Indenter, Lark, LarkOptions, LexerType, ParserAlgorithm};
+use lark_rs::{Ambiguity, Indenter, Lark, LarkOptions, LexerType, ParserAlgorithm};
 
 /// Build a LALR + Indenter parser for a grammar file, with the paren token lists
 /// the oracle group recorded.
@@ -78,6 +78,11 @@ fn test_indenter_oracle() {
                     }
                 }
                 Err(e) => {
+                    // We assert *rejection parity* only, not error-message parity:
+                    // lark-rs and Python Lark word their errors differently (the
+                    // oracle's `error` text is recorded but deliberately not
+                    // compared), so a stored message like "Unexpected dedent…" is
+                    // documentation, not an assertion target.
                     assert!(
                         !oracle_ok && !should_parse,
                         "[{name}] {input:?}: lark-rs rejected ({e}) but Python Lark accepted it"
@@ -116,5 +121,73 @@ fn test_indenter_requires_declare() {
     assert!(
         format!("{err}").contains("_INDENT"),
         "error should name the undeclared terminal: {err}"
+    );
+}
+
+/// A typo'd `nl_type` would make the Indenter a silent no-op (no token ever
+/// matches it, so no INDENT/DEDENT is injected and the grammar mis-parses). The
+/// build must reject it up front, naming the offending terminal.
+#[test]
+fn test_indenter_validates_nl_type() {
+    let grammar = grammar_text("indent");
+    let mut indenter = Indenter {
+        nl_type: "_TYPO".to_string(),
+        open_paren_types: vec![],
+        close_paren_types: vec![],
+        indent_type: "_INDENT".to_string(),
+        dedent_type: "_DEDENT".to_string(),
+        tab_len: 8,
+    };
+    let build = |ind: Indenter| {
+        Lark::new(
+            &grammar,
+            LarkOptions {
+                parser: ParserAlgorithm::Lalr,
+                lexer: LexerType::Basic,
+                start: vec!["start".to_string()],
+                postlex: Some(ind),
+                ..Default::default()
+            },
+        )
+    };
+    let err = build(indenter.clone())
+        .err()
+        .expect("build should fail with a typo'd nl_type");
+    assert!(
+        format!("{err}").contains("_TYPO"),
+        "error should name the bad nl_type: {err}"
+    );
+
+    // The correct nl_type builds fine.
+    indenter.nl_type = "_NL".to_string();
+    assert!(build(indenter).is_ok(), "correct nl_type should build");
+}
+
+/// postlex rides the LALR frontend only (issue #67); configuring it on another
+/// backend must error rather than be silently ignored.
+#[test]
+fn test_postlex_on_earley_is_rejected() {
+    let res = Lark::new(
+        &grammar_text("indent"),
+        LarkOptions {
+            parser: ParserAlgorithm::Earley,
+            lexer: LexerType::Basic,
+            ambiguity: Ambiguity::Resolve,
+            start: vec!["start".to_string()],
+            postlex: Some(Indenter {
+                nl_type: "_NL".to_string(),
+                open_paren_types: vec![],
+                close_paren_types: vec![],
+                indent_type: "_INDENT".to_string(),
+                dedent_type: "_DEDENT".to_string(),
+                tab_len: 8,
+            }),
+            ..Default::default()
+        },
+    );
+    let err = res.err().expect("postlex on Earley should fail to build");
+    assert!(
+        format!("{err}").contains("lalr"),
+        "error should explain LALR-only support: {err}"
     );
 }

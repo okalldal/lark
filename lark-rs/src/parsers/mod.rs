@@ -127,6 +127,14 @@ pub fn build_frontend(
     grammar: &Grammar,
     options: &LarkOptions,
 ) -> Result<ParsingFrontend, LarkError> {
+    // postlex is currently wired only through the LALR frontend (issue #67 tracks
+    // the contextual-lexer/other-backend support). Fail loudly rather than
+    // silently ignoring a configured hook on Earley/CYK.
+    if options.postlex.is_some() && options.parser != ParserAlgorithm::Lalr {
+        return Err(LarkError::Grammar(crate::error::GrammarError::Other {
+            msg: "postlex (Indenter) is only supported with parser='lalr'".to_string(),
+        }));
+    }
     match options.parser {
         ParserAlgorithm::Lalr => {
             // Lower the surface grammar to the interned IR once, then build the
@@ -139,17 +147,10 @@ pub fn build_frontend(
 
             // A postlex hook needs the whole token stream, so it always rides the
             // basic lexer (the contextual lexer lexes lazily, one token per parser
-            // state). Validate its `%declare`d terminals exist now, before parsing.
+            // state). Validate its terminal names now, before parsing, so a typo'd
+            // nl_type or an undeclared INDENT/DEDENT fails at build time.
             if let Some(postlex) = &options.postlex {
-                for name in [&postlex.indent_type, &postlex.dedent_type] {
-                    if cg.symbols.id(name).is_none() {
-                        return Err(LarkError::Grammar(crate::error::GrammarError::Other {
-                            msg: format!(
-                                "postlex Indenter terminal {name:?} is not declared in the grammar (add `%declare {name}`)"
-                            ),
-                        }));
-                    }
-                }
+                postlex.validate(&cg.symbols)?;
                 let lexer = BasicLexer::new(&lexer_conf)?;
                 return Ok(ParsingFrontend {
                     kind: FrontendKind::LalrPostlex {
