@@ -20,6 +20,13 @@ dynamic = ["version"]
 [project.urls]
 Repository = "https://github.com/lark-parser/lark"
 
+# Own pytest config so collection doesn't inherit the repo-root config (which
+# sets `python_files = "__main__.py"` for the Python-Lark test suite). This also
+# makes this directory pytest's rootdir.
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+
 [tool.maturin]
 # The crate lives in this directory; the importable module is `lark_rs`.
 manifest-path = "Cargo.toml"
