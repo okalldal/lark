@@ -254,17 +254,22 @@ fn main() {
     // parser='earley' and print the per-row Earley/LALR ratio.
     //
     // REPORTED, NOT GATED. P2-1 originally proposed asserting a single constant K×
-    // ceiling here ("Earley within K× of LALR on unambiguous input"). Wiring up
-    // this measurement showed that premise does not hold: the ratio *grows* with
-    // input size (≈15×→35×→193× as JSON scales 0.4K→8.7K→92K). That is structural,
-    // not a regression — the completer rescans the whole origin column
-    // (`earley.rs::predict_and_complete`) because the Joop-Leo transitive
-    // optimization is deliberately omitted, so Earley is super-linear on
-    // list-shaped unambiguous input. A constant-K ceiling is therefore not
-    // achievable until Leo lands. The criterion was downgraded to deferred
-    // (PHASE_2_PLAN.md §10); the Earley super-linearity is tracked as its own
-    // ticket. We still print the ratios so the trend (and any future Leo win) is
-    // visible in the recorded numbers.
+    // ceiling here ("Earley within K× of LALR on unambiguous input"). Wiring the
+    // measurement up disproved that premise: the ratio *grew* with input size
+    // (≈15×→35×→193× as JSON scaled 0.4K→8.7K→92K). The growth was first guessed to
+    // be the completer rescanning the origin column (Joop-Leo omitted) — but that is
+    // NOT what profiling found (#54/#55): chart construction is linear on these
+    // workloads (the completer scans a constant ~5 items/completion), and the
+    // super-linearity lived entirely in the resolve-mode forest→tree walk — two
+    // quadratics, copying the `Inline` child list of transparent left-recursive
+    // helpers (`x*`/`x+`/`_rule`) and deep-cloning each growing left subtree on memo
+    // (`expr: expr "+" term`). #55 fixed both (streaming append + lazy memoization),
+    // so the resolve-mode ratio now *stops growing* with input size (the large cases
+    // are cheaper per byte than the small ones). A constant-K ceiling is still not
+    // asserted: wall-clock is too noisy to gate (see BENCH.md). The completer/Joop-Leo
+    // claim is unverified (shown linear on JSON/arith only, not adversarial shapes),
+    // and that residual suspicion — plus the still-quadratic ambiguity='explicit'
+    // walk — is tracked in #56. We print the ratios so the trend stays visible.
     println!();
     println!("Parsing — Earley (basic lexer), cost-of-generality vs LALR (reported, NOT gated):");
     let json_e = build_earley(JSON_GRAMMAR);

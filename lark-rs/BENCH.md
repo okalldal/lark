@@ -8,6 +8,25 @@ runners is too noisy to enforce, and a flaky red perf gate gets muted. The
 nightly `.github/workflows/lark-rs-bench.yml` records and uploads the numbers as a
 trend; humans read regressions off the trend.
 
+## Performance discipline (profile first — the #54/#55 lesson)
+
+Three rules, learned the hard way: #54 named a culprit (completer / Joop-Leo), and
+#55's profiler found a different one (the forest→tree walk).
+
+1. **Demonstrate before fixing.** A suspected super-linearity gets a committed,
+   size-parametrized workload that *exhibits* it before any fix is written — the perf
+   analog of "every bug reproducible as a test failure first" (`CLAUDE.md`).
+   "Couldn't reproduce a pathology" is a valid, documented outcome (it closes the
+   suspicion with evidence).
+2. **Profile the root cause; don't guess it.** Fix the phase the profiler indicts,
+   not the one a hypothesis names, and attach the profile to the change. #54
+   attributed the growth to the completer; the cost was in the forest→tree walk.
+3. **Regress on a deterministic signal, never wall-clock.** Gate on allocation-block
+   counts (DHAT) or an instrumented copy/clone/rebuild counter, asserting *flat
+   per-byte scaling* — not absolute time. Wall-clock on shared runners is too noisy
+   to gate, and a flaky perf gate gets muted (the reason this whole bench is a
+   recorded trend, not a gate).
+
 ## Running it
 
 ```bash
@@ -40,17 +59,26 @@ comparison); `median_ns` drives the MB/s. Speedup on a row is
    ratio (`parse_earley` rows + a `ratio` line), and adds a reported-only
    pathological-ambiguous workload (`parse_earley_ambig`).
 
-   **Reported, not gated — and the ratio is *not* a constant.** Sprint 2 originally
+   **Reported, not gated — and the ratio was *not* a constant.** Sprint 2 originally
    meant to assert "...and within K× of LALR" here. Wiring the measurement up
-   disproved that premise: the Earley/LALR ratio **grows with input size**
-   (≈15×→32×→196× as JSON scales 0.4K→8.7K→92K on the reference box). That is
-   structural, not a regression — the Earley completer rescans the whole origin
-   column (`earley.rs::predict_and_complete`) because the Joop-Leo transitive
-   optimization is deliberately omitted, making Earley super-linear on list-shaped
-   unambiguous input. So a single-K ceiling is not meaningful pre-Leo; the criterion
-   was downgraded to deferred (`PHASE_2_PLAN.md` §10) and the super-linearity is
-   tracked as **P2-4** (Leo / completer-index). The ratios are printed so a future
-   Leo win shows up as the numbers dropping.
+   disproved that premise: the Earley/LALR ratio **grew with input size**
+   (≈15×→32×→196× as JSON scaled 0.4K→8.7K→92K on the reference box). That growth was
+   first attributed to the completer rescanning the origin column (Joop-Leo
+   transitives omitted) — but **profiling did not bear that hypothesis out.** #54/#55
+   found chart construction is linear on these workloads (the completer scans a
+   constant number of items per completion), and the super-linearity lived entirely
+   in the **resolve-mode forest→tree walk**: two quadratics — copying the `Inline`
+   child list of transparent left-recursive helpers (`x*`/`x+`/`_rule`), and
+   deep-cloning each growing left subtree on memo for left-recursive real rules
+   (`expr: expr "+" term`). #55 fixed both (streaming append + lazy memoization), so
+   the resolve-mode ratio now **stops growing with input size** —
+   `earley_over_lalr_max` fell 311.8× → 17.9×, and the largest cases are now cheaper
+   per byte than the smallest. A single-K ceiling is still not asserted: wall-clock
+   is too noisy to gate. The completer/Joop-Leo claim is **unverified** (shown linear
+   on JSON/arith only, not on adversarial grammar shapes), and that residual
+   suspicion — together with the still-quadratic `ambiguity='explicit'` walk,
+   untouched by #55 — is tracked in **#56** (profile-first, regression-backed). The
+   ratios are printed so the trend stays visible.
 
 ## Baseline snapshot
 
