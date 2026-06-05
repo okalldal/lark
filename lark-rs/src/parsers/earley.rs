@@ -164,12 +164,54 @@ struct SymbolNode {
     is_intermediate: bool,
     families: Vec<Packed>,
     family_set: HashSet<(ForestRef, ForestRef)>,
+    /// Joop-Leo deferred reconstructions: `(transitive, bottom_node, end_col)`. A
+    /// Leo completion records a path here instead of materializing the O(n) skipped
+    /// reduction nodes eagerly; `load_leo_paths` expands them (once, lazily) into
+    /// `families` before the forest→tree walk. Empty for non-Leo nodes.
+    paths: Vec<(usize, ForestRef, usize)>,
+}
+
+/// A Joop-Leo transitive item, memoized per `(start column, recognized symbol)`.
+///
+/// It records the one deterministic reduction step a completion of `recognized`
+/// (spanning `(key_start, i)`) takes: it advances the unique originator
+/// `[B → β•(recognized)γ, red_start]` (`red_*` below, with `red_node` its
+/// built-so-far left child) and, since `γ` is nullable, completes `B`. `parent`
+/// chains one level up toward `top`, the topmost item the whole chain collapses
+/// to. The completer jumps straight to `top`; `Forest::load_paths` walks the
+/// `parent` chain to rebuild the skipped reduction spine on demand.
+#[derive(Clone, Copy)]
+struct Trans {
+    /// The recognized non-terminal and the column it starts at (the map key).
+    recognized: SymbolId,
+    key_start: usize,
+    /// The unique originator `[B → β•(recognized)γ, red_start]` being advanced.
+    red_rule: usize,
+    red_dot: usize,
+    red_start: usize,
+    red_node: ForestRef,
+    /// Next level up the deterministic reduction path, or `None` if this level's
+    /// completion (`B`) is itself the topmost.
+    parent: Option<usize>,
+    /// The topmost item the chain collapses to: `(rule, dot, origin)`. Identical
+    /// for every level of one chain; the node is built at `(top_origin, i)`.
+    top_rule: usize,
+    top_dot: usize,
+    top_origin: usize,
 }
 
 /// Arena of forest nodes + the scanned-token leaves they reference by index.
 struct Forest {
     nodes: Vec<SymbolNode>,
     tokens: Vec<Token>,
+    /// Global identity index: `(key, start, end) → node id`. A node is one symbol
+    /// (or intermediate dotted rule) over one span, no matter how many derivations
+    /// reach it — every completion of `(key, start, end)` merges its family here.
+    /// Keying on `end` (not a per-column cache) is what lets Joop-Leo's lazy spine
+    /// reconstruction *reuse* the chart's existing nodes instead of forking a
+    /// parallel copy, so a symbol's Leo-derived and normally-derived families land
+    /// in the same node (required for `ambiguity='resolve'` to compare them).
+    index: HashMap<(NodeKey, usize, usize), usize>,
 }
 
 impl Forest {
@@ -177,18 +219,14 @@ impl Forest {
         Forest {
             nodes: Vec::new(),
             tokens: Vec::new(),
+            index: HashMap::new(),
         }
     }
 
-    /// Node id for `(key, start)` in the current column's `cache`, creating it on
-    /// first sight. `end` is the column being built; it is metadata only.
-    fn get_or_create(
-        &mut self,
-        cache: &mut HashMap<(NodeKey, usize), usize>,
-        key: NodeKey,
-        start: usize,
-    ) -> usize {
-        if let Some(&id) = cache.get(&(key, start)) {
+    /// Node id for the symbol/intermediate `key` spanning `(start, end)`, creating
+    /// it on first sight and returning the same id on every later request.
+    fn get_or_create(&mut self, key: NodeKey, start: usize, end: usize) -> usize {
+        if let Some(&id) = self.index.get(&(key, start, end)) {
             return id;
         }
         let id = self.nodes.len();
@@ -196,8 +234,9 @@ impl Forest {
             is_intermediate: key.is_intermediate(),
             families: Vec::new(),
             family_set: HashSet::new(),
+            paths: Vec::new(),
         });
-        cache.insert((key, start), id);
+        self.index.insert((key, start, end), id);
         id
     }
 
@@ -226,6 +265,13 @@ impl Forest {
         let id = self.tokens.len();
         self.tokens.push(token);
         id
+    }
+
+    /// Record a Joop-Leo deferred reconstruction on `node_id` (which spans
+    /// `(_, end)`): completing the chain bottom (`bottom`) under transitive
+    /// `trans` rebuilds, lazily, the reduction spine whose top is this node.
+    fn add_path(&mut self, node_id: usize, trans: usize, bottom: ForestRef, end: usize) {
+        self.nodes[node_id].paths.push((trans, bottom, end));
     }
 }
 
@@ -459,6 +505,13 @@ impl EarleyParser {
         let mut columns: Vec<Column> = vec![Column::new()];
         let mut to_scan = ScanSet::new();
 
+        // Joop-Leo state. `transitives[j]` maps a recognized symbol to the
+        // memoized transitive rooted at column `j` (grown in lockstep with
+        // `columns`); `trans_arena` is the stable backing store the `parent`
+        // links index into.
+        let mut transitives: Vec<HashMap<SymbolId, usize>> = vec![HashMap::new()];
+        let mut trans_arena: Vec<Trans> = Vec::new();
+
         // Predict the start symbol into column 0 (non-terminal items) / the scan
         // buffer (terminal items).
         if let Some(prods) = self.rules_by_origin.get(&start_id) {
@@ -477,20 +530,27 @@ impl EarleyParser {
             }
         }
 
-        // node_cache lives one column at a time; the start column uses a fresh one.
-        let mut node_cache: HashMap<(NodeKey, usize), usize> = HashMap::new();
-
         let mut i = 0;
         loop {
-            self.predict_and_complete(i, &mut columns, &mut to_scan, &mut forest, &mut node_cache);
+            while transitives.len() < columns.len() {
+                transitives.push(HashMap::new());
+            }
+            self.predict_and_complete(
+                i,
+                &mut columns,
+                &mut to_scan,
+                &mut forest,
+                &mut transitives,
+                &mut trans_arena,
+                start_id,
+            );
             if i == n {
                 break;
             }
             let token = toks[i];
             match self.scan(token, &mut columns, &to_scan, &mut forest) {
-                Some((next_scan, next_cache)) => {
+                Some(next_scan) => {
                     to_scan = next_scan;
-                    node_cache = next_cache;
                 }
                 None => {
                     return Err(ParseError::UnexpectedToken {
@@ -505,10 +565,15 @@ impl EarleyParser {
             i += 1;
         }
 
-        // The root is the completed start symbol over (0, n) — found in the final
-        // column's node cache, which collects all of its derivations into one node.
-        node_cache
-            .get(&(NodeKey::Sym(start_id), 0))
+        // Expand any Joop-Leo deferred reconstructions into real packed families
+        // before the forest→tree walk reads them.
+        self.load_leo_paths(&mut forest, &trans_arena);
+
+        // The root is the completed start symbol spanning (0, n): one node in the
+        // forest's global index, holding all of its derivations.
+        forest
+            .index
+            .get(&(NodeKey::Sym(start_id), 0, n))
             .copied()
             .map(|root| (forest, root))
             .ok_or_else(|| {
@@ -528,13 +593,16 @@ impl EarleyParser {
     /// LIFO worklist (matching the reference's `deque.pop()`), so newly derived
     /// items are handled before older ones — the order that fixes resolve
     /// tie-breaks.
+    #[allow(clippy::too_many_arguments)]
     fn predict_and_complete(
         &self,
         i: usize,
         columns: &mut Vec<Column>,
         to_scan: &mut ScanSet,
         forest: &mut Forest,
-        node_cache: &mut HashMap<(NodeKey, usize), usize>,
+        transitives: &mut [HashMap<SymbolId, usize>],
+        trans_arena: &mut Vec<Trans>,
+        start_id: SymbolId,
     ) {
         // Held (ε) completions at this column: origin → its empty node.
         let mut held: HashMap<SymbolId, usize> = HashMap::new();
@@ -550,8 +618,7 @@ impl EarleyParser {
                 let node_id = match item.node {
                     ForestRef::Node(id) => id,
                     _ => {
-                        let id =
-                            forest.get_or_create(node_cache, NodeKey::Sym(origin), item.origin);
+                        let id = forest.get_or_create(NodeKey::Sym(origin), item.origin, i);
                         // ε derivation: no right child, so right_pos is unused.
                         forest.add_family(id, item.rule, ForestRef::None, ForestRef::None, 0);
                         id
@@ -560,6 +627,46 @@ impl EarleyParser {
 
                 if item.origin == i {
                     held.insert(origin, node_id);
+                }
+
+                // ── Joop-Leo right-recursion shortcut ─────────────────────────
+                // For a non-empty completion, if the reduction path out of this
+                // symbol is *deterministic* (a unique quasi-complete originator at
+                // each step), memoize/extend the transitive chain and jump straight
+                // to the topmost item instead of cascading through every
+                // intermediate completion. The skipped reduction spine is recorded
+                // as a deferred path on the topmost node (`load_leo_paths` rebuilds
+                // it lazily) so the SPPF stays identical to the non-Leo forest.
+                // This collapses O(n²) right-recursion completions to O(n) — and,
+                // crucially, the regular waiter cascade below (which the perf
+                // counter measures) is skipped entirely on the Leo path.
+                if item.origin != i {
+                    self.create_leo(
+                        origin,
+                        item.origin,
+                        columns,
+                        transitives,
+                        trans_arena,
+                        start_id,
+                    );
+                    if let Some(&t) = transitives[item.origin].get(&origin) {
+                        let tr = trans_arena[t];
+                        let top_key = self.node_key(tr.top_rule, tr.top_dot);
+                        let top_node = forest.get_or_create(top_key, tr.top_origin, i);
+                        forest.add_path(top_node, t, ForestRef::Node(node_id), i);
+                        let new_item = Item {
+                            rule: tr.top_rule,
+                            dot: tr.top_dot,
+                            origin: tr.top_origin,
+                            node: ForestRef::Node(top_node),
+                        };
+                        if self.expects_terminal(&new_item) {
+                            to_scan.add(new_item);
+                        } else if columns[i].add(new_item, self.expect(&new_item)) {
+                            stack.push(new_item);
+                        }
+                        continue; // Leo handled it — skip the regular waiter cascade
+                    }
                 }
 
                 // Advance every item in the origin column that was waiting on this
@@ -579,7 +686,7 @@ impl EarleyParser {
 
                 for o in originators {
                     let key = self.node_key(o.rule, o.dot + 1);
-                    let new_node = forest.get_or_create(node_cache, key, o.origin);
+                    let new_node = forest.get_or_create(key, o.origin, i);
                     // `origin` was expected at position `o.dot`, so the completed
                     // node is the right child at that expansion position.
                     forest.add_family(new_node, o.rule, o.node, ForestRef::Node(node_id), o.dot);
@@ -615,7 +722,7 @@ impl EarleyParser {
                 // now (held completion) so ε-derivations propagate.
                 if let Some(&hnode) = held.get(&sym) {
                     let key = self.node_key(item.rule, item.dot + 1);
-                    let new_node = forest.get_or_create(node_cache, key, item.origin);
+                    let new_node = forest.get_or_create(key, item.origin, i);
                     // The held (ε) symbol was expected at position `item.dot`.
                     forest.add_family(
                         new_node,
@@ -643,19 +750,167 @@ impl EarleyParser {
         }
     }
 
+    /// A reduction path through `item` is taken by Leo only when consuming the
+    /// symbol at the dot *completes* the rule — i.e. the recognized symbol is the
+    /// rule's final symbol (strict right recursion). Scott/Leo also permit a
+    /// nullable tail after the recognized symbol, but the topmost item is then
+    /// non-complete and the SPPF spine reconstruction must thread the nullable
+    /// completions through it — a subtle case upstream Lark never finished. We
+    /// deliberately decline it: such a tail is bounded extra work the regular
+    /// completer handles correctly, so the linearization target (`a: X a | X`,
+    /// including a nullable base like `a: X a | ε`) is covered while the
+    /// nullable-tail interaction that breaks the forest is avoided. The `start_id`
+    /// guard refuses to special-case a directly self-recursive start.
+    fn is_quasi_complete(&self, item: &Item, start_id: SymbolId) -> bool {
+        let expansion = &self.grammar.rules[item.rule].expansion;
+        let origin = self.grammar.rules[item.rule].origin;
+        // The recognized symbol (at `item.dot`) must be the last in the rule.
+        if item.dot + 1 != expansion.len() {
+            return false;
+        }
+        // Refuse a directly self-recursive start (matches the reference guard).
+        origin != start_id || expansion[item.dot] != start_id
+    }
+
+    /// Memoize (or extend) the Joop-Leo transitive chain for completing
+    /// `recognized` at column `start`. Walks the deterministic reduction path
+    /// upward — each step requires a *unique* quasi-complete originator — recording
+    /// one [`Trans`] per level, all sharing the topmost item the chain collapses
+    /// to. A no-op if the chain already exists or the path is not deterministic.
+    fn create_leo(
+        &self,
+        recognized: SymbolId,
+        start: usize,
+        columns: &[Column],
+        transitives: &mut [HashMap<SymbolId, usize>],
+        trans_arena: &mut Vec<Trans>,
+        start_id: SymbolId,
+    ) {
+        if transitives[start].contains_key(&recognized) {
+            return;
+        }
+        let mut visited: HashSet<(usize, SymbolId)> = HashSet::new();
+        // Levels bottom→top: (recognized, key_start, originator item).
+        let mut to_create: Vec<(SymbolId, usize, Item)> = Vec::new();
+        let mut rec = recognized;
+        let mut col = start;
+        // The transitive already present at the top of the walk (if it stopped by
+        // meeting an existing chain), and the topmost item the chain collapses to.
+        let mut parent: Option<usize> = None;
+        let mut top: Option<(usize, usize, usize)> = None;
+        loop {
+            if let Some(&t) = transitives[col].get(&rec) {
+                let tr = trans_arena[t];
+                parent = Some(t);
+                top = Some((tr.top_rule, tr.top_dot, tr.top_origin));
+                break;
+            }
+            if !visited.insert((col, rec)) {
+                break; // cycle guard
+            }
+            let waiters = columns[col].waiting_on(rec);
+            if waiters.len() != 1 {
+                break;
+            }
+            let o = columns[col].items[waiters[0]];
+            if !self.is_quasi_complete(&o, start_id) {
+                break;
+            }
+            to_create.push((rec, col, o));
+            // The topmost item the chain reaches is the advance of the highest
+            // unique originator seen so far.
+            top = Some((o.rule, o.dot + 1, o.origin));
+            rec = self.grammar.rules[o.rule].origin;
+            col = o.origin;
+        }
+        if to_create.is_empty() {
+            return;
+        }
+        let (top_rule, top_dot, top_origin) = top.unwrap();
+        // Build top→bottom so each new level's `parent` is already created.
+        for &(rec, key_start, o) in to_create.iter().rev() {
+            let tid = trans_arena.len();
+            trans_arena.push(Trans {
+                recognized: rec,
+                key_start,
+                red_rule: o.rule,
+                red_dot: o.dot,
+                red_start: o.origin,
+                red_node: o.node,
+                parent,
+                top_rule,
+                top_dot,
+                top_origin,
+            });
+            transitives[key_start].insert(rec, tid);
+            parent = Some(tid);
+        }
+    }
+
+    /// Expand every deferred Joop-Leo path into real packed families. For each
+    /// recorded `(transitive chain, bottom node, end)` on a topmost node, walk the
+    /// chain top→bottom rebuilding one symbol node per skipped reduction level —
+    /// the same spine the non-Leo completer would have built, but materialized once
+    /// here (O(n)) instead of O(n²) times during the parse.
+    fn load_leo_paths(&self, forest: &mut Forest, trans_arena: &[Trans]) {
+        // New nodes are appended as we expand; iterate by index so they are visited
+        // too (created intermediate nodes carry no paths, so this terminates).
+        let mut id = 0;
+        while id < forest.nodes.len() {
+            if forest.nodes[id].paths.is_empty() {
+                id += 1;
+                continue;
+            }
+            let paths = std::mem::take(&mut forest.nodes[id].paths);
+            for (bottom_trans, _bottom_node, end) in paths {
+                // Collect the chain bottom→top via `parent`, then walk top→bottom.
+                // Every node is addressed by its global `(key, start, end)` identity,
+                // so the top level reuses this node, the bottom reuses the chart's
+                // already-built completed node, and any intermediate symbol nodes
+                // merge with whatever the chart already has at that span — exactly
+                // the merge `ambiguity='resolve'` needs.
+                let mut chain = Vec::new();
+                let mut cur = Some(bottom_trans);
+                while let Some(t) = cur {
+                    chain.push(t);
+                    cur = trans_arena[t].parent;
+                }
+                for &t in chain.iter().rev() {
+                    let tr = trans_arena[t];
+                    let cur_node = forest.get_or_create(
+                        self.node_key(tr.red_rule, tr.red_dot + 1),
+                        tr.red_start,
+                        end,
+                    );
+                    let right =
+                        forest.get_or_create(NodeKey::Sym(tr.recognized), tr.key_start, end);
+                    forest.add_family(
+                        cur_node,
+                        tr.red_rule,
+                        tr.red_node,
+                        ForestRef::Node(right),
+                        tr.red_dot,
+                    );
+                }
+            }
+            id += 1;
+        }
+    }
+
     /// Scott's scanner: advance every terminal-expecting item that matches
     /// `token`, recording a token-leaf packed node. Returns the next column's scan
-    /// buffer and node cache, or `None` if nothing matched (a parse failure).
+    /// buffer, or `None` if nothing matched (a parse failure).
     fn scan(
         &self,
         token: &Token,
         columns: &mut Vec<Column>,
         to_scan: &ScanSet,
         forest: &mut Forest,
-    ) -> Option<(ScanSet, HashMap<(NodeKey, usize), usize>)> {
+    ) -> Option<ScanSet> {
         let mut next_scan = ScanSet::new();
         let mut next_col = Column::new();
-        let mut next_cache: HashMap<(NodeKey, usize), usize> = HashMap::new();
+        // The column being built is the next one (its index = current length).
+        let end = columns.len();
 
         // One token leaf per position, shared by every item that scans it (so
         // packed-node de-duplication works).
@@ -664,7 +919,7 @@ impl EarleyParser {
         for item in &to_scan.items {
             if self.expect(item) == Some(token.type_id) {
                 let key = self.node_key(item.rule, item.dot + 1);
-                let new_node = forest.get_or_create(&mut next_cache, key, item.origin);
+                let new_node = forest.get_or_create(key, item.origin, end);
                 // The scanned terminal is the right child at position `item.dot`.
                 forest.add_family(new_node, item.rule, item.node, tok_ref, item.dot);
                 let advanced = Item {
@@ -685,7 +940,7 @@ impl EarleyParser {
             return None;
         }
         columns.push(next_col);
-        Some((next_scan, next_cache))
+        Some(next_scan)
     }
 
     // ─── Dynamic lexer (Sprint 5) ─────────────────────────────────────────────
@@ -759,10 +1014,22 @@ impl EarleyParser {
             }
         }
 
-        let mut node_cache: HashMap<(NodeKey, usize), usize> = HashMap::new();
+        let mut transitives: Vec<HashMap<SymbolId, usize>> = vec![HashMap::new()];
+        let mut trans_arena: Vec<Trans> = Vec::new();
 
         for i in 0..=n {
-            self.predict_and_complete(i, &mut columns, &mut to_scan, &mut forest, &mut node_cache);
+            while transitives.len() < columns.len() {
+                transitives.push(HashMap::new());
+            }
+            self.predict_and_complete(
+                i,
+                &mut columns,
+                &mut to_scan,
+                &mut forest,
+                &mut transitives,
+                &mut trans_arena,
+                start_id,
+            );
             if i == n {
                 break;
             }
@@ -781,9 +1048,8 @@ impl EarleyParser {
                 &mut forest,
                 &mut delayed,
             ) {
-                Some((next_scan, next_cache)) => {
+                Some(next_scan) => {
                     to_scan = next_scan;
-                    node_cache = next_cache;
                 }
                 None => {
                     let pos = boundaries[i];
@@ -799,8 +1065,11 @@ impl EarleyParser {
             }
         }
 
-        node_cache
-            .get(&(NodeKey::Sym(start_id), 0))
+        self.load_leo_paths(&mut forest, &trans_arena);
+
+        forest
+            .index
+            .get(&(NodeKey::Sym(start_id), 0, n))
             .copied()
             .map(|root| (forest, root))
             .ok_or(ParseError::UnexpectedEof {
@@ -830,7 +1099,7 @@ impl EarleyParser {
         to_scan: &ScanSet,
         forest: &mut Forest,
         delayed: &mut HashMap<usize, Vec<Delayed>>,
-    ) -> Option<(ScanSet, HashMap<(NodeKey, usize), usize>)> {
+    ) -> Option<ScanSet> {
         let pos = boundaries[i];
         let mk_token = |term: SymbolId, value: &str, end_step: usize| Token {
             type_id: term,
@@ -899,13 +1168,13 @@ impl EarleyParser {
         // 3) Drain the matches that complete at step i+1 into the next column.
         let mut next_scan = ScanSet::new();
         let mut next_col = Column::new();
-        let mut next_cache: HashMap<(NodeKey, usize), usize> = HashMap::new();
+        let end = i + 1;
 
         for d in delayed.remove(&(i + 1)).unwrap_or_default() {
             match d {
                 Delayed::Tok { item, token } => {
                     let key = self.node_key(item.rule, item.dot + 1);
-                    let new_node = forest.get_or_create(&mut next_cache, key, item.origin);
+                    let new_node = forest.get_or_create(key, item.origin, end);
                     let tok_ref = ForestRef::Tok(forest.add_token(token));
                     // The scanned terminal is the right child at position `item.dot`.
                     forest.add_family(new_node, item.rule, item.node, tok_ref, item.dot);
@@ -929,7 +1198,9 @@ impl EarleyParser {
                     if self.is_complete(&item) {
                         if let ForestRef::Node(id) = item.node {
                             let key = NodeKey::Sym(self.grammar.rules[item.rule].origin);
-                            next_cache.entry((key, item.origin)).or_insert(id);
+                            // Carry the completed node's identity into this column so
+                            // the root (and any waiter) finds it across the ignore.
+                            forest.index.entry((key, item.origin, end)).or_insert(id);
                         }
                         next_col.add(item, None);
                     } else if self.expects_terminal(&item) {
@@ -948,7 +1219,7 @@ impl EarleyParser {
         if next_scan.items.is_empty() && columns[i + 1].items.is_empty() && delayed.is_empty() {
             return None;
         }
-        Some((next_scan, next_cache))
+        Some(next_scan)
     }
 }
 

@@ -17,15 +17,16 @@
 //!
 //! ## The #56 outcome these assertions pin down
 //!
-//! **Arm 1 — completer origin-column rescan.** Demonstrated super-linear (the
-//! unindexed `.filter` was O(column) per completion, ~O(n³) on right recursion).
-//! *Fixed* by the per-column `waiting` index for the *named* rescan factor: JSON /
-//! arith / nested / left-recursion now keep **flat per-byte** completer scan
-//! (gated). The *residual* on hand-written right recursion (`a: X a | X`) is the
-//! omitted Joop-Leo optimization — non-Leo Earley builds O(n²) completed items
-//! there regardless of the rescan (Python Lark shares this; its Leo transitives are
-//! dead code). The index drops it ~O(n³)→O(n²); we gate that **quadratic ceiling**
-//! so a regression to the cubic full-rescan is caught, and track Leo as a follow-up.
+//! **Arm 1 — completer origin-column rescan + right recursion.** The unindexed
+//! `.filter` was O(column) per completion, ~O(n³) on right recursion; the
+//! per-column `waiting` index (#56) fixed the rescan factor (JSON / arith / nested
+//! / left-recursion all flat per byte). The *residual* O(n²) on hand-written right
+//! recursion (`a: X a | X`) — O(n²) completed items, which Python Lark shares since
+//! its Leo transitives are dead code — is now removed too: the **Joop-Leo**
+//! optimization (#58) records a transitive per column so the completer jumps to the
+//! topmost item instead of cascading, making the completer scan **flat per byte**
+//! (in fact zero) on right recursion. We gate that flatness; a relapse to the
+//! quadratic cascade trips it.
 //!
 //! **Arm 2 — `ambiguity='explicit'` forest walk.** The issue *guessed* the culprit
 //! was `expand_packed`'s `l = list.clone()` cartesian-product loop. Measuring it
@@ -80,8 +81,9 @@ const ARITH_GRAMMAR: &str = r#"
 "#;
 
 /// A right-recursive list `a: X a | X` — the adversarial *unambiguous* shape that
-/// demonstrated the Arm-1 residual. Non-Leo Earley completes `a` over every
-/// suffix, so the chart holds O(n²) completed items.
+/// demonstrated the Arm-1 residual. Non-Leo Earley completes `a` over every suffix
+/// (O(n²) completed items); the Joop-Leo optimization (#58) collapses that to a
+/// flat per-byte completer scan.
 const RIGHTREC_GRAMMAR: &str = "start: a\na: X a | X\nX: \"x\"\n";
 
 /// A deeply nested unambiguous grammar — a control: it is linear, so it pins the
@@ -201,27 +203,23 @@ fn earley_scaling_is_pinned() {
         ],
     );
 
-    // ── Arm 1 (residual, characterized): right recursion ≤ O(n²) ──────────────
-    // Non-Leo Earley is genuinely O(n²) here (O(n²) completed items, shared with
-    // the Python reference). The index dropped it from ~O(n³) to O(n²); gate that
-    // ceiling so a regression to the cubic full-column rescan is caught. NOT a
-    // claim of linearity — the Leo optimization is a tracked follow-up. Measured
-    // ~0.5·n², so the n² ceiling holds with margin while the old ~0.5·n³ blows it.
+    // ── Arm 1 (Joop-Leo, #58): right recursion is now FLAT per byte ────────────
+    // Non-Leo Earley builds O(n²) completed items for `a: X a | X` (the chart holds
+    // `a` over every (m, c) suffix), so the completer scan grew ~0.5·n² and per-byte
+    // cost climbed with n. The Joop-Leo deterministic-reduction-path optimization
+    // records a transitive per column so the completer jumps straight to the topmost
+    // item instead of cascading through every intermediate completion — O(n)
+    // completions, and the regular waiter cascade (what this counter measures) is
+    // skipped on the Leo path entirely. This is the #58 done-when: the old `≤ n²`
+    // ceiling is tightened to flat, with the size sweep as the regression net (a
+    // relapse to the quadratic cascade makes per-byte climb and trips the assert).
     {
         let p = earley(RIGHTREC_GRAMMAR, Ambiguity::Resolve);
-        for &n in &[64usize, 128, 256, 512] {
-            perf::reset();
-            p.parse(&gen_x(n))
-                .expect("right-recursion input must parse");
-            let scan = perf::completer_scan_steps();
-            assert!(
-                scan <= (n as u64) * (n as u64),
-                "Arm 1 residual regression: right-recursion completer scan {scan} at \
-                 n={n} exceeds the n² ceiling {} — the O(column) full rescan has \
-                 returned (the waiting index is not being used)",
-                (n as u64) * (n as u64)
-            );
-        }
+        assert_flat_per_byte(
+            "right_rec",
+            &p,
+            &[gen_x(64), gen_x(128), gen_x(256), gen_x(512)],
+        );
     }
 
     // ── Arm 2 (disproof): the named clone loop is LINEAR ──────────────────────
