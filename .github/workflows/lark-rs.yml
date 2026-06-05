@@ -47,6 +47,14 @@ jobs:
       - name: Cargo test
         run: cargo test --all
 
+      # Deterministic super-linearity gate (#56). The work counters in src/perf.rs
+      # only exist under the `perf-counters` feature, so the scaling regression net
+      # is a no-op in `cargo test --all` above and must be run explicitly here. It
+      # keys on counts (flat per byte / capped n²), never wall-clock — gateable on a
+      # shared runner, unlike the timing bench.
+      - name: Earley scaling gate (perf-counters)
+        run: cargo test --features perf-counters --test test_earley_scaling
+
       # The oracle JSON is generated from Python Lark and committed so Rust tests
       # run without Python. This gate proves the generators are deterministic and
       # that the committed oracles are in sync with the current Python Lark.

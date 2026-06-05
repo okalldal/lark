@@ -16,7 +16,7 @@
 //!
 //! Wired as `harness = false` in Cargo.toml, so `main()` runs directly.
 
-use lark_rs::{Lark, LarkOptions, LexerType, ParserAlgorithm};
+use lark_rs::{Ambiguity, Lark, LarkOptions, LexerType, ParserAlgorithm};
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
@@ -256,20 +256,27 @@ fn main() {
     // REPORTED, NOT GATED. P2-1 originally proposed asserting a single constant K×
     // ceiling here ("Earley within K× of LALR on unambiguous input"). Wiring the
     // measurement up disproved that premise: the ratio *grew* with input size
-    // (≈15×→35×→193× as JSON scaled 0.4K→8.7K→92K). The growth was first guessed to
-    // be the completer rescanning the origin column (Joop-Leo omitted) — but that is
-    // NOT what profiling found (#54/#55): chart construction is linear on these
-    // workloads (the completer scans a constant ~5 items/completion), and the
-    // super-linearity lived entirely in the resolve-mode forest→tree walk — two
-    // quadratics, copying the `Inline` child list of transparent left-recursive
-    // helpers (`x*`/`x+`/`_rule`) and deep-cloning each growing left subtree on memo
-    // (`expr: expr "+" term`). #55 fixed both (streaming append + lazy memoization),
-    // so the resolve-mode ratio now *stops growing* with input size (the large cases
-    // are cheaper per byte than the small ones). A constant-K ceiling is still not
-    // asserted: wall-clock is too noisy to gate (see BENCH.md). The completer/Joop-Leo
-    // claim is unverified (shown linear on JSON/arith only, not adversarial shapes),
-    // and that residual suspicion — plus the still-quadratic ambiguity='explicit'
-    // walk — is tracked in #56. We print the ratios so the trend stays visible.
+    // (≈15×→35×→193× as JSON scaled 0.4K→8.7K→92K). #55 fixed the resolve-mode
+    // forest→tree walk (two quadratics: copying the `Inline` child list of
+    // transparent left-recursive helpers, and deep-cloning each growing left subtree
+    // on memo), so the resolve-mode ratio on JSON/arith stops growing. A constant-K
+    // ceiling is still not asserted: wall-clock is too noisy to gate (see BENCH.md).
+    //
+    // #56 then took the remaining suspicions through the *demonstrate-first*
+    // discipline, and the verdicts are now committed (deterministic counters, not
+    // wall-clock — see `examples/profile_parse.rs scaling` + `tests/test_earley_scaling.rs`):
+    //   • The completer DID rescan the *whole* origin column (an O(column) `.filter`
+    //     per completion) — super-linear on a right-recursive grammar, NOT linear as
+    //     once assumed. Fixed by a per-column `waiting` index (the named rescan cost).
+    //   • A residual O(n²) remains on hand-written right recursion (`a: X a | X`):
+    //     non-Leo Earley builds O(n²) completed items there regardless of the rescan
+    //     (Python Lark shares this — Leo is dead code in the reference). Tracked for
+    //     the Joop-Leo optimization, not claimed fixed.
+    //   • The `ambiguity='explicit'` walk's guessed culprit (the `expand_packed`
+    //     `l = list.clone()` loop) was *disproved* — that loop is linear. The real
+    //     cost is the per-node derivation-value rebuild for transparent helpers
+    //     (O(n²)); the explicit analog of #55's streaming is the tracked fix.
+    // We print the ratios so the trend stays visible.
     println!();
     println!("Parsing — Earley (basic lexer), cost-of-generality vs LALR (reported, NOT gated):");
     let json_e = build_earley(JSON_GRAMMAR);
@@ -303,5 +310,44 @@ fn main() {
     for n in [4usize, 8, 12, 16] {
         let input = "b".repeat(n);
         run_parse("parse_earley_ambig", &format!("ambig_{n}"), &ambig, &input);
+    }
+
+    // --- #56 scaling workloads (REPORTED here; GATED deterministically) --------
+    // The two #56 super-linear shapes, as a wall-clock trend. The *gate* for these
+    // is the deterministic work-counter test (`tests/test_earley_scaling.rs`) +
+    // `examples/profile_parse.rs scaling`, NOT these timings — wall-clock is too
+    // noisy to enforce (BENCH.md). Reported so the trend stays visible:
+    //   • rightrec (`a: X a | X`): O(n²) completed items — the omitted-Leo residual.
+    //   • explicit_list (`X+`, ambiguity='explicit'): O(n²) node-rebuild — the real
+    //     explicit cost (the `expand_packed` clone loop guessed by #56 is linear).
+    println!();
+    println!("Parsing — Earley #56 scaling shapes (reported here; gated in test_earley_scaling):");
+    let rightrec = build_earley("start: a\na: X a | X\nX: \"x\"\n");
+    for n in [64usize, 128, 256, 512] {
+        run_parse(
+            "parse_earley_rightrec",
+            &format!("rr_{n}"),
+            &rightrec,
+            &"x".repeat(n),
+        );
+    }
+    let explicit_list = Lark::new(
+        "start: X+\nX: \"x\"\n",
+        LarkOptions {
+            start: vec!["start".to_string()],
+            parser: ParserAlgorithm::Earley,
+            lexer: LexerType::Basic,
+            ambiguity: Ambiguity::Explicit,
+            ..LarkOptions::default()
+        },
+    )
+    .expect("explicit-list grammar must build");
+    for n in [64usize, 128, 256, 512] {
+        run_parse(
+            "parse_earley_explicit",
+            &format!("ex_{n}"),
+            &explicit_list,
+            &"x".repeat(n),
+        );
     }
 }

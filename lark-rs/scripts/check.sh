@@ -33,6 +33,12 @@ note "Rust format: cargo fmt --check --all"
 note "Rust tests: cargo test --all"
 ( cd "$LARK_RS_DIR" && cargo test --all ) || fail "cargo test --all failed"
 
+# 2b. Deterministic super-linearity gate (#56) — the scaling regression net only
+#     runs with the perf-counters feature, so it is a no-op in `cargo test --all`.
+note "Earley scaling gate: cargo test --features perf-counters --test test_earley_scaling"
+( cd "$LARK_RS_DIR" && cargo test --features perf-counters --test test_earley_scaling ) \
+  || fail "Earley scaling gate failed — a super-linearity regressed (see test_earley_scaling.rs)"
+
 # 3. Oracle-freshness gate — regenerate from Python Lark and require no diff.
 #    (Needs 'pip install lark' and the JSONTestSuite submodule:
 #     git submodule update --init lark-rs/tests/corpora/JSONTestSuite)

@@ -25,6 +25,11 @@
 //! Joop-Leo right-recursion optimization is *not* ported (it is dead code in the
 //! Python reference — `create_leo_transitives` is commented out and the
 //! `transitives` table stays empty), which simplifies the port considerably.
+//! Consequence (measured under #56): hand-written right recursion (`a: X a | X`)
+//! costs O(n²) completed items — parity with the Python reference, not a
+//! regression. The completer no longer *also* pays an O(column) rescan on top of
+//! that: each [`Column`] indexes its waiters by expected symbol (see `Column.waiting`).
+//! Linearizing right recursion outright needs the Leo optimization (tracked follow-up).
 //!
 //! Nullable handling follows the reference's *held completions* (`H` in Scott's
 //! paper): when an ε-derivation completes at a column it is remembered, so a
@@ -71,6 +76,16 @@ struct Item {
 struct Column {
     items: Vec<Item>,
     seen: HashSet<(usize, usize, usize)>,
+    /// Index from the non-terminal an item expects next → positions in `items` of
+    /// the items waiting on it. The completer reads only the relevant bucket
+    /// instead of rescanning the whole column with a linear `.filter`. That rescan
+    /// is the "completer rescans the origin column" cost #54 suspected and #56
+    /// confirmed: later columns accumulate O(n) completed items, so an unindexed
+    /// scan is O(column) per completion → super-linear on a right-recursive grammar
+    /// (`a: X a | X`), even though only O(1) items per column actually wait on any
+    /// given symbol. This index is the Joop-Leo-free cure (the reference's Leo
+    /// transitives are dead code; this fixes the same asymptotics without them).
+    waiting: HashMap<SymbolId, Vec<usize>>,
 }
 
 impl Column {
@@ -79,14 +94,26 @@ impl Column {
     }
 
     /// Add `item` unless an equal one (same rule, dot, origin) is already present;
-    /// returns whether it was newly inserted.
-    fn add(&mut self, item: Item) -> bool {
+    /// returns whether it was newly inserted. `expected` is the non-terminal `item`
+    /// expects next (`None` if it is complete), used to index it for the completer.
+    fn add(&mut self, item: Item, expected: Option<SymbolId>) -> bool {
         if self.seen.insert((item.rule, item.dot, item.origin)) {
+            let idx = self.items.len();
             self.items.push(item);
+            if let Some(sym) = expected {
+                self.waiting.entry(sym).or_default().push(idx);
+            }
             true
         } else {
             false
         }
+    }
+
+    /// Positions in `items` of the items waiting on `sym`, in insertion order
+    /// (load-bearing for resolve tie-breaks). Empty if none — an O(1) lookup that
+    /// replaces the O(column) rescan.
+    fn waiting_on(&self, sym: SymbolId) -> &[usize] {
+        self.waiting.get(&sym).map(Vec::as_slice).unwrap_or(&[])
     }
 }
 
@@ -445,7 +472,7 @@ impl EarleyParser {
                 if self.expects_terminal(&item) {
                     to_scan.add(item);
                 } else {
-                    columns[0].add(item);
+                    columns[0].add(item, self.expect(&item));
                 }
             }
         }
@@ -536,13 +563,19 @@ impl EarleyParser {
                 }
 
                 // Advance every item in the origin column that was waiting on this
-                // non-terminal. Snapshot first (we mutate columns[i] below).
-                let originators: Vec<Item> = columns[item.origin]
-                    .items
-                    .iter()
-                    .filter(|o| self.expect(o) == Some(origin))
-                    .copied()
-                    .collect();
+                // non-terminal. The column's `waiting` index gives exactly those
+                // items in O(matches) instead of an O(column) rescan; snapshot into
+                // an owned Vec first (we mutate columns[i] below).
+                //
+                // Counting the items examined here (deterministically, behind the
+                // `perf-counters` feature) is the Arm-1 scaling signal #56 demands:
+                // it now stays flat per input byte even on right recursion, the
+                // gateable proof the rescan quadratic is gone (`tests/test_earley_scaling.rs`).
+                let origin_col = &columns[item.origin];
+                let waiters = origin_col.waiting_on(origin);
+                crate::perf::add_completer_scan_steps(waiters.len() as u64);
+                let originators: Vec<Item> =
+                    waiters.iter().map(|&idx| origin_col.items[idx]).collect();
 
                 for o in originators {
                     let key = self.node_key(o.rule, o.dot + 1);
@@ -558,7 +591,7 @@ impl EarleyParser {
                     };
                     if self.expects_terminal(&advanced) {
                         to_scan.add(advanced);
-                    } else if columns[i].add(advanced) {
+                    } else if columns[i].add(advanced, self.expect(&advanced)) {
                         stack.push(advanced);
                     }
                 }
@@ -602,7 +635,7 @@ impl EarleyParser {
                 for new in new_items {
                     if self.expects_terminal(&new) {
                         to_scan.add(new);
-                    } else if columns[i].add(new) {
+                    } else if columns[i].add(new, self.expect(&new)) {
                         stack.push(new);
                     }
                 }
@@ -643,7 +676,7 @@ impl EarleyParser {
                 if self.expects_terminal(&advanced) {
                     next_scan.add(advanced);
                 } else {
-                    next_col.add(advanced);
+                    next_col.add(advanced, self.expect(&advanced));
                 }
             }
         }
@@ -721,7 +754,7 @@ impl EarleyParser {
                 if self.expects_terminal(&item) {
                     to_scan.add(item);
                 } else {
-                    columns[0].add(item);
+                    columns[0].add(item, self.expect(&item));
                 }
             }
         }
@@ -885,7 +918,7 @@ impl EarleyParser {
                     if self.expects_terminal(&advanced) {
                         next_scan.add(advanced);
                     } else {
-                        next_col.add(advanced);
+                        next_col.add(advanced, self.expect(&advanced));
                     }
                 }
                 Delayed::Carry { item } => {
@@ -898,11 +931,11 @@ impl EarleyParser {
                             let key = NodeKey::Sym(self.grammar.rules[item.rule].origin);
                             next_cache.entry((key, item.origin)).or_insert(id);
                         }
-                        next_col.add(item);
+                        next_col.add(item, None);
                     } else if self.expects_terminal(&item) {
                         next_scan.add(item);
                     } else {
-                        next_col.add(item);
+                        next_col.add(item, self.expect(&item));
                     }
                 }
             }
@@ -1125,6 +1158,19 @@ impl<'a> Transformer<'a> {
         }
 
         visiting.remove(&node_id);
+        // The *real* #56 Arm-2 cost: explicit mode materializes one owned value per
+        // symbol node, and a transparent left-recursive helper's value is the whole
+        // accumulated child list — so the SPPF chain of n helper nodes builds Inlines
+        // of size 1, 2, …, n = O(n²) elements total (and `deriv_memo` then clones
+        // them). Counting the materialized derivation sizes here (behind
+        // `perf-counters`) exhibits that quadratic deterministically — the signal the
+        // streaming fix (the explicit analog of #55) must flatten. It is *not* the
+        // `expand_packed` clone loop the issue guessed (that is linear; see there).
+        // Gated at the call site (not just inside the no-op) so the `sum` — itself
+        // O(materialized children), i.e. the quadratic we are measuring — is never
+        // computed in a normal build.
+        #[cfg(feature = "perf-counters")]
+        crate::perf::add_explicit_node_children(derivs.iter().map(node_value_size).sum::<u64>());
         self.deriv_memo.insert(node_id, derivs.clone());
         derivs
     }
@@ -1357,15 +1403,40 @@ impl<'a> Transformer<'a> {
             return lefts;
         }
 
+        // The named #56 Arm-2 suspect: clone each growing prefix to form the
+        // cartesian product of left prefixes × right values. Counting the
+        // `NodeValue`s copied here (behind `perf-counters`) is what *disproves* that
+        // guess — it stays **linear** even on a transparent left-recursive helper
+        // (`x*` / `x+` / `_rule`), because every rule's binarized RHS prefix is
+        // bounded (≤ its arity), so this clone is O(1) per node. The real explicit
+        // super-linearity is the per-node derivation-value rebuild counted in
+        // `symbol_derivations` — the still-missing explicit analog of #55's
+        // resolve-mode streaming. Kept verbatim (no fast path) so the disproof
+        // measures the actual loop; the true fix is tracked as a follow-up.
         let mut out: Vec<Vec<NodeValue>> = Vec::with_capacity(lefts.len() * right_alts.len());
         for list in &lefts {
             for rv in &right_alts {
+                crate::perf::add_explicit_prefix_copies(list.len() as u64);
                 let mut l = list.clone();
                 l.push(rv.clone());
                 out.push(l);
             }
         }
         out
+    }
+}
+
+/// The number of child slots a materialized derivation value occupies — the unit
+/// of the [`explicit_node_children`](crate::perf::explicit_node_children) cost
+/// signal (#56 Arm 2). A transparent left-recursive helper's value grows by one
+/// per SPPF level, so summing this over the chain is the O(n²) the explicit walk
+/// pays where resolve mode streams (#55).
+#[cfg(feature = "perf-counters")]
+fn node_value_size(v: &NodeValue) -> u64 {
+    match v {
+        NodeValue::Token(_) => 1,
+        NodeValue::Tree(t) => t.children.len() as u64,
+        NodeValue::Inline(cs) => cs.len() as u64,
     }
 }
 

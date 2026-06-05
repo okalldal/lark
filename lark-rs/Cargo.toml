@@ -6,6 +6,13 @@ description = "A Rust implementation of the Lark parsing toolkit"
 license = "MIT"
 repository = "https://github.com/lark-parser/lark"
 
+[features]
+# Deterministic work counters for the profile-first perf discipline (#56). Off by
+# default so the normal build and the hot parse path carry zero overhead; turn on
+# with `--features perf-counters` to read `lark_rs::perf` (the noise-free
+# super-linearity regression net, `tests/test_earley_scaling.rs`).
+perf-counters = []
+
 [dependencies]
 regex = "1.10"
 indexmap = "2"

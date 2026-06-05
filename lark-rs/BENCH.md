@@ -8,10 +8,13 @@ runners is too noisy to enforce, and a flaky red perf gate gets muted. The
 nightly `.github/workflows/lark-rs-bench.yml` records and uploads the numbers as a
 trend; humans read regressions off the trend.
 
-## Performance discipline (profile first — the #54/#55 lesson)
+## Performance discipline (profile first — the #54/#55/#56 lesson)
 
-Three rules, learned the hard way: #54 named a culprit (completer / Joop-Leo), and
-#55's profiler found a different one (the forest→tree walk).
+Three rules, learned the hard way: #54 named a culprit (completer / Joop-Leo), #55's
+profiler found a different one (the forest→tree walk), and #56 showed *both* halves
+of a hypothesis can be wrong at once — its guessed explicit-walk culprit (a clone
+loop) turned out linear, while a suspicion it had down-weighted (the completer
+rescan) turned out real.
 
 1. **Demonstrate before fixing.** A suspected super-linearity gets a committed,
    size-parametrized workload that *exhibits* it before any fix is written — the perf
@@ -26,6 +29,26 @@ Three rules, learned the hard way: #54 named a culprit (completer / Joop-Leo), a
    per-byte scaling* — not absolute time. Wall-clock on shared runners is too noisy
    to gate, and a flaky perf gate gets muted (the reason this whole bench is a
    recorded trend, not a gate).
+
+## Deterministic scaling counters (the #56 gate)
+
+Wall-clock is a recorded trend; the **gateable** signal is a set of deterministic
+work counters in `lark_rs::perf`, compiled in only under the `perf-counters`
+feature (zero overhead otherwise — the increments sit in the Earley hot path). They
+make a suspected super-linearity reproducible as a *flat-per-byte* (or capped n²)
+assertion that a shared runner can actually enforce:
+
+```bash
+# Demonstrate: print the counters across a size sweep for each #56 workload.
+cargo run --release --features perf-counters --example profile_parse scaling
+# Gate: the committed scaling regression net (CI runs this).
+cargo test --features perf-counters --test test_earley_scaling
+```
+
+`completer_scan_steps` (Arm 1), `explicit_prefix_copies` (Arm 2, the *named* clone
+loop — kept as a committed disproof that it is linear), and `explicit_node_children`
+(Arm 2, the *real* O(n²) cost). Adding a new suspicion means adding a counter + a
+sweep here, never a wall-clock threshold.
 
 ## Running it
 
@@ -62,23 +85,41 @@ comparison); `median_ns` drives the MB/s. Speedup on a row is
    **Reported, not gated — and the ratio was *not* a constant.** Sprint 2 originally
    meant to assert "...and within K× of LALR" here. Wiring the measurement up
    disproved that premise: the Earley/LALR ratio **grew with input size**
-   (≈15×→32×→196× as JSON scaled 0.4K→8.7K→92K on the reference box). That growth was
-   first attributed to the completer rescanning the origin column (Joop-Leo
-   transitives omitted) — but **profiling did not bear that hypothesis out.** #54/#55
-   found chart construction is linear on these workloads (the completer scans a
-   constant number of items per completion), and the super-linearity lived entirely
-   in the **resolve-mode forest→tree walk**: two quadratics — copying the `Inline`
-   child list of transparent left-recursive helpers (`x*`/`x+`/`_rule`), and
-   deep-cloning each growing left subtree on memo for left-recursive real rules
-   (`expr: expr "+" term`). #55 fixed both (streaming append + lazy memoization), so
-   the resolve-mode ratio now **stops growing with input size** —
-   `earley_over_lalr_max` fell 311.8× → 17.9×, and the largest cases are now cheaper
-   per byte than the smallest. A single-K ceiling is still not asserted: wall-clock
-   is too noisy to gate. The completer/Joop-Leo claim is **unverified** (shown linear
-   on JSON/arith only, not on adversarial grammar shapes), and that residual
-   suspicion — together with the still-quadratic `ambiguity='explicit'` walk,
-   untouched by #55 — is tracked in **#56** (profile-first, regression-backed). The
-   ratios are printed so the trend stays visible.
+   (≈15×→32×→196× as JSON scaled 0.4K→8.7K→92K on the reference box). #55 fixed the
+   **resolve-mode forest→tree walk** (two quadratics: copying the `Inline` child list
+   of transparent left-recursive helpers, and deep-cloning each growing left subtree
+   on memo), so the resolve-mode ratio on JSON/arith **stops growing with input
+   size** — `earley_over_lalr_max` fell 311.8× → 17.9×. A single-K ceiling is still
+   not asserted: wall-clock is too noisy to gate. The ratios are printed so the trend
+   stays visible.
+
+   **#56 — the residual suspicions, now resolved under the demonstrate-first
+   discipline.** Each was taken through a committed, *deterministic* scaling artifact
+   (`lark_rs::perf` work counters via `examples/profile_parse.rs scaling`, gated by
+   `tests/test_earley_scaling.rs` — never wall-clock). The verdicts:
+
+   - **Completer origin-column rescan — was real, now fixed.** The earlier "linear on
+     JSON/arith" reading did *not* generalize: the completer rescanned the *whole*
+     origin column with an O(column) `.filter` per completion, which is super-linear
+     on a right-recursive grammar (`a: X a | X`) where later columns hold O(n)
+     completed items. A per-column `waiting` index (expected-symbol → waiters) makes
+     it O(matches); JSON/arith/nested/left-recursion now hold flat per-byte completer
+     scan, gated. (So the old "the ratio grows *because* the completer rescans the
+     origin column" claim was directionally right about the mechanism but was never
+     verified — #56 verified and fixed it.)
+   - **Right-recursion residual — characterized, not fixed.** Even with the index,
+     `a: X a | X` stays O(n²): non-Leo Earley builds O(n²) completed items there
+     regardless of the rescan. Python Lark shares this — its Joop-Leo transitives are
+     dead code (`create_leo_transitives` commented out). The index drops it ~O(n³)→
+     O(n²); the n² ceiling is gated, and the Leo optimization that would linearize it
+     is a **tracked follow-up**.
+   - **`ambiguity='explicit'` walk — guessed cause disproved.** The suspected culprit
+     was `expand_packed`'s `l = list.clone(); l.push(rv)` loop. Measured, that loop is
+     **linear** (its prefix is bounded by the rule arity). The genuine O(n²) is the
+     per-node derivation-value rebuild in `symbol_derivations`: a transparent helper
+     materializes Inlines of size 1,2,…,n — exactly the cost #55 streamed away for
+     resolve, still present in explicit. Both are gated (loop stays linear; rebuild
+     stays within its n² ceiling); the streaming fix is a **tracked follow-up**.
 
 ## Baseline snapshot
 

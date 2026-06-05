@@ -58,7 +58,17 @@ cargo test test_json_oracle         # JSON grammar vs oracle
 cargo test test_python_numbers      # Python number literals vs oracle
 cargo test test_json_corpus         # 293-file JSONTestSuite (requires submodule)
 cargo test test_earley              # Earley oracle + Earley compliance bank (Phase 2)
+
+# Deterministic super-linearity gate (#56) — needs the work-counter feature.
+cargo test --features perf-counters --test test_earley_scaling
 ```
+
+**Perf regression net (`perf-counters` feature).** Suspected super-linearities are
+gated on the *deterministic* work counters in `src/perf.rs` (compiled in only with
+`--features perf-counters`; zero overhead otherwise), never wall-clock — see
+`BENCH.md`. `tests/test_earley_scaling.rs` asserts flat-per-byte (or capped-n²)
+scaling; `examples/profile_parse.rs scaling` prints the same counters as a
+demonstration table. CI runs the gating variant as its own step.
 
 **Earley / ambiguity oracles (Phase 2).** `generate_oracles.py` and
 `extract_lark_compliance.py` already emit the Earley fixtures as part of their
@@ -272,7 +282,7 @@ needs FSM engine).
 |-----------|--------|-------|
 | Ambiguity test harness (Sprint 0) | ✅ | Earley oracles + `_ambig` set-matcher + Earley compliance bank (147 grammars), self-activating the moment the frontend builds |
 | Earley recogniser | ✅ | Sprint 1: predict/scan/complete over `SymbolId`. Now reimplemented on top of the Sprint-2 chart (`recognize` = "did the start node build?"), so it accepts exactly what `parse` parses. Verified by `test_earley_recognizer` |
-| SPPF forest construction | ✅ | Sprint 2: Elizabeth Scott's binarized SPPF (symbol / intermediate / packed nodes, arena-allocated by `NodeId`, held-completion nullable handling). Joop-Leo transitives omitted (dead code in the reference) |
+| SPPF forest construction | ✅ | Sprint 2: Elizabeth Scott's binarized SPPF (symbol / intermediate / packed nodes, arena-allocated by `NodeId`, held-completion nullable handling). Joop-Leo transitives omitted (dead code in the reference). #56: per-column `waiting` index removes the completer's O(column) origin rescan; the residual O(n²) on hand-written right recursion is the omitted Leo optimization (parity with the Python reference), tracked as a follow-up |
 | Forest → tree conversion | ✅ | Sprint 2: `Transformer` walks the SPPF and reuses `TreeBuilder::assemble`; `ambiguity='resolve'` picks the highest-priority derivation (Lark's `ForestSumVisitor` order). Verified ≡ LALR on every unambiguous oracle by `test_earley_parity` |
 | `ambiguity='explicit'` | ✅ | Sprint 2: emits `_ambig` forests; curated cases pass, bank 211/211 (clean — the `AmbiguousExpander` port lifts an ambiguous transparent `_rule`/EBNF-helper child's ambiguity up into the parent) |
 | Dynamic lexer | ✅ | Sprint 5: scanning folded into the Earley loop (`xearley.py` port) — terminals tried at each position are exactly those the parser predicts. `LexerType::Dynamic`. Delayed-match buffer for variable-length tokens + `%ignore` carry-over. Terminal priorities feed the forest sum (the basic lexer consumes them in its ordering; the dynamic lexer does not). Bank 446/454 ≈ 98.2% |
