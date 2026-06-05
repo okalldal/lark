@@ -80,11 +80,24 @@ const ARITH_GRAMMAR: &str = r#"
     %ignore WS_INLINE
 "#;
 
-/// A right-recursive list `a: X a | X` — the adversarial *unambiguous* shape that
+/// A right-recursive list `a: X a | X` — the canonical minimal shape that
 /// demonstrated the Arm-1 residual. Non-Leo Earley completes `a` over every suffix
 /// (O(n²) completed items); the Joop-Leo optimization (#58) collapses that to a
 /// flat per-byte completer scan.
 const RIGHTREC_GRAMMAR: &str = "start: a\na: X a | X\nX: \"x\"\n";
+
+/// **Realistic Leo case #1 — a right-associative binary operator.** Assignment
+/// `a = b = c`, exponentiation `2 ** 3 ** 4`, type arrows `A -> B -> C` and cons
+/// are *naturally* right-recursive (`?e: atom OP e | atom`) and CANNOT be written
+/// with `+`/`*` (those expand to left recursion and would give the wrong, flat
+/// tree — associativity is encoded in the right-nested shape). A long chain under
+/// Earley is exactly the O(n²) pathology Leo removes. The input is `x=x=…=x`.
+const ASSIGN_GRAMMAR: &str = "?start: a\n?a: NAME \"=\" a | NAME\nNAME: /[a-z]+/\n";
+
+/// **Realistic Leo case #2 — a hand-written right-recursive list** with a
+/// separator (`list: item "," list | item`), the shape people write from habit or
+/// when the recursion must carry structure. Same O(n²)→O(n) story. Input `i,i,…,i`.
+const RRLIST_GRAMMAR: &str = "start: lst\nlst: ITEM \",\" lst | ITEM\nITEM: \"i\"\n";
 
 /// A deeply nested unambiguous grammar — a control: it is linear, so it pins the
 /// claim that the Arm-1 fix keeps realistic recursion flat.
@@ -203,16 +216,26 @@ fn earley_scaling_is_pinned() {
         ],
     );
 
-    // ── Arm 1 (Joop-Leo, #58): right recursion is now FLAT per byte ────────────
-    // Non-Leo Earley builds O(n²) completed items for `a: X a | X` (the chart holds
-    // `a` over every (m, c) suffix), so the completer scan grew ~0.5·n² and per-byte
-    // cost climbed with n. The Joop-Leo deterministic-reduction-path optimization
-    // records a transitive per column so the completer jumps straight to the topmost
-    // item instead of cascading through every intermediate completion — O(n)
-    // completions, and the regular waiter cascade (what this counter measures) is
-    // skipped on the Leo path entirely. This is the #58 done-when: the old `≤ n²`
-    // ceiling is tightened to flat, with the size sweep as the regression net (a
-    // relapse to the quadratic cascade makes per-byte climb and trips the assert).
+    // ── Arm 1 (Joop-Leo, #58): right recursion linearized — BEFORE vs AFTER ────
+    // The headline of #58. For each right-recursive grammar we measure the SAME
+    // engine twice: with Leo OFF (the toggle reproduces the pre-fix behavior) it
+    // must be super-linear, and with Leo ON it must be linear. We key on the
+    // mode-neutral *forest size* (`perf::forest_nodes`), not the completer scan:
+    // Leo zeroes the scan by skipping the cascade, but the real question is whether
+    // *total* work is now linear — i.e. the SPPF stopped holding O(n²) nodes. The
+    // canonical `a: X a | X` plus two grammars people actually hand-write as right
+    // recursion (a right-associative operator and a separated list — neither
+    // expressible with `+`, which expands to flat left recursion). On a 64→512
+    // sweep, a quadratic forest ~quadruples per doubling and a linear one doubles;
+    // we assert OFF grows ≥3× per doubling (genuinely super-linear) and ON ≤2.3×
+    // (linear), so the gate proves the fix is *necessary* and *sufficient*.
+    assert_leo_before_after("right_rec", RIGHTREC_GRAMMAR, &|n| gen_x(n));
+    assert_leo_before_after("assign", ASSIGN_GRAMMAR, &|n| vec!["x"; n].join("="));
+    assert_leo_before_after("rrlist", RRLIST_GRAMMAR, &|n| vec!["i"; n].join(","));
+
+    // The #58 done-when, kept explicit: the completer's own waiter-scan counter on
+    // the canonical shape is now flat per byte (the old `≤ n²` ceiling tightened to
+    // flat), with the size sweep as the regression net.
     {
         let p = earley(RIGHTREC_GRAMMAR, Ambiguity::Resolve);
         assert_flat_per_byte(
@@ -290,6 +313,76 @@ fn assert_flat_per_byte(label: &str, parser: &Lark, inputs: &[String]) {
         "Arm 1 regression: {label} completer scan is NOT flat per byte — \
          grew from {first:.3} to {last:.3} scan/byte across the sweep \
          (per-byte rows: {per_byte:?}); the origin-column rescan is super-linear again"
+    );
+}
+
+/// Prove Joop-Leo both *necessary* and *sufficient* on a right-recursive grammar:
+/// measure the SAME engine with Leo disabled (pre-fix behavior, via the
+/// `perf`-only toggle) and enabled, keying on the mode-neutral forest size. Over a
+/// 64→128→256→512 sweep we check the node-count ratio per doubling: OFF must grow
+/// super-linearly (≥3× per doubling — a quadratic quadruples, a linear only
+/// doubles) and ON must be linear (≤2.3× per doubling). Restores the default
+/// (Leo on) before returning.
+#[cfg(feature = "perf-counters")]
+fn assert_leo_before_after(label: &str, grammar: &str, mk: &dyn Fn(usize) -> String) {
+    use lark_rs::perf;
+
+    let sizes = [64usize, 128, 256, 512];
+    let inputs: Vec<String> = sizes.iter().map(|&n| mk(n)).collect();
+    let parser = earley(grammar, Ambiguity::Resolve);
+
+    let nodes = |leo_disabled: bool| -> Vec<u64> {
+        perf::set_leo_disabled(leo_disabled);
+        inputs
+            .iter()
+            .map(|input| {
+                perf::reset();
+                parser
+                    .parse(input)
+                    .unwrap_or_else(|e| panic!("{label} must parse: {e:?}"));
+                perf::forest_nodes()
+            })
+            .collect()
+    };
+
+    let off = nodes(true);
+    let on = nodes(false);
+    perf::set_leo_disabled(false); // restore default for any later measurement
+
+    // Without Leo: super-linear. Every doubling must grow the forest by ≥3×.
+    for w in off.windows(2) {
+        let ratio = w[1] as f64 / w[0] as f64;
+        assert!(
+            ratio >= 3.0,
+            "{label}: WITHOUT Leo the forest is supposed to be super-linear \
+             (so the fix is *necessary*), but a doubling grew it only {ratio:.2}× \
+             ({} → {}); the OFF baseline no longer demonstrates the pathology — \
+             counts off={off:?}",
+            w[0],
+            w[1]
+        );
+    }
+
+    // With Leo: linear. Every doubling must grow the forest by ≤2.3×.
+    for w in on.windows(2) {
+        let ratio = w[1] as f64 / w[0] as f64;
+        assert!(
+            ratio <= 2.3,
+            "{label}: WITH Leo the forest must be linear (the fix is *sufficient*), \
+             but a doubling grew it {ratio:.2}× ({} → {}) — Leo is not collapsing \
+             the right-recursion spine (regression). counts on={on:?}",
+            w[0],
+            w[1]
+        );
+    }
+
+    // And the headline number: at the largest size, Leo shrinks the forest by a
+    // wide margin (sanity that OFF and ON really are the two regimes, not noise).
+    let (big_off, big_on) = (*off.last().unwrap(), *on.last().unwrap());
+    assert!(
+        big_off >= big_on * 4,
+        "{label}: expected Leo to shrink the largest forest by ≥4× (O(n²)→O(n)), \
+         got off={big_off} on={big_on}"
     );
 }
 

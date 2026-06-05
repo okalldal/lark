@@ -237,6 +237,7 @@ impl Forest {
             paths: Vec::new(),
         });
         self.index.insert((key, start, end), id);
+        crate::perf::add_forest_node();
         id
     }
 
@@ -565,28 +566,25 @@ impl EarleyParser {
             i += 1;
         }
 
-        // Expand any Joop-Leo deferred reconstructions into real packed families
-        // before the forest→tree walk reads them.
-        self.load_leo_paths(&mut forest, &trans_arena);
-
         // The root is the completed start symbol spanning (0, n): one node in the
-        // forest's global index, holding all of its derivations.
-        forest
-            .index
-            .get(&(NodeKey::Sym(start_id), 0, n))
-            .copied()
-            .map(|root| (forest, root))
-            .ok_or_else(|| {
-                let (line, col) = toks
-                    .last()
-                    .map(|t| (t.end_line.max(t.line), t.end_column.max(t.column)))
-                    .unwrap_or((1, 1));
-                ParseError::UnexpectedEof {
-                    line,
-                    col,
-                    expected: vec![],
-                }
-            })
+        // forest's global index, holding all of its derivations. Expand the
+        // Joop-Leo deferred reconstructions reachable from it before the forest→tree
+        // walk reads them.
+        let root = forest.index.get(&(NodeKey::Sym(start_id), 0, n)).copied();
+        if let Some(root) = root {
+            self.load_leo_paths(&mut forest, &trans_arena, root);
+        }
+        root.map(|root| (forest, root)).ok_or_else(|| {
+            let (line, col) = toks
+                .last()
+                .map(|t| (t.end_line.max(t.line), t.end_column.max(t.column)))
+                .unwrap_or((1, 1));
+            ParseError::UnexpectedEof {
+                line,
+                col,
+                expected: vec![],
+            }
+        })
     }
 
     /// Scott's predictor + completer for one column. Processes the column as a
@@ -786,6 +784,12 @@ impl EarleyParser {
         trans_arena: &mut Vec<Trans>,
         start_id: SymbolId,
     ) {
+        // Benchmark/test affordance (perf-counters only): with Leo disabled, never
+        // build transitives, so the completer falls back to the regular cascade —
+        // the "without the fix" arm of the #58 before/after proof.
+        if crate::perf::leo_disabled() {
+            return;
+        }
         if transitives[start].contains_key(&recognized) {
             return;
         }
@@ -852,13 +856,17 @@ impl EarleyParser {
     /// chain top→bottom rebuilding one symbol node per skipped reduction level —
     /// the same spine the non-Leo completer would have built, but materialized once
     /// here (O(n)) instead of O(n²) times during the parse.
-    fn load_leo_paths(&self, forest: &mut Forest, trans_arena: &[Trans]) {
-        // New nodes are appended as we expand; iterate by index so they are visited
-        // too (created intermediate nodes carry no paths, so this terminates).
-        let mut id = 0;
-        while id < forest.nodes.len() {
-            if forest.nodes[id].paths.is_empty() {
-                id += 1;
+    fn load_leo_paths(&self, forest: &mut Forest, trans_arena: &[Trans], root: usize) {
+        // Reachability DFS from the root: expand only the paths the forest->tree
+        // walk will actually read. A Leo completion records a top node at EVERY
+        // column, so `start` over every prefix carries a path; expanding them all
+        // would rebuild a length-c spine for every column c -- back to O(n^2).
+        // Touching only nodes reachable from the real root keeps reconstruction
+        // O(n), mirroring Python's `load_paths`-on-`children` laziness.
+        let mut stack = vec![root];
+        let mut visited: HashSet<usize> = HashSet::new();
+        while let Some(id) = stack.pop() {
+            if !visited.insert(id) {
                 continue;
             }
             let paths = std::mem::take(&mut forest.nodes[id].paths);
@@ -893,7 +901,15 @@ impl EarleyParser {
                     );
                 }
             }
-            id += 1;
+            // Descend into the now-complete family children so their own paths, if
+            // any, expand too — but only along edges reachable from the root.
+            for p in &forest.nodes[id].families {
+                for r in [p.left, p.right] {
+                    if let ForestRef::Node(c) = r {
+                        stack.push(c);
+                    }
+                }
+            }
         }
     }
 
@@ -1065,13 +1081,11 @@ impl EarleyParser {
             }
         }
 
-        self.load_leo_paths(&mut forest, &trans_arena);
-
-        forest
-            .index
-            .get(&(NodeKey::Sym(start_id), 0, n))
-            .copied()
-            .map(|root| (forest, root))
+        let root = forest.index.get(&(NodeKey::Sym(start_id), 0, n)).copied();
+        if let Some(root) = root {
+            self.load_leo_paths(&mut forest, &trans_arena, root);
+        }
+        root.map(|root| (forest, root))
             .ok_or(ParseError::UnexpectedEof {
                 line: *lines.last().unwrap_or(&1),
                 col: *cols.last().unwrap_or(&1),

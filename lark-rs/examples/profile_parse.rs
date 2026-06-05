@@ -68,7 +68,7 @@ const ARITH_GRAMMAR: &str = r#"
 "#;
 
 /// `a: X a | X` — right recursion. Non-Leo Earley builds O(n²) completed items
-/// here (the Arm-1 residual #56 demonstrates and tracks for the Leo optimization).
+/// here; the Joop-Leo optimization (#58) collapses the forest to O(n) nodes.
 const RIGHTREC_GRAMMAR: &str = "start: a\na: X a | X\nX: \"x\"\n";
 
 /// `X+` — a transparent left-recursive helper. Under `ambiguity='explicit'` its
@@ -122,17 +122,24 @@ fn scaling() {
             s as f64 / input.len() as f64
         );
     }
-    println!("# Arm 1 residual — right recursion `a: X a | X` stays O(n²) (omitted Leo, tracked)");
+    println!(
+        "# Joop-Leo (#58) — right recursion `a: X a | X`, forest size OFF (O(n²)) vs ON (O(n))"
+    );
     let rr = Lark::new(RIGHTREC_GRAMMAR, earley_opts(Ambiguity::Resolve)).unwrap();
     for &n in &[64usize, 128, 256, 512] {
         let input = "x".repeat(n);
+        perf::set_leo_disabled(true);
         perf::reset();
         rr.parse(&input).unwrap();
-        let s = perf::completer_scan_steps();
+        let off = perf::forest_nodes();
+        perf::set_leo_disabled(false);
+        perf::reset();
+        rr.parse(&input).unwrap();
+        let on = perf::forest_nodes();
         println!(
-            "  rightrec n={n:>5}  scan={:>9}  scan/n²={:.3}",
-            s,
-            s as f64 / (n * n) as f64
+            "  rightrec n={n:>5}  nodes_off={off:>8} ({:.2}/n²)  nodes_on={on:>6} ({:.2}/n)",
+            off as f64 / (n * n) as f64,
+            on as f64 / n as f64
         );
     }
     println!("# Arm 2 — `X+` explicit: clone loop LINEAR (disproof) vs node rebuild O(n²) (real)");

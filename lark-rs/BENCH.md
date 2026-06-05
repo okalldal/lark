@@ -107,12 +107,24 @@ comparison); `median_ns` drives the MB/s. Speedup on a row is
      scan, gated. (So the old "the ratio grows *because* the completer rescans the
      origin column" claim was directionally right about the mechanism but was never
      verified — #56 verified and fixed it.)
-   - **Right-recursion residual — characterized, not fixed.** Even with the index,
-     `a: X a | X` stays O(n²): non-Leo Earley builds O(n²) completed items there
-     regardless of the rescan. Python Lark shares this — its Joop-Leo transitives are
-     dead code (`create_leo_transitives` commented out). The index drops it ~O(n³)→
-     O(n²); the n² ceiling is gated, and the Leo optimization that would linearize it
-     is a **tracked follow-up**.
+   - **Right-recursion — linearized by Joop-Leo (#58).** Even with the index,
+     `a: X a | X` stayed O(n²): non-Leo Earley builds O(n²) completed items
+     regardless of the rescan (Python Lark still does — its Leo transitives are dead
+     code, `create_leo_transitives` commented out; the upstream completer even
+     references a nonexistent field, see lark-parser/lark#397). #58 implemented the
+     Joop-Leo deterministic-reduction-path optimization with a lazy, reachability-
+     bounded SPPF spine reconstruction over a forest-global `(key,start,end)` index.
+     The forest drops from O(n²) to O(n) nodes. The gate now proves this **before
+     vs after** on three grammars — the canonical `a: X a | X` plus two that people
+     hand-write as right recursion and *cannot* express with `+` (a right-associative
+     operator `?a: NAME "=" a | NAME` and a separated list `lst: ITEM "," lst | ITEM`,
+     since `+` expands to flat *left* recursion): with the Leo toggle off the forest
+     is super-linear (≥3× per doubling), with it on it is linear (≤2.3×). Wall-clock
+     on the `=` chain (measured 2026-06-05, `--features perf-counters`): **17× @ n=256,
+     38× @ n=512, 90× @ n=1024** (671 ms → 7.5 ms), the speedup growing ~linearly in
+     n exactly as O(n²)→O(n) predicts. This is where lark-rs is now *faster than the
+     Python oracle*. Restricted to strict right recursion (recognized symbol is the
+     rule's last); nullable-tail recursion falls back to the regular completer.
    - **`ambiguity='explicit'` walk — guessed cause disproved.** The suspected culprit
      was `expand_packed`'s `l = list.clone(); l.push(rv)` loop. Measured, that loop is
      **linear** (its prefix is bounded by the rule arity). The genuine O(n²) is the
