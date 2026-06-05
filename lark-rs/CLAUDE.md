@@ -315,7 +315,7 @@ underlying super-linearity has since been removed by the Joop-Leo work (#58).
 | WASM target | ⬜ | Browser/Node.js |
 | C API | ⬜ | `lark_h` crate |
 | `include_lark!` proc-macro | ⬜ | Compile-time grammar validation |
-| Benchmarks vs Python Lark | ⬜ | JSON / Python / SQL |
+| Benchmarks vs Python Lark | ✅ | #50: `cargo bench --bench vs_python_lark` — JSON / Python / SQL through both engines, byte-identical inputs, prints MB/s + speedup (~4–6× on the reference box). Results in `BENCH.md` |
 
 ---
 

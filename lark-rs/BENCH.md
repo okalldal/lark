@@ -54,9 +54,18 @@ sweep here, never a wall-clock threshold.
 
 ```bash
 cd lark-rs
-cargo bench --bench parse        # Rust LALR numbers (no benchmarking crate needed)
-python3 tools/bench_compare.py   # Python Lark on the same grammars+inputs
+cargo bench --bench parse           # Rust LALR/Earley internal numbers + scaling
+python3 tools/bench_compare.py      # Python Lark on parse.rs's JSON/arith grammars
+cargo bench --bench vs_python_lark  # cross-engine JSON/Python/SQL, prints the speedup
 ```
+
+`vs_python_lark` is the **cross-engine end-to-end comparison** (issue #50, the
+"10–100×" headline) and is the single command that reports the speedup ratio: it
+times lark-rs on three real workloads, then shells out to
+`benches/vs_python_lark.py` to time the *byte-identical* inputs through the in-tree
+Python Lark and prints `python_median / rust_median` per workload. See
+"Cross-engine end-to-end" below. The `parse` bench and `tools/bench_compare.py`
+remain the *internal* trend (LALR vs Earley, scaling shapes).
 
 Both print the same columns; compare row-by-row:
 
@@ -158,6 +167,56 @@ allocation-bound, not algorithm-bound — now **measured**, not assumed (see bel
 This harness is what makes that headroom measurable and turns each future
 optimization into a tracked delta.
 
+## Cross-engine end-to-end: JSON / Python / SQL (issue #50)
+
+`cargo bench --bench vs_python_lark` is the **cross-engine comparison** — the
+number behind the project's "10–100×" goal — over three real workloads, all on
+LALR + the contextual lexer (Lark's primary USP). It is the throughput analog of
+the oracle: lark-rs and Python Lark parse the **same grammar** over the **same
+bytes**, so the ratio is apples-to-apples.
+
+- **JSON** — the canonical JSON grammar over a ~92 KB array of records (the
+  `json_large` shape from `parse.rs`).
+- **Python** — a significant-whitespace Python *subset* driven by the `Indenter`
+  postlex hook (classes, methods, `if`/`else`, `for`, arithmetic, attribute
+  access). This exercises `%declare _INDENT _DEDENT` + postlex end-to-end — the
+  feature that makes Python-style indentation parseable. The *full* `python.lark`
+  is not yet parseable end-to-end by lark-rs (it needs regex lookbehind in its
+  string terminals; tracked under the grammar-stdlib work, #40), so the workload
+  is a representative subset both engines accept rather than upstream `python.lark`.
+- **SQL** — a `SELECT`/`INSERT`/`UPDATE`/`DELETE` grammar (joins, `WHERE`,
+  `GROUP BY`, `ORDER BY`, `BETWEEN`/`IN`) over a batch of statements.
+
+The grammars live byte-identical in `benches/vs_python_lark.rs` and
+`benches/vs_python_lark.py`. The Rust harness generates each input once, writes it
+to a temp dir, and passes it to the Python script with `--inputs`, so both engines
+time the exact same bytes (no generator-drift risk). Both sides assert the
+workload parses before timing, so grammar drift fails loudly rather than silently
+measuring an error path.
+
+### Reference run
+
+Machine-specific — **only ratios travel**; capture fresh numbers on your own box.
+
+- `Linux x86_64`, Intel Xeon @ 2.80 GHz, 4 cores, `rustc 1.94.1`, release + LTO.
+- **Python Lark 1.3.1**, CPython 3.11.15 (the in-tree copy), `parser='lalr'`,
+  `lexer='contextual'`. Measured 2026-06-05.
+
+| workload | bytes | Rust MB/s | Python MB/s | speedup |
+|----------|------:|----------:|------------:|--------:|
+| JSON   | ~92 KB  | ~4.0 | ~0.8 | **~5.2×** |
+| Python | ~104 KB | ~2.7 | ~0.5 | **~5.4×** |
+| SQL    | ~57 KB  | ~2.7 | ~0.6 | **~4.1×** |
+
+**Reading.** lark-rs LALR is currently ~4–6× faster than Python Lark end-to-end —
+consistent with the internal baseline above (~4–5× on JSON/arith). This is real
+but short of the "10–100×" headline: the gap is the deliberately-deferred
+tree-representation work (`Box<str>`/arena labels, zero-copy spans — see the
+profiling findings below; parse throughput is allocation-bound, ~3 allocations per
+input byte, not algorithm-bound). This bench is what turns that remaining headroom
+into a tracked delta: **re-run it after each significant engine change and update
+the table.**
+
 ## Profiling findings (spike, 2026-06-04)
 
 A one-off spike with `valgrind --tool=callgrind` (per-function instruction cost)
@@ -222,8 +281,15 @@ co-design it (see `PHASE_2_PLAN.md` §10).
 
 ## Adding a workload
 
-Edit `benches/parse.rs` (Rust) and mirror it in `tools/bench_compare.py` (Python)
-so the rows line up. Keep generators size-parameterized so a workload can scale to
-expose super-linear behavior. The Earley workloads (the unambiguous grammars
-re-run under `parser='earley'`, plus a pathological ambiguous grammar) are stubbed
-in both files and light up when the engine lands.
+**Internal trend** (`parse`): edit `benches/parse.rs` (Rust) and mirror it in
+`tools/bench_compare.py` (Python) so the rows line up. Keep generators
+size-parameterized so a workload can scale to expose super-linear behavior. The
+Earley workloads (the unambiguous grammars re-run under `parser='earley'`, plus a
+pathological ambiguous grammar) light up when the engine lands.
+
+**Cross-engine** (`vs_python_lark`): add the grammar + a size-parameterized
+generator to **both** `benches/vs_python_lark.rs` and `benches/vs_python_lark.py`,
+keeping the grammar strings byte-identical, then add the workload name to the three
+arrays in each `main()`. The Rust harness writes the generated input to a temp file
+and the Python script reads it via `--inputs`, so the two engines always time the
+same bytes even if the generators ever drift.
