@@ -22,7 +22,9 @@ use crate::grammar::intern::{CompiledGrammar, CompiledRule, SymbolId, SymbolTabl
 use crate::lexer::ContextualLexer;
 use crate::tree::{ParseTree, Token};
 
-use super::token_source::{Contextual, LexFailure, PreLexed, TokenSource};
+use super::token_source::{
+    postlex_contextual_source, Contextual, LexFailure, PreLexed, SourceError, TokenSource,
+};
 use super::tree_builder::{NodeValue, TreeBuilder};
 
 // ─── Parse table ─────────────────────────────────────────────────────────────
@@ -685,7 +687,9 @@ impl LalrParser {
             let state = *state_stack.last().unwrap();
             let token = match source.peek(state) {
                 Ok(tok) => tok,
-                Err(failure) => return Err(self.lex_failure(state, failure)),
+                Err(SourceError::Lex(failure)) => return Err(self.lex_failure(state, failure)),
+                // A postlex transform (the indenter) already produced a full error.
+                Err(SourceError::Postlex(e)) => return Err(e),
             };
 
             match self.table.action_at(state, token.type_id).copied() {
@@ -731,5 +735,23 @@ impl LalrParser {
         start: Option<&str>,
     ) -> Result<ParseTree, ParseError> {
         self.run(&mut Contextual::new(text, lexer), start)
+    }
+
+    /// Parse using the contextual lexer with a streaming [`Indenter`] postlex hook
+    /// (issue #67). The hook injects INDENT/DEDENT into the lazy token stream; the
+    /// indenter's newline terminal must already be forced into every state's
+    /// scanner (`always_accept`, set up in `build_frontend`).
+    ///
+    /// [`Indenter`]: crate::postlex::Indenter
+    pub fn parse_contextual_postlex(
+        &self,
+        text: &str,
+        lexer: &ContextualLexer,
+        postlex: &crate::postlex::Indenter,
+        symbols: &SymbolTable,
+        start: Option<&str>,
+    ) -> Result<ParseTree, ParseError> {
+        let mut source = postlex_contextual_source(text, lexer, postlex, symbols)?;
+        self.run(&mut source, start)
     }
 }
