@@ -325,6 +325,10 @@ fn main() {
     //     `lst: ITEM "," lst | ITEM`. ns/byte should stay flat as n grows.
     //   • explicit_list (`X+`, ambiguity='explicit'): O(n²) node-rebuild — the real
     //     explicit cost (the `expand_packed` clone loop guessed by #56 is linear).
+    //   • nulltail (`a: X a opt | X`, `opt:` nullable): the recursive `a` is NOT the
+    //     rule's last symbol, so Leo declines (strict-right-recursion only) and it
+    //     stays O(n²) — the KNOWN GAP (`tests/test_known_gaps.rs::gap3`). Reported
+    //     here as the not-linearized contrast to the rows above (ns/byte climbs).
     println!();
     println!(
         "Parsing — Earley right-recursion (Joop-Leo #58; reported, gated in test_earley_scaling):"
@@ -332,6 +336,8 @@ fn main() {
     let rightrec = build_earley("start: a\na: X a | X\nX: \"x\"\n");
     let assign = build_earley("?start: a\n?a: NAME \"=\" a | NAME\nNAME: /[a-z]+/\n");
     let rrlist = build_earley("start: lst\nlst: ITEM \",\" lst | ITEM\nITEM: \"i\"\n");
+    // KNOWN GAP (gap3): nullable tail after the recursion -> Leo declines -> O(n²).
+    let nulltail = build_earley("start: a\na: X a opt | X\nopt:\nX: \"x\"\n");
     for n in [64usize, 128, 256, 512, 1024] {
         run_parse(
             "parse_earley_rightrec",
@@ -350,6 +356,12 @@ fn main() {
             &format!("lst_{n}"),
             &rrlist,
             &vec!["i"; n].join(","),
+        );
+        run_parse(
+            "parse_earley_nulltail_GAP",
+            &format!("nt_{n}"),
+            &nulltail,
+            &"x".repeat(n),
         );
     }
     // Headline before/after in WALL CLOCK (only meaningful with `--features
