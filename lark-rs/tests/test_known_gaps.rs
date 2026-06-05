@@ -32,7 +32,7 @@ fn earley(grammar: &str, ambiguity: Ambiguity) -> Result<Lark, String> {
     .map_err(|e| e.to_string())
 }
 
-// ─── Gap 1: loader rejects the trailing-bar empty alternative ──────────────────
+// ─── Gap 1 (#62): loader rejects the trailing-bar empty alternative ────────────
 //
 // `a: X a |` is valid Lark: the bar with nothing after it is an empty (ε)
 // production, so `a` derives `X a` or nothing. Python Lark accepts it and parses
@@ -42,7 +42,7 @@ fn earley(grammar: &str, ambiguity: Ambiguity) -> Result<Lark, String> {
 // the next rule). The fix lives in the loader's alternation parsing, not the
 // engine. (We use a named empty rule in the #58 oracles to sidestep this.)
 #[test]
-#[ignore = "known gap: loader rejects trailing-bar empty alternative 'a: X a |' (valid Lark)"]
+#[ignore = "known gap #62: loader rejects trailing-bar empty alternative 'a: X a |' (valid Lark)"]
 fn gap1_loader_accepts_trailing_bar_empty_alt() {
     let lark = earley("start: a\na: X a |\nX: \"x\"\n", Ambiguity::Resolve)
         .expect("Python Lark accepts a trailing-bar empty alternative; lark-rs must too");
@@ -53,7 +53,7 @@ fn gap1_loader_accepts_trailing_bar_empty_alt() {
     assert!(matches!(tree, ParseTree::Tree(_)));
 }
 
-// ─── Gap 2: explicit `_ambig` nesting on deeply ambiguous input ────────────────
+// ─── Gap 2 (#63): explicit `_ambig` nesting on deeply ambiguous input ──────────
 //
 // For a grammar ambiguous N>2 ways over a span, Python Lark emits ONE `_ambig`
 // node with all N full derivations as flat children. lark-rs emits a *binarized*
@@ -63,7 +63,7 @@ fn gap1_loader_accepts_trailing_bar_empty_alt() {
 // This is an SPPF→tree ambiguity-flattening difference, independent of Leo (Leo
 // does not even fire on this grammar — its reduction path is not deterministic).
 #[test]
-#[ignore = "known gap: explicit _ambig is nested, not Python's flat N-way, on deeply ambiguous input"]
+#[ignore = "known gap #63: explicit _ambig is nested, not Python's flat N-way, on deeply ambiguous input"]
 fn gap2_explicit_ambig_is_flat_n_way() {
     let lark = earley(
         "!start: \"x\" start | start \"x\" | \"x\"\n",
@@ -93,7 +93,7 @@ fn gap2_explicit_ambig_is_flat_n_way() {
     }
 }
 
-// ─── Gap 3: Joop-Leo does not linearize nullable-tail right recursion ──────────
+// ─── Gap 3 (#64): Joop-Leo does not linearize nullable-tail right recursion ────
 //
 // Leo (#58) is restricted to STRICT right recursion: the recognized symbol must
 // be the rule's last symbol. A rule whose recursive symbol is followed by a
@@ -106,7 +106,7 @@ fn gap2_explicit_ambig_is_flat_n_way() {
 // upstream Lark never finished; a deliberate follow-up.
 #[cfg(feature = "perf-counters")]
 #[test]
-#[ignore = "known gap: nullable-tail right recursion is not linearized by Leo (still O(n^2)); by design"]
+#[ignore = "known gap #64: nullable-tail right recursion is not linearized by Leo (still O(n^2)); by design"]
 fn gap3_nullable_tail_right_recursion_is_linearized() {
     use lark_rs::perf;
 
