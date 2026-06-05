@@ -91,17 +91,17 @@ struct CnfRule {
 /// ε-removal duplicates a rule into variants that *omit* some nullable
 /// occurrences. Each variant points back at the original rule and records, per
 /// original expansion position, whether that symbol is present in the variant.
-/// At tree-assembly time the omitted (always transparent, always empty) positions
-/// are refilled with an empty splice, so the shared [`TreeBuilder`] still sees a
-/// child per original expansion symbol and applies the original rule's filtering /
-/// shaping unchanged.
+/// At tree-assembly time the omitted positions are refilled with the symbol's
+/// precomputed ε-value (see [`Cnf::epsilon_values`]), so the shared [`TreeBuilder`]
+/// still sees a child per original expansion symbol and applies the original
+/// rule's filtering / shaping unchanged.
 #[derive(Debug, Clone)]
 struct EffRule {
     /// Index into [`CompiledGrammar::rules`].
     rule_idx: usize,
     /// One flag per original expansion position: `true` = present in this variant
-    /// (consumes a parsed child), `false` = omitted (a nullable transparent symbol
-    /// that derived ε here; refilled with an empty splice on assembly).
+    /// (consumes a parsed child), `false` = omitted (a nullable symbol that derived
+    /// ε here; refilled with its ε-value on assembly).
     present_mask: Vec<bool>,
 }
 
@@ -110,6 +110,12 @@ struct Cnf {
     rules: Vec<CnfRule>,
     /// Original-rule views (see [`EffRule`]); `CnfRule::alias` / `skipped` index it.
     eff_rules: Vec<EffRule>,
+    /// The value an ε-deriving non-terminal contributes when it is *omitted* by
+    /// ε-removal — precomputed by assembling its empty production through the
+    /// shared [`TreeBuilder`], so an absent optional refills with exactly what the
+    /// other backends emit (an empty splice for `*`/`+`, a `None` placeholder for a
+    /// `maybe_placeholders` `[...]`, an aliased empty node, …). Keyed by symbol id.
+    epsilon_values: HashMap<SymbolId, NodeValue>,
     /// Terminal id → rule indices of `X → [terminal]` productions.
     terminal_rules: HashMap<SymbolId, Vec<usize>>,
     /// `(A, B)` → rule indices of `X → [A B]` productions.
@@ -156,8 +162,8 @@ impl CykParser {
     /// production, or a malformed rule after conversion), matching Python Lark,
     /// which raises while constructing the CYK frontend.
     pub fn new(grammar: CompiledGrammar) -> Result<Self, GrammarError> {
-        let (rules, eff_rules) = to_cnf(&grammar)?;
-        let cnf = build_indices(rules, eff_rules)?;
+        let (rules, eff_rules, epsilon_values) = to_cnf(&grammar)?;
+        let cnf = build_indices(rules, eff_rules, epsilon_values)?;
         Ok(CykParser { grammar, cnf })
     }
 
@@ -263,7 +269,7 @@ impl CykParser {
         // Earley perf path that needs a dedicated large stack.
         let builder = TreeBuilder::new(&self.grammar.rules);
         let rev = revert(&root, &self.cnf.rules);
-        let value = assemble_rev(rev, &builder, &self.cnf.eff_rules);
+        let value = assemble_rev(rev, &builder, &self.cnf, &self.grammar);
         let start_name = self.grammar.symbols.name(start_id).to_string();
 
         Ok(match value {
@@ -300,7 +306,9 @@ fn parse_failed() -> ParseError {
 /// nullable `*`/`?`/`+` helpers), then TERM, BIN, UNIT — mirroring Python Lark,
 /// whose own EBNF expansion and reachability pruning leave a comparable ε-free
 /// rule set before its CYK runs.
-fn to_cnf(grammar: &CompiledGrammar) -> Result<(Vec<CnfRule>, Vec<EffRule>), GrammarError> {
+type CnfResult = (Vec<CnfRule>, Vec<EffRule>, HashMap<SymbolId, NodeValue>);
+
+fn to_cnf(grammar: &CompiledGrammar) -> Result<CnfResult, GrammarError> {
     let mut eff_rules: Vec<EffRule> = Vec::new();
     let mut rules: Vec<CnfRule> = Vec::new();
     for (idx, r) in grammar.rules.iter().enumerate() {
@@ -354,13 +362,90 @@ fn to_cnf(grammar: &CompiledGrammar) -> Result<(Vec<CnfRule>, Vec<EffRule>), Gra
             }
         }
     }
+    // Precompute, before the rules are mutated, the value each nullable symbol
+    // contributes when ε-removal omits it — so an absent `[...]`'s `None`
+    // placeholder (and any other ε-derivation shaping) survives.
+    let epsilon_values = compute_epsilon_values(grammar, &nullable);
+
     let rules = eliminate_epsilon(rules, &nullable, &mut eff_rules)?;
 
     let rules = dedup(term(rules));
     let mut split_counter: u32 = 0;
     let rules = dedup(bin(rules, &mut split_counter));
     let rules = unit(rules)?;
-    Ok((rules, eff_rules))
+    Ok((rules, eff_rules, epsilon_values))
+}
+
+/// For every nullable non-terminal, precompute the [`NodeValue`] it yields when it
+/// derives ε — by assembling its lightest ε-production through the shared
+/// [`TreeBuilder`], recursively over its (also nullable) children. This is exactly
+/// what LALR/Earley produce for an empty derivation, so refilling an ε-removed
+/// (omitted) position with it keeps CYK's tree identical: an empty splice for a
+/// plain `*`/`?` helper, a `None` placeholder for a `maybe_placeholders` `[...]`,
+/// or an aliased empty node where the empty production is non-transparent.
+fn compute_epsilon_values(
+    grammar: &CompiledGrammar,
+    nullable: &HashSet<Nt>,
+) -> HashMap<SymbolId, NodeValue> {
+    let builder = TreeBuilder::new(&grammar.rules);
+    let mut memo: HashMap<SymbolId, NodeValue> = HashMap::new();
+    let mut visiting: HashSet<SymbolId> = HashSet::new();
+    for nt in nullable {
+        if let Nt::Orig(id) = nt {
+            eps_value(*id, grammar, nullable, &builder, &mut memo, &mut visiting);
+        }
+    }
+    memo
+}
+
+/// Memoized helper for [`compute_epsilon_values`]: the ε-value of one symbol.
+fn eps_value(
+    id: SymbolId,
+    grammar: &CompiledGrammar,
+    nullable: &HashSet<Nt>,
+    builder: &TreeBuilder,
+    memo: &mut HashMap<SymbolId, NodeValue>,
+    visiting: &mut HashSet<SymbolId>,
+) -> NodeValue {
+    if let Some(v) = memo.get(&id) {
+        return v.clone();
+    }
+    // A nullable symbol that recurs through its own ε-derivation is pathological;
+    // contribute nothing rather than loop.
+    if !visiting.insert(id) {
+        return NodeValue::Inline(Vec::new());
+    }
+    // The lightest ε-deriving production (all-nullable rhs), matching the DP's
+    // min-weight, then first, selection.
+    let chosen = grammar
+        .rules
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| {
+            !r.is_start
+                && r.origin == id
+                && r.expansion
+                    .iter()
+                    .all(|&s| !grammar.symbols.is_terminal(s) && nullable.contains(&Nt::Orig(s)))
+        })
+        .min_by_key(|(i, r)| (r.options.priority, *i))
+        .map(|(i, _)| i);
+    let value = match chosen {
+        Some(ri) => {
+            let child_values: Vec<NodeValue> = grammar.rules[ri]
+                .expansion
+                .iter()
+                .map(|&s| eps_value(s, grammar, nullable, builder, memo, visiting))
+                .collect();
+            builder.assemble(ri, child_values)
+        }
+        // `id` is nullable but has no all-nullable production reachable here; treat
+        // as an empty contribution.
+        None => NodeValue::Inline(Vec::new()),
+    };
+    visiting.remove(&id);
+    memo.insert(id, value.clone());
+    value
 }
 
 /// Drop every rule whose left-hand side is unreachable from any user start
@@ -676,7 +761,11 @@ fn dedup(rules: Vec<CnfRule>) -> Vec<CnfRule> {
 /// Build the terminal/non-terminal lookup indices, validating that every rule is
 /// in CNF (rhs of length 1 = a terminal, or length 2 = two non-terminals).
 /// Anything else — most importantly an empty production — is a build error.
-fn build_indices(rules: Vec<CnfRule>, eff_rules: Vec<EffRule>) -> Result<Cnf, GrammarError> {
+fn build_indices(
+    rules: Vec<CnfRule>,
+    eff_rules: Vec<EffRule>,
+    epsilon_values: HashMap<SymbolId, NodeValue>,
+) -> Result<Cnf, GrammarError> {
     let mut terminal_rules: HashMap<SymbolId, Vec<usize>> = HashMap::new();
     let mut nonterminal_rules: HashMap<(Nt, Nt), Vec<usize>> = HashMap::new();
     for (i, r) in rules.iter().enumerate() {
@@ -700,6 +789,7 @@ fn build_indices(rules: Vec<CnfRule>, eff_rules: Vec<EffRule>) -> Result<Cnf, Gr
     Ok(Cnf {
         rules,
         eff_rules,
+        epsilon_values,
         terminal_rules,
         nonterminal_rules,
     })
@@ -755,27 +845,45 @@ fn revert(node: &Rc<PNode>, cnf: &[CnfRule]) -> Rev {
 /// Fold a reverted tree into a [`NodeValue`] via the shared [`TreeBuilder`], so
 /// CYK output is shaped (filtered, expanded, spliced) identically to LALR/Earley.
 ///
-/// `eff` carries the present/absent mask of each node's ε-variant: the present
+/// The `present_mask` of each node's ε-variant drives reconstruction: the present
 /// children (in order) come from `kids`, and every omitted position is refilled
-/// with an empty splice (`Inline([])`) — a nullable transparent symbol that
-/// derived ε contributes no children, exactly as if its helper rule had matched
-/// empty — so the original rule still sees one value per expansion symbol.
-fn assemble_rev(rev: Rev, builder: &TreeBuilder, eff: &[EffRule]) -> NodeValue {
+/// with that symbol's precomputed ε-value (`cnf.epsilon_values`) — an empty splice
+/// for a plain `*`/`?` helper, but a `None` placeholder for a `maybe_placeholders`
+/// `[...]` — so the original rule still sees one value per expansion symbol and the
+/// resulting tree matches LALR/Earley/Python exactly.
+fn assemble_rev(
+    rev: Rev,
+    builder: &TreeBuilder,
+    cnf: &Cnf,
+    grammar: &CompiledGrammar,
+) -> NodeValue {
     match rev {
         Rev::Tok(t) => NodeValue::Token(t),
         Rev::Node(eff_idx, kids) => {
-            let e = &eff[eff_idx];
-            let mut present = kids.into_iter().map(|k| assemble_rev(k, builder, eff));
+            let e = &cnf.eff_rules[eff_idx];
+            let kid_values: Vec<NodeValue> = kids
+                .into_iter()
+                .map(|k| assemble_rev(k, builder, cnf, grammar))
+                .collect();
+            let expansion = &grammar.rules[e.rule_idx].expansion;
+            let mut present = kid_values.into_iter();
             let values: Vec<NodeValue> = e
                 .present_mask
                 .iter()
-                .map(|&keep| {
+                .enumerate()
+                .map(|(pos, &keep)| {
                     if keep {
                         present
                             .next()
                             .expect("a present child per present position")
                     } else {
-                        NodeValue::Inline(Vec::new())
+                        // Omitted: refill with the symbol's ε-value (an empty splice
+                        // unless it carries placeholders / an aliased empty node).
+                        let sym = expansion[pos];
+                        cnf.epsilon_values
+                            .get(&sym)
+                            .cloned()
+                            .unwrap_or_else(|| NodeValue::Inline(Vec::new()))
                     }
                 })
                 .collect();
@@ -786,7 +894,7 @@ fn assemble_rev(rev: Rev, builder: &TreeBuilder, eff: &[EffRule]) -> NodeValue {
         Rev::Splice(kids) => {
             let mut out: Vec<Child> = Vec::new();
             for k in kids {
-                match assemble_rev(k, builder, eff) {
+                match assemble_rev(k, builder, cnf, grammar) {
                     NodeValue::Token(t) => out.push(Child::Token(t)),
                     NodeValue::Tree(t) => out.push(Child::Tree(t)),
                     NodeValue::Inline(cs) => out.extend(cs),
@@ -896,6 +1004,44 @@ WORD: /[a-z]+/
             },
         );
         assert!(built.is_err(), "a nullable named rule must fail to build");
+    }
+
+    /// Under `maybe_placeholders`, an absent `[...]` optional must still emit a
+    /// `None` placeholder — even though CYK ε-removes the (nullable, transparent)
+    /// helper that carries it. CYK must match LALR on present *and* absent cases,
+    /// including two optionals where only one is filled.
+    #[test]
+    fn cyk_maybe_placeholders_none() {
+        let grammar = "\
+start: A [B] C [D]
+A: \"a\"
+B: \"b\"
+C: \"c\"
+D: \"d\"
+";
+        let build = |p: ParserAlgorithm| {
+            Lark::new(
+                grammar,
+                LarkOptions {
+                    parser: p,
+                    lexer: LexerType::Basic,
+                    maybe_placeholders: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        let cyk = build(ParserAlgorithm::Cyk);
+        let lalr = build(ParserAlgorithm::Lalr);
+        for input in ["ac", "abc", "acd", "abcd"] {
+            let c = cyk.parse(input).unwrap().to_string();
+            let l = lalr.parse(input).unwrap().to_string();
+            assert_eq!(c, l, "maybe_placeholders mismatch on {input:?}");
+            // The absent-optional cases must actually carry a None, not drop it.
+            if input == "ac" {
+                assert!(c.contains("None"), "absent optional lost its None: {c}");
+            }
+        }
     }
 
     /// The `ambiguity` option does not apply to CYK (it has no `_ambig` forest), but
