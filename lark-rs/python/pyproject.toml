@@ -1,0 +1,29 @@
+[build-system]
+requires = ["maturin>=1.5,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "lark-rs"
+description = "A Rust-powered, drop-in speedup for the Lark parsing toolkit"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.8"
+keywords = ["parser", "parsing", "earley", "lalr", "grammar", "lark", "rust"]
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Topic :: Software Development :: Compilers",
+    "Topic :: Text Processing :: General",
+]
+dynamic = ["version"]
+
+[project.urls]
+Repository = "https://github.com/lark-parser/lark"
+
+[tool.maturin]
+# The crate lives in this directory; the importable module is `lark_rs`.
+manifest-path = "Cargo.toml"
+module-name = "lark_rs"
+# Ship the hand-written type stubs alongside the extension so editors and type
+# checkers see the API surface.
+include = ["lark_rs.pyi", "py.typed"]
