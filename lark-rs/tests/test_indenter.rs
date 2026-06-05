@@ -13,13 +13,18 @@ use common::{load_oracle, tree_matches_oracle};
 use lark_rs::{Ambiguity, Indenter, Lark, LarkOptions, LexerType, ParserAlgorithm};
 
 /// Build a LALR + Indenter parser for a grammar file, with the paren token lists
-/// the oracle group recorded.
-fn make_indenter(grammar_text: &str, open: Vec<String>, close: Vec<String>) -> Lark {
+/// the oracle group recorded, on a given lexer.
+fn make_indenter(
+    grammar_text: &str,
+    lexer: LexerType,
+    open: Vec<String>,
+    close: Vec<String>,
+) -> Lark {
     Lark::new(
         grammar_text,
         LarkOptions {
             parser: ParserAlgorithm::Lalr,
-            lexer: LexerType::Basic,
+            lexer,
             start: vec!["start".to_string()],
             postlex: Some(Indenter {
                 nl_type: "_NL".to_string(),
@@ -54,42 +59,51 @@ fn strs(v: &serde_json::Value) -> Vec<String> {
 #[test]
 fn test_indenter_oracle() {
     let mut checked = 0;
-    for name in ["indent", "indent_paren"] {
-        let group = load_oracle(name, "cases");
-        let lark = make_indenter(
-            &grammar_text(name),
-            strs(&group["open_paren_types"]),
-            strs(&group["close_paren_types"]),
-        );
+    // The #41 oracles are generated with `lexer='basic'`, but Python Lark produces
+    // identical trees under the contextual lexer too. Replay both so the streaming
+    // contextual-lexer postlex path (issue #67) is held to the same oracle as the
+    // materialized basic-lexer path.
+    for lexer in [LexerType::Basic, LexerType::Contextual] {
+        for name in ["indent", "indent_paren"] {
+            let group = load_oracle(name, "cases");
+            let lark = make_indenter(
+                &grammar_text(name),
+                lexer.clone(),
+                strs(&group["open_paren_types"]),
+                strs(&group["close_paren_types"]),
+            );
 
-        for case in group["cases"].as_array().unwrap() {
-            let input = case["input"].as_str().unwrap();
-            let should_parse = case["should_parse"].as_bool().unwrap();
-            let oracle_ok = case["ok"].as_bool().unwrap();
+            for case in group["cases"].as_array().unwrap() {
+                let input = case["input"].as_str().unwrap();
+                let should_parse = case["should_parse"].as_bool().unwrap();
+                let oracle_ok = case["ok"].as_bool().unwrap();
 
-            match lark.parse(input) {
-                Ok(tree) => {
-                    assert!(
-                        oracle_ok,
-                        "[{name}] {input:?}: lark-rs parsed but Python Lark rejected it"
-                    );
-                    if let Err(e) = tree_matches_oracle(&tree, &case["tree"]) {
-                        panic!("[{name}] {input:?}: tree mismatch: {e}\n got: {tree}");
+                match lark.parse(input) {
+                    Ok(tree) => {
+                        assert!(
+                            oracle_ok,
+                            "[{name}/{lexer:?}] {input:?}: lark-rs parsed but Python Lark rejected it"
+                        );
+                        if let Err(e) = tree_matches_oracle(&tree, &case["tree"]) {
+                            panic!(
+                                "[{name}/{lexer:?}] {input:?}: tree mismatch: {e}\n got: {tree}"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        // We assert *rejection parity* only, not error-message parity:
+                        // lark-rs and Python Lark word their errors differently (the
+                        // oracle's `error` text is recorded but deliberately not
+                        // compared), so a stored message like "Unexpected dedent…" is
+                        // documentation, not an assertion target.
+                        assert!(
+                            !oracle_ok && !should_parse,
+                            "[{name}/{lexer:?}] {input:?}: lark-rs rejected ({e}) but Python Lark accepted it"
+                        );
                     }
                 }
-                Err(e) => {
-                    // We assert *rejection parity* only, not error-message parity:
-                    // lark-rs and Python Lark word their errors differently (the
-                    // oracle's `error` text is recorded but deliberately not
-                    // compared), so a stored message like "Unexpected dedent…" is
-                    // documentation, not an assertion target.
-                    assert!(
-                        !oracle_ok && !should_parse,
-                        "[{name}] {input:?}: lark-rs rejected ({e}) but Python Lark accepted it"
-                    );
-                }
+                checked += 1;
             }
-            checked += 1;
         }
     }
     assert!(checked > 0, "no indenter cases were checked");

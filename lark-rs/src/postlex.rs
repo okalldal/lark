@@ -15,6 +15,8 @@
 //! (paren tracking, tab expansion, end-of-stream dedent flush) matches it
 //! token-for-token so the oracle trees are identical.
 
+use std::collections::VecDeque;
+
 use crate::error::{GrammarError, ParseError};
 use crate::grammar::intern::{SymbolId, SymbolTable};
 use crate::tree::Token;
@@ -118,6 +120,11 @@ impl Indenter {
     /// Transform `tokens` (a fully-lexed stream ending in the synthetic `$END`
     /// token) by injecting INDENT/DEDENT around newline tokens.
     ///
+    /// This is the **basic-lexer** path: the whole stream is materialized, so the
+    /// indenter runs over a `Vec`. The **contextual lexer** drives the same
+    /// [`IndenterStream`] machine one token at a time (issue #67); both inject a
+    /// byte-identical INDENT/DEDENT stream because they share `feed`/`finish`.
+    ///
     /// `symbols` resolves the `%declare`d `indent_type` / `dedent_type` names to
     /// the interned ids the parser dispatches on; a missing one is a configuration
     /// error (the grammar never declared it).
@@ -126,129 +133,24 @@ impl Indenter {
         tokens: Vec<Token>,
         symbols: &SymbolTable,
     ) -> Result<Vec<Token>, ParseError> {
-        let indent_id = self.declared_id(symbols, &self.indent_type)?;
-        let dedent_id = self.declared_id(symbols, &self.dedent_type)?;
-
-        let mut out: Vec<Token> = Vec::with_capacity(tokens.len());
-        let mut paren_level: usize = 0;
-        let mut indent_stack: Vec<usize> = vec![0];
+        let mut stream = IndenterStream::new(self, symbols)?;
         // The synthetic `$END` is held back so the end-of-stream dedent flush lands
         // *before* it, exactly where Python Lark's generator emits the trailing
         // DEDENTs (after the input loop, before the parser sees end of input).
         let mut end_token: Option<Token> = None;
-        // Position of the last real token seen, borrowed onto flushed DEDENTs
-        // (Python's `Token.new_borrow_pos(DEDENT, '', token)`). Only the position
-        // is kept, so the loop never clones a whole `Token` here.
-        let mut last_pos: Option<Pos> = None;
 
         for tok in tokens {
             if tok.type_id == SymbolId::END {
                 end_token = Some(tok);
                 break;
             }
-
-            let cur = Pos::of(&tok);
-            last_pos = Some(cur);
-            // Decide the paren-depth delta from the token's type *before* it may be
-            // moved into `out`; apply it *after* yielding, matching Python's order
-            // (handle_NL / yield first, then adjust paren_level). A newline is never
-            // a bracket, so its delta is always 0.
-            let delta: i32 = if self.open_paren_types.iter().any(|t| t == &tok.type_) {
-                1
-            } else if self.close_paren_types.iter().any(|t| t == &tok.type_) {
-                -1
-            } else {
-                0
-            };
-
-            if tok.type_ == self.nl_type {
-                self.handle_nl(
-                    &tok,
-                    paren_level,
-                    &mut indent_stack,
-                    &mut out,
-                    indent_id,
-                    dedent_id,
-                )?;
-            } else {
-                out.push(tok); // moved, not cloned
-            }
-
-            match delta {
-                1 => paren_level += 1,
-                -1 => {
-                    paren_level = paren_level
-                        .checked_sub(1)
-                        .ok_or_else(|| ParseError::Postlex {
-                            msg: format!(
-                                "unbalanced closing bracket at line {}, column {}",
-                                cur.line, cur.column
-                            ),
-                        })?
-                }
-                _ => {}
-            }
+            stream.feed(tok)?;
         }
+        stream.finish();
 
-        // End of stream: close every still-open indentation level.
-        while indent_stack.len() > 1 {
-            indent_stack.pop();
-            out.push(self.make_token(dedent_id, &self.dedent_type, "", last_pos));
-        }
-
+        let mut out: Vec<Token> = stream.out.into_iter().collect();
         out.push(end_token.unwrap_or_else(Token::end));
         Ok(out)
-    }
-
-    /// Handle a newline token: emit it (unless inside parens), then push INDENT or
-    /// pop DEDENT(s) to match the new indentation depth.
-    fn handle_nl(
-        &self,
-        token: &Token,
-        paren_level: usize,
-        indent_stack: &mut Vec<usize>,
-        out: &mut Vec<Token>,
-        indent_id: SymbolId,
-        dedent_id: SymbolId,
-    ) -> Result<(), ParseError> {
-        // Inside brackets indentation is insignificant: swallow the newline whole,
-        // exactly as Python Lark's `handle_NL` returns without yielding.
-        if paren_level > 0 {
-            return Ok(());
-        }
-
-        out.push(token.clone());
-
-        // Indentation is the whitespace after the *last* newline in the token.
-        let indent_str = token
-            .value
-            .rsplit_once('\n')
-            .map(|(_, after)| after)
-            .unwrap_or(&token.value);
-        let indent =
-            indent_str.matches(' ').count() + indent_str.matches('\t').count() * self.tab_len;
-
-        let pos = Some(Pos::of(token));
-        let top = *indent_stack.last().expect("indent stack never empty");
-        if indent > top {
-            indent_stack.push(indent);
-            out.push(self.make_token(indent_id, &self.indent_type, indent_str, pos));
-        } else {
-            while indent < *indent_stack.last().expect("indent stack never empty") {
-                indent_stack.pop();
-                out.push(self.make_token(dedent_id, &self.dedent_type, indent_str, pos));
-            }
-            if indent != *indent_stack.last().expect("indent stack never empty") {
-                return Err(ParseError::Postlex {
-                    msg: format!(
-                        "Unexpected dedent to column {}. Expected dedent to {}",
-                        indent,
-                        indent_stack.last().unwrap()
-                    ),
-                });
-            }
-        }
-        Ok(())
     }
 
     /// Build a synthetic token, borrowing its position from `pos` (the newline it
@@ -278,5 +180,161 @@ impl Indenter {
                 "Indenter terminal {name:?} is not declared in the grammar (add `%declare {name}`)"
             ),
         })
+    }
+}
+
+/// The streaming core of the [`Indenter`].
+///
+/// Both postlex paths drive this one machine so they inject a byte-identical
+/// INDENT/DEDENT stream:
+///   * the **basic lexer** materializes the whole stream and `Indenter::process`
+///     feeds it in one loop;
+///   * the **contextual lexer** lexes lazily, so a `TokenSource` adapter feeds
+///     real tokens one at a time and drains the injected ones between them
+///     (issue #67).
+///
+/// `feed` consumes one real (non-`$END`) token and appends its postlex result —
+/// the token itself (unless swallowed inside parens) plus any INDENT/DEDENT — to
+/// the output queue. `finish` flushes the trailing DEDENTs at end of input. `pop`
+/// drains the queue front. The machine borrows only the immutable [`Indenter`]
+/// config; the interned ids are resolved once in [`new`](IndenterStream::new).
+pub(crate) struct IndenterStream<'a> {
+    cfg: &'a Indenter,
+    indent_id: SymbolId,
+    dedent_id: SymbolId,
+    paren_level: usize,
+    indent_stack: Vec<usize>,
+    /// Position of the last real token seen, borrowed onto flushed DEDENTs
+    /// (Python's `Token.new_borrow_pos(DEDENT, '', token)`). Only the position is
+    /// kept, so the loop never clones a whole `Token` for the EOF flush.
+    last_pos: Option<Pos>,
+    out: VecDeque<Token>,
+}
+
+impl<'a> IndenterStream<'a> {
+    pub(crate) fn new(cfg: &'a Indenter, symbols: &SymbolTable) -> Result<Self, ParseError> {
+        let indent_id = cfg.declared_id(symbols, &cfg.indent_type)?;
+        let dedent_id = cfg.declared_id(symbols, &cfg.dedent_type)?;
+        Ok(IndenterStream {
+            cfg,
+            indent_id,
+            dedent_id,
+            paren_level: 0,
+            indent_stack: vec![0],
+            last_pos: None,
+            out: VecDeque::new(),
+        })
+    }
+
+    /// Feed one real (non-`$END`) token. Appends its postlex result to the queue.
+    pub(crate) fn feed(&mut self, tok: Token) -> Result<(), ParseError> {
+        let cur = Pos::of(&tok);
+        self.last_pos = Some(cur);
+        // Decide the paren-depth delta from the token's type *before* it may be
+        // moved into the queue; apply it *after* yielding, matching Python's order
+        // (handle_NL / yield first, then adjust paren_level). A newline is never a
+        // bracket, so its delta is always 0.
+        let delta: i32 = if self.cfg.open_paren_types.iter().any(|t| t == &tok.type_) {
+            1
+        } else if self.cfg.close_paren_types.iter().any(|t| t == &tok.type_) {
+            -1
+        } else {
+            0
+        };
+
+        if tok.type_ == self.cfg.nl_type {
+            self.handle_nl(&tok)?;
+        } else {
+            self.out.push_back(tok); // moved, not cloned
+        }
+
+        match delta {
+            1 => self.paren_level += 1,
+            -1 => {
+                self.paren_level =
+                    self.paren_level
+                        .checked_sub(1)
+                        .ok_or_else(|| ParseError::Postlex {
+                            msg: format!(
+                                "unbalanced closing bracket at line {}, column {}",
+                                cur.line, cur.column
+                            ),
+                        })?
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// End of input: close every still-open indentation level, queueing a DEDENT
+    /// for each. Must be called exactly once, after the last [`feed`](Self::feed).
+    pub(crate) fn finish(&mut self) {
+        while self.indent_stack.len() > 1 {
+            self.indent_stack.pop();
+            self.out.push_back(self.cfg.make_token(
+                self.dedent_id,
+                &self.cfg.dedent_type,
+                "",
+                self.last_pos,
+            ));
+        }
+    }
+
+    /// Drain the next ready token, or `None` if the queue is currently empty.
+    pub(crate) fn pop(&mut self) -> Option<Token> {
+        self.out.pop_front()
+    }
+
+    /// Handle a newline token: emit it (unless inside parens), then push INDENT or
+    /// pop DEDENT(s) to match the new indentation depth.
+    fn handle_nl(&mut self, token: &Token) -> Result<(), ParseError> {
+        // Inside brackets indentation is insignificant: swallow the newline whole,
+        // exactly as Python Lark's `handle_NL` returns without yielding.
+        if self.paren_level > 0 {
+            return Ok(());
+        }
+
+        self.out.push_back(token.clone());
+
+        // Indentation is the whitespace after the *last* newline in the token.
+        let indent_str = token
+            .value
+            .rsplit_once('\n')
+            .map(|(_, after)| after)
+            .unwrap_or(&token.value);
+        let indent =
+            indent_str.matches(' ').count() + indent_str.matches('\t').count() * self.cfg.tab_len;
+
+        let pos = Some(Pos::of(token));
+        let top = *self.indent_stack.last().expect("indent stack never empty");
+        if indent > top {
+            self.indent_stack.push(indent);
+            self.out.push_back(self.cfg.make_token(
+                self.indent_id,
+                &self.cfg.indent_type,
+                indent_str,
+                pos,
+            ));
+        } else {
+            while indent < *self.indent_stack.last().expect("indent stack never empty") {
+                self.indent_stack.pop();
+                self.out.push_back(self.cfg.make_token(
+                    self.dedent_id,
+                    &self.cfg.dedent_type,
+                    indent_str,
+                    pos,
+                ));
+            }
+            if indent != *self.indent_stack.last().expect("indent stack never empty") {
+                return Err(ParseError::Postlex {
+                    msg: format!(
+                        "Unexpected dedent to column {}. Expected dedent to {}",
+                        indent,
+                        self.indent_stack.last().unwrap()
+                    ),
+                });
+            }
+        }
+        Ok(())
     }
 }

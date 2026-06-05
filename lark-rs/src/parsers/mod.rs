@@ -69,6 +69,17 @@ enum FrontendKind {
         postlex: Indenter,
         symbols: SymbolTable,
     },
+    /// LALR + contextual lexer + postlex hook (issue #67). Unlike `LalrPostlex`,
+    /// the contextual lexer can't be materialized up front (it narrows terminals
+    /// by parser state), so the [`Indenter`] runs as a streaming `TokenSource`
+    /// adapter inside the lazy pull loop. The hook's newline terminal is forced
+    /// into every state's scanner via `always_accept` (see `build_frontend`).
+    LalrContextualPostlex {
+        parser: LalrParser,
+        lexer: ContextualLexer,
+        postlex: Indenter,
+        symbols: SymbolTable,
+    },
     Earley {
         parser: EarleyParser,
         lexer: BasicLexer,
@@ -105,6 +116,12 @@ impl ParsingFrontend {
                 let tokens = postlex.process(tokens, symbols)?;
                 parser.parse(tokens, start)
             }
+            FrontendKind::LalrContextualPostlex {
+                parser,
+                lexer,
+                postlex,
+                symbols,
+            } => parser.parse_contextual_postlex(text, lexer, postlex, symbols, start),
             FrontendKind::Earley {
                 parser,
                 lexer,
@@ -145,21 +162,51 @@ pub fn build_frontend(
 
             let lexer_conf = basic_lexer_conf(&cg, options.g_regex_flags);
 
-            // A postlex hook needs the whole token stream, so it always rides the
-            // basic lexer (the contextual lexer lexes lazily, one token per parser
-            // state). Validate its terminal names now, before parsing, so a typo'd
-            // nl_type or an undeclared INDENT/DEDENT fails at build time.
+            // Validate the postlex hook's terminal names now, before parsing, so a
+            // typo'd nl_type or an undeclared INDENT/DEDENT fails at build time. The
+            // basic lexer materializes the whole stream and rewrites it; the
+            // contextual lexer (the default) instead runs the hook as a streaming
+            // adapter inside its lazy pull loop (issue #67).
             if let Some(postlex) = &options.postlex {
                 postlex.validate(&cg.symbols)?;
-                let lexer = BasicLexer::new(&lexer_conf)?;
-                return Ok(ParsingFrontend {
-                    kind: FrontendKind::LalrPostlex {
-                        parser,
-                        lexer,
-                        postlex: postlex.clone(),
-                        symbols: cg.symbols.clone(),
-                    },
-                });
+                match options.lexer {
+                    LexerType::Contextual | LexerType::Auto => {
+                        let state_terminals = parser.state_terminals();
+                        // Force the indenter's newline terminal into every state's
+                        // scanner (Python Lark's `PostLex.always_accept`) so the
+                        // lazy lexer still emits the newlines the indenter measures
+                        // indentation from. `validate` already proved it resolves.
+                        let mut always_accept = cg.ignore.clone();
+                        if let Some(nl_id) = cg.symbols.id(&postlex.nl_type) {
+                            if !always_accept.contains(&nl_id) {
+                                always_accept.push(nl_id);
+                            }
+                        }
+                        let lexer =
+                            ContextualLexer::new(&lexer_conf, &state_terminals, always_accept)?;
+                        return Ok(ParsingFrontend {
+                            kind: FrontendKind::LalrContextualPostlex {
+                                parser,
+                                lexer,
+                                postlex: postlex.clone(),
+                                symbols: cg.symbols.clone(),
+                            },
+                        });
+                    }
+                    // Basic lexer (and any other explicit choice): materialize the
+                    // whole stream, then rewrite it.
+                    _ => {
+                        let lexer = BasicLexer::new(&lexer_conf)?;
+                        return Ok(ParsingFrontend {
+                            kind: FrontendKind::LalrPostlex {
+                                parser,
+                                lexer,
+                                postlex: postlex.clone(),
+                                symbols: cg.symbols.clone(),
+                            },
+                        });
+                    }
+                }
             }
 
             let kind = match options.lexer {
