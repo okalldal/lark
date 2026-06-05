@@ -838,6 +838,80 @@ def generate_imports():
     save_oracle("imports", "cases", results)
 
 
+# ─── Indenter / postlex (Phase 3) ────────────────────────────────────────────
+#
+# Python-style significant whitespace via `%declare`d INDENT/DEDENT terminals and
+# the `Indenter` postlex hook. The oracle is generated with `lexer='basic'` (which
+# lark-rs's postlex path uses): the lexer produces the whole token stream, the
+# Indenter rewrites it, then the parser replays it. Both grammars `%declare
+# _INDENT _DEDENT` and measure indentation off the `_NL` terminal.
+#
+# (grammar_file, open_paren_types, close_paren_types, [(input, should_parse)])
+INDENTER_GROUPS = [
+    ("indent", [], [], [
+        ("a\n",                                   True),
+        ("a\nb\n",                                True),
+        ("if x:\n    a\n",                        True),   # single block
+        ("if x:\n    a\n    b\nc\n",              True),   # multi-stmt block + dedent
+        ("if x:\n    if y:\n        a\n    b\nc\n", True), # nested, multi-level dedent
+        ("",                                      False),  # stmt+ needs one stmt
+        ("a",                                     False),  # simple needs a newline
+        ("if x:\nb\n",                            False),  # block body needs INDENT
+        ("if x:\n    a\n  b\n",                   False),  # dedent to an unknown column
+    ]),
+    ("indent_paren", ["LPAR"], ["RPAR"], [
+        ("f (x)\n",                               True),
+        ("f (\n   x\n)\n",                        True),   # newlines inside parens ignored
+        ("a\nf (y)\n",                            True),
+    ]),
+]
+
+
+def generate_indenter():
+    from lark.indenter import Indenter
+
+    print("Generating Indenter / postlex oracles...")
+    # One oracle suite per grammar file (suite name == grammar stem) so the
+    # oracle-coverage meta-test maps each tests/grammars/<name>.lark to its dir.
+    for name, open_types, close_types, cases in INDENTER_GROUPS:
+        grammar = load_grammar(name)
+
+        class _TI(Indenter):
+            NL_type = "_NL"
+            OPEN_PAREN_types = open_types
+            CLOSE_PAREN_types = close_types
+            INDENT_type = "_INDENT"
+            DEDENT_type = "_DEDENT"
+            tab_len = 8
+
+        built = []
+        for inp, should_parse in cases:
+            try:
+                lark = Lark(grammar, parser="lalr", lexer="basic",
+                            postlex=_TI(), start="start", maybe_placeholders=False)
+                tree = lark.parse(inp)
+                ok, payload = True, tree_to_dict(tree)
+            except Exception as e:
+                ok, payload = False, str(e)
+            if should_parse and not ok:
+                print(f"  WARNING: {name} expected to parse {inp!r}: {payload}")
+            if not should_parse and ok:
+                print(f"  WARNING: {name} expected to reject {inp!r}")
+            built.append({
+                "input": inp,
+                "should_parse": should_parse,
+                "ok": ok,
+                "tree": payload if ok else None,
+                "error": payload if not ok else None,
+            })
+        save_oracle(name, "cases", {
+            "name": name,
+            "open_paren_types": open_types,
+            "close_paren_types": close_types,
+            "cases": built,
+        })
+
+
 def generate_json():
     print("Generating JSON oracles...")
     grammar = load_grammar("json")
@@ -905,6 +979,7 @@ if __name__ == "__main__":
     generate_terminal_refs()
     generate_common()
     generate_imports()
+    generate_indenter()
     generate_python_numbers()
     generate_lalr_core()
     generate_earley()

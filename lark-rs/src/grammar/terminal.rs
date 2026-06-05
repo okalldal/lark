@@ -155,6 +155,12 @@ pub struct TerminalDef {
     pub pattern: Pattern,
     /// Higher priority terminals are tried first in the lexer.
     pub priority: i32,
+    /// A `%declare`d terminal: it has *no* pattern of its own and is never lexed.
+    /// It is interned as a terminal (so rules can reference it and the parse table
+    /// reserves a column) but excluded from every scanner; a postlex hook (e.g. an
+    /// [`Indenter`](crate::postlex::Indenter)) injects its tokens into the stream.
+    /// The `pattern` field carries a never-used placeholder for these.
+    pub declared: bool,
 }
 
 impl TerminalDef {
@@ -163,6 +169,19 @@ impl TerminalDef {
             name: name.into(),
             pattern,
             priority,
+            declared: false,
+        }
+    }
+
+    /// A pattern-less `%declare`d terminal (see [`declared`](Self::declared)). The
+    /// placeholder pattern never reaches a lexer — `declared` terminals are filtered
+    /// out before any scanner is built.
+    pub fn declared(name: impl Into<String>) -> Self {
+        TerminalDef {
+            name: name.into(),
+            pattern: Pattern::Str(PatternStr::new("")),
+            priority: 0,
+            declared: true,
         }
     }
 }

@@ -58,6 +58,11 @@ pub enum ParseError {
         col: usize,
         expected: Vec<String>,
     },
+    /// A postlex hook (e.g. an [`Indenter`](crate::postlex::Indenter)) rejected the
+    /// token stream — most commonly a dedent that does not match any open
+    /// indentation level (Python Lark's `DedentError`).
+    #[error("Postlex error: {msg}")]
+    Postlex { msg: String },
 }
 
 impl ParseError {

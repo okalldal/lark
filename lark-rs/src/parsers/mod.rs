@@ -9,8 +9,10 @@ pub use token_source::{Contextual, LexFailure, PreLexed, TokenSource};
 pub use tree_builder::{NodeValue, TreeBuilder};
 
 use crate::error::{LarkError, ParseError};
+use crate::grammar::intern::SymbolTable;
 use crate::grammar::{CompiledGrammar, Grammar};
 use crate::lexer::{BasicLexer, ContextualLexer, DynamicMatcher, Lexer, LexerConf};
+use crate::postlex::Indenter;
 use crate::tree::ParseTree;
 use crate::{LarkOptions, LexerType, ParserAlgorithm};
 
@@ -22,6 +24,10 @@ pub fn basic_lexer_conf(cg: &CompiledGrammar, g_regex_flags: u32) -> LexerConf {
     let terminals = cg
         .terminals
         .iter()
+        // `%declare`d terminals have no pattern and are never lexed — a postlex
+        // hook injects them. Keep them out of every scanner; they are still
+        // interned, so rules and the parse table still see them.
+        .filter(|t| !t.declared)
         .map(|t| {
             (
                 cg.symbols.id(&t.name).expect("terminal interned"),
@@ -52,6 +58,17 @@ enum FrontendKind {
         parser: LalrParser,
         lexer: ContextualLexer,
     },
+    /// LALR driven by a postlex hook: the basic lexer produces the whole token
+    /// stream, the [`Indenter`] rewrites it (injecting INDENT/DEDENT), then the
+    /// parser replays it. The contextual lexer is bypassed because postlex needs
+    /// the materialized stream, and `symbols` lets the indenter resolve its
+    /// `%declare`d terminal ids.
+    LalrPostlex {
+        parser: LalrParser,
+        lexer: BasicLexer,
+        postlex: Indenter,
+        symbols: SymbolTable,
+    },
     Earley {
         parser: EarleyParser,
         lexer: BasicLexer,
@@ -78,6 +95,16 @@ impl ParsingFrontend {
             FrontendKind::LalrContextual { parser, lexer } => {
                 parser.parse_contextual(text, lexer, start)
             }
+            FrontendKind::LalrPostlex {
+                parser,
+                lexer,
+                postlex,
+                symbols,
+            } => {
+                let tokens = lexer.lex(text)?;
+                let tokens = postlex.process(tokens, symbols)?;
+                parser.parse(tokens, start)
+            }
             FrontendKind::Earley {
                 parser,
                 lexer,
@@ -100,6 +127,14 @@ pub fn build_frontend(
     grammar: &Grammar,
     options: &LarkOptions,
 ) -> Result<ParsingFrontend, LarkError> {
+    // postlex is currently wired only through the LALR frontend (issue #67 tracks
+    // the contextual-lexer/other-backend support). Fail loudly rather than
+    // silently ignoring a configured hook on Earley/CYK.
+    if options.postlex.is_some() && options.parser != ParserAlgorithm::Lalr {
+        return Err(LarkError::Grammar(crate::error::GrammarError::Other {
+            msg: "postlex (Indenter) is only supported with parser='lalr'".to_string(),
+        }));
+    }
     match options.parser {
         ParserAlgorithm::Lalr => {
             // Lower the surface grammar to the interned IR once, then build the
@@ -109,6 +144,23 @@ pub fn build_frontend(
             let parser = LalrParser::new(table);
 
             let lexer_conf = basic_lexer_conf(&cg, options.g_regex_flags);
+
+            // A postlex hook needs the whole token stream, so it always rides the
+            // basic lexer (the contextual lexer lexes lazily, one token per parser
+            // state). Validate its terminal names now, before parsing, so a typo'd
+            // nl_type or an undeclared INDENT/DEDENT fails at build time.
+            if let Some(postlex) = &options.postlex {
+                postlex.validate(&cg.symbols)?;
+                let lexer = BasicLexer::new(&lexer_conf)?;
+                return Ok(ParsingFrontend {
+                    kind: FrontendKind::LalrPostlex {
+                        parser,
+                        lexer,
+                        postlex: postlex.clone(),
+                        symbols: cg.symbols.clone(),
+                    },
+                });
+            }
 
             let kind = match options.lexer {
                 LexerType::Basic => {

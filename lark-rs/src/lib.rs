@@ -3,6 +3,7 @@ pub mod grammar;
 pub mod lexer;
 pub mod parsers;
 pub mod perf;
+pub mod postlex;
 pub mod tree;
 
 pub use error::{GrammarError, LarkError, ParseError};
@@ -17,6 +18,7 @@ pub use lexer::{BasicLexer, ContextualLexer, DynamicMatcher, Lexer, LexerConf};
 pub use parsers::{
     basic_lexer_conf, lalr, EarleyParser, LexFailure, ParseTable, ParserConf, TokenSource,
 };
+pub use postlex::Indenter;
 pub use tree::{Child, ParseTree, Token, Tree};
 
 /// Main entry point — mirrors Python's `Lark(grammar, parser=..., lexer=...)`
@@ -76,6 +78,12 @@ pub struct LarkOptions {
     /// cannot be resolved — only the bundled `common` library is available, as
     /// when a grammar is built from an in-memory string with no source location.
     pub base_path: Option<std::path::PathBuf>,
+    /// Post-lexer hook applied to the token stream before it reaches the parser.
+    /// Currently an [`Indenter`], which injects `%declare`d `INDENT` / `DEDENT`
+    /// tokens for Python-style significant-whitespace grammars. Mirrors Python
+    /// Lark's `postlex` option. Only the LALR backend honours it. `None` (the
+    /// default) leaves the token stream untouched.
+    pub postlex: Option<postlex::Indenter>,
 }
 
 impl Default for LarkOptions {
@@ -94,6 +102,7 @@ impl Default for LarkOptions {
             strict: false,
             g_regex_flags: 0,
             base_path: None,
+            postlex: None,
         }
     }
 }
