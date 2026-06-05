@@ -1,0 +1,18 @@
+[package]
+name = "lark_proc"
+version = "0.1.0"
+edition = "2021"
+description = "Compile-time grammar validation for lark-rs via the include_lark! proc-macro"
+license = "MIT"
+repository = "https://github.com/lark-parser/lark"
+
+[lib]
+proc-macro = true
+
+# `lark-rs` is a *build-time* dependency here: the proc-macro loads and validates
+# the .lark grammar while the user's crate is compiling, so a malformed grammar
+# fails `cargo build` rather than `parser.parse(...)`. The generated parser also
+# references `::lark_rs` at the user's runtime, so any crate using `include_lark!`
+# must depend on `lark-rs` too (exactly as `serde_derive` users depend on `serde`).
+[dependencies]
+lark-rs = { path = ".." }
