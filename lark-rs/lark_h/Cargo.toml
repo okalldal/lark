@@ -1,0 +1,16 @@
+[package]
+name = "lark_h"
+version = "0.1.0"
+edition = "2021"
+description = "C-compatible FFI bindings for lark-rs (the lark_h C API)"
+license = "MIT"
+repository = "https://github.com/lark-parser/lark"
+
+[lib]
+# cdylib  → liblark_h.so / .dylib / lark_h.dll for embedding from C/C++/Go/ctypes
+# staticlib → liblark_h.a for static linking
+# rlib    → lets the C smoke-test harness (tests/c_smoke.rs) depend on this crate
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+lark-rs = { path = ".." }
