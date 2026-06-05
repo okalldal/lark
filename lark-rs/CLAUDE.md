@@ -26,6 +26,9 @@ We generate expected parse trees using Python Lark and compare Rust output again
 **Rules:**
 - Every new grammar feature must have an oracle test before we implement it
 - Every bug must be reproducible as a test failure before we fix it
+- A suspected performance pathology must be reproducible as a committed, deterministic
+  scaling benchmark before we fix it — and the fix targets the cause the profiler names,
+  not the one we guessed (see `BENCH.md`)
 - Prefer end-to-end tests over unit tests — the oracle checks the full pipeline
 - Corpus tests (JSONTestSuite) are kept at 100% oracle agreement; never regress them
 - Never write an oracle test that depends on an arbitrary lexer tie-break — two
