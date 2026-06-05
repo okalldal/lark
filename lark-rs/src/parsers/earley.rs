@@ -174,30 +174,26 @@ struct SymbolNode {
 /// A Joop-Leo transitive item, memoized per `(start column, recognized symbol)`.
 ///
 /// It records the one deterministic reduction step a completion of `recognized`
-/// (spanning `(key_start, i)`) takes: it advances the unique originator
-/// `[B → β•(recognized)γ, red_start]` (`red_*` below, with `red_node` its
-/// built-so-far left child) and, since `γ` is nullable, completes `B`. `parent`
-/// chains one level up toward `top`, the topmost item the whole chain collapses
-/// to. The completer jumps straight to `top`; `Forest::load_paths` walks the
-/// `parent` chain to rebuild the skipped reduction spine on demand.
+/// (spanning `(key_start, i)`) takes: it advances the unique originator `red`
+/// (`= [B → β•(recognized)γ, red.origin]`, with `red.node` its built-so-far left
+/// child) and, since `γ` is empty, completes `B`. `parent` chains one level up
+/// toward `top`, the topmost item the whole chain collapses to. The completer
+/// jumps straight to `top`; `load_leo_paths` walks the `parent` chain to rebuild
+/// the skipped reduction spine on demand.
 #[derive(Clone, Copy)]
 struct Trans {
     /// The recognized non-terminal and the column it starts at (the map key).
     recognized: SymbolId,
     key_start: usize,
-    /// The unique originator `[B → β•(recognized)γ, red_start]` being advanced.
-    red_rule: usize,
-    red_dot: usize,
-    red_start: usize,
-    red_node: ForestRef,
+    /// The unique originator `[B → β•(recognized)γ, red.origin]` being advanced;
+    /// `red.node` is its built-so-far left child.
+    red: Item,
     /// Next level up the deterministic reduction path, or `None` if this level's
     /// completion (`B`) is itself the topmost.
     parent: Option<usize>,
-    /// The topmost item the chain collapses to: `(rule, dot, origin)`. Identical
-    /// for every level of one chain; the node is built at `(top_origin, i)`.
-    top_rule: usize,
-    top_dot: usize,
-    top_origin: usize,
+    /// The topmost item the chain collapses to (its `node` is unused). Identical
+    /// for every level of one chain; the completer builds it at `(top.origin, i)`.
+    top: Item,
 }
 
 /// Arena of forest nodes + the scanned-token leaves they reference by index.
@@ -648,15 +644,13 @@ impl EarleyParser {
                         start_id,
                     );
                     if let Some(&t) = transitives[item.origin].get(&origin) {
-                        let tr = trans_arena[t];
-                        let top_key = self.node_key(tr.top_rule, tr.top_dot);
-                        let top_node = forest.get_or_create(top_key, tr.top_origin, i);
+                        let top = trans_arena[t].top;
+                        let top_key = self.node_key(top.rule, top.dot);
+                        let top_node = forest.get_or_create(top_key, top.origin, i);
                         forest.add_path(top_node, t, ForestRef::Node(node_id), i);
                         let new_item = Item {
-                            rule: tr.top_rule,
-                            dot: tr.top_dot,
-                            origin: tr.top_origin,
                             node: ForestRef::Node(top_node),
+                            ..top
                         };
                         if self.expects_terminal(&new_item) {
                             to_scan.add(new_item);
@@ -801,12 +795,11 @@ impl EarleyParser {
         // The transitive already present at the top of the walk (if it stopped by
         // meeting an existing chain), and the topmost item the chain collapses to.
         let mut parent: Option<usize> = None;
-        let mut top: Option<(usize, usize, usize)> = None;
+        let mut top: Option<Item> = None;
         loop {
             if let Some(&t) = transitives[col].get(&rec) {
-                let tr = trans_arena[t];
                 parent = Some(t);
-                top = Some((tr.top_rule, tr.top_dot, tr.top_origin));
+                top = Some(trans_arena[t].top);
                 break;
             }
             if !visited.insert((col, rec)) {
@@ -822,29 +815,26 @@ impl EarleyParser {
             }
             to_create.push((rec, col, o));
             // The topmost item the chain reaches is the advance of the highest
-            // unique originator seen so far.
-            top = Some((o.rule, o.dot + 1, o.origin));
+            // unique originator seen so far (its `node` is unused downstream).
+            top = Some(Item {
+                rule: o.rule,
+                dot: o.dot + 1,
+                origin: o.origin,
+                node: ForestRef::None,
+            });
             rec = self.grammar.rules[o.rule].origin;
             col = o.origin;
         }
-        if to_create.is_empty() {
-            return;
-        }
-        let (top_rule, top_dot, top_origin) = top.unwrap();
+        let Some(top) = top else { return };
         // Build top→bottom so each new level's `parent` is already created.
         for &(rec, key_start, o) in to_create.iter().rev() {
             let tid = trans_arena.len();
             trans_arena.push(Trans {
                 recognized: rec,
                 key_start,
-                red_rule: o.rule,
-                red_dot: o.dot,
-                red_start: o.origin,
-                red_node: o.node,
+                red: o,
                 parent,
-                top_rule,
-                top_dot,
-                top_origin,
+                top,
             });
             transitives[key_start].insert(rec, tid);
             parent = Some(tid);
@@ -886,18 +876,18 @@ impl EarleyParser {
                 for &t in chain.iter().rev() {
                     let tr = trans_arena[t];
                     let cur_node = forest.get_or_create(
-                        self.node_key(tr.red_rule, tr.red_dot + 1),
-                        tr.red_start,
+                        self.node_key(tr.red.rule, tr.red.dot + 1),
+                        tr.red.origin,
                         end,
                     );
                     let right =
                         forest.get_or_create(NodeKey::Sym(tr.recognized), tr.key_start, end);
                     forest.add_family(
                         cur_node,
-                        tr.red_rule,
-                        tr.red_node,
+                        tr.red.rule,
+                        tr.red.node,
                         ForestRef::Node(right),
-                        tr.red_dot,
+                        tr.red.dot,
                     );
                 }
             }
