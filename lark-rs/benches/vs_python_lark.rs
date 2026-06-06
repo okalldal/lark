@@ -3,20 +3,28 @@
 //! The existing `benches/parse.rs` measures lark-rs *internally* (LALR vs Earley
 //! cost-of-generality, scaling shapes). This bench is the **cross-engine
 //! comparison** — the number behind the project's "10–100× faster than Python
-//! Lark" goal — over three real workloads:
+//! Lark" goal — over four real workloads:
 //!
 //!   1. **JSON**   — the canonical JSON grammar on a ~92 KB array of records.
 //!   2. **Python** — a significant-whitespace Python subset (driven by the
 //!                   `Indenter` postlex hook) over a representative source file.
 //!   3. **SQL**    — a SELECT/INSERT/UPDATE/DELETE grammar over a batch of statements.
+//!   4. **NL**     — a small ambiguous natural-language grammar (PP-attachment +
+//!                   coordination) on one short sentence, run under **CYK** — the
+//!                   realistic use case for a general-CFG parser (the other three
+//!                   are LALR-parseable and do not need CYK).
 //!
-//! Each workload is run on **LALR + the contextual lexer** (Lark's primary USP),
-//! and JSON + SQL are *also* run on **Earley** (the second engine) so the
+//! JSON / Python / SQL are run on **LALR + the contextual lexer** (Lark's primary
+//! USP), and JSON + SQL are *also* run on **Earley** (the second engine) so the
 //! Earley-vs-Python-Earley story has a number too. Python has no Earley row: its
 //! `Indenter` postlex hook is LALR-only in lark-rs, and Python Lark can't pair
 //! postlex with the dynamic lexer either — there is no apples-to-apples Earley
 //! configuration for a significant-whitespace grammar. (The Earley-vs-LALR *cost
 //! of generality* — same engine, same input — lives in `benches/parse.rs`.)
+//!
+//! The **NL** workload runs only on **CYK** (lark-rs vs Python Lark's CYK): it is
+//! the one genuinely ambiguous grammar here, so it's the like-for-like CYK-vs-CYK
+//! comparison. Bounded to a single short sentence since CYK is O(n³).
 //!
 //! A single command does the whole comparison:
 //!
@@ -153,6 +161,34 @@ COMMENT: /--[^\n]*/
 %ignore COMMENT
 "#;
 
+// A small natural-language phrase-structure grammar with genuine PP-attachment and
+// coordination ambiguity — the canonical realistic CYK/CKY use case (computational
+// linguistics). Unlike JSON/SQL/Python (all LALR-parseable, so they do *not* need a
+// general-CFG engine), this grammar is inherently ambiguous: a trailing
+// prepositional phrase can attach to the verb phrase or to the noun phrase, so the
+// number of parses grows ~Catalan in the count of PPs. That is exactly the class of
+// grammar someone reaches for CYK on. lark-rs and Python Lark run the *same* CNF
+// conversion + O(n³) DP, so this is a like-for-like CYK-vs-CYK comparison.
+const NL_GRAMMAR: &str = r#"
+start: s
+?s: np vp
+?np: nominal
+   | np pp
+   | np "and" np
+nominal: DET NOUN | NOUN | ADJ nominal
+?vp: VERB np
+   | vp pp
+   | VERB
+pp: PREP np
+DET:  "the" | "a" | "an"
+ADJ:  "big" | "small" | "red" | "old"
+NOUN: "man" | "dog" | "park" | "telescope" | "boy" | "hill" | "girl" | "cat"
+VERB: "saw" | "watched" | "found" | "liked"
+PREP: "in" | "with" | "on" | "near" | "by"
+%import common.WS
+%ignore WS
+"#;
+
 // --- Input generators — mirror benches/vs_python_lark.py byte-for-byte -------
 
 /// A JSON array of `records` flat objects, each with `fields` key/value pairs
@@ -234,6 +270,27 @@ fn gen_sql(statements: usize) -> String {
     s
 }
 
+/// One ambiguous English sentence with `pps` trailing prepositional phrases
+/// (`"the man saw the dog in the park with the telescope …"`). Each added PP
+/// roughly multiplies the parse count, so this is a deliberately hard CYK input —
+/// but kept short (CYK is O(n³), the niche/last-resort backend), as the issue
+/// prescribes. Mirrors `gen_nl` in `vs_python_lark.py` byte-for-byte.
+fn gen_nl(pps: usize) -> String {
+    const PHRASES: [&str; 5] = [
+        "in the park",
+        "with the telescope",
+        "on the hill",
+        "near the boy",
+        "by the girl",
+    ];
+    let mut s = String::from("the man saw the dog");
+    for i in 0..pps {
+        s.push(' ');
+        s.push_str(PHRASES[i % PHRASES.len()]);
+    }
+    s
+}
+
 // --- Timing harness (mirrors parse.rs) ---------------------------------------
 
 struct Stat {
@@ -284,6 +341,7 @@ fn python_indenter() -> Indenter {
 enum Algo {
     Lalr,
     Earley,
+    Cyk,
 }
 
 impl Algo {
@@ -291,6 +349,7 @@ impl Algo {
         match self {
             Algo::Lalr => "lalr",
             Algo::Earley => "earley",
+            Algo::Cyk => "cyk",
         }
     }
 }
@@ -320,6 +379,11 @@ struct Config {
 /// (basic lexer) and SQL (the *dynamic* lexer — the basic lexer can't tell the
 /// assignment `=` from the comparison `=` here, in either engine). Python is
 /// **omitted under Earley** (postlex is LALR-only); see the module header.
+///
+/// The CYK row uses the **NL** workload — the one grammar here that genuinely
+/// *needs* a general-CFG engine (JSON/SQL/Python are all LALR-parseable). CYK is
+/// O(n³), so its input is a single short ambiguous sentence, not a large file
+/// (the issue bounds the CYK arm to small inputs). Basic lexer, like Earley.
 fn configs() -> Vec<Config> {
     vec![
         Config {
@@ -357,6 +421,13 @@ fn configs() -> Vec<Config> {
             grammar: SQL_GRAMMAR,
             postlex: false,
         },
+        Config {
+            name: "nl",
+            algo: Algo::Cyk,
+            lexer: LexerType::Basic,
+            grammar: NL_GRAMMAR,
+            postlex: false,
+        },
     ]
 }
 
@@ -366,6 +437,7 @@ fn build(cfg: &Config) -> Lark {
         parser: match cfg.algo {
             Algo::Lalr => ParserAlgorithm::Lalr,
             Algo::Earley => ParserAlgorithm::Earley,
+            Algo::Cyk => ParserAlgorithm::Cyk,
         },
         lexer: cfg.lexer.clone(),
         ..LarkOptions::default()
@@ -496,6 +568,8 @@ fn main() {
         ("json", gen_json(512, 5)),
         ("python", gen_python(220)),
         ("sql", gen_sql(700)),
+        // CYK is O(n³): a single ambiguous sentence (12 PPs ≈ 40 tokens), not a file.
+        ("nl", gen_nl(12)),
     ]);
 
     let cfgs = configs();
@@ -513,6 +587,7 @@ fn main() {
         ("json", &inputs["json"]),
         ("python", &inputs["python"]),
         ("sql", &inputs["sql"]),
+        ("nl", &inputs["nl"]),
     ]);
     println!();
 

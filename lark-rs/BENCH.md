@@ -56,12 +56,12 @@ sweep here, never a wall-clock threshold.
 cd lark-rs
 cargo bench --bench parse           # Rust LALR/Earley internal numbers + scaling
 python3 tools/bench_compare.py      # Python Lark on parse.rs's JSON/arith grammars
-cargo bench --bench vs_python_lark  # cross-engine JSON/Python/SQL, prints the speedup
+cargo bench --bench vs_python_lark  # cross-engine JSON/Python/SQL/NL-CYK, prints the speedup
 ```
 
 `vs_python_lark` is the **cross-engine end-to-end comparison** (issue #50, the
 "10–100×" headline) and is the single command that reports the speedup ratio: it
-times lark-rs on three real workloads, then shells out to
+times lark-rs on four real workloads, then shells out to
 `benches/vs_python_lark.py` to time the *byte-identical* inputs through the in-tree
 Python Lark and prints `python_median / rust_median` per workload. See
 "Cross-engine end-to-end" below. The `parse` bench and `tools/bench_compare.py`
@@ -81,7 +81,7 @@ comparison); `median_ns` drives the MB/s. Speedup on a row is
 
 1. **Rust-LALR vs Python-Lark-LALR** — the defensible "faster than Python Lark"
    story. `tools/bench_compare.py` computes it on `parse.rs`'s grammars, and
-   `cargo bench --bench vs_python_lark` reports it directly on the JSON/Python/SQL
+   `cargo bench --bench vs_python_lark` reports it directly on the JSON/Python/SQL/NL
    workloads (see "Cross-engine end-to-end" below).
 2. **Rust-Earley vs Python-Lark-Earley** — the same story for the second engine,
    now wired into `cargo bench --bench vs_python_lark` (JSON + SQL; ~13–16× on the
@@ -170,27 +170,38 @@ allocation-bound, not algorithm-bound — now **measured**, not assumed (see bel
 This harness is what makes that headroom measurable and turns each future
 optimization into a tracked delta.
 
-## Cross-engine end-to-end: JSON / Python / SQL (issue #50)
+## Cross-engine end-to-end: JSON / Python / SQL / NL-CYK (issues #50, #87)
 
 `cargo bench --bench vs_python_lark` is the **cross-engine comparison** — the
-number behind the project's "10–100×" goal — over three real workloads. It is the
+number behind the project's "10–100×" goal — over four real workloads. It is the
 throughput analog of the oracle: lark-rs and Python Lark parse the **same grammar**
-over the **same bytes**, so the ratio is apples-to-apples. Every workload runs on
-**LALR + the contextual lexer** (Lark's primary USP); JSON and SQL *also* run on
-**Earley**, so the second engine has a cross-engine number too (see "Earley arm"
-below).
+over the **same bytes**, so the ratio is apples-to-apples. JSON / Python / SQL run
+on **LALR + the contextual lexer** (Lark's primary USP); JSON and SQL *also* run on
+**Earley**, and the NL workload runs on **CYK** — so all three engines have a
+cross-engine number (see "Earley arm" and "CYK arm" below).
 
 - **JSON** — the canonical JSON grammar over a ~92 KB array of records (the
   `json_large` shape from `parse.rs`).
 - **Python** — a significant-whitespace Python *subset* driven by the `Indenter`
   postlex hook (classes, methods, `if`/`else`, `for`, arithmetic, attribute
   access). This exercises `%declare _INDENT _DEDENT` + postlex end-to-end — the
-  feature that makes Python-style indentation parseable. The *full* `python.lark`
-  is not yet parseable end-to-end by lark-rs (it needs regex lookbehind in its
-  string terminals; tracked under the grammar-stdlib work, #40), so the workload
-  is a representative subset both engines accept rather than upstream `python.lark`.
+  feature that makes Python-style indentation parseable. The *full* upstream
+  `python.lark` is still not parseable end-to-end by lark-rs — but no longer for
+  the reason once tracked under #40 (now closed; the lookaround terminals route to
+  `fancy-regex`). The current blocker is a core EBNF gap: lark-rs gives
+  structurally-identical group/optional helpers distinct anon rules where Python
+  Lark dedups them (its `rules_cache`), so `python.lark` hits reduce/reduce
+  conflicts under LALR that Python Lark does not (full analysis on #79). So the
+  workload remains a representative subset both engines accept (see #79 for the
+  swap once that gap is fixed).
 - **SQL** — a `SELECT`/`INSERT`/`UPDATE`/`DELETE` grammar (joins, `WHERE`,
   `GROUP BY`, `ORDER BY`, `BETWEEN`/`IN`) over a batch of statements.
+- **NL** (CYK) — a small ambiguous natural-language grammar (PP-attachment +
+  coordination) over one short sentence. This is the *realistic* CYK/CKY use case:
+  unlike JSON/SQL/Python (all LALR-parseable), it genuinely needs a general-CFG
+  engine, and parse count grows ~Catalan in the number of prepositional phrases.
+  Bounded to ~40 tokens since CYK is O(n³·|grammar|) — the niche/last-resort
+  backend, deliberately stressed but kept small.
 
 The grammars live byte-identical in `benches/vs_python_lark.rs` and
 `benches/vs_python_lark.py`. The Rust harness generates each input once, writes it
@@ -214,6 +225,23 @@ and Python Lark itself refuses postlex with the dynamic lexer
 Earley configuration for a significant-whitespace grammar to compare. Lifting
 postlex onto the Earley engine is future work.
 
+### CYK arm (NL) — issue #87
+
+The **NL** workload runs under `parser='cyk'` on both engines, the like-for-like
+"Rust-CYK vs Python-CYK" comparison. It is the one workload here whose grammar
+genuinely *needs* a general-CFG parser: JSON/SQL/Python are all LALR-parseable, so
+running them under CYK would be a contrived choice, whereas an ambiguous
+phrase-structure grammar (PP-attachment) is the textbook realistic CYK/CKY use
+case. Both engines run the **same** CNF conversion + O(n³) DP (lark-rs's `cyk.rs`
+is a faithful port of Python Lark's `cyk.py`), so the ratio is a clean
+implementation-vs-implementation number, not an algorithm difference.
+
+The input is a single ambiguous sentence (~40 tokens), not a file — CYK is the
+niche/last-resort backend and is `O(n³·|grammar|)`, so the arm is deliberately
+small (the bound the issue prescribes). The deterministic *shape* of that cubic
+cost is separately gated by `tests/test_cyk_scaling.rs` (#87); this arm is the
+throughput trend.
+
 ### Reference run
 
 Machine-specific — **only ratios travel**; capture fresh numbers on your own box.
@@ -230,8 +258,9 @@ Machine-specific — **only ratios travel**; capture fresh numbers on your own b
 | LALR   | SQL    | ~57 KB  | ~2.8 | ~0.7 | **~4.4×** |
 | Earley | JSON   | ~92 KB  | ~0.5 | ~0.04 | **~12.8×** |
 | Earley | SQL    | ~57 KB  | ~0.1 | ~0.009 | **~16.2×** |
+| CYK    | NL     | ~186 B  | ~0.5 | ~0.02 | **~29×** |
 
-**Reading.** Two separate stories:
+**Reading.** Three separate stories:
 
 - **LALR** — lark-rs is ~4–6× faster than Python Lark end-to-end, consistent with
   the internal baseline above (~4–5× on JSON/arith). Real, but short of the
@@ -246,6 +275,12 @@ Machine-specific — **only ratios travel**; capture fresh numbers on your own b
   too — see `parse.rs`), but doing so far more cheaply than the reference
   implementation. SQL's dynamic lexer is the most expensive configuration, which is
   exactly where the gap is widest.
+- **CYK** — the widest margin (~29×). Same story as Earley but more pronounced:
+  Python Lark's pure-Python CYK DP pays a large constant factor per table cell,
+  while lark-rs's port keeps the same O(n³) shape in native code. The absolute
+  numbers are tiny (a ~40-token sentence), so read this as "the general-CFG
+  fallback is not a Python-speed cliff in lark-rs," not a throughput headline — CYK
+  remains the last-resort backend.
 
 This bench turns that remaining LALR headroom into a tracked delta: **re-run it
 after each significant engine change and update the table.**
