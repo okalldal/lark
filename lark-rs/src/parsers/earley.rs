@@ -162,6 +162,12 @@ struct Packed {
 /// (packed nodes); more than one means the node is ambiguous.
 struct SymbolNode {
     is_intermediate: bool,
+    /// The input span `[start, end)` this node covers (column steps for the
+    /// dynamic lexer, token indices for the basic lexer). Used only to break
+    /// `sort_key` ties among a node's derivations by split point — see
+    /// [`Transformer::sorted_families`].
+    start: usize,
+    end: usize,
     families: Vec<Packed>,
     family_set: HashSet<(ForestRef, ForestRef)>,
     /// Joop-Leo deferred reconstructions: `(transitive, bottom_node, end_col)`. A
@@ -228,6 +234,8 @@ impl Forest {
         let id = self.nodes.len();
         self.nodes.push(SymbolNode {
             is_intermediate: key.is_intermediate(),
+            start,
+            end,
             families: Vec::new(),
             family_set: HashSet::new(),
             paths: Vec::new(),
@@ -859,38 +867,7 @@ impl EarleyParser {
             if !visited.insert(id) {
                 continue;
             }
-            let paths = std::mem::take(&mut forest.nodes[id].paths);
-            for (bottom_trans, _bottom_node, end) in paths {
-                // Collect the chain bottom→top via `parent`, then walk top→bottom.
-                // Every node is addressed by its global `(key, start, end)` identity,
-                // so the top level reuses this node, the bottom reuses the chart's
-                // already-built completed node, and any intermediate symbol nodes
-                // merge with whatever the chart already has at that span — exactly
-                // the merge `ambiguity='resolve'` needs.
-                let mut chain = Vec::new();
-                let mut cur = Some(bottom_trans);
-                while let Some(t) = cur {
-                    chain.push(t);
-                    cur = trans_arena[t].parent;
-                }
-                for &t in chain.iter().rev() {
-                    let tr = trans_arena[t];
-                    let cur_node = forest.get_or_create(
-                        self.node_key(tr.red.rule, tr.red.dot + 1),
-                        tr.red.origin,
-                        end,
-                    );
-                    let right =
-                        forest.get_or_create(NodeKey::Sym(tr.recognized), tr.key_start, end);
-                    forest.add_family(
-                        cur_node,
-                        tr.red.rule,
-                        tr.red.node,
-                        ForestRef::Node(right),
-                        tr.red.dot,
-                    );
-                }
-            }
+            self.materialize_leo_paths(forest, trans_arena, id);
             // Descend into the now-complete family children so their own paths, if
             // any, expand too — but only along edges reachable from the root.
             for p in &forest.nodes[id].families {
@@ -899,6 +876,51 @@ impl EarleyParser {
                         stack.push(c);
                     }
                 }
+            }
+        }
+    }
+
+    /// Expand the deferred Joop-Leo paths recorded on a *single* node into real
+    /// packed families (the per-node body of [`load_leo_paths`]). Each recorded
+    /// `(transitive chain, bottom node, end)` is walked top→bottom, rebuilding one
+    /// symbol node per skipped reduction level. The chain's topmost level lands on
+    /// this node itself (the path owner), so afterwards the node carries its
+    /// derivations as families. The node's `paths` are taken, so a later call (or
+    /// the reachability DFS) never re-expands them.
+    ///
+    /// Used both by `load_leo_paths`'s DFS and by the dynamic scanner's `%ignore`
+    /// carry-over, which must materialize a carried completed item's Leo-deferred
+    /// derivation before copying its families to the carried-span node.
+    fn materialize_leo_paths(&self, forest: &mut Forest, trans_arena: &[Trans], id: usize) {
+        let paths = std::mem::take(&mut forest.nodes[id].paths);
+        for (bottom_trans, _bottom_node, end) in paths {
+            // Collect the chain bottom→top via `parent`, then walk top→bottom.
+            // Every node is addressed by its global `(key, start, end)` identity,
+            // so the top level reuses this node, the bottom reuses the chart's
+            // already-built completed node, and any intermediate symbol nodes
+            // merge with whatever the chart already has at that span — exactly
+            // the merge `ambiguity='resolve'` needs.
+            let mut chain = Vec::new();
+            let mut cur = Some(bottom_trans);
+            while let Some(t) = cur {
+                chain.push(t);
+                cur = trans_arena[t].parent;
+            }
+            for &t in chain.iter().rev() {
+                let tr = trans_arena[t];
+                let cur_node = forest.get_or_create(
+                    self.node_key(tr.red.rule, tr.red.dot + 1),
+                    tr.red.origin,
+                    end,
+                );
+                let right = forest.get_or_create(NodeKey::Sym(tr.recognized), tr.key_start, end);
+                forest.add_family(
+                    cur_node,
+                    tr.red.rule,
+                    tr.red.node,
+                    ForestRef::Node(right),
+                    tr.red.dot,
+                );
             }
         }
     }
@@ -1053,6 +1075,7 @@ impl EarleyParser {
                 &to_scan,
                 &mut forest,
                 &mut delayed,
+                &trans_arena,
             ) {
                 Some(next_scan) => {
                     to_scan = next_scan;
@@ -1103,6 +1126,7 @@ impl EarleyParser {
         to_scan: &ScanSet,
         forest: &mut Forest,
         delayed: &mut HashMap<usize, Vec<Delayed>>,
+        trans_arena: &[Trans],
     ) -> Option<ScanSet> {
         let pos = boundaries[i];
         let mk_token = |term: SymbolId, value: &str, end_step: usize| Token {
@@ -1195,22 +1219,51 @@ impl EarleyParser {
                     }
                 }
                 Delayed::Carry { item } => {
-                    // The item keeps its dot and prefix node; it just reappears in
-                    // the column after the ignored span. A completed item is also
-                    // registered in this column's node cache so the root (and any
-                    // waiting completer) finds it across trailing/inner ignores.
-                    if self.is_complete(&item) {
-                        if let ForestRef::Node(id) = item.node {
-                            let key = NodeKey::Sym(self.grammar.rules[item.rule].origin);
-                            // Carry the completed node's identity into this column so
-                            // the root (and any waiter) finds it across the ignore.
-                            forest.index.entry((key, item.origin, end)).or_insert(id);
+                    // The item keeps its dot, but it now spans one step further (past
+                    // the ignored text). Re-anchor its forest node to the carried span
+                    // `[origin, end]` through the global `(key, origin, end)` index and
+                    // merge in the families of its pre-ignore node — xearley.py's
+                    // ignore carry-over (the `token is None` branch), which builds a
+                    // fresh node at the new label and copies the old node's children.
+                    //
+                    // Re-anchoring is what makes the carried derivation survive: a
+                    // completion or scan landing at the same `(key, origin, end)` shares
+                    // this very node, so their derivations *merge* as alternative
+                    // families instead of one shadowing the other. The previous
+                    // `index.entry(..).or_insert(..)` dropped the carried derivation on
+                    // any such collision (and `ScanSet`/`Column` dedup keeps a single
+                    // item, so the lone surviving item must point at the merged node).
+                    let carried = if let ForestRef::Node(old) = item.node {
+                        // The carried derivation may be a deferred Joop-Leo path
+                        // rather than a materialized family (a completed right-
+                        // recursive rule reached through the Leo shortcut). Force it
+                        // into families first, otherwise the copy below would carry an
+                        // empty node and the derivation would be lost across the
+                        // ignore (the previous `or_insert` kept the *same* node id, so
+                        // the deferred path stayed reachable from the root; copying
+                        // into a fresh node does not, so it must be materialized now).
+                        self.materialize_leo_paths(forest, trans_arena, old);
+                        let key = self.node_key(item.rule, item.dot);
+                        let new_node = forest.get_or_create(key, item.origin, end);
+                        if old != new_node {
+                            let fams = forest.nodes[old].families.clone();
+                            for f in fams {
+                                forest.add_family(new_node, f.rule, f.left, f.right, f.right_pos);
+                            }
                         }
-                        next_col.add(item, None);
-                    } else if self.expects_terminal(&item) {
-                        next_scan.add(item);
+                        Item {
+                            node: ForestRef::Node(new_node),
+                            ..item
+                        }
                     } else {
-                        next_col.add(item, self.expect(&item));
+                        item
+                    };
+                    if self.is_complete(&carried) {
+                        next_col.add(carried, None);
+                    } else if self.expects_terminal(&carried) {
+                        next_scan.add(carried);
+                    } else {
+                        next_col.add(carried, self.expect(&carried));
                     }
                 }
             }
@@ -1242,6 +1295,11 @@ struct Transformer<'a> {
     /// dynamic lexer is used (the basic lexer consumes terminal priorities in its
     /// terminal ordering). Empty otherwise.
     term_priority: HashMap<SymbolId, i32>,
+    /// Whether the dynamic lexer produced this forest. Gates the split-point
+    /// tie-break in [`Transformer::sorted_families`], which compensates for the
+    /// way lark-rs's EBNF helper nodes reverse the insertion order of equal-rank
+    /// `dynamic_complete` segmentation derivations relative to Python Lark.
+    dynamic: bool,
     /// Memoized symbol-node values (final assembled trees).
     memo: HashMap<usize, NodeValue>,
     /// Memoized per-symbol-node derivation lists (the deduped alternative values
@@ -1269,6 +1327,8 @@ impl<'a> Transformer<'a> {
         resolve: bool,
         term_priority: bool,
     ) -> Self {
+        // `term_priority` is set exactly when the dynamic lexer built the forest.
+        let dynamic = term_priority;
         // Map each terminal id to its declared priority (only consulted under the
         // dynamic lexer; built empty otherwise so the lookup is a no-op).
         let term_priority = if term_priority {
@@ -1286,6 +1346,7 @@ impl<'a> Transformer<'a> {
             forest,
             builder: TreeBuilder::new(&grammar.rules),
             resolve,
+            dynamic,
             term_priority,
             memo: HashMap::new(),
             deriv_memo: HashMap::new(),
@@ -1350,11 +1411,24 @@ impl<'a> Transformer<'a> {
     /// Family indices of `node_id` in Lark's `sort_key` order: non-empty
     /// derivations first, then higher priority, then lower rule order. A stable
     /// sort keeps insertion order among ties (which is how Lark breaks otherwise
-    /// equal derivations).
+    /// equal derivations — its `StableSymbolNode` stores packed children in an
+    /// `OrderedSet`, so insertion order is the final tie-break there too).
+    ///
+    /// Under the **dynamic lexer** a further tie-break is applied: among otherwise
+    /// equal-rank derivations of the same span, the one whose last symbol (the
+    /// packed node's right child) covers the most input — i.e. the earliest split —
+    /// wins. The dynamic lexer's `dynamic_complete` re-tokenization makes a single
+    /// span reachable by many segmentations; Python Lark inserts these last-symbol
+    /// families in earliest-split-first order during its scan, but lark-rs builds
+    /// them through an EBNF helper node whose LIFO completion reverses that order,
+    /// so the split key restores Python's choice (e.g. `WORD+` over `"bc"` resolves
+    /// to one `WORD "bc"`, not `WORD "b"`, `WORD "c"`). The basic lexer keeps pure
+    /// insertion order, where it already matches Python on genuine grammar ambiguity.
     fn sorted_families(&mut self, node_id: usize) -> Vec<usize> {
         let forest = self.forest;
         let node = &forest.nodes[node_id];
         let parent_inter = node.is_intermediate;
+        let node_start = node.start;
         let prios: Vec<i32> = (0..node.families.len())
             .map(|k| {
                 let p = node.families[k];
@@ -1364,6 +1438,15 @@ impl<'a> Transformer<'a> {
         let mut idx: Vec<usize> = (0..node.families.len()).collect();
         let fams = &forest.nodes[node_id].families;
         let grammar = self.grammar;
+        let dynamic = self.dynamic;
+        // The split position of a derivation: where its right (last) symbol starts,
+        // i.e. the end of its left prefix. A smaller split means a longer right child.
+        let split = |p: &Packed| -> usize {
+            match p.left {
+                ForestRef::Node(lid) => forest.nodes[lid].end,
+                _ => node_start,
+            }
+        };
         idx.sort_by(|&a, &b| {
             let empty = |p: &Packed| {
                 matches!(p.left, ForestRef::None) && matches!(p.right, ForestRef::None)
@@ -1376,6 +1459,11 @@ impl<'a> Transformer<'a> {
                         .order
                         .cmp(&grammar.rules[fams[b].rule].order),
                 )
+                .then(if dynamic {
+                    split(&fams[a]).cmp(&split(&fams[b]))
+                } else {
+                    std::cmp::Ordering::Equal
+                })
         });
         idx
     }
