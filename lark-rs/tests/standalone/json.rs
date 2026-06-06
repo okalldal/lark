@@ -31,203 +31,7 @@ use regex::Regex;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-static N_TERMINALS: u32 = 13;
-
-static SYMBOL_NAMES: &[&str] = &[
-    "$END",
-    "ESCAPED_STRING",
-    "SIGNED_NUMBER",
-    "_WS",
-    "FALSE",
-    "NULL",
-    "TRUE",
-    "COLON",
-    "COMMA",
-    "LBRACE",
-    "LSQB",
-    "RBRACE",
-    "RSQB",
-    "$root_start",
-    "start",
-    "value",
-    "__anon_opt_0",
-    "__anon_opt_2",
-    "__anon_group_3",
-    "__anon_plus_4",
-    "__anon_star_5",
-    "__anon_group_1",
-    "array",
-    "__anon_opt_6",
-    "__anon_opt_8",
-    "__anon_group_9",
-    "__anon_plus_10",
-    "__anon_star_11",
-    "__anon_group_7",
-    "object",
-    "pair",
-    "string",
-];
-
-static RULES: &[RuleData] = &[
-    RuleData { origin: 14, len: 1, tree_name: "start", transparent: false, expand1: true, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
-    RuleData { origin: 15, len: 1, tree_name: "value", transparent: false, expand1: true, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
-    RuleData { origin: 15, len: 1, tree_name: "value", transparent: false, expand1: true, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
-    RuleData { origin: 15, len: 1, tree_name: "value", transparent: false, expand1: true, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
-    RuleData { origin: 15, len: 1, tree_name: "number", transparent: false, expand1: true, has_alias: true, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
-    RuleData { origin: 15, len: 1, tree_name: "true", transparent: false, expand1: true, has_alias: true, keep_all: false, filter_pos: &[true], placeholder_count: 0, is_start: false },
-    RuleData { origin: 15, len: 1, tree_name: "false", transparent: false, expand1: true, has_alias: true, keep_all: false, filter_pos: &[true], placeholder_count: 0, is_start: false },
-    RuleData { origin: 15, len: 1, tree_name: "null", transparent: false, expand1: true, has_alias: true, keep_all: false, filter_pos: &[true], placeholder_count: 0, is_start: false },
-    RuleData { origin: 16, len: 1, tree_name: "__anon_opt_0", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[true], placeholder_count: 0, is_start: false },
-    RuleData { origin: 16, len: 0, tree_name: "__anon_opt_0", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[], placeholder_count: 0, is_start: false },
-    RuleData { origin: 17, len: 1, tree_name: "__anon_opt_2", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[true], placeholder_count: 0, is_start: false },
-    RuleData { origin: 17, len: 0, tree_name: "__anon_opt_2", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[], placeholder_count: 0, is_start: false },
-    RuleData { origin: 18, len: 3, tree_name: "__anon_group_3", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[true, false, false], placeholder_count: 0, is_start: false },
-    RuleData { origin: 19, len: 1, tree_name: "__anon_plus_4", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
-    RuleData { origin: 19, len: 2, tree_name: "__anon_plus_4", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false, false], placeholder_count: 0, is_start: false },
-    RuleData { origin: 20, len: 1, tree_name: "__anon_star_5", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
-    RuleData { origin: 20, len: 0, tree_name: "__anon_star_5", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[], placeholder_count: 0, is_start: false },
-    RuleData { origin: 21, len: 2, tree_name: "__anon_group_1", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false, false], placeholder_count: 0, is_start: false },
-    RuleData { origin: 21, len: 0, tree_name: "__anon_group_1", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[], placeholder_count: 0, is_start: false },
-    RuleData { origin: 22, len: 4, tree_name: "array", transparent: false, expand1: false, has_alias: false, keep_all: false, filter_pos: &[true, false, false, true], placeholder_count: 0, is_start: false },
-    RuleData { origin: 23, len: 1, tree_name: "__anon_opt_6", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[true], placeholder_count: 0, is_start: false },
-    RuleData { origin: 23, len: 0, tree_name: "__anon_opt_6", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[], placeholder_count: 0, is_start: false },
-    RuleData { origin: 24, len: 1, tree_name: "__anon_opt_8", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[true], placeholder_count: 0, is_start: false },
-    RuleData { origin: 24, len: 0, tree_name: "__anon_opt_8", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[], placeholder_count: 0, is_start: false },
-    RuleData { origin: 25, len: 3, tree_name: "__anon_group_9", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[true, false, false], placeholder_count: 0, is_start: false },
-    RuleData { origin: 26, len: 1, tree_name: "__anon_plus_10", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
-    RuleData { origin: 26, len: 2, tree_name: "__anon_plus_10", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false, false], placeholder_count: 0, is_start: false },
-    RuleData { origin: 27, len: 1, tree_name: "__anon_star_11", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
-    RuleData { origin: 27, len: 0, tree_name: "__anon_star_11", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[], placeholder_count: 0, is_start: false },
-    RuleData { origin: 28, len: 2, tree_name: "__anon_group_7", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false, false], placeholder_count: 0, is_start: false },
-    RuleData { origin: 28, len: 0, tree_name: "__anon_group_7", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[], placeholder_count: 0, is_start: false },
-    RuleData { origin: 29, len: 4, tree_name: "object", transparent: false, expand1: false, has_alias: false, keep_all: false, filter_pos: &[true, false, false, true], placeholder_count: 0, is_start: false },
-    RuleData { origin: 30, len: 4, tree_name: "pair", transparent: false, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false, true, true, false], placeholder_count: 0, is_start: false },
-    RuleData { origin: 31, len: 1, tree_name: "string", transparent: false, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
-    RuleData { origin: 13, len: 1, tree_name: "$root_start", transparent: false, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: true },
-];
-
-static ACTION: &[&[(u32, Action)]] = &[
-    &[(1, Action::Shift(1)), (2, Action::Shift(2)), (4, Action::Shift(3)), (5, Action::Shift(4)), (6, Action::Shift(5)), (9, Action::Shift(6)), (10, Action::Shift(7))],
-    &[(0, Action::Reduce(33)), (7, Action::Reduce(33)), (8, Action::Reduce(33)), (11, Action::Reduce(33)), (12, Action::Reduce(33))],
-    &[(0, Action::Reduce(4)), (8, Action::Reduce(4)), (11, Action::Reduce(4)), (12, Action::Reduce(4))],
-    &[(0, Action::Reduce(6)), (8, Action::Reduce(6)), (11, Action::Reduce(6)), (12, Action::Reduce(6))],
-    &[(0, Action::Reduce(7)), (8, Action::Reduce(7)), (11, Action::Reduce(7)), (12, Action::Reduce(7))],
-    &[(0, Action::Reduce(5)), (8, Action::Reduce(5)), (11, Action::Reduce(5)), (12, Action::Reduce(5))],
-    &[(1, Action::Reduce(21)), (3, Action::Shift(13)), (11, Action::Reduce(21))],
-    &[(1, Action::Reduce(9)), (2, Action::Reduce(9)), (3, Action::Shift(15)), (4, Action::Reduce(9)), (5, Action::Reduce(9)), (6, Action::Reduce(9)), (9, Action::Reduce(9)), (10, Action::Reduce(9)), (12, Action::Reduce(9))],
-    &[(0, Action::Accept)],
-    &[(0, Action::Reduce(0))],
-    &[(0, Action::Reduce(2)), (8, Action::Reduce(2)), (11, Action::Reduce(2)), (12, Action::Reduce(2))],
-    &[(0, Action::Reduce(1)), (8, Action::Reduce(1)), (11, Action::Reduce(1)), (12, Action::Reduce(1))],
-    &[(0, Action::Reduce(3)), (8, Action::Reduce(3)), (11, Action::Reduce(3)), (12, Action::Reduce(3))],
-    &[(1, Action::Reduce(20)), (11, Action::Reduce(20))],
-    &[(1, Action::Shift(1)), (11, Action::Reduce(30))],
-    &[(1, Action::Reduce(8)), (2, Action::Reduce(8)), (4, Action::Reduce(8)), (5, Action::Reduce(8)), (6, Action::Reduce(8)), (9, Action::Reduce(8)), (10, Action::Reduce(8)), (12, Action::Reduce(8))],
-    &[(1, Action::Shift(1)), (2, Action::Shift(2)), (4, Action::Shift(3)), (5, Action::Shift(4)), (6, Action::Shift(5)), (9, Action::Shift(6)), (10, Action::Shift(7)), (12, Action::Reduce(18))],
-    &[(11, Action::Shift(22))],
-    &[(8, Action::Shift(23)), (11, Action::Reduce(28))],
-    &[(7, Action::Shift(27))],
-    &[(8, Action::Shift(28)), (12, Action::Reduce(16))],
-    &[(12, Action::Shift(32))],
-    &[(0, Action::Reduce(31)), (8, Action::Reduce(31)), (11, Action::Reduce(31)), (12, Action::Reduce(31))],
-    &[(1, Action::Reduce(23)), (3, Action::Shift(33))],
-    &[(8, Action::Reduce(25)), (11, Action::Reduce(25))],
-    &[(8, Action::Shift(23)), (11, Action::Reduce(27))],
-    &[(11, Action::Reduce(29))],
-    &[(3, Action::Shift(36))],
-    &[(1, Action::Reduce(11)), (2, Action::Reduce(11)), (3, Action::Shift(37)), (4, Action::Reduce(11)), (5, Action::Reduce(11)), (6, Action::Reduce(11)), (9, Action::Reduce(11)), (10, Action::Reduce(11))],
-    &[(8, Action::Reduce(13)), (12, Action::Reduce(13))],
-    &[(8, Action::Shift(28)), (12, Action::Reduce(15))],
-    &[(12, Action::Reduce(17))],
-    &[(0, Action::Reduce(19)), (8, Action::Reduce(19)), (11, Action::Reduce(19)), (12, Action::Reduce(19))],
-    &[(1, Action::Reduce(22))],
-    &[(1, Action::Shift(1))],
-    &[(8, Action::Reduce(26)), (11, Action::Reduce(26))],
-    &[(1, Action::Shift(1)), (2, Action::Shift(2)), (4, Action::Shift(3)), (5, Action::Shift(4)), (6, Action::Shift(5)), (9, Action::Shift(6)), (10, Action::Shift(7))],
-    &[(1, Action::Reduce(10)), (2, Action::Reduce(10)), (4, Action::Reduce(10)), (5, Action::Reduce(10)), (6, Action::Reduce(10)), (9, Action::Reduce(10)), (10, Action::Reduce(10))],
-    &[(1, Action::Shift(1)), (2, Action::Shift(2)), (4, Action::Shift(3)), (5, Action::Shift(4)), (6, Action::Shift(5)), (9, Action::Shift(6)), (10, Action::Shift(7))],
-    &[(8, Action::Reduce(14)), (12, Action::Reduce(14))],
-    &[(8, Action::Reduce(24)), (11, Action::Reduce(24))],
-    &[(8, Action::Reduce(32)), (11, Action::Reduce(32))],
-    &[(8, Action::Reduce(12)), (12, Action::Reduce(12))],
-];
-
-static GOTO: &[&[(u32, u32)]] = &[
-    &[(1, 8), (2, 9), (9, 10), (16, 11), (18, 12)],
-    &[],
-    &[],
-    &[],
-    &[],
-    &[],
-    &[(10, 14)],
-    &[(3, 16)],
-    &[],
-    &[],
-    &[],
-    &[],
-    &[],
-    &[],
-    &[(15, 17), (17, 18), (18, 19)],
-    &[],
-    &[(2, 20), (8, 21), (9, 10), (16, 11), (18, 12)],
-    &[],
-    &[(12, 24), (13, 25), (14, 26)],
-    &[],
-    &[(5, 29), (6, 30), (7, 31)],
-    &[],
-    &[],
-    &[(11, 34)],
-    &[],
-    &[(12, 35)],
-    &[],
-    &[],
-    &[(4, 38)],
-    &[],
-    &[(5, 39)],
-    &[],
-    &[],
-    &[],
-    &[(17, 40), (18, 19)],
-    &[],
-    &[(2, 41), (9, 10), (16, 11), (18, 12)],
-    &[],
-    &[(2, 42), (9, 10), (16, 11), (18, 12)],
-    &[],
-    &[],
-    &[],
-    &[],
-];
-
-static START_STATES: &[(&str, u32)] = &[
-    ("start", 0),
-];
-
-static START_DEFAULT: &str = "start";
-
-static GLOBAL_PREFIX: &str = "";
-
-static SCAN_GROUPS: &[(u32, &str)] = &[
-    (2, "(?:\\+|\\-)?(?:(?:(?:(?:(?:(?:(?:(?:(?:[0-9]))+)\\.(?:(?:(?:(?:[0-9]))+))?)|(?:\\.(?:(?:(?:[0-9]))+)))(?:(?:(?:e|E)(?:(?:\\+|\\-)?(?:(?:(?:[0-9]))+))))?)|(?:(?:(?:(?:[0-9]))+)(?:(?:e|E)(?:(?:\\+|\\-)?(?:(?:(?:[0-9]))+))))))|(?:(?:(?:(?:[0-9]))+)))"),
-    (1, "\"(?:(?:(?:[^\"\\\\\\n]|\\\\.))*)\""),
-    (3, "(?:[ \\t\\f\\r\\n])+"),
-    (4, "false"),
-    (5, "null"),
-    (6, "true"),
-    (9, "\\{"),
-    (10, "\\["),
-    (11, "\\}"),
-    (12, "\\]"),
-    (7, ":"),
-    (8, ","),
-];
-
-static UNLESS: &[(u32, &[(&str, u32)])] = &[
-];
-
-static IGNORE: &[u32] = &[];
-
-// ───────────────────────────── runtime shim ─────────────────────────────
-
+/// A parse-table cell: shift to a state, reduce by a rule, or accept.
 #[derive(Clone, Copy)]
 pub enum Action {
     Shift(u32),
@@ -235,17 +39,65 @@ pub enum Action {
     Accept,
 }
 
-struct RuleData {
-    origin: u32,
-    len: u32,
-    tree_name: &'static str,
-    transparent: bool,
-    expand1: bool,
-    has_alias: bool,
-    keep_all: bool,
-    filter_pos: &'static [bool],
-    placeholder_count: u32,
-    is_start: bool,
+/// A rule's tree-shaping metadata (everything the reducer needs, precomputed).
+pub struct RuleData {
+    pub origin: u32,
+    pub len: u32,
+    pub tree_name: &'static str,
+    pub transparent: bool,
+    pub expand1: bool,
+    pub has_alias: bool,
+    pub keep_all: bool,
+    pub filter_pos: &'static [bool],
+    pub placeholder_count: u32,
+    pub is_start: bool,
+}
+
+/// Every per-grammar table a generated parser bakes. The generated file emits a
+/// single `static DATA: GrammarData = …;` of this shape; the runtime is otherwise
+/// grammar-agnostic.
+pub struct GrammarData {
+    /// Terminal ids occupy `[0, n_terminals)`; non-terminal GOTO index is
+    /// `origin - n_terminals`.
+    pub n_terminals: u32,
+    /// Symbol name by id (token types + tree-node fallback + diagnostics).
+    pub symbol_names: &'static [&'static str],
+    pub rules: &'static [RuleData],
+    /// `action[state]` is a sparse `(terminal id, action)` row.
+    pub action: &'static [&'static [(u32, Action)]],
+    /// `goto[state]` is a sparse `(nonterminal index, next state)` row.
+    pub goto: &'static [&'static [(u32, u32)]],
+    /// Start symbol name → initial state.
+    pub start_states: &'static [(&'static str, u32)],
+    pub start_default: &'static str,
+    /// Leading inline-flag group for `g_regex_flags` (e.g. `(?i)`), or empty.
+    pub global_prefix: &'static str,
+    /// `(terminal id, inline regex)` in alternation order — the combined scanner.
+    pub scan_groups: &'static [(u32, &'static str)],
+    /// `unless` keyword retype: regex-terminal id → `(matched value, keyword id)`.
+    pub unless: &'static [(u32, &'static [(&'static str, u32)])],
+    /// `%ignore` terminal ids, discarded after matching.
+    pub ignore: &'static [u32],
+}
+
+impl GrammarData {
+    fn name_of(&self, id: u32) -> &'static str {
+        self.symbol_names.get(id as usize).copied().unwrap_or("")
+    }
+
+    fn action_at(&self, state: usize, term: u32) -> Option<Action> {
+        self.action[state]
+            .iter()
+            .find(|(t, _)| *t == term)
+            .map(|(_, a)| *a)
+    }
+
+    fn goto_at(&self, state: usize, nt_index: u32) -> Option<u32> {
+        self.goto[state]
+            .iter()
+            .find(|(n, _)| *n == nt_index)
+            .map(|(_, s)| *s)
+    }
 }
 
 /// A positioned token from the lexer.
@@ -311,10 +163,6 @@ impl fmt::Display for ParseTree {
     }
 }
 
-fn name_of(id: u32) -> &'static str {
-    SYMBOL_NAMES.get(id as usize).copied().unwrap_or("")
-}
-
 // ───────────────────────────── lexer ─────────────────────────────
 
 struct Scanner {
@@ -325,12 +173,12 @@ struct Scanner {
 }
 
 impl Scanner {
-    fn new() -> Scanner {
-        let mut parts: Vec<String> = Vec::with_capacity(SCAN_GROUPS.len());
-        for (id, rx) in SCAN_GROUPS {
+    fn new(data: &GrammarData) -> Scanner {
+        let mut parts: Vec<String> = Vec::with_capacity(data.scan_groups.len());
+        for (id, rx) in data.scan_groups {
             parts.push(format!("(?P<g{}>{})", id, rx));
         }
-        let pattern = format!("{}{}", GLOBAL_PREFIX, parts.join("|"));
+        let pattern = format!("{}{}", data.global_prefix, parts.join("|"));
         let re = Regex::new(&pattern).expect("baked scanner regex is valid");
         // Resolve each group's name to its capture index (a terminal pattern can
         // itself contain groups, so the index is not the alternation position).
@@ -339,12 +187,13 @@ impl Scanner {
             .enumerate()
             .filter_map(|(i, n)| n.map(|n| (n.to_string(), i)))
             .collect();
-        let groups = SCAN_GROUPS
+        let groups = data
+            .scan_groups
             .iter()
             .map(|(id, _)| (*id, name_to_idx[&format!("g{}", id)]))
             .collect();
         let mut unless: HashMap<u32, HashMap<String, u32>> = HashMap::new();
-        for (re_id, entries) in UNLESS {
+        for (re_id, entries) in data.unless {
             let m = unless.entry(*re_id).or_default();
             for (value, kw_id) in *entries {
                 m.insert(value.to_string(), *kw_id);
@@ -377,8 +226,8 @@ impl Scanner {
     }
 }
 
-fn lex(scanner: &Scanner, text: &str) -> Result<Vec<Token>, String> {
-    let ignore: HashSet<u32> = IGNORE.iter().copied().collect();
+fn lex(data: &GrammarData, scanner: &Scanner, text: &str) -> Result<Vec<Token>, String> {
+    let ignore: HashSet<u32> = data.ignore.iter().copied().collect();
     let mut tokens = Vec::new();
     let mut pos = 0usize;
     let mut line = 1usize;
@@ -401,7 +250,7 @@ fn lex(scanner: &Scanner, text: &str) -> Result<Vec<Token>, String> {
                 if !ignore.contains(&id) {
                     tokens.push(Token {
                         type_id: id,
-                        type_: name_of(id).to_string(),
+                        type_: data.name_of(id).to_string(),
                         value: value.to_string(),
                         line: start_line,
                         column: start_col,
@@ -421,7 +270,7 @@ fn lex(scanner: &Scanner, text: &str) -> Result<Vec<Token>, String> {
     // End-of-input sentinel (terminal id 0 = $END).
     tokens.push(Token {
         type_id: 0,
-        type_: name_of(0).to_string(),
+        type_: data.name_of(0).to_string(),
         value: String::new(),
         line,
         column: col,
@@ -430,24 +279,6 @@ fn lex(scanner: &Scanner, text: &str) -> Result<Vec<Token>, String> {
 }
 
 // ───────────────────────────── parser ─────────────────────────────
-
-fn action_at(state: usize, term: u32) -> Option<Action> {
-    for (t, a) in ACTION[state] {
-        if *t == term {
-            return Some(*a);
-        }
-    }
-    None
-}
-
-fn goto_at(state: usize, nt_index: u32) -> Option<u32> {
-    for (n, s) in GOTO[state] {
-        if *n == nt_index {
-            return Some(*s);
-        }
-    }
-    None
-}
 
 fn keep_token(rule: &RuleData, pos: usize) -> bool {
     rule.keep_all || !rule.filter_pos.get(pos).copied().unwrap_or(false)
@@ -477,8 +308,8 @@ fn shape(rule: &RuleData, mut children: Vec<Child>) -> NodeValue {
     }
 }
 
-fn assemble(rule_idx: usize, child_values: Vec<NodeValue>) -> NodeValue {
-    let rule = &RULES[rule_idx];
+fn assemble(data: &GrammarData, rule_idx: usize, child_values: Vec<NodeValue>) -> NodeValue {
+    let rule = &data.rules[rule_idx];
     let mut children: Vec<Child> = Vec::new();
     for (i, value) in child_values.into_iter().enumerate() {
         match value {
@@ -494,7 +325,7 @@ fn assemble(rule_idx: usize, child_values: Vec<NodeValue>) -> NodeValue {
     shape(rule, children)
 }
 
-fn run(tokens: &[Token], start_state: usize) -> Result<ParseTree, String> {
+fn run(data: &GrammarData, tokens: &[Token], start_state: usize) -> Result<ParseTree, String> {
     let mut state_stack: Vec<usize> = vec![start_state];
     let mut value_stack: Vec<NodeValue> = Vec::new();
     let mut i = 0usize;
@@ -502,24 +333,23 @@ fn run(tokens: &[Token], start_state: usize) -> Result<ParseTree, String> {
     loop {
         let state = *state_stack.last().unwrap();
         let token = &tokens[i];
-        match action_at(state, token.type_id) {
+        match data.action_at(state, token.type_id) {
             Some(Action::Shift(ns)) => {
                 i += 1;
                 state_stack.push(ns as usize);
                 value_stack.push(NodeValue::Token(token.clone()));
             }
             Some(Action::Reduce(r)) => {
-                let rule = &RULES[r as usize];
+                let rule = &data.rules[r as usize];
                 let len = rule.len as usize;
-                let child_values: Vec<NodeValue> =
-                    value_stack.split_off(value_stack.len() - len);
+                let child_values: Vec<NodeValue> = value_stack.split_off(value_stack.len() - len);
                 for _ in 0..len {
                     state_stack.pop();
                 }
-                let value = assemble(r as usize, child_values);
+                let value = assemble(data, r as usize, child_values);
                 let top = *state_stack.last().unwrap();
-                let nt_index = rule.origin - N_TERMINALS;
-                let next = goto_at(top, nt_index).expect("missing goto entry");
+                let nt_index = rule.origin - data.n_terminals;
+                let next = data.goto_at(top, nt_index).expect("missing goto entry");
                 state_stack.push(next as usize);
                 value_stack.push(value);
             }
@@ -531,8 +361,10 @@ fn run(tokens: &[Token], start_state: usize) -> Result<ParseTree, String> {
                 };
             }
             None => {
-                let expected: Vec<&str> =
-                    ACTION[state].iter().map(|(t, _)| name_of(*t)).collect();
+                let expected: Vec<&str> = data.action[state]
+                    .iter()
+                    .map(|(t, _)| data.name_of(*t))
+                    .collect();
                 if token.type_id == 0 {
                     return Err(format!(
                         "Unexpected end of input at line {}, column {}. Expected one of: {:?}",
@@ -548,9 +380,9 @@ fn run(tokens: &[Token], start_state: usize) -> Result<ParseTree, String> {
     }
 }
 
-fn start_state_for(start: Option<&str>) -> Result<usize, String> {
-    let name = start.unwrap_or(START_DEFAULT);
-    for (n, s) in START_STATES {
+fn start_state_for(data: &GrammarData, start: Option<&str>) -> Result<usize, String> {
+    let name = start.unwrap_or(data.start_default);
+    for (n, s) in data.start_states {
         if *n == name {
             return Ok(*s as usize);
         }
@@ -558,17 +390,18 @@ fn start_state_for(start: Option<&str>) -> Result<usize, String> {
     Err(format!("unknown start symbol {:?}", name))
 }
 
-/// A self-contained parser for the baked grammar.
+/// A self-contained parser over a baked [`GrammarData`].
 pub struct Parser {
+    data: &'static GrammarData,
     scanner: Scanner,
 }
 
 impl Parser {
-    /// Build the parser (compiles the combined lexer regex once).
-    pub fn new() -> Parser {
-        Parser {
-            scanner: Scanner::new(),
-        }
+    /// Build a parser for the given baked grammar (compiles the lexer regex once).
+    /// The generated file adds a `Parser::new()` that calls this with its `&DATA`.
+    pub fn from_data(data: &'static GrammarData) -> Parser {
+        let scanner = Scanner::new(data);
+        Parser { data, scanner }
     }
 
     /// Parse `text` from the default start symbol.
@@ -578,9 +411,203 @@ impl Parser {
 
     /// Parse `text` from the named start symbol.
     pub fn parse_from(&self, text: &str, start: Option<&str>) -> Result<ParseTree, String> {
-        let tokens = lex(&self.scanner, text)?;
-        let start_state = start_state_for(start)?;
-        run(&tokens, start_state)
+        let tokens = lex(self.data, &self.scanner, text)?;
+        let start_state = start_state_for(self.data, start)?;
+        run(self.data, &tokens, start_state)
+    }
+}
+
+
+// ── baked grammar tables ──
+static DATA: GrammarData = GrammarData {
+    n_terminals: 13,
+    symbol_names: &[
+        "$END",
+        "ESCAPED_STRING",
+        "SIGNED_NUMBER",
+        "_WS",
+        "FALSE",
+        "NULL",
+        "TRUE",
+        "COLON",
+        "COMMA",
+        "LBRACE",
+        "LSQB",
+        "RBRACE",
+        "RSQB",
+        "$root_start",
+        "start",
+        "value",
+        "__anon_opt_0",
+        "__anon_opt_2",
+        "__anon_group_3",
+        "__anon_plus_4",
+        "__anon_star_5",
+        "__anon_group_1",
+        "array",
+        "__anon_opt_6",
+        "__anon_opt_8",
+        "__anon_group_9",
+        "__anon_plus_10",
+        "__anon_star_11",
+        "__anon_group_7",
+        "object",
+        "pair",
+        "string",
+    ],
+    rules: &[
+        RuleData { origin: 14, len: 1, tree_name: "start", transparent: false, expand1: true, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
+        RuleData { origin: 15, len: 1, tree_name: "value", transparent: false, expand1: true, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
+        RuleData { origin: 15, len: 1, tree_name: "value", transparent: false, expand1: true, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
+        RuleData { origin: 15, len: 1, tree_name: "value", transparent: false, expand1: true, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
+        RuleData { origin: 15, len: 1, tree_name: "number", transparent: false, expand1: true, has_alias: true, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
+        RuleData { origin: 15, len: 1, tree_name: "true", transparent: false, expand1: true, has_alias: true, keep_all: false, filter_pos: &[true], placeholder_count: 0, is_start: false },
+        RuleData { origin: 15, len: 1, tree_name: "false", transparent: false, expand1: true, has_alias: true, keep_all: false, filter_pos: &[true], placeholder_count: 0, is_start: false },
+        RuleData { origin: 15, len: 1, tree_name: "null", transparent: false, expand1: true, has_alias: true, keep_all: false, filter_pos: &[true], placeholder_count: 0, is_start: false },
+        RuleData { origin: 16, len: 1, tree_name: "__anon_opt_0", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[true], placeholder_count: 0, is_start: false },
+        RuleData { origin: 16, len: 0, tree_name: "__anon_opt_0", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[], placeholder_count: 0, is_start: false },
+        RuleData { origin: 17, len: 1, tree_name: "__anon_opt_2", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[true], placeholder_count: 0, is_start: false },
+        RuleData { origin: 17, len: 0, tree_name: "__anon_opt_2", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[], placeholder_count: 0, is_start: false },
+        RuleData { origin: 18, len: 3, tree_name: "__anon_group_3", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[true, false, false], placeholder_count: 0, is_start: false },
+        RuleData { origin: 19, len: 1, tree_name: "__anon_plus_4", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
+        RuleData { origin: 19, len: 2, tree_name: "__anon_plus_4", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false, false], placeholder_count: 0, is_start: false },
+        RuleData { origin: 20, len: 1, tree_name: "__anon_star_5", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
+        RuleData { origin: 20, len: 0, tree_name: "__anon_star_5", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[], placeholder_count: 0, is_start: false },
+        RuleData { origin: 21, len: 2, tree_name: "__anon_group_1", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false, false], placeholder_count: 0, is_start: false },
+        RuleData { origin: 21, len: 0, tree_name: "__anon_group_1", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[], placeholder_count: 0, is_start: false },
+        RuleData { origin: 22, len: 4, tree_name: "array", transparent: false, expand1: false, has_alias: false, keep_all: false, filter_pos: &[true, false, false, true], placeholder_count: 0, is_start: false },
+        RuleData { origin: 23, len: 1, tree_name: "__anon_opt_6", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[true], placeholder_count: 0, is_start: false },
+        RuleData { origin: 23, len: 0, tree_name: "__anon_opt_6", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[], placeholder_count: 0, is_start: false },
+        RuleData { origin: 24, len: 1, tree_name: "__anon_opt_8", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[true], placeholder_count: 0, is_start: false },
+        RuleData { origin: 24, len: 0, tree_name: "__anon_opt_8", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[], placeholder_count: 0, is_start: false },
+        RuleData { origin: 25, len: 3, tree_name: "__anon_group_9", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[true, false, false], placeholder_count: 0, is_start: false },
+        RuleData { origin: 26, len: 1, tree_name: "__anon_plus_10", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
+        RuleData { origin: 26, len: 2, tree_name: "__anon_plus_10", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false, false], placeholder_count: 0, is_start: false },
+        RuleData { origin: 27, len: 1, tree_name: "__anon_star_11", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
+        RuleData { origin: 27, len: 0, tree_name: "__anon_star_11", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[], placeholder_count: 0, is_start: false },
+        RuleData { origin: 28, len: 2, tree_name: "__anon_group_7", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false, false], placeholder_count: 0, is_start: false },
+        RuleData { origin: 28, len: 0, tree_name: "__anon_group_7", transparent: true, expand1: false, has_alias: false, keep_all: false, filter_pos: &[], placeholder_count: 0, is_start: false },
+        RuleData { origin: 29, len: 4, tree_name: "object", transparent: false, expand1: false, has_alias: false, keep_all: false, filter_pos: &[true, false, false, true], placeholder_count: 0, is_start: false },
+        RuleData { origin: 30, len: 4, tree_name: "pair", transparent: false, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false, true, true, false], placeholder_count: 0, is_start: false },
+        RuleData { origin: 31, len: 1, tree_name: "string", transparent: false, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
+        RuleData { origin: 13, len: 1, tree_name: "$root_start", transparent: false, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: true },
+    ],
+    action: &[
+        &[(1, Action::Shift(1)), (2, Action::Shift(2)), (4, Action::Shift(3)), (5, Action::Shift(4)), (6, Action::Shift(5)), (9, Action::Shift(6)), (10, Action::Shift(7))],
+        &[(0, Action::Reduce(33)), (7, Action::Reduce(33)), (8, Action::Reduce(33)), (11, Action::Reduce(33)), (12, Action::Reduce(33))],
+        &[(0, Action::Reduce(4)), (8, Action::Reduce(4)), (11, Action::Reduce(4)), (12, Action::Reduce(4))],
+        &[(0, Action::Reduce(6)), (8, Action::Reduce(6)), (11, Action::Reduce(6)), (12, Action::Reduce(6))],
+        &[(0, Action::Reduce(7)), (8, Action::Reduce(7)), (11, Action::Reduce(7)), (12, Action::Reduce(7))],
+        &[(0, Action::Reduce(5)), (8, Action::Reduce(5)), (11, Action::Reduce(5)), (12, Action::Reduce(5))],
+        &[(1, Action::Reduce(21)), (3, Action::Shift(13)), (11, Action::Reduce(21))],
+        &[(1, Action::Reduce(9)), (2, Action::Reduce(9)), (3, Action::Shift(15)), (4, Action::Reduce(9)), (5, Action::Reduce(9)), (6, Action::Reduce(9)), (9, Action::Reduce(9)), (10, Action::Reduce(9)), (12, Action::Reduce(9))],
+        &[(0, Action::Accept)],
+        &[(0, Action::Reduce(0))],
+        &[(0, Action::Reduce(2)), (8, Action::Reduce(2)), (11, Action::Reduce(2)), (12, Action::Reduce(2))],
+        &[(0, Action::Reduce(1)), (8, Action::Reduce(1)), (11, Action::Reduce(1)), (12, Action::Reduce(1))],
+        &[(0, Action::Reduce(3)), (8, Action::Reduce(3)), (11, Action::Reduce(3)), (12, Action::Reduce(3))],
+        &[(1, Action::Reduce(20)), (11, Action::Reduce(20))],
+        &[(1, Action::Shift(1)), (11, Action::Reduce(30))],
+        &[(1, Action::Reduce(8)), (2, Action::Reduce(8)), (4, Action::Reduce(8)), (5, Action::Reduce(8)), (6, Action::Reduce(8)), (9, Action::Reduce(8)), (10, Action::Reduce(8)), (12, Action::Reduce(8))],
+        &[(1, Action::Shift(1)), (2, Action::Shift(2)), (4, Action::Shift(3)), (5, Action::Shift(4)), (6, Action::Shift(5)), (9, Action::Shift(6)), (10, Action::Shift(7)), (12, Action::Reduce(18))],
+        &[(11, Action::Shift(22))],
+        &[(8, Action::Shift(23)), (11, Action::Reduce(28))],
+        &[(7, Action::Shift(27))],
+        &[(8, Action::Shift(28)), (12, Action::Reduce(16))],
+        &[(12, Action::Shift(32))],
+        &[(0, Action::Reduce(31)), (8, Action::Reduce(31)), (11, Action::Reduce(31)), (12, Action::Reduce(31))],
+        &[(1, Action::Reduce(23)), (3, Action::Shift(33))],
+        &[(8, Action::Reduce(25)), (11, Action::Reduce(25))],
+        &[(8, Action::Shift(23)), (11, Action::Reduce(27))],
+        &[(11, Action::Reduce(29))],
+        &[(3, Action::Shift(36))],
+        &[(1, Action::Reduce(11)), (2, Action::Reduce(11)), (3, Action::Shift(37)), (4, Action::Reduce(11)), (5, Action::Reduce(11)), (6, Action::Reduce(11)), (9, Action::Reduce(11)), (10, Action::Reduce(11))],
+        &[(8, Action::Reduce(13)), (12, Action::Reduce(13))],
+        &[(8, Action::Shift(28)), (12, Action::Reduce(15))],
+        &[(12, Action::Reduce(17))],
+        &[(0, Action::Reduce(19)), (8, Action::Reduce(19)), (11, Action::Reduce(19)), (12, Action::Reduce(19))],
+        &[(1, Action::Reduce(22))],
+        &[(1, Action::Shift(1))],
+        &[(8, Action::Reduce(26)), (11, Action::Reduce(26))],
+        &[(1, Action::Shift(1)), (2, Action::Shift(2)), (4, Action::Shift(3)), (5, Action::Shift(4)), (6, Action::Shift(5)), (9, Action::Shift(6)), (10, Action::Shift(7))],
+        &[(1, Action::Reduce(10)), (2, Action::Reduce(10)), (4, Action::Reduce(10)), (5, Action::Reduce(10)), (6, Action::Reduce(10)), (9, Action::Reduce(10)), (10, Action::Reduce(10))],
+        &[(1, Action::Shift(1)), (2, Action::Shift(2)), (4, Action::Shift(3)), (5, Action::Shift(4)), (6, Action::Shift(5)), (9, Action::Shift(6)), (10, Action::Shift(7))],
+        &[(8, Action::Reduce(14)), (12, Action::Reduce(14))],
+        &[(8, Action::Reduce(24)), (11, Action::Reduce(24))],
+        &[(8, Action::Reduce(32)), (11, Action::Reduce(32))],
+        &[(8, Action::Reduce(12)), (12, Action::Reduce(12))],
+    ],
+    goto: &[
+        &[(1, 8), (2, 9), (9, 10), (16, 11), (18, 12)],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[(10, 14)],
+        &[(3, 16)],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[],
+        &[(15, 17), (17, 18), (18, 19)],
+        &[],
+        &[(2, 20), (8, 21), (9, 10), (16, 11), (18, 12)],
+        &[],
+        &[(12, 24), (13, 25), (14, 26)],
+        &[],
+        &[(5, 29), (6, 30), (7, 31)],
+        &[],
+        &[],
+        &[(11, 34)],
+        &[],
+        &[(12, 35)],
+        &[],
+        &[],
+        &[(4, 38)],
+        &[],
+        &[(5, 39)],
+        &[],
+        &[],
+        &[],
+        &[(17, 40), (18, 19)],
+        &[],
+        &[(2, 41), (9, 10), (16, 11), (18, 12)],
+        &[],
+        &[(2, 42), (9, 10), (16, 11), (18, 12)],
+        &[],
+        &[],
+        &[],
+        &[],
+    ],
+    start_states: &[("start", 0)],
+    start_default: "start",
+    global_prefix: "",
+    scan_groups: &[
+        (2, "(?:\\+|\\-)?(?:(?:(?:(?:(?:(?:(?:(?:(?:[0-9]))+)\\.(?:(?:(?:(?:[0-9]))+))?)|(?:\\.(?:(?:(?:[0-9]))+)))(?:(?:(?:e|E)(?:(?:\\+|\\-)?(?:(?:(?:[0-9]))+))))?)|(?:(?:(?:(?:[0-9]))+)(?:(?:e|E)(?:(?:\\+|\\-)?(?:(?:(?:[0-9]))+))))))|(?:(?:(?:(?:[0-9]))+)))"),
+        (1, "\"(?:(?:(?:[^\"\\\\\\n]|\\\\.))*)\""),
+        (3, "(?:[ \\t\\f\\r\\n])+"),
+        (4, "false"),
+        (5, "null"),
+        (6, "true"),
+        (9, "\\{"),
+        (10, "\\["),
+        (11, "\\}"),
+        (12, "\\]"),
+        (7, ":"),
+        (8, ","),
+    ],
+    unless: &[
+    ],
+    ignore: &[],
+};
+
+impl Parser {
+    /// Construct the parser for this baked grammar.
+    pub fn new() -> Parser {
+        Parser::from_data(&DATA)
     }
 }
 
