@@ -472,6 +472,51 @@ mod tests {
     }
 
     #[test]
+    fn test_named_keyword_terminal_retypes_over_identifier() {
+        // A named terminal defined as a single case-sensitive string literal
+        // (`ASYNC: "async"`) must compile to `Pattern::Str`, like an inline literal
+        // and like Python Lark's `PatternStr`, so it joins the contextual lexer's
+        // keyword `unless` retyping. Otherwise it is a `Pattern::Re` that ties with
+        // the overlapping `NAME` regex and loses, and `async` lexes as an identifier
+        // — the bug that kept python.lark's `async`/`await` from parsing. Outcomes
+        // are byte-identical to Python Lark 1.3.1 (`lalr`, `contextual`).
+        let src = "start: stmt+\n\
+                   ?stmt: kw_stmt | id_stmt\n\
+                   kw_stmt: ASYNC NAME NL\n\
+                   id_stmt: NAME NL\n\
+                   ASYNC: \"async\"\n\
+                   NAME: /[a-z]+/\n\
+                   NL: /\\n/\n\
+                   %ignore \" \"\n";
+        let l = Lark::new(
+            src,
+            LarkOptions {
+                parser: ParserAlgorithm::Lalr,
+                lexer: LexerType::Contextual,
+                start: vec!["start".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("build");
+        let alt = |inp: &str| -> Option<String> {
+            match l.parse(inp).ok()? {
+                ParseTree::Tree(t) => match t.children.first()? {
+                    Child::Tree(c) => Some(c.data.clone()),
+                    _ => None,
+                },
+                _ => None,
+            }
+        };
+        // `async` overlapping NAME is retyped to the keyword where the state expects
+        // it, and stays an identifier-shaped token nowhere else.
+        assert_eq!(alt("async foo\n").as_deref(), Some("kw_stmt"));
+        assert_eq!(alt("foo\n").as_deref(), Some("id_stmt"));
+        // `async` is a hard keyword (cannot be a bare NAME), exactly as in Python.
+        assert!(l.parse("async\n").is_err());
+        assert!(l.parse("foo bar\n").is_err());
+    }
+
+    #[test]
     #[ignore = "slow (~18s debug): builds python.lark's full LALR table; run with --ignored"]
     fn test_python_lark_builds_under_lalr() {
         // End-to-end witness for the EBNF-helper dedup: upstream `python.lark` has

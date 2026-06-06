@@ -2001,8 +2001,10 @@ impl GrammarCompiler {
     /// references (`C: "C" | D`). Resolution is order-independent and memoized;
     /// mutually-recursive terminals are rejected (a terminal denotes a *regular*
     /// language, so it cannot reference itself). Each terminal is then registered
-    /// as a `Pattern::Re` — matching the previous behavior, where even a pure
-    /// string terminal becomes a regex.
+    /// as a `Pattern::Re`, **except** one that reduces to a single case-sensitive
+    /// string literal, which is registered as a `Pattern::Str` — like an inline
+    /// `"literal"` and like Python Lark's `PatternStr`, so a named keyword terminal
+    /// participates in the contextual lexer's `unless` keyword retyping.
     fn resolve_terminals(&mut self) -> Result<(), GrammarError> {
         let raw_terms = std::mem::take(&mut self.raw_terms);
         let by_name: HashMap<&str, &RawTerm> =
@@ -2034,19 +2036,110 @@ impl GrammarCompiler {
             Self::term_is_str(&t.name, &by_name, &imported_str, &mut str_memo);
         }
 
+        // The recoverable literal value of each already-known string terminal, so a
+        // reference to an imported `PatternStr` resolves to a `PatternStr` too.
+        let imported_val: HashMap<String, String> = self
+            .terminals
+            .iter()
+            .filter_map(|t| match &t.pattern {
+                Pattern::Str(p) => Some((t.name.clone(), p.value.clone())),
+                _ => None,
+            })
+            .collect();
+
         // Register in source order so terminal ordering stays stable. A terminal
         // already defined via `%import` is not redefined (import wins).
+        //
+        // A terminal that reduces to a single *case-sensitive* string literal is
+        // compiled to `Pattern::Str`, exactly like an inline `"literal"` and like
+        // Python Lark's `PatternStr`. This is what lets a named keyword terminal
+        // (`ASYNC: "async"`) join the keyword `unless` retyping in the contextual
+        // lexer — otherwise it is a `Pattern::Re` that ties with, and loses to, an
+        // overlapping identifier regex (`NAME`), so `async` would lex as `NAME`.
+        // Everything else (regex, concatenation, alternation, range, repetition, or
+        // a case-insensitive literal) stays `Pattern::Re`.
+        let mut strval_memo: HashMap<String, Option<String>> = HashMap::new();
         for t in &raw_terms {
             if self.terminals.iter().any(|td| td.name == t.name) {
                 continue;
             }
-            let regex = &memo[&t.name];
-            let pat = Pattern::Re(PatternRe::new(regex.as_str(), 0)?);
             let string_type = str_memo.get(&t.name).copied().unwrap_or(false);
+            let pat = match Self::term_str_value(&t.name, &by_name, &imported_val, &mut strval_memo)
+            {
+                Some(value) => Pattern::Str(PatternStr::new(&value)),
+                None => Pattern::Re(PatternRe::new(memo[&t.name].as_str(), 0)?),
+            };
             self.terminals
                 .push(TerminalDef::new(&t.name, pat, t.priority).with_string_type(string_type));
         }
         Ok(())
+    }
+
+    /// The plain string value iff this terminal compiles to a `PatternStr` whose
+    /// value lark-rs can recover — a single **case-sensitive** string literal,
+    /// possibly through a single-alternative group or a reference to another such
+    /// terminal. Returns `None` for anything else (regex, concatenation,
+    /// alternation, range, repetition, or a *case-insensitive* literal, which
+    /// lark-rs — like its inline-literal path — represents as a `PatternRe`).
+    /// Parallels [`term_is_str`]; memoized; assumes the acyclic grammar the regex
+    /// pass already validated.
+    fn term_str_value(
+        name: &str,
+        by_name: &HashMap<&str, &RawTerm>,
+        imported_val: &HashMap<String, String>,
+        memo: &mut HashMap<String, Option<String>>,
+    ) -> Option<String> {
+        if let Some(v) = memo.get(name) {
+            return v.clone();
+        }
+        if let Some(raw) = by_name.get(name) {
+            memo.insert(name.to_string(), None); // cycle guard
+            let result = Self::alts_str_value(&raw.expansions, by_name, imported_val, memo);
+            memo.insert(name.to_string(), result.clone());
+            return result;
+        }
+        // An imported / declared terminal: recoverable only if it is itself a
+        // `PatternStr`. Common-library terminals are regex-typed → `None`.
+        imported_val.get(name).cloned()
+    }
+
+    /// Value of a parenthesised/whole-terminal `expansions` node: present only when
+    /// there is a single alternative that is itself a recoverable string.
+    fn alts_str_value(
+        alts: &[AliasedExpansion],
+        by_name: &HashMap<&str, &RawTerm>,
+        imported_val: &HashMap<String, String>,
+        memo: &mut HashMap<String, Option<String>>,
+    ) -> Option<String> {
+        if alts.len() != 1 {
+            return None;
+        }
+        let expansion = &alts[0].expansion;
+        match expansion.len() {
+            0 => Some(String::new()), // empty PatternStr('')
+            1 => Self::expr_str_value(&expansion[0], by_name, imported_val, memo),
+            _ => None, // concatenation → joined PatternRe
+        }
+    }
+
+    /// Value of a single `Expr` in a terminal body (see [`term_str_value`]).
+    fn expr_str_value(
+        expr: &Expr,
+        by_name: &HashMap<&str, &RawTerm>,
+        imported_val: &HashMap<String, String>,
+        memo: &mut HashMap<String, Option<String>>,
+    ) -> Option<String> {
+        match expr {
+            Expr::Value(Value::Literal(LiteralVal::Str(s, false))) => Some(s.clone()),
+            // A case-insensitive literal keeps Python's `str` type but lark-rs has
+            // no case-insensitive `PatternStr`, so it stays a `PatternRe`.
+            Expr::Value(Value::Literal(LiteralVal::Str(_, true))) => None,
+            Expr::Value(Value::Terminal(referenced)) => {
+                Self::term_str_value(referenced, by_name, imported_val, memo)
+            }
+            Expr::Group(alts) => Self::alts_str_value(alts, by_name, imported_val, memo),
+            _ => None,
+        }
     }
 
     /// Does this terminal reduce to a single string literal (Python's `PatternStr`,
