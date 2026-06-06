@@ -2234,12 +2234,17 @@ impl GrammarCompiler {
                 return Ok(()); // nothing to import
             };
 
-        // The bundled `common` library is resolved from its compiled regex table,
-        // not the filesystem. Everything else is a file import resolved relative to
-        // the importing grammar's directory. A *relative* `%import .common ...`
-        // (leading dot) is a file, not the library.
-        let is_common = !spec.relative && module_path.first().map(String::as_str) == Some("common");
-        if is_common {
+        // Bundled grammar libraries (shipped with lark-rs, mirroring the grammars
+        // Python Lark ships under `lark/grammars/`) are resolved from embedded
+        // sources, not the filesystem. Everything else is a file import resolved
+        // relative to the importing grammar's directory. A *relative*
+        // `%import .common ...` (leading dot) is a file, not the library.
+        let is_library = !spec.relative && module_path.len() == 1;
+
+        // `common` keeps its dedicated terminal-table path (terminals only, no
+        // rules) — it is the hot, heavily-pinned library and copies inline regexes
+        // directly.
+        if is_library && module_path[0] == "common" {
             for (name, alias) in &names_to_import {
                 if let Some(regex) = common_terminals().get(name) {
                     let registered_name = alias.as_deref().unwrap_or(name.as_str());
@@ -2252,6 +2257,16 @@ impl GrammarCompiler {
                 // Rules from common (e.g., %import common.list) are silently skipped for now.
             }
             return Ok(());
+        }
+
+        // Other bundled libraries (`python`, `unicode`, `lark`, …) carry rules as
+        // well as terminals, so they route through the same source-parse +
+        // closure-copy path as a file import — just with the source embedded in the
+        // binary instead of read from disk.
+        if is_library {
+            if let Some(src) = bundled_grammar_source(&module_path[0]) {
+                return self.import_from_source(src, None, &module_path, &names_to_import);
+            }
         }
 
         self.resolve_file_import(&module_path, &names_to_import)
@@ -2285,19 +2300,36 @@ impl GrammarCompiler {
             path: dotted.clone(),
         })?;
 
-        // A pure-terminal file (e.g. `tokens.lark`) has no rule referencing its
-        // terminals, so dead-terminal pruning would drop them. Append a probe rule
-        // that references every requested name so they survive compilation — the
-        // same trick `common_terminals()` uses. The probe is never copied out.
+        // The imported grammar's own relative imports resolve against *its*
+        // directory, so nested file imports compose.
+        let sub_base = file.parent().map(PathBuf::from);
+        self.import_from_source(&text, sub_base, module_path, names_to_import)
+    }
+
+    /// Parse a grammar `text` (read from a sibling file or embedded as a bundled
+    /// library) and copy the requested terminals/rules — and, for a rule, its
+    /// dependency closure — into this grammar. `sub_base` is the directory the
+    /// imported grammar's *own* relative imports resolve against (`None` for an
+    /// embedded library, which can only re-import other libraries, never files).
+    fn import_from_source(
+        &mut self,
+        text: &str,
+        sub_base: Option<PathBuf>,
+        module_path: &[String],
+        names_to_import: &[(String, Option<String>)],
+    ) -> Result<(), GrammarError> {
+        let dotted = module_path.join(".");
+        // A pure-terminal source (e.g. `tokens.lark`, `unicode.lark`) has no rule
+        // referencing its terminals, so dead-terminal pruning would drop them.
+        // Append a probe rule that references every requested name so they survive
+        // compilation — the same trick `common_terminals()` uses. The probe is
+        // never copied out.
         let probe_body = names_to_import
             .iter()
             .map(|(n, _)| n.as_str())
             .collect::<Vec<_>>()
             .join(" ");
         let probe = format!("{text}\n{IMPORT_PROBE_RULE}: {probe_body}\n");
-        // The imported grammar's own relative imports resolve against *its*
-        // directory, so nested file imports compose.
-        let sub_base = file.parent().map(PathBuf::from);
         let imported = load_grammar_with_base(
             &probe,
             &[IMPORT_PROBE_RULE.to_string()],
@@ -2407,10 +2439,16 @@ impl GrammarCompiler {
                     }
                 })
                 .collect();
+            // An alias (`-> name`) names the tree node this rule produces; Python
+            // Lark mangles it under the module prefix just like a rule origin, so an
+            // imported `-> literal` surfaces as `<module>__literal`. Mangle it here
+            // too, otherwise the imported grammar's aliased nodes would collide with
+            // (or leak into) the importing grammar's namespace.
+            let alias = rule.alias.as_deref().map(rename);
             self.rules.push(Rule::new(
                 origin,
                 expansion,
-                rule.alias.clone(),
+                alias,
                 rule.options.clone(),
                 rule.order,
             ));
@@ -2564,6 +2602,25 @@ static TERMINAL_NAMES: &[(&str, &str)] = &[
     ("\t", "TAB"),
     (" ", "SPACE"),
 ];
+
+/// Embedded source of a bundled grammar library (the equivalents of the grammars
+/// Python Lark ships under `lark/grammars/`), keyed by its `%import` module name.
+///
+/// `common` is handled separately (its dedicated terminal-table fast path); the
+/// libraries here carry rules as well as terminals and are imported through the
+/// same source-parse + closure-copy path as a sibling-file import. The files are
+/// verbatim copies of Python Lark's grammars — a handful of their terminals use
+/// lookaround (the `regex` crate has no lookahead/lookbehind), which the lexer
+/// transparently routes to `fancy-regex`, so the grammar text needs no hand-edits.
+/// Pinned by `tests/test_stdlib.rs`.
+fn bundled_grammar_source(module: &str) -> Option<&'static str> {
+    match module {
+        "python" => Some(include_str!("../grammars/python.lark")),
+        "unicode" => Some(include_str!("../grammars/unicode.lark")),
+        "lark" => Some(include_str!("../grammars/lark.lark")),
+        _ => None,
+    }
+}
 
 /// Lark's `common.lark`, bundled and compiled once into a `name → inline-regex`
 /// map for `%import common.X` resolution.

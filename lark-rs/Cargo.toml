@@ -29,6 +29,12 @@ perf-counters = []
 
 [dependencies]
 regex = "1.10"
+# Backtracking-regex overlay for the handful of bundled-grammar terminals that use
+# lookaround (lookahead/lookbehind), which the linear-time `regex` crate cannot
+# compile (issue #40). Only lookaround-bearing terminals route here; every other
+# terminal stays on the fast combined `regex` scanner. Because `regex` is a subset,
+# a pattern that compiles with `regex` is never handed to `fancy-regex`.
+fancy-regex = "0.18"
 # Dense-DFA support for the strict-mode regex-collision check (issue #35): the
 # `regex` crate has no intersection/emptiness test, so we drop to its automata
 # layer and run a product construction over two terminals' DFAs.
@@ -59,6 +65,14 @@ harness = false
 [[bench]]
 name = "vs_python_lark"
 path = "benches/vs_python_lark.rs"
+harness = false
+
+# Two-tier ReDoS cost of the lookaround terminals routed to `fancy-regex` (#40):
+# the benign linear `python.STRING` vs the pathological super-linear `lark.REGEXP`.
+# The artifact for the lookaround-rewrite follow-up. Recorded trend, not a CI gate.
+[[bench]]
+name = "redos"
+path = "benches/redos.rs"
 harness = false
 
 [profile.release]

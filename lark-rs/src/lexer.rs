@@ -39,6 +39,83 @@ use crate::grammar::intern::SymbolId;
 use crate::grammar::terminal::{Pattern, TerminalDef};
 use crate::tree::Token;
 
+// ─── AnyRegex: a per-terminal regex that may need lookaround ──────────────────
+//
+// The combined scanner is built on the linear-time `regex` crate, which has no
+// lookahead/lookbehind. A few bundled-grammar terminals (issue #40) use bounded
+// lookaround; those are compiled to `fancy-regex` instead and matched one terminal
+// at a time. `AnyRegex` hides the choice behind a uniform anchored-match API so the
+// caller never branches on the engine. Because `regex`'s language is a subset of
+// `fancy-regex`'s, a pattern is only ever sent to `fancy-regex` when `regex`
+// rejects it — every ordinary terminal keeps the fast engine.
+
+enum AnyRegex {
+    Plain(Regex),
+    Fancy(fancy_regex::Regex),
+}
+
+impl AnyRegex {
+    /// Compile `src`, preferring the linear `regex` engine and only falling back to
+    /// `fancy-regex` for patterns `regex` cannot express (lookaround). An error from
+    /// *both* engines surfaces the `regex`-crate message (the familiar one).
+    fn compile(src: &str) -> Result<AnyRegex, GrammarError> {
+        match Regex::new(src) {
+            Ok(re) => Ok(AnyRegex::Plain(re)),
+            Err(plain_err) => match fancy_regex::Regex::new(src) {
+                Ok(re) => Ok(AnyRegex::Fancy(re)),
+                Err(_) => Err(GrammarError::InvalidRegex {
+                    pattern: src.to_string(),
+                    reason: plain_err.to_string(),
+                }),
+            },
+        }
+    }
+
+    /// Whether this pattern needed the backtracking engine (i.e. uses lookaround).
+    fn is_fancy(&self) -> bool {
+        matches!(self, AnyRegex::Fancy(_))
+    }
+
+    /// End offset of a non-empty match beginning *exactly* at `pos`, or `None`.
+    /// The full `text` (not a suffix) is passed so a lookbehind can see the bytes
+    /// before `pos`.
+    fn match_end_at(&self, text: &str, pos: usize) -> Option<usize> {
+        match self {
+            AnyRegex::Plain(re) => {
+                let m = re.find_at(text, pos)?;
+                (m.start() == pos && m.end() > pos).then_some(m.end())
+            }
+            AnyRegex::Fancy(re) => {
+                let m = re.find_from_pos(text, pos).ok()??;
+                (m.start() == pos && m.end() > pos).then_some(m.end())
+            }
+        }
+    }
+
+    /// End offset of a non-empty match anchored at the start of `sub`, or `None`.
+    fn match_end_in(&self, sub: &str) -> Option<usize> {
+        match self {
+            AnyRegex::Plain(re) => {
+                let m = re.find(sub)?;
+                (m.start() == 0 && m.end() > 0).then_some(m.end())
+            }
+            AnyRegex::Fancy(re) => {
+                let m = re.find(sub).ok()??;
+                (m.start() == 0 && m.end() > 0).then_some(m.end())
+            }
+        }
+    }
+
+    /// Whether the pattern matches `text` in full (used by `unless` retyping, where
+    /// `src` is already anchored with `^…$`).
+    fn is_full_match(&self, text: &str) -> bool {
+        match self {
+            AnyRegex::Plain(re) => re.is_match(text),
+            AnyRegex::Fancy(re) => re.is_match(text).unwrap_or(false),
+        }
+    }
+}
+
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -101,14 +178,24 @@ pub trait Lexer {
 ///   * a single [`CaptureLocations`] scratch buffer is reused across matches
 ///     (`captures_read_at`) rather than allocating a fresh `Captures` per token.
 struct Scanner {
-    re: Regex,
-    /// (terminal id, capture-group index), in alternation order.
-    groups: Vec<(SymbolId, usize)>,
+    /// Combined alternation over every *plain* (`regex`-crate) terminal, or `None`
+    /// when this scanner's terminals are all lookaround terminals. Returns the
+    /// lowest-rank plain terminal matching at a position (leftmost-first).
+    re: Option<Regex>,
+    /// (terminal id, capture-group index, rank), in alternation order. `rank` is the
+    /// terminal's index in the fully-sorted candidate list, so a plain match can be
+    /// compared against a fancy match by who Python's combined alternation would
+    /// reach first.
+    groups: Vec<(SymbolId, usize, usize)>,
+    /// Lookaround terminals (`fancy-regex`), each matched individually. Stored in
+    /// ascending `rank` order, so the first one that matches is the lowest-rank
+    /// fancy candidate. Empty for the overwhelming common case (no lookaround).
+    fancy: Vec<(usize, SymbolId, AnyRegex)>,
     /// regex-terminal-id → (matched-text → keyword-terminal-id).
     unless: HashMap<SymbolId, HashMap<String, SymbolId>>,
     /// Reused match-location scratch, sized for `re`. `RefCell` because the hot
     /// `match_at` runs behind `&self` (the contextual lexer's per-token path).
-    locs: RefCell<CaptureLocations>,
+    locs: Option<RefCell<CaptureLocations>>,
 }
 
 impl Scanner {
@@ -135,7 +222,12 @@ impl Scanner {
         let embedded: HashSet<SymbolId> =
             unless.values().flat_map(|m| m.values().copied()).collect();
 
-        // Scanner terminals = everything not embedded, sorted Python-style.
+        // Scanner terminals = everything not embedded, sorted Python-style. The
+        // sorted index is each terminal's `rank`: Python builds the combined
+        // alternation in this order and takes the first branch that matches, so a
+        // lower rank wins ties. We split the list into plain terminals (the fast
+        // combined `regex`) and lookaround terminals (`fancy-regex`, matched
+        // individually) while preserving rank, then merge by rank at match time.
         let mut scan: Vec<(SymbolId, &TerminalDef)> = terms
             .iter()
             .copied()
@@ -143,42 +235,56 @@ impl Scanner {
             .collect();
         sort_terminals(&mut scan);
 
-        let mut parts = Vec::with_capacity(scan.len());
-        let mut group_names = Vec::with_capacity(scan.len());
-        for (id, term) in scan {
-            let group = format!("g{}", id.0);
+        let prefix = global_flag_prefix(global_flags);
+        let mut parts = Vec::new();
+        let mut group_names = Vec::new();
+        let mut fancy: Vec<(usize, SymbolId, AnyRegex)> = Vec::new();
+        for (rank, (id, term)) in scan.iter().enumerate() {
             // `to_inline_regex` keeps per-terminal flags (e.g. `(?i:…)` for a
             // case-insensitive terminal) scoped to this group; `as_regex_str`
             // would drop them, so `"a"i` would not match `A`.
-            parts.push(format!("(?P<{}>{})", group, term.pattern.to_inline_regex()));
-            group_names.push((id, group));
+            let inline = term.pattern.to_inline_regex();
+            let compiled = AnyRegex::compile(&format!("{prefix}{inline}"))?;
+            if compiled.is_fancy() {
+                fancy.push((rank, *id, compiled));
+            } else {
+                let group = format!("g{}", id.0);
+                parts.push(format!("(?P<{group}>{inline})"));
+                group_names.push((*id, group, rank));
+            }
         }
-        let pattern = format!("{}{}", global_flag_prefix(global_flags), parts.join("|"));
-        let re = Regex::new(&pattern).map_err(|e| GrammarError::InvalidRegex {
-            pattern: pattern.clone(),
-            reason: e.to_string(),
-        })?;
 
-        // Resolve each terminal's named group to its capture *index* once. A
-        // terminal pattern may itself contain capturing groups, so the index is
-        // not the alternation position — read it from `capture_names` (which
-        // enumerates every group in index order, unnamed ones as `None`).
-        let groups = {
+        // The combined regex over plain terminals (skipped entirely when every
+        // candidate is a lookaround terminal).
+        let (re, groups, locs) = if parts.is_empty() {
+            (None, Vec::new(), None)
+        } else {
+            let pattern = format!("{}{}", prefix, parts.join("|"));
+            let re = Regex::new(&pattern).map_err(|e| GrammarError::InvalidRegex {
+                pattern: pattern.clone(),
+                reason: e.to_string(),
+            })?;
+            // Resolve each terminal's named group to its capture *index* once. A
+            // terminal pattern may itself contain capturing groups, so the index is
+            // not the alternation position — read it from `capture_names` (which
+            // enumerates every group in index order, unnamed ones as `None`).
             let name_to_idx: HashMap<&str, usize> = re
                 .capture_names()
                 .enumerate()
                 .filter_map(|(i, n)| n.map(|n| (n, i)))
                 .collect();
-            group_names
+            let groups = group_names
                 .iter()
-                .map(|(id, name)| (*id, name_to_idx[name.as_str()]))
-                .collect()
+                .map(|(id, name, rank)| (*id, name_to_idx[name.as_str()], *rank))
+                .collect();
+            let locs = Some(RefCell::new(re.capture_locations()));
+            (Some(re), groups, locs)
         };
 
-        let locs = RefCell::new(re.capture_locations());
         Ok(Scanner {
             re,
             groups,
+            fancy,
             unless,
             locs,
         })
@@ -187,28 +293,50 @@ impl Scanner {
     /// Match a single token starting exactly at `pos`. Returns `(terminal id,
     /// value)`, with keyword retyping already applied. `None` means nothing
     /// matched here.
+    ///
+    /// The winner is the lowest-`rank` terminal that matches at `pos` — exactly the
+    /// branch Python's combined `(A)|(B)|…` alternation reaches first. We get the
+    /// lowest-rank *plain* terminal from the combined regex and the lowest-rank
+    /// *fancy* terminal from the (rank-sorted) lookaround list, then keep whichever
+    /// has the smaller rank.
     fn match_at<'t>(&self, text: &'t str, pos: usize) -> Option<(SymbolId, &'t str)> {
-        let mut locs = self.locs.borrow_mut();
-        let m0 = self.re.captures_read_at(&mut locs, text, pos)?;
-        // captures_read_at finds the leftmost match at *or after* pos; only accept
-        // a token beginning exactly at pos, and reject empty matches so a nullable
-        // terminal can never stall the scan.
-        if m0.start() != pos || m0.end() == pos {
-            return None;
-        }
-        let value = m0.as_str();
-        for (id, idx) in &self.groups {
-            if locs.get(*idx).is_some() {
-                let ty = self
-                    .unless
-                    .get(id)
-                    .and_then(|m| m.get(value))
-                    .copied()
-                    .unwrap_or(*id);
-                return Some((ty, value));
+        // Lowest-rank plain candidate.
+        let mut best: Option<(usize, SymbolId, &'t str)> = None;
+        if let (Some(re), Some(locs)) = (&self.re, &self.locs) {
+            let mut locs = locs.borrow_mut();
+            if let Some(m0) = re.captures_read_at(&mut locs, text, pos) {
+                // Accept only a non-empty match beginning exactly at pos.
+                if m0.start() == pos && m0.end() != pos {
+                    let value = m0.as_str();
+                    for (id, idx, rank) in &self.groups {
+                        if locs.get(*idx).is_some() {
+                            best = Some((*rank, *id, value));
+                            break;
+                        }
+                    }
+                }
             }
         }
-        None
+        // Lowest-rank fancy candidate (the list is rank-sorted, so the first match
+        // wins); keep it only if it out-ranks the plain candidate.
+        for (rank, id, re) in &self.fancy {
+            if best.is_some_and(|(b, _, _)| *rank > b) {
+                break;
+            }
+            if let Some(end) = re.match_end_at(text, pos) {
+                best = Some((*rank, *id, &text[pos..end]));
+                break;
+            }
+        }
+
+        let (_, id, value) = best?;
+        let ty = self
+            .unless
+            .get(&id)
+            .and_then(|m| m.get(value))
+            .copied()
+            .unwrap_or(id);
+        Some((ty, value))
     }
 }
 
@@ -238,10 +366,9 @@ fn compute_unless(
             global_flag_prefix(global_flags),
             re_t.pattern.to_inline_regex()
         );
-        let full = Regex::new(&full_src).map_err(|e| GrammarError::InvalidRegex {
-            pattern: full_src.clone(),
-            reason: e.to_string(),
-        })?;
+        // A lookaround terminal (issue #40) cannot compile under the `regex` crate;
+        // `AnyRegex` falls back to `fancy-regex` so keyword embedding still works.
+        let full = AnyRegex::compile(&full_src)?;
         for (s_id, s_t) in &strs {
             if s_t.priority != re_t.priority {
                 continue;
@@ -250,7 +377,7 @@ fn compute_unless(
                 Pattern::Str(p) => &p.value,
                 Pattern::Re(_) => continue,
             };
-            if full.is_match(value) {
+            if full.is_full_match(value) {
                 unless
                     .entry(*re_id)
                     .or_default()
@@ -766,24 +893,22 @@ impl ContextualLexer {
 /// is resolved by the grammar, not by a lexer tie-break. Per-terminal flags
 /// (`(?i:…)`) and `g_regex_flags` are preserved exactly as the basic lexer does.
 pub struct DynamicMatcher {
-    res: HashMap<SymbolId, Regex>,
+    res: HashMap<SymbolId, AnyRegex>,
     ignore: Vec<SymbolId>,
     names: HashMap<SymbolId, String>,
 }
 
 impl DynamicMatcher {
     /// Build a matcher from the same [`LexerConf`] the basic lexer uses, so both
-    /// engines honour identical terminal patterns and global flags.
+    /// engines honour identical terminal patterns and global flags. A lookaround
+    /// terminal (issue #40) compiles via `fancy-regex`, exactly as in the basic
+    /// scanner, so the dynamic lexer matches the same language.
     pub fn new(conf: &LexerConf) -> Result<Self, GrammarError> {
         let prefix = global_flag_prefix(conf.global_flags);
         let mut res = HashMap::new();
         for (id, term) in &conf.terminals {
             let src = format!("{}{}", prefix, term.pattern.to_inline_regex());
-            let re = Regex::new(&src).map_err(|e| GrammarError::InvalidRegex {
-                pattern: src.clone(),
-                reason: e.to_string(),
-            })?;
-            res.insert(*id, re);
+            res.insert(*id, AnyRegex::compile(&src)?);
         }
         Ok(DynamicMatcher {
             res,
@@ -796,24 +921,16 @@ impl DynamicMatcher {
     /// matched slice, or `None` if the terminal does not match there (or matches
     /// empty — a nullable terminal can never advance the scan).
     pub fn match_at<'t>(&self, id: SymbolId, text: &'t str, pos: usize) -> Option<&'t str> {
-        let re = self.res.get(&id)?;
-        let m = re.find_at(text, pos)?;
-        if m.start() != pos || m.end() == pos {
-            return None;
-        }
-        Some(m.as_str())
+        let end = self.res.get(&id)?.match_end_at(text, pos)?;
+        Some(&text[pos..end])
     }
 
     /// Match terminal `id` against the whole sub-slice `sub` (anchored at its
     /// start). Used by `dynamic_complete` to explore shorter tokenizations, which
     /// Python Lark does by re-matching against a truncated string `s[:-j]`.
     pub fn match_in<'t>(&self, id: SymbolId, sub: &'t str) -> Option<&'t str> {
-        let re = self.res.get(&id)?;
-        let m = re.find(sub)?;
-        if m.start() != 0 || m.end() == 0 {
-            return None;
-        }
-        Some(&sub[..m.end()])
+        let end = self.res.get(&id)?.match_end_in(sub)?;
+        Some(&sub[..end])
     }
 
     /// The `%ignore` terminal ids, tried between tokens by the dynamic scanner.

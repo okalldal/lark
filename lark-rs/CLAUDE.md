@@ -304,7 +304,7 @@ underlying super-linearity has since been removed by the Joop-Leo work (#58).
 | `%import` from file path | ✅ | Relative imports (`%import .module (X, ...)`) resolve against the importing grammar's directory (`LarkOptions.base_path`), load through `load_grammar`, and copy the requested terminal/rule — a rule pulls in its dependency closure, mangled under the module name (Python's `_get_mangle`). Pinned by `test_imports.rs` (oracles in `fixtures/oracles/imports/`, grammars under `tests/grammars/imports/`) |
 | `%declare` semantic action | ✅ | `%declare _INDENT _DEDENT` registers pattern-less terminals (`TerminalDef::declared`): interned + reserved a parse-table column, filtered out of every scanner (`basic_lexer_conf`), injected by a postlex hook. Pinned by `test_indenter.rs` |
 | Indenter / postlex | ✅ (basic + contextual lexer) | `LarkOptions.postlex: Option<Indenter>` (LALR backend), on **both** the basic and the contextual (default) lexer. Basic lexer: materialize the stream, `Indenter::process` rewrites it (INDENT/DEDENT injection, paren-depth suppression, tab expansion, end-of-input dedent flush — a token-for-token port of `lark.indenter.Indenter`), then the parser replays it. **#67: contextual lexer** — the lazy per-state lexer can't be materialized up front, so the indenter runs as a streaming `TokenSource` adapter (`PostlexContextual`) inside the pull loop, driving the shared `IndenterStream` core so it injects a byte-identical stream; the NL terminal is forced into every state's scanner via `always_accept` (Python Lark's `PostLex.always_accept`). Pinned by `test_indenter.rs`, which replays the `indent`/`indent_paren` oracles under both lexers **and** adds `indent_context` — a grammar where the contextual lexer's state-narrowing is load-bearing (`NAME`/`VALUE` overlap, basic lexer provably can't parse it) *while* postlex injects INDENT/DEDENT, so the two mechanisms are pinned together, not just for parity. **#69: a general trait-object postlex** (beyond the built-in `Indenter`) is the remaining follow-up |
-| Grammar standard library | ⬜ | SQL, Python, … |
+| Grammar standard library | ✅ | Beyond `common.lark`, lark-rs bundles every grammar Python Lark ships under `lark/grammars/` — `python.lark`, `unicode.lark`, and `lark.lark` — under `src/grammars/`, resolvable via the same `%import <lib>.<X>` directive. The files are **verbatim** copies (no hand-edits): the loader's bundled-library path parses each through lark-rs's own loader and copies the requested terminal/rule closure, mangled under the module prefix (`python__HEX_NUMBER`). A handful of their terminals use lookaround, which the lexer transparently routes to `fancy-regex` (see the parity-gap note below), so the grammar text matches upstream byte-for-byte and cannot drift. Pinned by `tests/test_stdlib.rs` (oracles in `fixtures/oracles/stdlib/`). SQL/C/Lua are *not* bundled — upstream distributes them as separate packages, not under `lark/grammars/` |
 | Standalone parser gen | ⬜ | Emit self-contained Rust or Python |
 | Error recovery | ⬜ | Insert/delete tokens on failure |
 | CYK parser | ⬜ | Highly ambiguous grammars |
@@ -355,8 +355,21 @@ is `_WS` in this grammar, not `WS`. Store and look up by alias.
 propagation). Conflict detection depends on its precision: SLR FOLLOW sets would
 over-report conflicts, so accurate `GrammarError::Conflict` reporting requires it.
 
-**`regex` crate has no lookahead or backreferences.** Some Python Lark grammars in the
-wild rely on these. Document as a known parity gap when adding Phase-3 grammar library.
+**`regex` crate has no lookahead or backreferences.** Some Python Lark grammars rely
+on lookaround (the bundled `python.lark`/`lark.lark` do: `STRING`'s `(?<!\\)(\\\\)*?`
+escaped-quote guard, `DEC_NUMBER`'s `(?![1-9])`, `lark.OP`/`REGEXP`). lark-rs handles
+these by **routing only the lookaround-bearing terminals to `fancy-regex`** (a
+backtracking overlay) while every other terminal stays on the fast combined `regex`
+scanner — see `AnyRegex` in `src/lexer.rs`. Detection is automatic (a terminal is sent
+to `fancy-regex` only when the `regex` crate rejects its pattern), so user grammars
+with lookaround work too. **No backreferences** are used by any bundled grammar (and
+`fancy-regex` would support them if needed). Measured cost (`cargo bench --bench
+redos`): both shipped lookaround terminals stay **linear** — `fancy-regex` runs their
+ambiguous bodies on the linear engine and only backtracks around the fixed leading
+assertion, so there is no ReDoS; `STRING` carries only a constant-factor tax. One
+terminal — `common.lark`'s `ESCAPED_STRING` — keeps its hand-written lookaround-free
+adaptation (it's the hottest terminal in the library and already linear on the pure
+`regex` engine); it is the single standing exception to "verbatim upstream."
 
 ---
 
@@ -364,9 +377,15 @@ wild rely on these. Document as a known parity gap when adding Phase-3 grammar l
 
 All open tasks are tracked as GitHub issues. #39 (`%import` file paths), #45
 (`%declare`), #41 (Indenter/postlex, basic lexer), #67 (postlex over the
-contextual lexer), and #35 (strict regex-collision) are ✅ done. Current priority
-order for the remaining Phase 3: #32 (Earley XFAIL burndown) → #40 (grammar
-stdlib) → #43 (error recovery) → #42 (standalone parser) → #44 (CYK).
+contextual lexer), #35 (strict regex-collision), and #40 (grammar stdlib) are
+✅ done. Current priority order for the remaining Phase 3: #32 (Earley XFAIL
+burndown) → #43 (error recovery) → #42 (standalone parser) → #44 (CYK).
+
+Note for #42 (standalone): the standalone generator emits a pure-`regex` parser, so
+a grammar with lookaround terminals (the bundled `python`/`lark`) is not yet
+standalone-able — `fancy-regex` routing lives only in the in-process lexer. Wiring it
+into the emitted runtime (or rewriting those terminals onto `regex`) is follow-up
+work for that issue.
 
 Deferred until specialist work is available: #33 (de-recurse forest walk,
 profiler-gated).
