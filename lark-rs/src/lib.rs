@@ -77,8 +77,9 @@ pub struct LarkOptions {
     /// Directory that relative `%import .module (...)` (and other non-`common`
     /// file imports) resolve against. Mirrors the base path Python Lark derives
     /// from the importing grammar's file. `None` (the default) means file imports
-    /// cannot be resolved — only the bundled `common` library is available, as
-    /// when a grammar is built from an in-memory string with no source location.
+    /// cannot be resolved — only the bundled libraries (`common`, `python`,
+    /// `unicode`, `lark`) are available, as when a grammar is built from an
+    /// in-memory string with no source location.
     pub base_path: Option<std::path::PathBuf>,
     /// Post-lexer hook applied to the token stream before it reaches the parser.
     /// Currently an [`Indenter`], which injects `%declare`d `INDENT` / `DEDENT`
