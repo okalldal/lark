@@ -472,6 +472,67 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "KNOWN GAP (reproduces): python.lark rejects star-params after a \
+                positional in a def header; run with --ignored to see it fail"]
+    fn test_python_lark_star_param_after_positional() {
+        // Pre-existing LALR gap surfaced while swapping the cross-engine bench to
+        // the real `python.lark` (issue #79): a `def`/lambda parameter list with a
+        // positional parameter *before* a star-param — `def f(a, *b)` /
+        // `def f(a, **b)` — is rejected by lark-rs, although Python Lark 1.3.1
+        // accepts it (verified: `lalr`, `contextual`, `PythonIndenter`). The error
+        // is `UnexpectedToken { token: "*", expected: [NAME, MATCH, CASE, SLASH] }`
+        // — the state reached after `paramvalue ("," paramvalue)* ","` is missing
+        // the `["," [starparams | kwparams]]` branch's FIRST (`*`/`**`).
+        //
+        // It is *not* the `parameters` rule shape in isolation (a minimal grammar
+        // with the same `A ("," A)* ["," SLASH ...] ["," [B]]` skeleton parses
+        // fine in lark-rs); the trigger is some interaction in the full grammar —
+        // likely the `name`/`typedparam` rule indirection and/or the EBNF
+        // helper-dedup (#98) merging states such that this lookahead is dropped.
+        //
+        // Star-params with *no* preceding positional (`def f(*b)`, the second
+        // `parameters` alternative) and call-site unpacking (`f(a, *b, **c)`) both
+        // parse — so the cross-engine bench's `gen_python` works around this by
+        // exercising def-site `*args`/`**kwargs` only on a no-positional top-level
+        // function. This test asserts the *correct* (Python-Lark) behaviour, so it
+        // fails today; it is `#[ignore]`d to keep CI green and should flip to
+        // passing (drop the `#[ignore]`) once the gap is fixed.
+        let src = include_str!("grammars/python.lark");
+        let l = Lark::new(
+            src,
+            LarkOptions {
+                parser: ParserAlgorithm::Lalr,
+                lexer: LexerType::Contextual,
+                start: vec!["file_input".to_string()],
+                maybe_placeholders: true,
+                postlex: Some(Indenter {
+                    nl_type: "_NEWLINE".to_string(),
+                    open_paren_types: vec!["LPAR".into(), "LSQB".into(), "LBRACE".into()],
+                    close_paren_types: vec!["RPAR".into(), "RSQB".into(), "RBRACE".into()],
+                    indent_type: "_INDENT".to_string(),
+                    dedent_type: "_DEDENT".to_string(),
+                    tab_len: 8,
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("python.lark must build under LALR");
+        // Forms that already parse (no positional before the star) — the contrast.
+        for ok in ["def f(*b): pass\n", "def f(**b): pass\n"] {
+            assert!(l.parse(ok).is_ok(), "expected {ok:?} to parse");
+        }
+        // The gap: a positional parameter before the star-param. Python Lark
+        // accepts both; lark-rs rejects both today.
+        for inp in ["def f(a, *b): pass\n", "def f(a, **b): pass\n"] {
+            assert!(
+                l.parse(inp).is_ok(),
+                "python.lark must parse {inp:?} (Python Lark does), got {:?}",
+                l.parse(inp).err()
+            );
+        }
+    }
+
+    #[test]
     fn test_named_keyword_terminal_retypes_over_identifier() {
         // A named terminal defined as a single case-sensitive string literal
         // (`ASYNC: "async"`) must compile to `Pattern::Str`, like an inline literal
