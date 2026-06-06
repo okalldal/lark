@@ -4,6 +4,7 @@ pub mod lexer;
 pub mod parsers;
 pub mod perf;
 pub mod postlex;
+pub mod standalone;
 pub mod tree;
 
 pub use error::{GrammarError, LarkError, ParseError};
@@ -19,6 +20,7 @@ pub use parsers::{
     basic_lexer_conf, lalr, EarleyParser, LexFailure, ParseTable, ParserConf, TokenSource,
 };
 pub use postlex::Indenter;
+pub use standalone::generate as generate_standalone;
 pub use tree::{Child, ParseTree, Token, Tree};
 
 /// Main entry point — mirrors Python's `Lark(grammar, parser=..., lexer=...)`
