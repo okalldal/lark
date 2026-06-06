@@ -256,6 +256,63 @@ mod tests {
     }
 
     #[test]
+    fn test_shared_star_wrapper_matches_oracle() {
+        // The dedup shares the *nullable* `x*` wrapper (`__star: __plus | ε`) — a
+        // rule Python Lark does not have (it distributes `x*` into each parent via
+        // SimplifyRule). Sharing it is *forced*, not chosen: once the group and its
+        // `__plus` recurse core are shared, two `(NAME ";")*` wrappers are
+        // byte-identical, and here both are followed by the same `","`, so without
+        // the merge they collide as an unresolvable reduce/reduce (the exact
+        // python.lark failure — `__anon_star -> ε` twice on one lookahead). So this
+        // grammar does not even build unless the wrapper is shared, making it a live
+        // guard that Star-sharing stays. It then pins that the merge does NOT
+        // reintroduce the follow-set-union leak we avoid for `?`/`[...]`: "p"/"q"
+        // both lex as NAME, so distinguishing `a` from `b` after the shared loop is
+        // pure contextual narrowing. Every accept/reject/tree below is byte-identical
+        // to Python Lark 1.3.1 (`parser='lalr', lexer='contextual'`).
+        let src = "start: a | b\n\
+                   a: (NAME \";\")* \",\" \"p\"\n\
+                   b: (NAME \";\")* \",\" \"q\"\n\
+                   NAME: /[a-z]+/\n\
+                   %ignore \" \"\n";
+        let l = Lark::new(
+            src,
+            LarkOptions {
+                parser: ParserAlgorithm::Lalr,
+                lexer: LexerType::Contextual,
+                start: vec!["start".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("shared-wrapper grammar must build: identical wrappers merge, no R/R");
+
+        // The alternative `start` reduced to ("a" or "b"), or None if parse failed.
+        let alt = |inp: &str| -> Option<String> {
+            match l.parse(inp).ok()? {
+                ParseTree::Tree(t) => match t.children.first()? {
+                    Child::Tree(c) => Some(c.data.clone()),
+                    _ => None,
+                },
+                _ => None,
+            }
+        };
+
+        // Correct narrowing through the shared loop: the final "p"/"q" selects the
+        // parent (incl. the zero-item case), and the NAME items land in the tree.
+        assert_eq!(alt(", p").as_deref(), Some("a"));
+        assert_eq!(alt("x ; , p").as_deref(), Some("a"));
+        assert_eq!(alt(", q").as_deref(), Some("b"));
+        assert_eq!(alt("x ; y ; , q").as_deref(), Some("b"));
+        // Anti-leak: after the shared loop and its `,`, only "p"/"q" are valid — the
+        // contextual lexer must not also admit NAME there (a follow-set over-merge
+        // would). Python rejects `, x`; so must we.
+        assert!(
+            l.parse(", x").is_err(),
+            "NAME must not be admitted after the ','"
+        );
+    }
+
+    #[test]
     #[ignore = "slow (~18s debug): builds python.lark's full LALR table; run with --ignored"]
     fn test_python_lark_builds_under_lalr() {
         // End-to-end witness for the EBNF-helper dedup: upstream `python.lark` has

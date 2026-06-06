@@ -1532,27 +1532,45 @@ impl GrammarCompiler {
         kind: HelperKind,
         alts: Vec<(Vec<Symbol>, Option<String>)>,
     ) -> Symbol {
-        // Share exactly what Python Lark's `rules_cache` shares — no more. Python
-        // caches the `*`/`+` *recurse core* (keyed on the inner expression) but
-        // *inlines* `?` and `[...]` into each parent, never giving them a shared
-        // rule. We mirror that split:
+        // What to share is anchored to Python Lark's `rules_cache`, but with one
+        // structural caveat worth stating precisely. Python caches only the
+        // *non-nullable* recurse core (`_c: _c c | c`, keyed on the inner
+        // expression) — shared by both `+` and `*` — and has *no* nullable `*`
+        // rule at all: `SimplifyRule_Visitor` distributes `c*`'s empty case into
+        // each parent (`a: b c* d` → `_c: _c c | c` + `a: b _c d | b d`). lark-rs
+        // instead lowers `x*` to a nullable wrapper `__star: __plus | ε` over that
+        // same core, so what we cache is not a verbatim mirror of `rules_cache`:
         //
-        //   * `Group` / `Star` — share. A shared `(",", X)` group lets its
-        //     `+`-recurse helper share in turn (keyed on that one inner symbol),
-        //     and the `*` wrapper shares directly; this is what collapses
-        //     `python.lark`'s many `(",", X)*` patterns from duplicate, colliding
-        //     nullable helpers into one LALR-parseable rule.
+        //   * `Group` / `Star` — share. Sharing the `(",", X)` group lets the
+        //     pre-existing `recurse_cache` share its `+`-recurse `__plus` in turn
+        //     (keyed on that one inner symbol). That makes every `(",", X)*`
+        //     wrapper *byte-identical* (`__plus | ε`), and two identical nullable
+        //     wrappers collide as an unresolvable reduce/reduce the moment two of
+        //     them reduce on the *same* lookahead in a common state (witnessed on
+        //     `python.lark`: state 716, `__anon_star_102 -> ε` vs
+        //     `__anon_star_106 -> ε` on COMMA). Sharing the wrapper *resolves* that
+        //     collision by recognizing the two rules are one rule — it is forced by
+        //     the shared core, not a free choice. It does not over-narrow: the
+        //     collision is the proof the parser already cannot tell the wrappers
+        //     apart (they merge via the shared `__plus`, exactly as Python's shared
+        //     `_c` merges its parents' contexts), so unifying them widens no state's
+        //     contextual scanner. Pinned against the oracle by
+        //     `test_shared_star_wrapper_matches_oracle`: a grammar whose two
+        //     `(NAME ";")*` wrappers *do* collide without sharing parses, rejects,
+        //     and narrows byte-for-byte like Python Lark.
         //   * `Opt` / `Maybe` / `GroupOptional` — do *not* share. These are the
-        //     `?`/`[...]` helpers Python inlines. Sharing a *nullable* helper
-        //     across two parents unions their follow-sets, and the contextual
-        //     lexer derives each state's terminal set from exactly those follows —
-        //     so an over-merge silently widens a state's scanner and breaks
-        //     state-narrowing (it makes `csv.lark`'s `header` start trying `row`'s
-        //     terminals, picking the higher-priority `NON_SEPARATOR_STRING` over
-        //     `WORD`). Leaving them per-parent keeps lark-rs byte-identical to the
-        //     oracle, which never shares them either. (Sharing the `*` core is *not*
-        //     a divergence: Python shares it too, so both engines reject the same
-        //     contextual-lexer-ambiguous `x*` grammars identically.)
+        //     `?`/`[...]` helpers Python inlines into parents. Unlike the `*`
+        //     wrapper there is no pre-shared core forcing their states together, so
+        //     sharing one *forces* a merge LALR would otherwise keep separate —
+        //     unioning two parents' follow-sets into a contextual scanner that LALR
+        //     never actually merges, silently widening it (it made `csv.lark`'s
+        //     `header` start trying `row`'s terminals, picking the higher-priority
+        //     `NON_SEPARATOR_STRING` over `WORD`). Leaving them per-parent keeps
+        //     lark-rs byte-identical to the oracle, which never shares them either.
+        //
+        // The principled convergence is to drop the wrapper and distribute `*`/`?`
+        // into parents as Python does (tracked as #97); until then, sharing the
+        // forced-identical `*` wrapper is sound and is what lets `python.lark` build.
         let cacheable = matches!(kind, HelperKind::Group | HelperKind::Star);
         let key: HelperKey = (kind.clone(), self.current_keep_all, alts.clone());
         if cacheable {
