@@ -629,6 +629,70 @@ def save_oracle(suite, name, data):
     print(f"  wrote {path.relative_to(LARK_RS_DIR)}")
 
 
+# ─── Error recovery (Phase 3, issue #43) ─────────────────────────────────────
+#
+# lark-rs's panic-mode recovery is single-token-deletion: on a token the parser
+# can't act on, delete that token and resume in the same state. That is *exactly*
+# Python Lark's built-in recovery driver, reached by passing `on_error=lambda e:
+# True` to `parse()` (see `LALR_Parser.parse`): each `UnexpectedToken` is recovered
+# from by `interactive_parser.resume_parse()`, which has already pulled the bad
+# token off the lexer — so it is effectively deleted and the parse continues. We
+# capture, for each input, the tree Python recovers to and how many times the
+# handler fired (= number of deleted tokens), and the Rust test asserts byte-for-
+# byte tree parity plus the same error count.
+#
+# A premature-EOF error ($END with no action) is the one case Python's loop cannot
+# fix — its infinite-loop guard re-raises. We record `recovered=false` there;
+# lark-rs intentionally returns a best-effort partial tree instead of aborting
+# (the issue's "produce a partial tree on failure"), so the Rust test only checks
+# that it recovered (non-empty errors), not the tree shape.
+
+RECOVERY_CASES = [
+    "1 + 2",          # clean parse, no recovery
+    "1 + + 2",        # stray '+' where a NUMBER is expected -> delete it
+    "1 + + + 2",      # two stray '+' -> two deletions
+    "1 1 + 2",        # stray NUMBER after a complete sum -> delete it
+    "+ 1 + 2",        # leading '+' -> delete it
+    "1 + 2 3 + 4",    # stray NUMBER mid-stream -> delete it
+    "1 + 2 +",        # trailing '+' -> premature EOF, Python re-raises
+]
+
+
+def generate_recovery():
+    print("Generating error-recovery oracles...")
+    grammar = load_grammar("recovery")
+    results = []
+    for inp in RECOVERY_CASES:
+        # `lexer='basic'` so the token stream is the global one — the same stream
+        # lark-rs's recovery lexes. (For this grammar the contextual lexer yields
+        # an identical stream via its root-lexer fallback, so the choice is moot,
+        # but 'basic' makes the parity explicit.)
+        lark = Lark(grammar, parser="lalr", lexer="basic", start="start",
+                    maybe_placeholders=False)
+        count = {"n": 0}
+
+        def on_error(e):
+            count["n"] += 1
+            return True  # delete the offending token and keep going
+
+        try:
+            tree = lark.parse(inp, on_error=on_error)
+            results.append({
+                "input": inp,
+                "recovered": True,
+                "error_count": count["n"],
+                "tree": tree_to_dict(tree),
+            })
+        except Exception:
+            results.append({
+                "input": inp,
+                "recovered": False,
+                "error_count": count["n"],
+                "tree": None,
+            })
+    save_oracle("recovery", "cases", results)
+
+
 def generate_arithmetic():
     print("Generating arithmetic oracles...")
     grammar = load_grammar("arithmetic")
@@ -1132,6 +1196,7 @@ if __name__ == "__main__":
     generate_indenter()
     generate_python_numbers()
     generate_lalr_core()
+    generate_recovery()
     generate_earley()
     generate_earley_dynamic()
     generate_fuzz_corpus()

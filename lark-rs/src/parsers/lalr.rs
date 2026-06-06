@@ -20,7 +20,7 @@ use crate::error::{GrammarError, ParseError};
 use crate::grammar::analysis::GrammarAnalysis;
 use crate::grammar::intern::{CompiledGrammar, CompiledRule, SymbolId, SymbolTable};
 use crate::lexer::ContextualLexer;
-use crate::tree::{ParseTree, Token};
+use crate::tree::{Child, ParseTree, Token, Tree};
 
 use super::token_source::{
     postlex_contextual_source, Contextual, LexFailure, PreLexed, SourceError, TokenSource,
@@ -719,6 +719,137 @@ impl LalrParser {
             col: f.col,
             expected: self.expected_at(state),
         }
+    }
+
+    // ─── Panic-mode error recovery (issue #43) ───────────────────────────────
+    //
+    // Single-token-deletion recovery: when the current state has no action for the
+    // lookahead, record the error, ask `on_error` whether to continue, and if so
+    // *delete* that token and resume in the same state. This is a token-for-token
+    // port of Python Lark's built-in recovery loop (`LALR_Parser.parse` with an
+    // `on_error` callback that returns `True`): each `UnexpectedToken` is recovered
+    // from by `interactive_parser.resume_parse()`, which has already pulled the bad
+    // token off the lexer, so the net effect is "drop the token and carry on" — with
+    // the same parse tables, the surviving stream therefore builds the same tree.
+    //
+    // Termination: every iteration either shifts, reduces (toward ACCEPT), deletes a
+    // token, or stops — and a deletion strictly advances the source toward `$END`,
+    // so the loop cannot spin. A `$END` error can't be deleted (there's nothing
+    // after it); Python re-raises there, we return a best-effort partial instead.
+
+    /// Drive the state machine with recovery. Mirrors [`run`](Self::run) but, on a
+    /// token with no action, deletes it and continues (subject to `on_error`).
+    /// Every recovered error is pushed to `errors`. Returns the finished tree on
+    /// ACCEPT, or a best-effort partial tree when recovery cannot reach ACCEPT.
+    fn run_recovering<S: TokenSource>(
+        &self,
+        source: &mut S,
+        start: Option<&str>,
+        on_error: &mut dyn FnMut(&ParseError) -> bool,
+        errors: &mut Vec<ParseError>,
+    ) -> Result<ParseTree, ParseError> {
+        let mut state_stack: Vec<usize> = vec![self.initial_state(start)?];
+        let mut value_stack: Vec<NodeValue> = Vec::new();
+
+        loop {
+            let state = *state_stack.last().unwrap();
+            let token = match source.peek(state) {
+                Ok(tok) => tok,
+                // Lexer-level (character) recovery is a follow-up; a genuinely
+                // un-lexable position is still a hard error.
+                Err(SourceError::Lex(failure)) => return Err(self.lex_failure(state, failure)),
+                Err(SourceError::Postlex(e)) => return Err(e),
+            };
+
+            match self.table.action_at(state, token.type_id).copied() {
+                Some(Action::Shift(next_state)) => {
+                    source.advance();
+                    state_stack.push(next_state);
+                    value_stack.push(NodeValue::Token(token));
+                }
+                Some(Action::Reduce(rule_idx)) => {
+                    self.reduce(rule_idx, &mut state_stack, &mut value_stack, &token)?;
+                }
+                Some(Action::Accept) => return Self::accept(&mut value_stack),
+                None => {
+                    let err = self.unexpected(state, &token);
+                    // Consult the handler for every error (as Python Lark does),
+                    // then record it. `$END` can't be deleted — there's nothing
+                    // after it — so stop regardless of the handler's answer, where
+                    // a normal token is deleted only if the handler agrees.
+                    let cont = on_error(&err);
+                    errors.push(err);
+                    if token.type_id == SymbolId::END || !cont {
+                        return Ok(self.synthesize_partial(start, value_stack));
+                    }
+                    source.advance(); // delete the offending token, retry in same state
+                }
+            }
+        }
+    }
+
+    /// Wrap whatever fragments remain on the value stack into a best-effort partial
+    /// tree, used when recovery cannot reach a normal ACCEPT. Not a real derivation
+    /// — a scaffold for editor tooling; the [`RecoveredTree::errors`] list is the
+    /// authoritative record of what went wrong.
+    ///
+    /// [`RecoveredTree::errors`]: crate::error::RecoveredTree::errors
+    fn synthesize_partial(&self, start: Option<&str>, value_stack: Vec<NodeValue>) -> ParseTree {
+        let mut children: Vec<Child> = Vec::new();
+        for value in value_stack {
+            match value {
+                NodeValue::Token(t) => children.push(Child::Token(t)),
+                NodeValue::Tree(t) => children.push(Child::Tree(t)),
+                NodeValue::Inline(cs) => children.extend(cs),
+            }
+        }
+        // A lone fragment needs no synthetic wrapper.
+        if children.len() == 1 {
+            return match children.pop().unwrap() {
+                Child::Tree(t) => ParseTree::Tree(t),
+                Child::Token(t) => ParseTree::Token(t),
+                Child::None => ParseTree::Tree(Tree::new(self.start_name(start), Vec::new())),
+            };
+        }
+        ParseTree::Tree(Tree::new(self.start_name(start), children))
+    }
+
+    /// The name to label a synthesized partial root with: the requested start
+    /// symbol, or the first registered start symbol when none was named.
+    fn start_name(&self, start: Option<&str>) -> String {
+        if let Some(name) = start {
+            return name.to_string();
+        }
+        self.table
+            .start_states
+            .keys()
+            .next()
+            .map(|id| self.table.symbols.name(*id).to_string())
+            .unwrap_or_else(|| "start".to_string())
+    }
+
+    /// Recovering parse over a pre-tokenized sequence (basic lexer). See
+    /// [`run_recovering`](Self::run_recovering).
+    pub fn parse_recovering(
+        &self,
+        tokens: Vec<Token>,
+        start: Option<&str>,
+        on_error: &mut dyn FnMut(&ParseError) -> bool,
+        errors: &mut Vec<ParseError>,
+    ) -> Result<ParseTree, ParseError> {
+        self.run_recovering(&mut PreLexed::new(tokens), start, on_error, errors)
+    }
+
+    /// Recovering parse over the contextual lexer.
+    pub fn parse_contextual_recovering(
+        &self,
+        text: &str,
+        lexer: &ContextualLexer,
+        start: Option<&str>,
+        on_error: &mut dyn FnMut(&ParseError) -> bool,
+        errors: &mut Vec<ParseError>,
+    ) -> Result<ParseTree, ParseError> {
+        self.run_recovering(&mut Contextual::new(text, lexer), start, on_error, errors)
     }
 
     /// Parse a pre-tokenized sequence (basic lexer).
