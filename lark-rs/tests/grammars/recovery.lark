@@ -1,0 +1,13 @@
+// Grammar used by the error-recovery oracle tests (issue #43).
+//
+// A small left-recursive sum grammar: every token (`NUMBER`, `+`) is globally
+// lexable, so a grammatically-misplaced token (e.g. a stray `+` where a NUMBER
+// is expected) surfaces as a token-level parse error the recovery loop can delete
+// — exactly the panic-mode single-token-deletion path, and exactly what Python
+// Lark's `on_error=lambda e: True` does.
+start: sum
+?sum: product
+    | sum "+" product   -> add
+?product: NUMBER
+NUMBER: /[0-9]+/
+%ignore " "

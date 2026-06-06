@@ -10,7 +10,7 @@ pub use lalr::{build_lalr_table, LalrParser, ParseTable};
 pub use token_source::{Contextual, LexFailure, PreLexed, TokenSource};
 pub use tree_builder::{NodeValue, TreeBuilder};
 
-use crate::error::{LarkError, ParseError};
+use crate::error::{LarkError, ParseError, RecoveredTree};
 use crate::grammar::intern::SymbolTable;
 use crate::grammar::{CompiledGrammar, Grammar};
 use crate::lexer::{
@@ -52,6 +52,12 @@ pub struct ParserConf {
 /// A unified frontend that wires together a lexer and a parser.
 pub struct ParsingFrontend {
     kind: FrontendKind,
+    /// A basic (global) lexer kept for error recovery (issue #43). Recovery lexes
+    /// with the full terminal set so an out-of-context-but-valid token becomes a
+    /// deletable token rather than a lexer error — mirroring Python Lark's
+    /// contextual-lexer root fallback during recovery. `Some` only for the LALR
+    /// backend without a postlex hook (the configurations recovery supports).
+    recovery_lexer: Option<BasicLexer>,
 }
 
 enum FrontendKind {
@@ -154,6 +160,48 @@ impl ParsingFrontend {
             }
         }
     }
+
+    /// The LALR parser behind this frontend, if any (every LALR kind carries one).
+    fn lalr_parser(&self) -> Option<&LalrParser> {
+        match &self.kind {
+            FrontendKind::LalrBasic { parser, .. }
+            | FrontendKind::LalrContextual { parser, .. }
+            | FrontendKind::LalrPostlex { parser, .. }
+            | FrontendKind::LalrContextualPostlex { parser, .. } => Some(parser),
+            FrontendKind::Earley { .. }
+            | FrontendKind::EarleyDynamic { .. }
+            | FrontendKind::Cyk { .. } => None,
+        }
+    }
+
+    /// Parse with panic-mode error recovery (issue #43). On a token the parser
+    /// can't act on, `on_error` is consulted; returning `true` deletes that token
+    /// and resumes (single-token-deletion recovery, identical to Python Lark's
+    /// `on_error` driver), `false` stops with the partial tree built so far.
+    ///
+    /// Only the LALR backend without a postlex hook supports recovery; other
+    /// configurations return a [`GrammarError::Other`]. Lexing uses the basic
+    /// (global) lexer so out-of-context-but-valid tokens are deletable tokens
+    /// rather than lexer errors. A genuinely un-lexable character is still a hard
+    /// error (character-level recovery is a follow-up).
+    ///
+    /// [`GrammarError::Other`]: crate::error::GrammarError::Other
+    pub fn parse_recovering(
+        &self,
+        text: &str,
+        start: Option<&str>,
+        on_error: &mut dyn FnMut(&ParseError) -> bool,
+    ) -> Result<RecoveredTree, LarkError> {
+        let (Some(parser), Some(lexer)) = (self.lalr_parser(), self.recovery_lexer.as_ref()) else {
+            return Err(LarkError::Grammar(crate::error::GrammarError::Other {
+                msg: "error recovery requires parser='lalr' without a postlex hook".to_string(),
+            }));
+        };
+        let tokens = lexer.lex(text)?;
+        let mut errors = Vec::new();
+        let tree = parser.parse_recovering(tokens, start, on_error, &mut errors)?;
+        Ok(RecoveredTree { tree, errors })
+    }
 }
 
 pub fn build_frontend(
@@ -218,6 +266,9 @@ pub fn build_frontend(
                                 postlex: postlex.clone(),
                                 symbols: cg.symbols.clone(),
                             },
+                            // Recovery + postlex is not yet supported (the indenter
+                            // injects synthetic tokens deletion could desync).
+                            recovery_lexer: None,
                         });
                     }
                     // Basic lexer (and any other explicit choice): materialize the
@@ -231,6 +282,7 @@ pub fn build_frontend(
                                 postlex: postlex.clone(),
                                 symbols: cg.symbols.clone(),
                             },
+                            recovery_lexer: None,
                         });
                     }
                 }
@@ -252,7 +304,14 @@ pub fn build_frontend(
                     FrontendKind::LalrBasic { parser, lexer }
                 }
             };
-            Ok(ParsingFrontend { kind })
+            // Keep a basic lexer for error recovery (issue #43). Building it can't
+            // fail here — the same construction already succeeded above for the
+            // basic-lexer path, and zero-width/collision checks ran earlier.
+            let recovery_lexer = BasicLexer::new(&lexer_conf).ok();
+            Ok(ParsingFrontend {
+                kind,
+                recovery_lexer,
+            })
         }
         ParserAlgorithm::Earley => {
             // Earley never uses the contextual lexer (it narrows terminals by LALR
@@ -300,7 +359,10 @@ pub fn build_frontend(
                     }
                 }
             };
-            Ok(ParsingFrontend { kind })
+            Ok(ParsingFrontend {
+                kind,
+                recovery_lexer: None,
+            })
         }
         ParserAlgorithm::Cyk => {
             // CYK uses the basic lexer (it has no parser-state-driven lexer, like
@@ -317,6 +379,7 @@ pub fn build_frontend(
             let parser = CykParser::new(cg)?;
             Ok(ParsingFrontend {
                 kind: FrontendKind::Cyk { parser, lexer },
+                recovery_lexer: None,
             })
         }
     }
