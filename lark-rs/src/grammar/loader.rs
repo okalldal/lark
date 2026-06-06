@@ -2483,6 +2483,35 @@ impl GrammarCompiler {
             self.terminals.push(TerminalDef::new(&name, pat, 0));
         }
 
+        // Reject use-before-definition: a rule body that references a symbol which
+        // is neither a defined rule nor a defined terminal is a grammar error, as in
+        // Python Lark (`GrammarError("Rule 'X' used but not defined")`). We check
+        // *before* pruning so the full terminal set is visible. Template parameters
+        // never reach here — templates are instantiated on demand and only their
+        // (fully substituted) instances live in `self.rules` — and anonymous literal
+        // terminals are interned as they are compiled, so they are always defined.
+        let defined_rules: std::collections::HashSet<&str> =
+            self.rules.iter().map(|r| r.origin.name.as_str()).collect();
+        let defined_terms: std::collections::HashSet<&str> =
+            self.terminals.iter().map(|t| t.name.as_str()).collect();
+        for rule in &self.rules {
+            for sym in &rule.expansion {
+                match sym {
+                    Symbol::NonTerminal(nt) if !defined_rules.contains(nt.name.as_str()) => {
+                        return Err(GrammarError::UndefinedRule {
+                            name: nt.name.clone(),
+                        });
+                    }
+                    Symbol::Terminal(t) if !defined_terms.contains(t.name.as_str()) => {
+                        return Err(GrammarError::UndefinedTerminal {
+                            name: t.name.clone(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+
         // Prune terminals that no rule (or `%ignore`) references. A terminal used
         // only inside another terminal (`C: "C" | D` — `D` is inlined into `C`)
         // has no token of its own, exactly as Python Lark drops it. Terminals
