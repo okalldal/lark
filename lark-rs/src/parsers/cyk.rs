@@ -224,6 +224,10 @@ impl CykParser {
                     let right = &trees[p][j];
                     for (lhs_a, cell_a) in left {
                         for (lhs_b, cell_b) in right {
+                            // One table-fill combination step. Summed over all
+                            // spans/splits this is the `O(n³ · |grammar|)` DP cost
+                            // the scaling gate (`tests/test_cyk_scaling.rs`) pins.
+                            crate::perf::add_cyk_table_steps(1);
                             let key = (lhs_a.clone(), lhs_b.clone());
                             let Some(rule_ids) = self.cnf.nonterminal_rules.get(&key) else {
                                 continue;

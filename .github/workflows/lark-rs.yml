@@ -55,6 +55,12 @@ jobs:
       - name: Earley scaling gate (perf-counters)
         run: cargo test --features perf-counters --test test_earley_scaling
 
+      # CYK scaling gate (#87). CYK is O(n³·|grammar|); this keys on the
+      # cyk_table_steps work counter and asserts a cubic envelope (flat per n³),
+      # catching a complexity regression in the CNF conversion or DP.
+      - name: CYK scaling gate (perf-counters)
+        run: cargo test --features perf-counters --test test_cyk_scaling
+
       # The oracle JSON is generated from Python Lark and committed so Rust tests
       # run without Python. This gate proves the generators are deterministic and
       # that the committed oracles are in sync with the current Python Lark.

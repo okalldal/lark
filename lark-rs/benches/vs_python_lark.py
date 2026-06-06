@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Time Python Lark on the cross-engine workloads (JSON / Python / SQL).
+"""Time Python Lark on the cross-engine workloads (JSON / Python / SQL / NL-CYK).
 
 This is the Python half of the Phase-4 cross-engine comparison (issue #50). The
 Rust bench `cargo bench --bench vs_python_lark` drives it: it generates the three
@@ -147,6 +147,28 @@ COMMENT: /--[^\n]*/
 %ignore COMMENT
 """
 
+# A small ambiguous natural-language grammar (PP-attachment + coordination) — the
+# realistic CYK/CKY use case. Byte-identical to NL_GRAMMAR in vs_python_lark.rs.
+NL_GRAMMAR = r"""
+start: s
+?s: np vp
+?np: nominal
+   | np pp
+   | np "and" np
+nominal: DET NOUN | NOUN | ADJ nominal
+?vp: VERB np
+   | vp pp
+   | VERB
+pp: PREP np
+DET:  "the" | "a" | "an"
+ADJ:  "big" | "small" | "red" | "old"
+NOUN: "man" | "dog" | "park" | "telescope" | "boy" | "hill" | "girl" | "cat"
+VERB: "saw" | "watched" | "found" | "liked"
+PREP: "in" | "with" | "on" | "near" | "by"
+%import common.WS
+%ignore WS
+"""
+
 
 class PyIndenter(Indenter):
     NL_type = "_NL"
@@ -214,6 +236,13 @@ def gen_sql(statements):
     return "\n".join(out) + "\n"
 
 
+def gen_nl(pps):
+    # One ambiguous sentence with `pps` trailing PPs. Mirrors gen_nl in
+    # vs_python_lark.rs byte-for-byte. Short on purpose — CYK is O(n³).
+    phrases = ["in the park", "with the telescope", "on the hill", "near the boy", "by the girl"]
+    return "the man saw the dog" + "".join(" " + phrases[i % len(phrases)] for i in range(pps))
+
+
 # ---------------------------------------------------------------------------
 # Timing — mirrors the Rust harness (calibrate, then min/median over samples).
 # ---------------------------------------------------------------------------
@@ -239,19 +268,22 @@ def measure(fn):
     return samples[0], samples[len(samples) // 2]
 
 
-GRAMMARS = {"json": JSON_GRAMMAR, "python": PY_GRAMMAR, "sql": SQL_GRAMMAR}
+GRAMMARS = {"json": JSON_GRAMMAR, "python": PY_GRAMMAR, "sql": SQL_GRAMMAR, "nl": NL_GRAMMAR}
 
 # (algo, workload, lexer, postlex) — mirrored in benches/vs_python_lark.rs.
-# LALR + contextual on all three; Earley on the two workloads it can run
+# LALR + contextual on JSON/Python/SQL; Earley on the two workloads it can run
 # cross-engine (JSON/basic, SQL/dynamic). Python has no Earley row: postlex is
 # incompatible with the dynamic lexer, and the basic lexer can't drive the
-# Indenter the way the workload needs — see the .rs module header.
+# Indenter the way the workload needs — see the .rs module header. CYK runs the
+# NL workload (the one genuinely ambiguous grammar that needs a general-CFG
+# engine), bounded to a short sentence since CYK is O(n³).
 CONFIGS = [
     ("lalr", "json", "contextual", False),
     ("lalr", "python", "contextual", True),
     ("lalr", "sql", "contextual", False),
     ("earley", "json", "basic", False),
     ("earley", "sql", "dynamic", False),
+    ("cyk", "nl", "basic", False),
 ]
 
 
@@ -282,15 +314,17 @@ def main():
             "json": (d / "json.txt").read_text(),
             "python": (d / "python.txt").read_text(),
             "sql": (d / "sql.txt").read_text(),
+            "nl": (d / "nl.txt").read_text(),
         }
     else:
         inputs = {
             "json": gen_json(512, 5),
             "python": gen_python(220),
             "sql": gen_sql(700),
+            "nl": gen_nl(12),
         }
 
-    print(f"# Python Lark {lark.__version__} cross-engine workloads (JSON / Python / SQL)")
+    print(f"# Python Lark {lark.__version__} cross-engine workloads (JSON / Python / SQL / NL-CYK)")
     print("# columns: PYBENCH<TAB>algo<TAB>name<TAB>bytes<TAB>median_ns<TAB>min_ns<TAB>mb_per_s")
     print()
 
