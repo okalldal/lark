@@ -1002,6 +1002,138 @@ STDLIB_GROUPS = [
 ]
 
 
+# ─── Lowering-aware lookaround oracles (Lexer DFA / B1 plan) ─────────────────
+#
+# The lexer-DFA strategy (docs/LEXER_DFA_PLAN.md) retires `fancy-regex` by lowering
+# every bounded lookaround terminal onto the linear engine. These oracles are the
+# behavioral gate that lowering must reproduce — they PASS against today's
+# `fancy-regex` lexer and lock its semantics so the B1 rewrite (PR 2/3) cannot
+# silently diverge. Each of the four boundary-assertion forms (§4.2) gets a minimal,
+# isolated grammar, plus the two `g_regex_flags`/inline-flag risks §6 calls out:
+#
+#   * trailing `(?!)` — *length-changing*: a greedy `a+` forced to a SHORTER match
+#     by the trailing negative lookahead (`"aaab"` → `A="aa"`, not `"aaa"`). This is
+#     the case the bundled terminals do NOT exercise (their longest match trivially
+#     wins) — exactly the "longest end whose boundary assertion holds" rule (§4.2).
+#   * trailing `(?=)` — positive lookahead keeps the greedy run only where followed.
+#   * leading `(?<!)` — the even-backslash STRING-guard shape (`(?<!\\)(?:\\\\)*"`),
+#     isolated so the reversed-body lookbehind DFA (§6 reverse-DFA risk) has a
+#     dedicated adversarial oracle separate from the broader python_string parse.
+#   * leading `(?<=)` — positive lookbehind.
+#   * a `(?i:…)` inline flag INSIDE an assertion body, and a global
+#     `g_regex_flags=IGNORECASE` applied OVER an assertion — both must survive the
+#     front-end's strip/lower step (§6 flags risk).
+#
+# (name, grammar, [flag_name, ...], [(input, should_parse)])
+LOOKAROUND_GROUPS = [
+    ("trailing_neg_lookahead", r"""
+start: A B
+A: /a+(?!b)/
+B: /[ab]+/
+""", [], [
+        ("aaab", True),   # a+ backtracks to "aa" so (?!b) holds at the 3rd 'a'
+        ("aab", True),    # → A="a", B="ab"
+        ("ab", False),    # A can't match (a then 'b' fails (?!b), can't shrink)
+        ("aaa", False),   # A="aaa" consumes all, B starves
+    ]),
+    ("trailing_pos_lookahead", r"""
+start: A B
+A: /a+(?=b)/
+B: /b+/
+""", [], [
+        ("aaab", True),   # A="aaa" (followed by b), B="b"
+        ("ab", True),     # A="a", B="b"
+        ("aaabb", True),  # A="aaa", B="bb"
+        ("aaa", False),   # no 'b' → (?=b) never holds
+        ("b", False),     # A needs at least one 'a'
+    ]),
+    ("leading_neg_lookbehind", r"""
+start: items
+items: (BS | Q)+
+Q: /(?<!\\)(?:\\\\)*"/
+BS: /\\/
+""", [], [
+        (r'"', True),     # even (zero) backslashes → Q
+        (r'\\"', True),   # even (two) backslashes → Q matches \\"
+        (r'\"', False),   # odd (one) backslash escapes the quote → no Q for it
+    ]),
+    ("leading_pos_lookbehind", r"""
+start: AT C
+AT: /@/
+C: /(?<=@)[a-z]+/
+""", [], [
+        ("@abc", True),
+        ("abc", False),   # C requires a preceding '@'
+    ]),
+    ("inline_flag_in_assertion", r"""
+start: A REST
+A: /a+(?=(?i:END))/
+REST: /.+/
+""", [], [
+        ("aaaEND", True),
+        ("aaaend", True),  # (?i:) makes the lookahead case-insensitive
+        ("aaaEnd", True),
+        ("aaaxyz", False),
+    ]),
+    ("global_flag_over_assertion", r"""
+start: A B
+A: /a+(?!b)/
+B: /[ab]+/
+""", ["IGNORECASE"], [
+        ("AAAB", True),   # IGNORECASE reaches both a+ and (?!b): A="AA", B="AB"
+        ("aAbB", True),   # A="a" ('A' next is not 'b'/'B'), B="AbB"
+        ("aaa", False),
+    ]),
+]
+
+# Map the serialized flag names to Python `re` flags. The Rust replay maps the same
+# names to `lark_rs::grammar::terminal::flags` bits, so the two stay in lockstep.
+_RE_FLAGS = {
+    "IGNORECASE": __import__("re").IGNORECASE,
+    "MULTILINE": __import__("re").MULTILINE,
+    "DOTALL": __import__("re").DOTALL,
+    "VERBOSE": __import__("re").VERBOSE,
+}
+
+
+def generate_lookaround():
+    print("Generating lookaround lowering oracles (Lexer DFA / B1 gate)...")
+    groups = []
+    for name, grammar, flag_names, cases in LOOKAROUND_GROUPS:
+        g_flags = 0
+        for fn in flag_names:
+            g_flags |= _RE_FLAGS[fn]
+        built = []
+        for inp, should_parse in cases:
+            try:
+                lark = Lark(grammar, parser="lalr", lexer="contextual", start="start",
+                            maybe_placeholders=False, g_regex_flags=g_flags)
+                tree = lark.parse(inp)
+                ok, payload = True, tree_to_dict(tree)
+            except Exception as e:
+                ok, payload = False, str(e)
+            if should_parse and not ok:
+                print(f"  WARNING: {name} expected to parse {inp!r}: {payload}")
+            if not should_parse and ok:
+                print(f"  WARNING: {name} expected to reject {inp!r}")
+            built.append({
+                "input": inp,
+                "should_pass": should_parse,
+                "ok": ok,
+                "tree": payload if ok else None,
+                "error": payload if not ok else None,
+            })
+        groups.append({
+            "name": name,
+            "grammar": grammar,
+            "g_regex_flags": flag_names,
+            "cases": built,
+        })
+    save_oracle("lookaround", "cases", groups)
+    n_cases = sum(len(g["cases"]) for g in groups)
+    print(f"  {len(groups)} groups, {n_cases} cases")
+
+
 def generate_stdlib():
     print("Generating grammar standard-library oracles (python/unicode/lark)...")
     groups = []
@@ -1192,6 +1324,7 @@ if __name__ == "__main__":
     generate_terminal_refs()
     generate_common()
     generate_stdlib()
+    generate_lookaround()
     generate_imports()
     generate_indenter()
     generate_python_numbers()
