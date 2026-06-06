@@ -256,20 +256,19 @@ mod tests {
     }
 
     #[test]
-    fn test_shared_star_wrapper_matches_oracle() {
-        // The dedup shares the *nullable* `x*` wrapper (`__star: __plus | ε`) — a
-        // rule Python Lark does not have (it distributes `x*` into each parent via
-        // SimplifyRule). Sharing it is *forced*, not chosen: once the group and its
-        // `__plus` recurse core are shared, two `(NAME ";")*` wrappers are
-        // byte-identical, and here both are followed by the same `","`, so without
-        // the merge they collide as an unresolvable reduce/reduce (the exact
-        // python.lark failure — `__anon_star -> ε` twice on one lookahead). So this
-        // grammar does not even build unless the wrapper is shared, making it a live
-        // guard that Star-sharing stays. It then pins that the merge does NOT
-        // reintroduce the follow-set-union leak we avoid for `?`/`[...]`: "p"/"q"
-        // both lex as NAME, so distinguishing `a` from `b` after the shared loop is
-        // pure contextual narrowing. Every accept/reject/tree below is byte-identical
-        // to Python Lark 1.3.1 (`parser='lalr', lexer='contextual'`).
+    fn test_leading_star_distribution_matches_oracle() {
+        // Here `(NAME ";")*` is a *leading* repetition — it precedes `","` — so
+        // since #97 it is distributed into each parent (`a: __plus "," "p" | ","
+        // "p"`, sharing the `+`-recurse core `__plus`), exactly as Python Lark's
+        // `SimplifyRule`. That is what lets the grammar build: before distribution,
+        // the two `(NAME ";")*` nullable wrappers reduced `ε` on the same `","`
+        // lookahead in a common state — an unresolvable reduce/reduce (the python.lark
+        // failure). Distribution removes the wrapper entirely, so there is nothing to
+        // collide. The test then pins that the distributed form narrows correctly:
+        // "p"/"q" both lex as NAME, so distinguishing `a` from `b` after the shared
+        // `__plus` loop is pure contextual narrowing, and the absent (zero-item) case
+        // is the bare `"," "p"` alternative. Every accept/reject/tree below is
+        // byte-identical to Python Lark 1.3.1 (`parser='lalr', lexer='contextual'`).
         let src = "start: a | b\n\
                    a: (NAME \";\")* \",\" \"p\"\n\
                    b: (NAME \";\")* \",\" \"q\"\n\
@@ -284,7 +283,7 @@ mod tests {
                 ..Default::default()
             },
         )
-        .expect("shared-wrapper grammar must build: identical wrappers merge, no R/R");
+        .expect("leading `*` distributes into each parent, so the grammar builds (no R/R)");
 
         // The alternative `start` reduced to ("a" or "b"), or None if parse failed.
         let alt = |inp: &str| -> Option<String> {
@@ -310,6 +309,166 @@ mod tests {
             l.parse(", x").is_err(),
             "NAME must not be admitted after the ','"
         );
+    }
+
+    #[test]
+    fn test_leading_nullable_is_distributed() {
+        // #97: a *named nullable* EBNF helper (`X?`, `X*`, `[X]`) placed *before*
+        // further symbols hides those symbols from the LR(0) closure — the dot
+        // never advances past the helper until it ε-reduces, so the automaton
+        // mispredicts and a shift/reduce conflict against an independently-reached
+        // copy of the hidden path silently drops it. Here `awaited: A? atom` and
+        // `assign: nm "=" nm` both reach `nm`/`NAME`; before the fix, the leading
+        // `A?` helper made the start state shift `NAME` into the `assign`-only path
+        // and a bare name (`"b"`) could not be parsed as `awaited` at all. With the
+        // leading nullable distributed into `awaited: A atom | atom` (Python Lark's
+        // `SimplifyRule`), both name-first paths merge and every input below parses
+        // exactly as Python Lark 1.3.1 does (`parser='lalr', lexer='contextual'`).
+        // `A`/`NAME` are disjoint so the contextual lexer's keyword retyping is not
+        // involved — this isolates the LALR-table fix.
+        let src = "start: assign | awaited\n\
+                   assign: nm \"=\" nm\n\
+                   awaited: A? atom\n\
+                   atom: nm\n\
+                   nm: NAME\n\
+                   A: \"a\"\n\
+                   NAME: /[b-z][a-z]*/\n\
+                   %ignore \" \"\n";
+        let l = Lark::new(
+            src,
+            LarkOptions {
+                parser: ParserAlgorithm::Lalr,
+                lexer: LexerType::Contextual,
+                start: vec!["start".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("grammar with a leading nullable must build");
+
+        // The rule under `start`, or None if the parse failed.
+        let alt = |inp: &str| -> Option<String> {
+            match l.parse(inp).ok()? {
+                ParseTree::Tree(t) => match t.children.first()? {
+                    Child::Tree(c) => Some(c.data.clone()),
+                    _ => None,
+                },
+                _ => None,
+            }
+        };
+
+        // The headline regression: a bare name reaches `awaited` (the leading-`A?`
+        // path), not just the `assign` path. Pre-fix this errored.
+        assert_eq!(alt("b").as_deref(), Some("awaited"));
+        // The present form of the optional still parses.
+        assert_eq!(alt("a b").as_deref(), Some("awaited"));
+        // The independently-reached name-first path is unaffected.
+        assert_eq!(alt("b = c").as_deref(), Some("assign"));
+        // `a` alone has no following atom — rejected, exactly as Python.
+        assert!(
+            l.parse("a").is_err(),
+            "`A?` alone, with no atom, must reject"
+        );
+    }
+
+    #[test]
+    fn test_leading_nullable_star_and_group_distribute() {
+        // The same distribution must apply to a leading `*` and a leading optional
+        // group `[...]` (without placeholders), not just `?`. Each grammar pairs a
+        // rule whose leading nullable precedes `item` (also reachable bare) with an
+        // independent `WORD`-first `plain` path, so the leading nullable's content
+        // must be predicted directly at the start state. Both parse the absent and
+        // present cases, matching Python Lark 1.3.1.
+        let build = |src: &str| {
+            Lark::new(
+                src,
+                LarkOptions {
+                    parser: ParserAlgorithm::Lalr,
+                    lexer: LexerType::Contextual,
+                    start: vec!["start".to_string()],
+                    ..Default::default()
+                },
+            )
+            .expect("grammar with a leading nullable must build")
+        };
+
+        // Leading `*`.
+        let star = build(
+            "start: stars | plain\n\
+             stars: B* item\n\
+             plain: WORD \"=\" WORD\n\
+             item: WORD\n\
+             B: \"b\"\n\
+             WORD: /[d-z]+/\n\
+             %ignore \" \"\n",
+        );
+        assert!(
+            star.parse("d").is_ok(),
+            "`B* item` with `B*` absent must parse"
+        );
+        assert!(star.parse("b b d").is_ok(), "present `B*` must parse");
+        assert!(star.parse("d = e").is_ok());
+
+        // Leading optional group `[...]`.
+        let opt = build(
+            "start: opt | plain\n\
+             opt: [C] item\n\
+             plain: WORD \"=\" WORD\n\
+             item: WORD\n\
+             C: \"c\"\n\
+             WORD: /[d-z]+/\n\
+             %ignore \" \"\n",
+        );
+        assert!(
+            opt.parse("d").is_ok(),
+            "`[C] item` with `[C]` absent must parse"
+        );
+        assert!(opt.parse("c d").is_ok(), "present `[C]` must parse");
+        assert!(opt.parse("d = e").is_ok());
+    }
+
+    #[test]
+    #[ignore = "slow: builds python.lark's full LALR table; run with --ignored"]
+    fn test_python_lark_parses_statements() {
+        // #97 end-to-end: with leading nullables distributed (the key offender is
+        // `?await_expr: AWAIT? atom_expr`), upstream `python.lark` not only *builds*
+        // under LALR (see the build test below) but *parses* real statements —
+        // expression, assignment, call, and a `def` with a suite — each of which
+        // dies right after the first name without the fix. Trees verified against
+        // Python Lark 1.3.1 (`PythonIndenter`, contextual lexer). (A bare `await`
+        // keyword still mis-lexes as NAME via a *separate* contextual-lexer
+        // keyword-retyping gap, unrelated to this LALR-table fix.)
+        let src = include_str!("grammars/python.lark");
+        let l = Lark::new(
+            src,
+            LarkOptions {
+                parser: ParserAlgorithm::Lalr,
+                lexer: LexerType::Contextual,
+                start: vec!["file_input".to_string()],
+                maybe_placeholders: true,
+                postlex: Some(Indenter {
+                    nl_type: "_NEWLINE".to_string(),
+                    open_paren_types: vec!["LPAR".into(), "LSQB".into(), "LBRACE".into()],
+                    close_paren_types: vec!["RPAR".into(), "RSQB".into(), "RBRACE".into()],
+                    indent_type: "_INDENT".to_string(),
+                    dedent_type: "_DEDENT".to_string(),
+                    tab_len: 8,
+                }),
+                ..Default::default()
+            },
+        )
+        .expect("python.lark must build under LALR");
+        for inp in [
+            "x = 1\n",
+            "f(x)\n",
+            "x\n",
+            "def f(a, b):\n    return a + b\n",
+        ] {
+            assert!(
+                l.parse(inp).is_ok(),
+                "python.lark must parse {inp:?}, got {:?}",
+                l.parse(inp).err()
+            );
+        }
     }
 
     #[test]
