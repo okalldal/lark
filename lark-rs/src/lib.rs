@@ -7,7 +7,7 @@ pub mod postlex;
 pub mod standalone;
 pub mod tree;
 
-pub use error::{GrammarError, LarkError, ParseError};
+pub use error::{GrammarError, LarkError, ParseError, RecoveredTree};
 pub use grammar::{
     load_grammar, lower,
     rule::{Rule, RuleOptions},
@@ -53,6 +53,44 @@ impl Lark {
 
     pub fn parse_with_start(&self, text: &str, start: &str) -> Result<ParseTree, ParseError> {
         self.frontend.parse(text, Some(start))
+    }
+
+    /// Parse with built-in panic-mode error recovery (issue #43).
+    ///
+    /// Instead of aborting on the first parse error, the parser deletes the
+    /// offending token and continues (single-token-deletion recovery), returning a
+    /// best-effort [`RecoveredTree`]: the partial tree plus every error recovered
+    /// from. This is exactly Python Lark's `parse(text, on_error=lambda e: True)`.
+    ///
+    /// Only the LALR backend without a postlex hook supports recovery; other
+    /// configurations return an error. See [`RecoveredTree`] for the partial-tree
+    /// and error-node semantics.
+    pub fn parse_with_recovery(&self, text: &str) -> Result<RecoveredTree, LarkError> {
+        self.parse_on_error(text, |_| true)
+    }
+
+    /// Parse with a custom `on_error` handler, mirroring Python Lark's `on_error`
+    /// callback. The handler is invoked for each parse error; return `true` to
+    /// recover (delete the offending token and resume) or `false` to stop and
+    /// return the partial tree built so far. The recovered errors are collected in
+    /// the returned [`RecoveredTree::errors`].
+    pub fn parse_on_error(
+        &self,
+        text: &str,
+        mut on_error: impl FnMut(&ParseError) -> bool,
+    ) -> Result<RecoveredTree, LarkError> {
+        self.frontend.parse_recovering(text, None, &mut on_error)
+    }
+
+    /// As [`parse_on_error`](Self::parse_on_error), from an explicit start symbol.
+    pub fn parse_on_error_with_start(
+        &self,
+        text: &str,
+        start: &str,
+        mut on_error: impl FnMut(&ParseError) -> bool,
+    ) -> Result<RecoveredTree, LarkError> {
+        self.frontend
+            .parse_recovering(text, Some(start), &mut on_error)
     }
 }
 
@@ -221,22 +259,21 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Known divergence (#77): undefined symbols are silently accepted as \
-                never-matching terminals instead of being rejected at grammar-load \
-                time. Python Lark raises GrammarError(\"... used but not defined\"). \
-                Remove #[ignore] once the loader validates references."]
     fn test_undefined_symbol_is_rejected() {
-        // Python Lark rejects a grammar that references an undefined symbol when
-        // the grammar is compiled. lark-rs currently builds it and instead fails
-        // at parse time (the undefined name becomes a terminal that never matches),
-        // so this is gated until the loader gains use-before-definition validation.
+        // Python Lark rejects a grammar that references an undefined symbol when the
+        // grammar is compiled (`GrammarError("... used but not defined")`), rather
+        // than deferring to a confusing parse-time failure. The loader's
+        // use-before-definition pass matches that: an undefined uppercase reference
+        // is an `UndefinedTerminal`, an undefined lowercase one an `UndefinedRule`.
         let res = grammar::load_grammar("start: UNDEFINED\n", &["start".to_string()], false, false);
         assert!(
-            matches!(
-                res,
-                Err(GrammarError::UndefinedTerminal { .. } | GrammarError::UndefinedRule { .. })
-            ),
-            "expected undefined-symbol rejection, got {res:?}"
+            matches!(res, Err(GrammarError::UndefinedTerminal { .. })),
+            "expected undefined-terminal rejection, got {res:?}"
+        );
+        let res = grammar::load_grammar("start: undefined\n", &["start".to_string()], false, false);
+        assert!(
+            matches!(res, Err(GrammarError::UndefinedRule { .. })),
+            "expected undefined-rule rejection, got {res:?}"
         );
     }
 
