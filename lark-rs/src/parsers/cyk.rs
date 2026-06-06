@@ -1010,6 +1010,84 @@ WORD: /[a-z]+/
         assert!(built.is_err(), "a nullable named rule must fail to build");
     }
 
+    /// CYK's empty-rule rejection is a function of whether the *user rule* can
+    /// derive ε — **not** of how a nullable EBNF operator is lowered. lark-rs
+    /// distributes a *leading* nullable into the parent (`a: B? C` → `a: B C | C`)
+    /// but keeps a shared helper for a *trailing* one (`a: C B?` → `a: C __opt`);
+    /// it is tempting to assume that switching the trailing form to distribution
+    /// too (full Python `SimplifyRule` parity) would push an ε into a
+    /// non-transparent parent and start failing CYK builds. It would not: the
+    /// parent's *nullability* is a property of the language, invariant under the
+    /// lowering choice, and that is the only thing this rejection keys on. This
+    /// test pins exactly that boundary so the invariance is not re-litigated:
+    ///
+    ///   * a parent that stays non-nullable builds under **either** lowering
+    ///     (leading-distributed `B? C` and trailing-helper `C B?` both succeed);
+    ///   * a *wholly*-nullable parent is rejected under **either** lowering
+    ///     (`B?` and `B? C?` both fail), because the parent can derive ε either way.
+    ///
+    /// Verified equal to Python Lark 1.3.1's CYK on all four (PR #100 review).
+    #[test]
+    fn cyk_epsilon_rejection_is_lowering_invariant() {
+        let build = |body: &str| {
+            Lark::new(
+                &format!("start: a\na: {body}\nB: \"b\"\nC: \"c\"\n"),
+                LarkOptions {
+                    parser: ParserAlgorithm::Cyk,
+                    lexer: LexerType::Basic,
+                    ..Default::default()
+                },
+            )
+        };
+        // Non-nullable parent: builds regardless of leading vs trailing lowering.
+        assert!(
+            build("B? C").is_ok(),
+            "leading-distributed `B? C` (parent non-nullable) must build"
+        );
+        assert!(
+            build("C B?").is_ok(),
+            "trailing-helper `C B?` (parent non-nullable) must build"
+        );
+        // Wholly-nullable parent: rejected regardless of lowering — the parent can
+        // derive ε, which is what CYK can't model. (So distributing trailing
+        // nullables too would *not* change which grammars CYK accepts.)
+        assert!(
+            build("B?").is_err(),
+            "wholly-nullable `B?` must be rejected (parent derives ε)"
+        );
+        assert!(
+            build("B? C?").is_err(),
+            "wholly-nullable `B? C?` must be rejected (parent derives ε)"
+        );
+    }
+
+    /// Known divergence from the oracle — tracked by #101. A wholly-nullable
+    /// *transparent* rule (`_a: B?`) is rejected by Python Lark's CYK
+    /// (`CYK doesn't support empty rules`) but lark-rs currently **accepts** it: its
+    /// ε-removal can splice away a transparent rule's empty derivation, so the build
+    /// proceeds (only a *non*-transparent nullable is rejected — see
+    /// `cyk_rejects_genuine_epsilon_rule`). This test encodes the oracle-target
+    /// (rejection) and is `#[ignore]`d until #101 is decided: run it with
+    /// `cargo test --ignored cyk_transparent_nullable` to reproduce the gap. If #101
+    /// resolves toward *accepting* the divergence instead, flip this to assert
+    /// `is_ok()` and drop the `#[ignore]`.
+    #[test]
+    #[ignore = "#101: lark-rs CYK accepts a transparent wholly-nullable rule the oracle rejects"]
+    fn cyk_transparent_nullable_rule_diverges_from_oracle() {
+        let built = Lark::new(
+            "start: _a \"x\"\n_a: B?\nB: \"b\"\n",
+            LarkOptions {
+                parser: ParserAlgorithm::Cyk,
+                lexer: LexerType::Basic,
+                ..Default::default()
+            },
+        );
+        assert!(
+            built.is_err(),
+            "oracle parity: a transparent wholly-nullable rule should be rejected (#101)"
+        );
+    }
+
     /// Under `maybe_placeholders`, an absent `[...]` optional must still emit a
     /// `None` placeholder — even though CYK ε-removes the (nullable, transparent)
     /// helper that carries it. CYK must match LALR on present *and* absent cases,
