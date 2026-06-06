@@ -1,0 +1,390 @@
+[
+  {
+    "name": "trailing_neg_lookahead",
+    "grammar": "\nstart: A B\nA: /a+(?!b)/\nB: /[ab]+/\n",
+    "g_regex_flags": [],
+    "cases": [
+      {
+        "input": "aaab",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "aa"
+            },
+            {
+              "type": "token",
+              "token_type": "B",
+              "value": "ab"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "aab",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "token",
+              "token_type": "B",
+              "value": "ab"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "ab",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected token Token('B', 'ab') at line 1, column 1.\nExpected one of: \n\t* A\nPrevious tokens: [None]\n"
+      },
+      {
+        "input": "aaa",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* B\n"
+      }
+    ]
+  },
+  {
+    "name": "trailing_pos_lookahead",
+    "grammar": "\nstart: A B\nA: /a+(?=b)/\nB: /b+/\n",
+    "g_regex_flags": [],
+    "cases": [
+      {
+        "input": "aaab",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "aaa"
+            },
+            {
+              "type": "token",
+              "token_type": "B",
+              "value": "b"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "ab",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "token",
+              "token_type": "B",
+              "value": "b"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "aaabb",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "aaa"
+            },
+            {
+              "type": "token",
+              "token_type": "B",
+              "value": "bb"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "aaa",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\naaa\n^\nExpected one of: \n\t* A\n"
+      },
+      {
+        "input": "b",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected token Token('B', 'b') at line 1, column 1.\nExpected one of: \n\t* A\nPrevious tokens: [None]\n"
+      }
+    ]
+  },
+  {
+    "name": "leading_neg_lookbehind",
+    "grammar": "\nstart: items\nitems: (BS | Q)+\nQ: /(?<!\\\\)(?:\\\\\\\\)*\"/\nBS: /\\\\/\n",
+    "g_regex_flags": [],
+    "cases": [
+      {
+        "input": "\"",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "items",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "Q",
+                  "value": "\""
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "\\\\\"",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "items",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "Q",
+                  "value": "\\\\\""
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "\\\"",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "No terminal matches '\"' in the current parser context, at line 1 col 2\n\n\\\"\n ^\nExpected one of: \n\t* BS\n\t* Q\n\nPrevious tokens: Token('BS', '\\\\')\n"
+      }
+    ]
+  },
+  {
+    "name": "leading_pos_lookbehind",
+    "grammar": "\nstart: AT C\nAT: /@/\nC: /(?<=@)[a-z]+/\n",
+    "g_regex_flags": [],
+    "cases": [
+      {
+        "input": "@abc",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "AT",
+              "value": "@"
+            },
+            {
+              "type": "token",
+              "token_type": "C",
+              "value": "abc"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "abc",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\nabc\n^\nExpected one of: \n\t* AT\n"
+      }
+    ]
+  },
+  {
+    "name": "inline_flag_in_assertion",
+    "grammar": "\nstart: A REST\nA: /a+(?=(?i:END))/\nREST: /.+/\n",
+    "g_regex_flags": [],
+    "cases": [
+      {
+        "input": "aaaEND",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "aaa"
+            },
+            {
+              "type": "token",
+              "token_type": "REST",
+              "value": "END"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "aaaend",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "aaa"
+            },
+            {
+              "type": "token",
+              "token_type": "REST",
+              "value": "end"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "aaaEnd",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "aaa"
+            },
+            {
+              "type": "token",
+              "token_type": "REST",
+              "value": "End"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "aaaxyz",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected token Token('REST', 'aaaxyz') at line 1, column 1.\nExpected one of: \n\t* A\nPrevious tokens: [None]\n"
+      }
+    ]
+  },
+  {
+    "name": "global_flag_over_assertion",
+    "grammar": "\nstart: A B\nA: /a+(?!b)/\nB: /[ab]+/\n",
+    "g_regex_flags": [
+      "IGNORECASE"
+    ],
+    "cases": [
+      {
+        "input": "AAAB",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "AA"
+            },
+            {
+              "type": "token",
+              "token_type": "B",
+              "value": "AB"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "aAbB",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "token",
+              "token_type": "B",
+              "value": "AbB"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "aaa",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* B\n"
+      }
+    ]
+  }
+]
