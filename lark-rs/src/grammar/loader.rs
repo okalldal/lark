@@ -1153,6 +1153,20 @@ enum HelperKind {
     Star,
 }
 
+/// One compiled position of an expansion (see `compile_slot`): either a fixed
+/// symbol sequence, or a distributable leading nullable contributing several
+/// present-form alternatives that fan out across the parent's alternatives.
+enum Slot {
+    /// Contributes this exact symbol sequence at its position (usually one
+    /// symbol). Covers every non-distributed position, including a *trailing*
+    /// nullable's shared `__anon_*` helper.
+    Fixed(Vec<Symbol>),
+    /// A leading nullable distributed into the parent: these are the non-empty
+    /// ("present") alternatives; the absent (ε) alternative is added during the
+    /// cartesian product in `compile_expansion`.
+    Nullable(Vec<Vec<Symbol>>),
+}
+
 /// Structural identity of an anonymous EBNF helper: its kind, the enclosing
 /// `keep_all_tokens` context, and the ordered, compiled `(symbols, alias)` of
 /// each alternative. Identical keys reuse one generated rule — Python Lark's
@@ -1337,40 +1351,216 @@ impl GrammarCompiler {
         // (and the anonymous rules it expands into) is compiled.
         self.current_keep_all = keep_all;
 
-        for (order, alt) in raw.expansions.into_iter().enumerate() {
+        // Each source alternative may distribute into several BNF alternatives
+        // (a leading nullable fanned out), so `order` runs over the flattened
+        // result rather than the raw alternatives.
+        let mut order = 0;
+        for alt in raw.expansions.into_iter() {
             let alias = alt.alias.clone();
-            let expansion_syms = self.compile_expansion(alt.expansion, &origin.name)?;
-            let options = RuleOptions {
-                expand1,
-                keep_all_tokens: keep_all,
-                priority: raw.priority,
-                empty_indices: Vec::new(),
-                placeholder_count: 0,
-            };
-            self.rules.push(Rule::new(
-                origin.clone(),
-                expansion_syms,
-                alias,
-                options,
-                order,
-            ));
+            for expansion_syms in self.compile_expansion(alt.expansion, &origin.name)? {
+                let options = RuleOptions {
+                    expand1,
+                    keep_all_tokens: keep_all,
+                    priority: raw.priority,
+                    empty_indices: Vec::new(),
+                    placeholder_count: 0,
+                };
+                self.rules.push(Rule::new(
+                    origin.clone(),
+                    expansion_syms,
+                    alias.clone(),
+                    options,
+                    order,
+                ));
+                order += 1;
+            }
         }
         Ok(())
     }
 
-    /// Compile a list of `Expr` nodes into a `Vec<Symbol>`, creating auxiliary
-    /// rules as needed for EBNF operators.
+    /// Compile a list of `Expr` nodes into one or more alternative symbol
+    /// sequences, creating auxiliary rules as needed for EBNF operators.
+    ///
+    /// A single source expansion can lower to **several** BNF alternatives:
+    /// a *leading nullable* EBNF helper (`X?`, `X*`, `[X]`-without-placeholders)
+    /// that is not the last symbol of the expansion is **distributed** into the
+    /// parent's alternatives — `a: X? Y` becomes `a: X Y | Y` — exactly as
+    /// Python Lark's `SimplifyRule_Visitor` does. This is required for
+    /// correctness: a named nullable helper before further symbols hides those
+    /// symbols from the textbook LR(0) closure (the dot never advances past the
+    /// helper until it ε-reduces), so the LALR automaton mispredicts and a
+    /// shift/reduce conflict against the hidden path silently drops it (#97). A
+    /// *trailing* nullable causes no such hiding, so it keeps its shared helper
+    /// (the lower-churn variant of the fix — Python distributes those too, but
+    /// the helper form is conflict-free and byte-identical in the tree).
     fn compile_expansion(
         &mut self,
         exprs: Vec<Expr>,
         parent: &str,
-    ) -> Result<Vec<Symbol>, GrammarError> {
-        let mut syms = Vec::new();
-        for expr in exprs {
-            let sym = self.compile_expr(expr, parent)?;
-            syms.push(sym);
+    ) -> Result<Vec<Vec<Symbol>>, GrammarError> {
+        let n = exprs.len();
+        // Cartesian product of each position's choices, building present-form
+        // alternatives before the empty one (Python's distribution order).
+        let mut acc: Vec<Vec<Symbol>> = vec![Vec::new()];
+        for (i, expr) in exprs.into_iter().enumerate() {
+            let is_last = i + 1 == n;
+            let choices: Vec<Vec<Symbol>> = match self.compile_slot(expr, parent, is_last)? {
+                Slot::Fixed(syms) => vec![syms],
+                Slot::Nullable(mut present) => {
+                    // present-forms first, then the absent (ε) alternative.
+                    present.push(Vec::new());
+                    present
+                }
+            };
+            let mut next = Vec::with_capacity(acc.len() * choices.len());
+            for prefix in &acc {
+                for choice in &choices {
+                    let mut combined = prefix.clone();
+                    combined.extend_from_slice(choice);
+                    next.push(combined);
+                }
+            }
+            acc = next;
         }
-        Ok(syms)
+        // Distributing two optionals can coincide (`X? X?` → `X X | X | X | ε`);
+        // identical alternatives would reduce/reduce on the same item, so keep the
+        // first occurrence of each (Python's grammar dedups identical rules too).
+        let mut seen = std::collections::HashSet::new();
+        acc.retain(|a| seen.insert(a.clone()));
+        Ok(acc)
+    }
+
+    /// Compile one position of an expansion into either a single fixed symbol
+    /// sequence (the common case) or, for a distributable leading nullable, the
+    /// set of present-form alternatives to fan out across the parent (see
+    /// [`compile_expansion`]). `is_last` suppresses distribution for a *trailing*
+    /// nullable, which keeps its shared `__anon_*` helper.
+    fn compile_slot(
+        &mut self,
+        expr: Expr,
+        parent: &str,
+        is_last: bool,
+    ) -> Result<Slot, GrammarError> {
+        // Only a *leading* (non-final) nullable distributes, and only when it
+        // carries no alias (an alias names a subtree that inline distribution
+        // would lose, so those fall back to the helper form). `try_distribute`
+        // never compiles anything on its `None` path, so the fall-through
+        // `compile_expr` below compiles the position exactly once.
+        if !is_last && !Self::expr_contains_alias(&expr) {
+            if let Some(present) = self.try_distribute(&expr, parent)? {
+                return Ok(Slot::Nullable(present));
+            }
+        }
+        Ok(Slot::Fixed(vec![self.compile_expr(expr, parent)?]))
+    }
+
+    /// If `expr` is a distributable leading nullable (`X?`, `X*`, or a
+    /// placeholder-free `[X]`), return its present-form alternatives; otherwise
+    /// `None`. The `None` paths bail *before* compiling anything, so the caller
+    /// may compile the expr afresh without emitting duplicate helper rules.
+    fn try_distribute(
+        &mut self,
+        expr: &Expr,
+        parent: &str,
+    ) -> Result<Option<Vec<Vec<Symbol>>>, GrammarError> {
+        match expr {
+            // `X?` / `(...)?` → present forms of the inner.
+            Expr::Repeat {
+                inner,
+                min: 0,
+                max: Some(1),
+            } => self.present_forms((**inner).clone(), parent),
+            // `X*` → the shared one-or-more recurse helper.
+            Expr::Repeat {
+                inner,
+                min: 0,
+                max: None,
+            } => {
+                let inner_sym = self.compile_expr((**inner).clone(), parent)?;
+                let plus = self.plus_helper(inner_sym);
+                Ok(Some(vec![vec![plus]]))
+            }
+            // `[X]` without placeholders → present forms.
+            Expr::Maybe(alts) if !self.maybe_placeholders => {
+                self.distributable_alternatives(alts.clone(), parent)
+            }
+            _ => Ok(None),
+        }
+    }
+
+    /// The non-empty ("present") derivations of an expr, used when distributing a
+    /// leading nullable. Returns `None` when the expr cannot be safely distributed
+    /// (a `maybe_placeholders` `[X]`, whose absent case must emit positional `None`
+    /// placeholders the inline form cannot carry), so the caller keeps the helper.
+    fn present_forms(
+        &mut self,
+        expr: Expr,
+        parent: &str,
+    ) -> Result<Option<Vec<Vec<Symbol>>>, GrammarError> {
+        match expr {
+            Expr::Value(v) => Ok(Some(vec![vec![self.compile_value(v, parent)?]])),
+            Expr::Group(alts) => self.distributable_alternatives(alts, parent),
+            // `[X]` without placeholders is a plain optional group; with
+            // placeholders it cannot be distributed inline (see above).
+            Expr::Maybe(_) if self.maybe_placeholders => Ok(None),
+            Expr::Maybe(alts) => self.distributable_alternatives(alts, parent),
+            // A nested `?` collapses: `(X?)?` ≡ `X?`, so drop the inner optionality
+            // and let the outer distribution re-add the single ε.
+            Expr::Repeat {
+                inner,
+                min: 0,
+                max: Some(1),
+            } => self.present_forms(*inner, parent),
+            // `X*` / `X+` present form is the shared one-or-more recurse helper.
+            Expr::Repeat {
+                inner,
+                min: 0,
+                max: None,
+            }
+            | Expr::Repeat {
+                inner,
+                min: 1,
+                max: None,
+            } => {
+                let inner_sym = self.compile_expr(*inner, parent)?;
+                Ok(Some(vec![vec![self.plus_helper(inner_sym)]]))
+            }
+            // Exact / bounded repetition: a single helper symbol.
+            other => Ok(Some(vec![vec![self.compile_expr(other, parent)?]])),
+        }
+    }
+
+    /// Lower each alternative of a group/`[...]` into distributed present-form
+    /// sequences, flattened into one alternative list. Returns `None` if any
+    /// alternative carries an alias (inline distribution would lose the named
+    /// subtree), so the caller falls back to the helper form.
+    fn distributable_alternatives(
+        &mut self,
+        alts: Vec<AliasedExpansion>,
+        parent: &str,
+    ) -> Result<Option<Vec<Vec<Symbol>>>, GrammarError> {
+        if alts.iter().any(|a| a.alias.is_some()) {
+            return Ok(None);
+        }
+        let mut out = Vec::new();
+        for alt in alts {
+            let subs = self.compile_expansion(alt.expansion, parent)?;
+            out.extend(subs);
+        }
+        Ok(Some(out))
+    }
+
+    /// Whether an expr (recursively) carries a `->` alias on any of its grouped
+    /// alternatives. A distributable nullable wrapping an alias is kept as a
+    /// helper instead, so the alias's named subtree survives.
+    fn expr_contains_alias(expr: &Expr) -> bool {
+        match expr {
+            Expr::Value(_) => false,
+            Expr::Repeat { inner, .. } => Self::expr_contains_alias(inner),
+            Expr::Group(alts) | Expr::Maybe(alts) => alts
+                .iter()
+                .any(|a| a.alias.is_some() || a.expansion.iter().any(Self::expr_contains_alias)),
+        }
     }
 
     fn compile_expr(&mut self, expr: Expr, parent: &str) -> Result<Symbol, GrammarError> {
@@ -1488,28 +1678,33 @@ impl GrammarCompiler {
         parent: &str,
         optional: bool,
     ) -> Result<Symbol, GrammarError> {
-        // A plain single-alternative group with no alias that compiles to exactly
-        // one symbol *is* that symbol — skip the wrapper rule. Besides dropping a
-        // redundant transparent node, this lets `(X)+` share `X`'s recurse helper
-        // and stops `("A"?)?` from stacking a second nullable rule.
-        if !optional && alts.len() == 1 && alts[0].alias.is_none() {
-            let alt = alts.into_iter().next().unwrap();
-            let mut syms = self.compile_expansion(alt.expansion, parent)?;
-            if syms.len() == 1 {
-                return Ok(syms.pop().unwrap());
-            }
-            return Ok(self.intern_helper(HelperKind::Group, vec![(syms, None)]));
-        }
         // Lower every alternative up front so the structural cache key is built
-        // from the compiled symbols, then share or emit one helper for it. (The
-        // `parent` name is inert below the top level — only template usage reads
-        // it, and that path ignores it — so lowering before the helper is named
-        // is behaviourally identical to the old outer-first numbering.)
+        // from the compiled symbols, then share or emit one helper for it. A
+        // single source alternative may itself distribute into several (a leading
+        // nullable fanned out), so each contributes one *or more* compiled
+        // alternatives. (The `parent` name is inert below the top level — only
+        // template usage reads it, and that path ignores it — so lowering before
+        // the helper is named is behaviourally identical to the old numbering.)
         let mut compiled: Vec<(Vec<Symbol>, Option<String>)> = Vec::with_capacity(alts.len());
         for alt in alts {
             let alias = alt.alias.clone();
-            let syms = self.compile_expansion(alt.expansion, parent)?;
-            compiled.push((syms, alias));
+            for syms in self.compile_expansion(alt.expansion, parent)? {
+                compiled.push((syms, alias.clone()));
+            }
+        }
+        // A plain single non-aliased alternative that compiles to exactly one
+        // symbol *is* that symbol — skip the wrapper rule. Besides dropping a
+        // redundant transparent node, this lets `(X)+` share `X`'s recurse helper
+        // and stops `("A"?)?` from stacking a second nullable rule.
+        if !optional && compiled.len() == 1 && compiled[0].1.is_none() && compiled[0].0.len() == 1 {
+            return Ok(compiled
+                .into_iter()
+                .next()
+                .unwrap()
+                .0
+                .into_iter()
+                .next()
+                .unwrap());
         }
         let kind = if optional {
             HelperKind::GroupOptional
@@ -1568,9 +1763,15 @@ impl GrammarCompiler {
         //     `NON_SEPARATOR_STRING` over `WORD`). Leaving them per-parent keeps
         //     lark-rs byte-identical to the oracle, which never shares them either.
         //
-        // The principled convergence is to drop the wrapper and distribute `*`/`?`
-        // into parents as Python does (tracked as #97); until then, sharing the
-        // forced-identical `*` wrapper is sound and is what lets `python.lark` build.
+        // #97 took the principled convergence *partway*: a *leading* (non-final)
+        // `*`/`?`/`[...]` is now distributed into its parent's alternatives by
+        // `compile_expansion`, exactly as Python's `SimplifyRule` does, so it never
+        // reaches `intern_helper` as a `Star`/`Opt`/`GroupOptional` at all. What
+        // still flows here is the *trailing* nullable — which causes no LR(0)
+        // closure hiding and so keeps its shared helper (Python distributes those
+        // too, but the helper form is conflict-free and tree-identical). The
+        // forced-identical trailing `*` wrapper is still shared for the same R/R
+        // reason above; the leading case that motivated the workaround is gone.
         let cacheable = matches!(kind, HelperKind::Group | HelperKind::Star);
         let key: HelperKey = (kind.clone(), self.current_keep_all, alts.clone());
         if cacheable {
@@ -1655,8 +1856,9 @@ impl GrammarCompiler {
         let mut compiled: Vec<(Vec<Symbol>, Option<String>)> = Vec::with_capacity(alts.len());
         for alt in alts {
             let alias = alt.alias.clone();
-            let syms = self.compile_expansion(alt.expansion, parent)?;
-            compiled.push((syms, alias));
+            for syms in self.compile_expansion(alt.expansion, parent)? {
+                compiled.push((syms, alias.clone()));
+            }
         }
         Ok(self.intern_helper(HelperKind::Maybe, compiled))
     }
@@ -2237,16 +2439,19 @@ impl GrammarCompiler {
         // Substitute template params in expansions
         let expansions = Self::substitute_template(&expansions, &subst);
         let origin = NonTerminal::new(&inst_name);
-        for (order, alt) in expansions.into_iter().enumerate() {
+        let mut order = 0;
+        for alt in expansions.into_iter() {
             let alias = alt.alias.clone();
-            let syms = self.compile_expansion(alt.expansion, &inst_name)?;
-            self.rules.push(Rule::new(
-                origin.clone(),
-                syms,
-                alias,
-                inst_opts.clone(),
-                order,
-            ));
+            for syms in self.compile_expansion(alt.expansion, &inst_name)? {
+                self.rules.push(Rule::new(
+                    origin.clone(),
+                    syms,
+                    alias.clone(),
+                    inst_opts.clone(),
+                    order,
+                ));
+                order += 1;
+            }
         }
         self.current_keep_all = saved_keep_all;
         Ok(Symbol::NonTerminal(origin))
