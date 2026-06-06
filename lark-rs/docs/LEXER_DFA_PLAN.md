@@ -1,6 +1,9 @@
 # Lexer Strategy — Remove `fancy-regex`, Unify on a Linear DFA Lexer (B1)
 
-**Status:** ⬜ planned. Strategy decided 2026-06-06; no code yet.
+**Status:** 🟡 in progress. Strategy decided 2026-06-06; PR 1 (the lookaround
+behavioral oracles, `tests/test_lookaround.rs`) landed. **Amended 2026-06-06** after
+a direct re-scan of the grammar corpus invalidated the boundary-assertion premise —
+see the **Amendment** callout in §4.
 
 **Decision:** retire `fancy-regex` from lark-rs entirely. Replace it with a
 **general lowering of bounded lookaround to finite automata** ("B1" in the issue
@@ -134,6 +137,54 @@ source and the post-match value, independent of which engine runs the match.
 
 ## 4. B1 lowering design
 
+> **⚠️ Amendment (2026-06-06) — corrected pattern census.** A direct re-scan of
+> *every* `.lark` file (bundled `src/grammars/` **and** `examples/`) contradicts the
+> boundary-assertion premise the rest of this section was built on. Only **2** of the
+> assertions in the corpus are true token-boundary assertions; the rest — including
+> ones in the **bundled** `python.lark` / `lark.lark` that already ship via
+> `fancy-regex` (#40) — are **internal** (mid-pattern, position data-dependent).
+>
+> | Terminal | Grammar | Assertion(s) | Position | Boundary? |
+> |---|---|---|---|---|
+> | `DEC_NUMBER` | `python.lark` (bundled) | `(?![1-9])` | token end | ✅ trailing |
+> | `OP` | `lark.lark` (bundled) | `(?![a-z])` | end of `?` alt (= token end) | ✅ trailing |
+> | `STRING` | `python.lark` (bundled) | `(?!"")`/`(?!'')`, `(?<!\\)(\\\\)*?` | after opening quote; before closing quote | ❌ internal |
+> | `LONG_STRING` | `python.lark` (bundled) | `(?<!\\)(\\\\)*?` | before closing triple-quote | ❌ internal |
+> | `REGEXP` | `lark.lark` (bundled) | `(?!\/)` | after opening `/` | ❌ internal |
+> | `MULTILINE_COMMENT` | `verilog.lark` (`examples/`) | `\*(?!\/)` | **inside a `(…)*` loop** | ❌ internal |
+>
+> (`common.lark`'s `ESCAPED_STRING` is already hand-adapted to a lookaround-free
+> regex, so it does not appear here. Zero backreferences corpus-wide, as before.)
+>
+> **Consequences — what is now wrong below:**
+> 1. **§4.2** ("Every assertion … sits at a token boundary"; "the
+>    complete-for-all-known-grammars path") is true *only* for `DEC_NUMBER` and `OP`.
+>    It even mislabels `STRING`'s `(?!"")` / `(?<!\\)` as boundary assertions; both
+>    are mid-pattern. The boundary peek (strip + peek left/right at the *token* edge)
+>    structurally cannot validate an assertion whose position depends on where a
+>    `.*?` stopped.
+> 2. **§4.3** ("No bundled or `examples/` grammar uses [an internal assertion]") is
+>    false. The internal path is **required for parity with grammars already in
+>    `main`**, not a "theoretical extension."
+> 3. **M3 cannot fall back to build-time rejection for internal assertions.**
+>    `%import python.STRING`, `python.LONG_STRING`, and `lark.REGEXP` ship today;
+>    rejecting them after deleting `fancy-regex` would regress the stdlib (#40). The
+>    internal-assertion lowering must land *with* M2/M3.
+>
+> **Recommended mechanism.** Abandon the boundary-peek-vs-internal-compiler split and
+> implement the single **general regular lowering** of §2 for *every* assertion:
+> compile the terminal pattern to an NFA, realize each bounded assertion as the §2
+> intersection/complement constraint *at its position* (build a sub-automaton for the
+> assertion body, splice it as a guarded ε-transition), then determinize into the
+> combined anchored DFA — reusing the #35 product-construction machinery the repo
+> already owns. Token-boundary assertions fall out as the position-0 / final-position
+> special case, so the §4.2 boundary peek becomes an *optional* fast-path, never the
+> contract. This keeps every terminal on one `regex-automata` DFA with no separate
+> per-token boundary-DFA peeking, and is the literal realization of §2's "compile the
+> assertions into automata."
+>
+> The milestone re-scope this implies is folded into §5 below (M2/M3 marked).
+
 ### 4.1 A front-end is the real cost — name it
 
 The honest crux: neither `regex-syntax` (the `regex` crate's parser) nor
@@ -152,7 +203,13 @@ compile them. Options, cheapest-first:
 We explicitly do **not** keep `fancy-regex` "just for parsing" — that retains the
 dependency and the temptation to fall back to its engine.
 
-### 4.2 Boundary assertions — the complete-for-all-known-grammars path
+### 4.2 Boundary assertions — a fast-path special case (⚠️ see §4 Amendment)
+
+> **Superseded premise.** The opening sentence below is false except for
+> `DEC_NUMBER` and `OP` — see the §4 Amendment census. Read this section as
+> *"the fast-path for the two assertions that happen to sit at the token edge,"* not
+> as a complete strategy. The escaped-quote (`(?<!\\)`), quote-open (`(?!"")`), and
+> `REGEXP` (`(?!\/)`) guards it names are **internal**, not boundary, assertions.
 
 Every assertion in every real grammar sits at a **token boundary**: a *leading*
 lookbehind (`(?<!\\)` guarding `STRING`/`LONG_STRING`) or a *trailing* lookahead
@@ -188,17 +245,30 @@ An assertion in the *middle* of a pattern (not at a token boundary) is not expre
 by a boundary peek; it requires compiling the assertion into the core automaton via
 the intersection/complement constructions of §2 (build NFAs for the surrounding
 fragments and the assertion body, intersect at the assertion position, determinize).
-**No bundled or `examples/` grammar uses one.** So:
 
-- Ship B1 with the boundary path (§4.2), which is complete for every grammar we
-  know of.
-- A genuinely internal bounded assertion is **rejected at build time with a clear,
-  specific error** ("internal lookaround is not yet supported; rewrite as a boundary
-  assertion or file an issue"). This residual is strictly *smaller* than today's
-  unstated "no backreferences" residual, and it is reachable only by an exotic
-  user grammar.
-- Implement the full internal-assertion compiler only if a real grammar ever needs
-  it — at which point §2 is the recipe and #35's product-construction is the engine.
+> **⚠️ Corrected (§4 Amendment).** The original text here claimed "No bundled or
+> `examples/` grammar uses one" and proposed deferring this compiler / rejecting
+> internal assertions at build time. That is wrong: the **bundled** `python.lark`
+> (`STRING`, `LONG_STRING`) and `lark.lark` (`REGEXP`), plus `verilog.lark` in
+> `examples/`, all use internal assertions. So this compiler is **required**, and the
+> recommendation is to make it the *primary* path (general regular lowering, §4
+> Amendment), with §4.2's boundary peek demoted to an optional fast-path. The build-
+> time-rejection fallback below is retained **only** for any assertion that is
+> genuinely unbounded/non-regular (none exist in the corpus) — never for the bounded
+> internal assertions in the shipped grammars.
+
+The plan is therefore:
+
+- Implement the general regular lowering (§2 / §4 Amendment) so *every* bounded
+  assertion — boundary or internal — compiles into the combined DFA. This is
+  complete for every grammar in the corpus, bundled and `examples/`.
+- The §4.2 boundary peek is kept only as an optional micro-optimization for the two
+  literal token-edge assertions (`DEC_NUMBER`, `OP`); it is not load-bearing.
+- A genuinely *unbounded* or non-regular assertion (which would require
+  backtracking, and which no corpus grammar contains) is **rejected at build time
+  with a clear, specific error**. This residual is strictly *smaller* than today's
+  unstated "no backreferences" residual.
+- §2 is the recipe and #35's product-construction is the engine.
 
 ### 4.4 Selection interaction
 
@@ -227,19 +297,30 @@ against the Python oracle. The ordering front-loads the safety nets.
   scaling on a sparse-terminal workload (the python.lark STRING shape). This is both
   the migration safety net *and* the regression net PR #104's `\G` fix is currently
   missing. **Do this first.**
-- **M1 — Lookaround-aware front-end (§4.1).** The mini-parser that strips boundary
-  assertions from a pattern, leaving a `regex`-crate-clean core + a list of
-  `(side, polarity, body)` assertions. Unit-tested against the four bundled
-  lookaround terminals.
-- **M2 — Boundary-assertion lowering + validation (§4.2),** still alongside the
-  existing scanner. Route the four bundled terminals through it; oracle suite
-  (`test_stdlib`, `test_common`, `test_json_corpus`) stays green. This is the step
-  that **removes the `REGEXP` ReDoS and the bail-wrong-answer risk** (those
-  terminals are now on the linear engine).
+- **M1 — Lookaround-aware front-end (§4.1).** The mini-parser that extracts *every*
+  bounded assertion from a pattern as an AST node tagged with its **position**
+  (`(offset/anchor, side, polarity, body)`) — boundary *and* internal alike, per the
+  §4 Amendment — leaving a `regex`-crate-clean skeleton. Unit-tested against all the
+  corpus assertions (`STRING`/`LONG_STRING`/`REGEXP`/`DEC_NUMBER`/`OP`), not just the
+  boundary pair.
+- **M2 — General regular lowering + validation (§2 / §4 Amendment),** still alongside
+  the existing scanner. Compile each assertion into the terminal's automaton via the
+  intersection/complement construction (boundary assertions take the §4.2 peek
+  fast-path; internal ones the product-construction). Route the bundled lookaround
+  terminals through it; oracle suite (`test_stdlib`, `test_common`, `test_json_corpus`,
+  `test_lookaround`) stays green. This is the step that **removes the `REGEXP` ReDoS
+  and the bail-wrong-answer risk** (those terminals are now on the linear engine).
+  *(Re-scoped 2026-06-06: was "boundary-assertion lowering" only, which the §4
+  Amendment shows covers just `DEC_NUMBER`/`OP` — the bundled `STRING`/`LONG_STRING`/
+  `REGEXP` need the internal path here, not in a deferred follow-up.)*
 - **M3 — Delete `fancy-regex`.** Remove the `AnyRegex::Fancy` arm, the dependency,
-  and the dual-engine merge in `match_at`. Internal assertions now hit the M-level
-  rejection error (§4.3). Compliance banks regenerated; `CLAUDE.md` parity-gap note
-  rewritten.
+  and the dual-engine merge in `match_at`. With M2's general lowering, the bundled
+  internal-assertion terminals stay green on the pure-`regex` engine; only a
+  genuinely *unbounded/non-regular* assertion (none in the corpus) hits the rejection
+  error. Compliance banks regenerated; `CLAUDE.md` parity-gap note rewritten.
+  *(Re-scoped 2026-06-06: the original "internal assertions now hit the rejection
+  error" would have regressed `%import python.STRING` / `lark.REGEXP`, which ship
+  today — see §4 Amendment consequence 3.)*
 - **M4 — Unify the scanner on the `regex-automata` multi-pattern anchored DFA
   (§3).** The perf step: single DFA pass, `PatternID` dispatch, no capture-index
   lookup. Closes the Python outlier; re-measure `BENCH.md`.
