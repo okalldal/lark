@@ -226,6 +226,128 @@ mod tests {
     }
 
     #[test]
+    fn test_repeated_ebnf_repetition_is_shared() {
+        // Python Lark's `rules_cache`: structurally-identical EBNF repetition must
+        // collapse to one set of helper rules, not a fresh one per occurrence.
+        // Counting the distinct anonymous helper origins, writing `("," NAME)*`
+        // twice must add *no* helpers over writing it once — the group, its
+        // `+`-recurse core, and the `*` wrapper are all reused.
+        fn anon_helper_count(src: &str) -> usize {
+            let g = grammar::load_grammar(src, &["start".to_string()], false, false).unwrap();
+            let mut names: Vec<&str> = g
+                .rules
+                .iter()
+                .map(|r| r.origin.name.as_str())
+                .filter(|n| n.starts_with("__anon"))
+                .collect();
+            names.sort_unstable();
+            names.dedup();
+            names.len()
+        }
+        let once = anon_helper_count("start: NAME (\",\" NAME)*\nNAME: /[a-z]+/\n");
+        let twice = anon_helper_count(
+            "start: a b\na: NAME (\",\" NAME)*\nb: NAME (\",\" NAME)*\nNAME: /[a-z]+/\n",
+        );
+        assert!(once > 0, "expected some anonymous helpers, got {once}");
+        assert_eq!(
+            once, twice,
+            "the second `(\",\" NAME)*` must reuse the first's helpers (got {once} vs {twice})"
+        );
+    }
+
+    #[test]
+    fn test_shared_star_wrapper_matches_oracle() {
+        // The dedup shares the *nullable* `x*` wrapper (`__star: __plus | ε`) — a
+        // rule Python Lark does not have (it distributes `x*` into each parent via
+        // SimplifyRule). Sharing it is *forced*, not chosen: once the group and its
+        // `__plus` recurse core are shared, two `(NAME ";")*` wrappers are
+        // byte-identical, and here both are followed by the same `","`, so without
+        // the merge they collide as an unresolvable reduce/reduce (the exact
+        // python.lark failure — `__anon_star -> ε` twice on one lookahead). So this
+        // grammar does not even build unless the wrapper is shared, making it a live
+        // guard that Star-sharing stays. It then pins that the merge does NOT
+        // reintroduce the follow-set-union leak we avoid for `?`/`[...]`: "p"/"q"
+        // both lex as NAME, so distinguishing `a` from `b` after the shared loop is
+        // pure contextual narrowing. Every accept/reject/tree below is byte-identical
+        // to Python Lark 1.3.1 (`parser='lalr', lexer='contextual'`).
+        let src = "start: a | b\n\
+                   a: (NAME \";\")* \",\" \"p\"\n\
+                   b: (NAME \";\")* \",\" \"q\"\n\
+                   NAME: /[a-z]+/\n\
+                   %ignore \" \"\n";
+        let l = Lark::new(
+            src,
+            LarkOptions {
+                parser: ParserAlgorithm::Lalr,
+                lexer: LexerType::Contextual,
+                start: vec!["start".to_string()],
+                ..Default::default()
+            },
+        )
+        .expect("shared-wrapper grammar must build: identical wrappers merge, no R/R");
+
+        // The alternative `start` reduced to ("a" or "b"), or None if parse failed.
+        let alt = |inp: &str| -> Option<String> {
+            match l.parse(inp).ok()? {
+                ParseTree::Tree(t) => match t.children.first()? {
+                    Child::Tree(c) => Some(c.data.clone()),
+                    _ => None,
+                },
+                _ => None,
+            }
+        };
+
+        // Correct narrowing through the shared loop: the final "p"/"q" selects the
+        // parent (incl. the zero-item case), and the NAME items land in the tree.
+        assert_eq!(alt(", p").as_deref(), Some("a"));
+        assert_eq!(alt("x ; , p").as_deref(), Some("a"));
+        assert_eq!(alt(", q").as_deref(), Some("b"));
+        assert_eq!(alt("x ; y ; , q").as_deref(), Some("b"));
+        // Anti-leak: after the shared loop and its `,`, only "p"/"q" are valid — the
+        // contextual lexer must not also admit NAME there (a follow-set over-merge
+        // would). Python rejects `, x`; so must we.
+        assert!(
+            l.parse(", x").is_err(),
+            "NAME must not be admitted after the ','"
+        );
+    }
+
+    #[test]
+    #[ignore = "slow (~18s debug): builds python.lark's full LALR table; run with --ignored"]
+    fn test_python_lark_builds_under_lalr() {
+        // End-to-end witness for the EBNF-helper dedup: upstream `python.lark` has
+        // many repeated `("," X)*` patterns that, without `rules_cache`-style
+        // sharing, expand to duplicate nullable helpers and collide as
+        // unresolvable reduce/reduce — so the LALR table cannot be built at all
+        // (see issue #79). With sharing the table builds. (Parsing a Python file
+        // end-to-end is gated separately on a distinct terminal/assignment issue,
+        // so this only asserts the build.)
+        let src = include_str!("grammars/python.lark");
+        let res = Lark::new(
+            src,
+            LarkOptions {
+                parser: ParserAlgorithm::Lalr,
+                lexer: LexerType::Contextual,
+                start: vec!["file_input".to_string()],
+                postlex: Some(Indenter {
+                    nl_type: "_NEWLINE".to_string(),
+                    open_paren_types: vec!["LPAR".into(), "LSQB".into(), "LBRACE".into()],
+                    close_paren_types: vec!["RPAR".into(), "RSQB".into(), "RBRACE".into()],
+                    indent_type: "_INDENT".to_string(),
+                    dedent_type: "_DEDENT".to_string(),
+                    tab_len: 8,
+                }),
+                ..Default::default()
+            },
+        );
+        assert!(
+            res.is_ok(),
+            "python.lark LALR build failed: {:?}",
+            res.err()
+        );
+    }
+
+    #[test]
     fn test_terminal_reference_is_inlined() {
         // A terminal may reference another terminal (defined in any order); the
         // referenced pattern is inlined and the referenced-only terminal is pruned.

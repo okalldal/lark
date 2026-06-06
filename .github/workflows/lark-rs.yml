@@ -61,6 +61,15 @@ jobs:
       - name: CYK scaling gate (perf-counters)
         run: cargo test --features perf-counters --test test_cyk_scaling
 
+      # python.lark LALR build gate (#79). The headline result of the EBNF-helper
+      # dedup is that upstream python.lark's full LALR table now *builds* (without
+      # sharing, its repeated `("," X)*` helpers collide as unresolvable R/R). The
+      # witness test is `#[ignore]`d because the build is slow (~18s debug), so
+      # `cargo test --all` above skips it — it must be run explicitly here, exactly
+      # like the perf-counters gates, or nothing continuously guards the goal.
+      - name: python.lark LALR build gate (ignored, slow ~18s)
+        run: cargo test --lib tests::test_python_lark_builds_under_lalr -- --ignored --exact
+
       # The oracle JSON is generated from Python Lark and committed so Rust tests
       # run without Python. This gate proves the generators are deterministic and
       # that the committed oracles are in sync with the current Python Lark.

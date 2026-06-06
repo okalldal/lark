@@ -1135,6 +1135,33 @@ impl<'a> GrammarParser<'a> {
 
 // ─── Grammar Compiler: AST → BNF ─────────────────────────────────────────────
 
+/// The flavour of anonymous EBNF helper a structural cache key describes. Two
+/// helpers share a generated rule only when they agree on *both* their kind and
+/// their compiled alternatives, so a `(",", X)` group never collapses into a
+/// `(",", X)?` optional even though their alternatives coincide.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum HelperKind {
+    /// `(...)` — a plain spliced group.
+    Group,
+    /// `(...)?` / a placeholder-less `[...]` — a group plus an empty alternative.
+    GroupOptional,
+    /// `[...]` under `maybe_placeholders` — empty case emits `None` placeholders.
+    Maybe,
+    /// `x?` — the single-symbol optional wrapper (`P: x | ε`).
+    Opt,
+    /// `x*` — the nullable wrapper around the shared `+`-recurse helper.
+    Star,
+}
+
+/// Structural identity of an anonymous EBNF helper: its kind, the enclosing
+/// `keep_all_tokens` context, and the ordered, compiled `(symbols, alias)` of
+/// each alternative. Identical keys reuse one generated rule — Python Lark's
+/// `rules_cache`. Caching the *compiled* symbols (not the AST) means the sharing
+/// composes bottom-up: a repeated `(",", X)*` shares its inner group, which lets
+/// its `+`-recurse helper and `*` wrapper share in turn, collapsing what would
+/// otherwise be duplicate nullable helpers that LALR cannot disambiguate.
+type HelperKey = (HelperKind, bool, Vec<(Vec<Symbol>, Option<String>)>);
+
 /// Converts the parsed AST into flat BNF rules and terminal definitions.
 struct GrammarCompiler {
     start: Vec<String>,
@@ -1181,6 +1208,13 @@ struct GrammarCompiler {
     /// like `a+ b | a+` and `a* b | a+` LALR-parseable: with separate recurse rules
     /// the duplicated `… -> "a"` reductions are an unresolvable reduce/reduce.
     recurse_cache: HashMap<(Symbol, bool), String>,
+    /// Cache of every other anonymous EBNF helper — groups, optionals, `?`/`*`
+    /// wrappers — keyed by its [`HelperKey`] structural identity. Extends the
+    /// single-symbol `recurse_cache` sharing to grouped repetition: Python Lark's
+    /// `rules_cache`. Without it, each `(",", X)*` occurrence gets a fresh helper,
+    /// so structurally-identical nullable rules collide as unresolvable
+    /// reduce/reduce (e.g. `python.lark`'s many `(",", param)*` patterns).
+    helper_cache: HashMap<HelperKey, String>,
     /// Anon helper rules that already derive ε (the `?`/`*` helpers). A `?` applied
     /// to one of these is redundant — `(X?)?` is just `X?` — so it is collapsed
     /// rather than stacked, which is what Python Lark's distribute+dedup achieves
@@ -1215,6 +1249,7 @@ impl GrammarCompiler {
             current_keep_all: keep_all_tokens,
             helper_sizes: HashMap::new(),
             recurse_cache: HashMap::new(),
+            helper_cache: HashMap::new(),
             nullable_opts: std::collections::HashSet::new(),
             base_path,
         }
@@ -1463,44 +1498,144 @@ impl GrammarCompiler {
             if syms.len() == 1 {
                 return Ok(syms.pop().unwrap());
             }
-            let name = self.fresh_anon_rule("group");
-            let origin = NonTerminal::new(&name);
-            let size: usize = syms.iter().map(|s| self.symbol_size(s)).sum();
-            self.helper_sizes.insert(name.clone(), size);
-            self.rules
-                .push(Rule::new(origin.clone(), syms, None, self.anon_opts(), 0));
-            return Ok(Symbol::NonTerminal(origin));
+            return Ok(self.intern_helper(HelperKind::Group, vec![(syms, None)]));
         }
-        let name = self.fresh_anon_rule("group");
+        // Lower every alternative up front so the structural cache key is built
+        // from the compiled symbols, then share or emit one helper for it. (The
+        // `parent` name is inert below the top level — only template usage reads
+        // it, and that path ignores it — so lowering before the helper is named
+        // is behaviourally identical to the old outer-first numbering.)
+        let mut compiled: Vec<(Vec<Symbol>, Option<String>)> = Vec::with_capacity(alts.len());
+        for alt in alts {
+            let alias = alt.alias.clone();
+            let syms = self.compile_expansion(alt.expansion, parent)?;
+            compiled.push((syms, alias));
+        }
+        let kind = if optional {
+            HelperKind::GroupOptional
+        } else {
+            HelperKind::Group
+        };
+        Ok(self.intern_helper(kind, compiled))
+    }
+
+    /// Share or emit the anonymous helper rule(s) for `kind` over its already
+    /// lowered alternatives. On a structural cache hit the existing helper
+    /// non-terminal is returned and nothing is emitted; otherwise a fresh
+    /// `__anon_*` rule set is generated, its inlined size recorded (Lark's
+    /// `FindRuleSize`), and the name cached under its [`HelperKey`]. This is the
+    /// single choke point that extends Python Lark's `rules_cache` to every EBNF
+    /// helper, so repeated `(",", X)*`-style patterns collapse to one rule
+    /// instead of colliding as duplicate nullable helpers under LALR.
+    fn intern_helper(
+        &mut self,
+        kind: HelperKind,
+        alts: Vec<(Vec<Symbol>, Option<String>)>,
+    ) -> Symbol {
+        // What to share is anchored to Python Lark's `rules_cache`, but with one
+        // structural caveat worth stating precisely. Python caches only the
+        // *non-nullable* recurse core (`_c: _c c | c`, keyed on the inner
+        // expression) — shared by both `+` and `*` — and has *no* nullable `*`
+        // rule at all: `SimplifyRule_Visitor` distributes `c*`'s empty case into
+        // each parent (`a: b c* d` → `_c: _c c | c` + `a: b _c d | b d`). lark-rs
+        // instead lowers `x*` to a nullable wrapper `__star: __plus | ε` over that
+        // same core, so what we cache is not a verbatim mirror of `rules_cache`:
+        //
+        //   * `Group` / `Star` — share. Sharing the `(",", X)` group lets the
+        //     pre-existing `recurse_cache` share its `+`-recurse `__plus` in turn
+        //     (keyed on that one inner symbol). That makes every `(",", X)*`
+        //     wrapper *byte-identical* (`__plus | ε`), and two identical nullable
+        //     wrappers collide as an unresolvable reduce/reduce the moment two of
+        //     them reduce on the *same* lookahead in a common state (witnessed on
+        //     `python.lark`: state 716, `__anon_star_102 -> ε` vs
+        //     `__anon_star_106 -> ε` on COMMA). Sharing the wrapper *resolves* that
+        //     collision by recognizing the two rules are one rule — it is forced by
+        //     the shared core, not a free choice. It does not over-narrow: the
+        //     collision is the proof the parser already cannot tell the wrappers
+        //     apart (they merge via the shared `__plus`, exactly as Python's shared
+        //     `_c` merges its parents' contexts), so unifying them widens no state's
+        //     contextual scanner. Pinned against the oracle by
+        //     `test_shared_star_wrapper_matches_oracle`: a grammar whose two
+        //     `(NAME ";")*` wrappers *do* collide without sharing parses, rejects,
+        //     and narrows byte-for-byte like Python Lark.
+        //   * `Opt` / `Maybe` / `GroupOptional` — do *not* share. These are the
+        //     `?`/`[...]` helpers Python inlines into parents. Unlike the `*`
+        //     wrapper there is no pre-shared core forcing their states together, so
+        //     sharing one *forces* a merge LALR would otherwise keep separate —
+        //     unioning two parents' follow-sets into a contextual scanner that LALR
+        //     never actually merges, silently widening it (it made `csv.lark`'s
+        //     `header` start trying `row`'s terminals, picking the higher-priority
+        //     `NON_SEPARATOR_STRING` over `WORD`). Leaving them per-parent keeps
+        //     lark-rs byte-identical to the oracle, which never shares them either.
+        //
+        // The principled convergence is to drop the wrapper and distribute `*`/`?`
+        // into parents as Python does (tracked as #97); until then, sharing the
+        // forced-identical `*` wrapper is sound and is what lets `python.lark` build.
+        let cacheable = matches!(kind, HelperKind::Group | HelperKind::Star);
+        let key: HelperKey = (kind.clone(), self.current_keep_all, alts.clone());
+        if cacheable {
+            if let Some(name) = self.helper_cache.get(&key) {
+                return Symbol::NonTerminal(NonTerminal::new(name));
+            }
+        }
+        let tag = match kind {
+            HelperKind::Group | HelperKind::GroupOptional => "group",
+            HelperKind::Maybe => "maybe",
+            HelperKind::Opt => "opt",
+            HelperKind::Star => "star",
+        };
+        let name = self.fresh_anon_rule(tag);
         let origin = NonTerminal::new(&name);
         let mut max_size = 0;
-        for (order, alt) in alts.into_iter().enumerate() {
-            let alias = alt.alias.clone();
-            let syms = self.compile_expansion(alt.expansion, &name)?;
+        for (order, (syms, alias)) in alts.iter().enumerate() {
             let size: usize = syms.iter().map(|s| self.symbol_size(s)).sum();
             max_size = max_size.max(size);
             self.rules.push(Rule::new(
                 origin.clone(),
-                syms,
-                alias,
+                syms.clone(),
+                alias.clone(),
                 self.anon_opts(),
                 order,
             ));
         }
-        // A group is spliced inline; record its size so a `[...]` wrapping it
-        // counts the right number of placeholders (Lark's `FindRuleSize`).
+        // `*` helpers stay size 0 (transparent, inlined away) — `symbol_size` of
+        // their lone `+`-recurse child is already 0, so recording `max_size` here
+        // is a no-op for them and keeps the bookkeeping uniform.
         self.helper_sizes.insert(name.clone(), max_size);
-        if optional {
-            // Add empty alternative
-            self.rules.push(Rule::new(
-                origin.clone(),
-                vec![],
-                None,
-                self.anon_opts(),
-                100,
-            ));
+        match kind {
+            // `(...)` is spliced inline with no empty arm.
+            HelperKind::Group => {}
+            // A placeholder-less optional group: just an empty alternative.
+            HelperKind::GroupOptional => {
+                self.rules.push(Rule::new(
+                    origin.clone(),
+                    vec![],
+                    None,
+                    self.anon_opts(),
+                    100,
+                ));
+            }
+            // `[...]` under maybe_placeholders: the empty case emits one `None`
+            // per kept slot of the widest alternative.
+            HelperKind::Maybe => {
+                let empty_opts = RuleOptions {
+                    placeholder_count: max_size,
+                    ..self.anon_opts()
+                };
+                self.rules
+                    .push(Rule::new(origin.clone(), vec![], None, empty_opts, 100));
+            }
+            // `x?` / `x*`: a single-arm nullable wrapper `P: inner | ε`.
+            HelperKind::Opt | HelperKind::Star => {
+                self.nullable_opts.insert(name.clone());
+                self.rules
+                    .push(Rule::new(origin.clone(), vec![], None, self.anon_opts(), 1));
+            }
         }
-        Ok(Symbol::NonTerminal(origin))
+        if cacheable {
+            self.helper_cache.insert(key, name);
+        }
+        Symbol::NonTerminal(origin)
     }
 
     fn compile_maybe(
@@ -1514,34 +1649,16 @@ impl GrammarCompiler {
         }
         // With maybe_placeholders, the empty case emits one `None` per kept symbol,
         // using the widest alternative (Python Lark inserts max-width placeholders).
-        let name = self.fresh_anon_rule("maybe");
-        let origin = NonTerminal::new(&name);
-        let mut max_kept = 0;
-        for (order, alt) in alts.into_iter().enumerate() {
+        // A kept slot is a kept token *or* the inlined size of a nested maybe/group,
+        // so nested optionals compose (Lark `FindRuleSize`); `intern_helper` records
+        // the widest alternative's size and threads it into the empty production.
+        let mut compiled: Vec<(Vec<Symbol>, Option<String>)> = Vec::with_capacity(alts.len());
+        for alt in alts {
             let alias = alt.alias.clone();
-            let syms = self.compile_expansion(alt.expansion, &name)?;
-            // The empty production emits one `None` per kept slot of the widest
-            // alternative. A slot is a kept token *or* the inlined size of a
-            // nested maybe/group, so nested optionals compose (Lark `FindRuleSize`).
-            let size: usize = syms.iter().map(|s| self.symbol_size(s)).sum();
-            max_kept = max_kept.max(size);
-            self.rules.push(Rule::new(
-                origin.clone(),
-                syms,
-                alias,
-                self.anon_opts(),
-                order,
-            ));
+            let syms = self.compile_expansion(alt.expansion, parent)?;
+            compiled.push((syms, alias));
         }
-        // Record this maybe's size so an enclosing `[...]` counts it recursively.
-        self.helper_sizes.insert(name.clone(), max_kept);
-        let empty_opts = RuleOptions {
-            placeholder_count: max_kept,
-            ..self.anon_opts()
-        };
-        self.rules
-            .push(Rule::new(origin.clone(), vec![], None, empty_opts, 100));
-        Ok(Symbol::NonTerminal(origin))
+        Ok(self.intern_helper(HelperKind::Maybe, compiled))
     }
 
     /// Number of tree children a symbol contributes to an absent `[...]`'s `None`
@@ -1623,21 +1740,7 @@ impl GrammarCompiler {
                         return Ok(inner_sym);
                     }
                 }
-                let name = self.fresh_anon_rule("opt");
-                let nt = NonTerminal::new(&name);
-                let size = self.symbol_size(&inner_sym);
-                self.helper_sizes.insert(name.clone(), size);
-                self.nullable_opts.insert(name.clone());
-                self.rules.push(Rule::new(
-                    nt.clone(),
-                    vec![inner_sym],
-                    None,
-                    self.anon_opts(),
-                    0,
-                ));
-                self.rules
-                    .push(Rule::new(nt.clone(), vec![], None, self.anon_opts(), 1));
-                Ok(Symbol::NonTerminal(nt))
+                Ok(self.intern_helper(HelperKind::Opt, vec![(vec![inner_sym], None)]))
             }
             (1, None) => {
                 // inner+ → one-or-more, via the shared recurse helper.
@@ -1646,15 +1749,10 @@ impl GrammarCompiler {
             (0, None) => {
                 // inner* → optional wrapper around the *same* shared recurse helper,
                 // so `x*` and `x+` reuse one `P: inner | P inner` rule (Lark's model).
+                // The wrapper itself is shared too, so repeated `x*` collapse to one
+                // nullable helper instead of colliding under LALR.
                 let plus = self.plus_helper(inner_sym);
-                let name = self.fresh_anon_rule("star");
-                let nt = NonTerminal::new(&name);
-                self.nullable_opts.insert(name.clone());
-                self.rules
-                    .push(Rule::new(nt.clone(), vec![plus], None, self.anon_opts(), 0));
-                self.rules
-                    .push(Rule::new(nt.clone(), vec![], None, self.anon_opts(), 1));
-                Ok(Symbol::NonTerminal(nt))
+                Ok(self.intern_helper(HelperKind::Star, vec![(vec![plus], None)]))
             }
             (n, Some(m)) if n == m => {
                 // exact repetition: inline n copies
