@@ -46,6 +46,7 @@ mod imp {
     static EXPLICIT_NODE_CHILDREN: AtomicU64 = AtomicU64::new(0);
     static FOREST_NODES: AtomicU64 = AtomicU64::new(0);
     static CYK_TABLE_STEPS: AtomicU64 = AtomicU64::new(0);
+    static LEXER_SCAN_STEPS: AtomicU64 = AtomicU64::new(0);
     static LEO_DISABLED: AtomicBool = AtomicBool::new(false);
 
     #[inline]
@@ -83,6 +84,21 @@ mod imp {
         CYK_TABLE_STEPS.fetch_add(n, Ordering::Relaxed);
     }
 
+    /// Count lexer scan work: per per-position match attempt, the number of input
+    /// bytes the (unanchored) regql search had to skip past `pos` before it found a
+    /// candidate or gave up, plus one for the attempt itself. On a correctly
+    /// *anchored* scanner this is ~1 per attempt (the search only looks at `pos`), so
+    /// the total is linear in the token count. On an *unanchored* scanner a terminal
+    /// that fails at `pos` makes the engine forward-scan toward the next possible
+    /// match — O(remaining input) per position — so a low-rank lookaround terminal
+    /// tried at every token boundary makes the total O(n²). Asserting this count
+    /// stays flat per byte (`tests/test_lexer_scaling.rs`) is the deterministic gate
+    /// for that pathology.
+    #[inline]
+    pub fn add_lexer_scan_steps(n: u64) {
+        LEXER_SCAN_STEPS.fetch_add(n, Ordering::Relaxed);
+    }
+
     /// Zero every counter. Call before the workload you want to measure.
     pub fn reset() {
         COMPLETER_SCAN_STEPS.store(0, Ordering::Relaxed);
@@ -90,6 +106,7 @@ mod imp {
         EXPLICIT_NODE_CHILDREN.store(0, Ordering::Relaxed);
         FOREST_NODES.store(0, Ordering::Relaxed);
         CYK_TABLE_STEPS.store(0, Ordering::Relaxed);
+        LEXER_SCAN_STEPS.store(0, Ordering::Relaxed);
     }
 
     pub fn completer_scan_steps() -> u64 {
@@ -110,6 +127,10 @@ mod imp {
 
     pub fn cyk_table_steps() -> u64 {
         CYK_TABLE_STEPS.load(Ordering::Relaxed)
+    }
+
+    pub fn lexer_scan_steps() -> u64 {
+        LEXER_SCAN_STEPS.load(Ordering::Relaxed)
     }
 
     /// Turn the Joop-Leo optimization off (`true`) or on (`false`). Lets a
@@ -147,6 +168,9 @@ mod imp {
     #[inline]
     pub fn add_cyk_table_steps(_n: u64) {}
 
+    #[inline]
+    pub fn add_lexer_scan_steps(_n: u64) {}
+
     pub fn reset() {}
 
     pub fn completer_scan_steps() -> u64 {
@@ -166,6 +190,10 @@ mod imp {
     }
 
     pub fn cyk_table_steps() -> u64 {
+        0
+    }
+
+    pub fn lexer_scan_steps() -> u64 {
         0
     }
 
