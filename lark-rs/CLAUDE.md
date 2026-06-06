@@ -288,11 +288,17 @@ After each REDUCE, `apply_rule_options()` post-processes children:
 ### ✅ Phase 2 — Earley + SPPF
 
 All six sprints complete. LALR compliance 512/512 = 100%; Earley basic bank
-211/211 (clean); dynamic-lexer bank 446/454 ≈ 98.2%. Open items tracked as GitHub
-issues: #32 (XFAIL burndown — cluster 1, "nested `_ambig` through a transparent
-`_rule`/EBNF helper", fixed by porting Lark's `AmbiguousExpander`; the
-`%ignore`-of-content and `dynamic_complete` tie-break clusters remain), #33
-(de-recurse forest walk). #35 (strict regex-collision) is ✅ done — a
+211/211 (clean); dynamic-lexer bank 454/454 = 100% (clean). #32 (XFAIL burndown)
+is ✅ done — all three clusters cleared: cluster 1 ("nested `_ambig` through a
+transparent `_rule`/EBNF helper") by porting Lark's `AmbiguousExpander`; cluster 2
+(`%ignore`-of-content) by re-anchoring the dynamic scanner's ignore carry-over
+through the forest's global node index so carried derivations *merge* rather than
+shadow each other (materializing any deferred Joop-Leo path first); cluster 3
+(`dynamic_complete` resolve tie-break) by a split-point tie-break in
+`sorted_families`, gated to the dynamic lexer, that restores Python's
+earliest-split-first segmentation order (lark-rs's EBNF helper nodes otherwise
+reverse it via LIFO completion). Remaining open Earley item: #33 (de-recurse
+forest walk). #35 (strict regex-collision) is ✅ done — a
 `regex-automata` product-construction emptiness test backs the strict-mode check.
 #31 (Earley perf gate) is ✅ done — the shared bench harness re-runs the
 unambiguous workloads under `parser='earley'` and reports the Earley/LALR ratio
@@ -306,7 +312,7 @@ underlying super-linearity has since been removed by the Joop-Leo work (#58).
 | SPPF forest construction | ✅ | Sprint 2: Elizabeth Scott's binarized SPPF (symbol / intermediate / packed nodes, arena-allocated by `NodeId`, held-completion nullable handling). #56: per-column `waiting` index removes the completer's O(column) origin rescan. **#58: Joop-Leo** deterministic-reduction-path optimization — the completer records a transitive per column and jumps to the topmost item instead of cascading, with a lazy spine reconstruction (`load_leo_paths`) over a forest-global `(key,start,end)` node index so the SPPF stays byte-identical. Collapses hand-written right recursion (`a: X a \| X`) from O(n²) completed items to a flat per-byte completer scan — lark-rs is now *faster than the Python oracle here*, which never finished Leo (its completer references a nonexistent field; see lark-parser/lark#397). Restricted to strict right recursion (recognized symbol is the rule's last); nullable-tail right recursion falls back to the regular completer |
 | Forest → tree conversion | ✅ | Sprint 2: `Transformer` walks the SPPF and reuses `TreeBuilder::assemble`; `ambiguity='resolve'` picks the highest-priority derivation (Lark's `ForestSumVisitor` order). Verified ≡ LALR on every unambiguous oracle by `test_earley_parity` |
 | `ambiguity='explicit'` | ✅ | Sprint 2: emits `_ambig` forests; curated cases pass, bank 211/211 (clean — the `AmbiguousExpander` port lifts an ambiguous transparent `_rule`/EBNF-helper child's ambiguity up into the parent) |
-| Dynamic lexer | ✅ | Sprint 5: scanning folded into the Earley loop (`xearley.py` port) — terminals tried at each position are exactly those the parser predicts. `LexerType::Dynamic`. Delayed-match buffer for variable-length tokens + `%ignore` carry-over. Terminal priorities feed the forest sum (the basic lexer consumes them in its ordering; the dynamic lexer does not). Bank 446/454 ≈ 98.2% |
+| Dynamic lexer | ✅ | Sprint 5: scanning folded into the Earley loop (`xearley.py` port) — terminals tried at each position are exactly those the parser predicts. `LexerType::Dynamic`. Delayed-match buffer for variable-length tokens + `%ignore` carry-over. Terminal priorities feed the forest sum (the basic lexer consumes them in its ordering; the dynamic lexer does not). Bank 454/454 = 100% (clean) |
 | `dynamic_complete` | ✅ | Sprint 5: `LexerType::DynamicComplete` — also explores every shorter tokenization, so all segmentations are considered |
 
 ### ⬜ Phase 3 — Full Feature Parity
@@ -391,8 +397,8 @@ adaptation (it's the hottest terminal in the library and already linear on the p
 All open tasks are tracked as GitHub issues. #39 (`%import` file paths), #45
 (`%declare`), #41 (Indenter/postlex, basic lexer), #67 (postlex over the
 contextual lexer), #35 (strict regex-collision), #44 (CYK parser), #42 (standalone
-parser — Rust variant), and #40 (grammar stdlib) are ✅ done. Current priority order
-for the remaining Phase 3: #32 (Earley XFAIL burndown) → #43 (error recovery).
+parser — Rust variant), #40 (grammar stdlib), and #32 (Earley XFAIL burndown) are
+✅ done. Current priority for the remaining Phase 3: #43 (error recovery).
 
 Follow-ups: a Python standalone emitter (#42); and `fancy-regex` routing in the
 standalone runtime — it emits a pure-`regex` parser, so a grammar with lookaround
