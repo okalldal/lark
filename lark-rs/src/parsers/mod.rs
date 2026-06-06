@@ -1,8 +1,10 @@
+pub mod cyk;
 pub mod earley;
 pub mod lalr;
 pub mod token_source;
 pub mod tree_builder;
 
+pub use cyk::CykParser;
 pub use earley::EarleyParser;
 pub use lalr::{build_lalr_table, LalrParser, ParseTable};
 pub use token_source::{Contextual, LexFailure, PreLexed, TokenSource};
@@ -97,6 +99,13 @@ enum FrontendKind {
         /// longest match at each position.
         complete_lex: bool,
     },
+    /// CYK over the basic lexer. Like Earley, CYK has no parser-state-driven
+    /// lexer, so it always uses the basic lexer; the grammar is converted to
+    /// Chomsky Normal Form once when the parser is built.
+    Cyk {
+        parser: CykParser,
+        lexer: BasicLexer,
+    },
 }
 
 impl ParsingFrontend {
@@ -139,6 +148,10 @@ impl ParsingFrontend {
                 resolve,
                 complete_lex,
             } => parser.parse_dynamic(text, start, *resolve, *complete_lex, matcher),
+            FrontendKind::Cyk { parser, lexer } => {
+                let tokens = lexer.lex(text)?;
+                parser.parse(&tokens, start)
+            }
         }
     }
 }
@@ -289,8 +302,22 @@ pub fn build_frontend(
             };
             Ok(ParsingFrontend { kind })
         }
-        ParserAlgorithm::Cyk => Err(LarkError::Grammar(crate::error::GrammarError::Other {
-            msg: "CYK parser not yet implemented".to_string(),
-        })),
+        ParserAlgorithm::Cyk => {
+            // CYK uses the basic lexer (it has no parser-state-driven lexer, like
+            // Earley). The grammar is lowered, the basic lexer built with the same
+            // validation the LALR/Earley basic paths apply, and the parser
+            // converts the grammar to CNF up front — so an unconvertible grammar
+            // (e.g. one with ε-rules) is rejected here as a build error, exactly as
+            // Python Lark rejects it while constructing the CYK frontend.
+            let cg = crate::grammar::lower(grammar);
+            let lexer_conf = basic_lexer_conf(&cg, options.g_regex_flags);
+            check_zero_width_terminals(&lexer_conf)?;
+            check_regex_collisions(&lexer_conf, options.strict, None)?;
+            let lexer = BasicLexer::new(&lexer_conf)?;
+            let parser = CykParser::new(cg)?;
+            Ok(ParsingFrontend {
+                kind: FrontendKind::Cyk { parser, lexer },
+            })
+        }
     }
 }
