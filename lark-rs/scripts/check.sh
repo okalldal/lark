@@ -39,6 +39,12 @@ note "Earley scaling gate: cargo test --features perf-counters --test test_earle
 ( cd "$LARK_RS_DIR" && cargo test --features perf-counters --test test_earley_scaling ) \
   || fail "Earley scaling gate failed — a super-linearity regressed (see test_earley_scaling.rs)"
 
+# 2c. CYK scaling gate (#87) — same perf-counters discipline; asserts the
+#     O(n³·|grammar|) table fill stays within a cubic envelope (flat per n³).
+note "CYK scaling gate: cargo test --features perf-counters --test test_cyk_scaling"
+( cd "$LARK_RS_DIR" && cargo test --features perf-counters --test test_cyk_scaling ) \
+  || fail "CYK scaling gate failed — a complexity regression in CNF/DP (see test_cyk_scaling.rs)"
+
 # 3. Oracle-freshness gate — regenerate from Python Lark and require no diff.
 #    (Needs 'pip install lark' and the JSONTestSuite submodule:
 #     git submodule update --init lark-rs/tests/corpora/JSONTestSuite)

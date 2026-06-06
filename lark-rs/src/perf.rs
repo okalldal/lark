@@ -27,6 +27,15 @@
 //!   where the explicit walk is genuinely O(n²) on a transparent left-recursive
 //!   helper (Inlines of size 1,2,…,n); the streaming fix that would flatten it is a
 //!   tracked follow-up (the explicit analog of #55's resolve-mode fix).
+//!
+//! A fourth counter backs the CYK scaling gate (#87):
+//!
+//! * [`cyk_table_steps`] — every `(split, left-nt, right-nt)` combination the CYK
+//!   DP examines while filling its triangular table. CYK is inherently
+//!   `O(n³ · |grammar|)`; asserting this count scales cubically (flat per `n³`)
+//!   over a size sweep catches an accidental complexity regression in the CNF
+//!   conversion or the DP, mirroring the Earley methodology
+//!   (`tests/test_cyk_scaling.rs`).
 
 #[cfg(feature = "perf-counters")]
 mod imp {
@@ -36,6 +45,7 @@ mod imp {
     static EXPLICIT_PREFIX_COPIES: AtomicU64 = AtomicU64::new(0);
     static EXPLICIT_NODE_CHILDREN: AtomicU64 = AtomicU64::new(0);
     static FOREST_NODES: AtomicU64 = AtomicU64::new(0);
+    static CYK_TABLE_STEPS: AtomicU64 = AtomicU64::new(0);
     static LEO_DISABLED: AtomicBool = AtomicBool::new(false);
 
     #[inline]
@@ -63,12 +73,23 @@ mod imp {
         FOREST_NODES.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Count one CYK table-fill combination step: every `(split, left-nt,
+    /// right-nt)` triple the DP examines when filling a span cell. This is the
+    /// dominant cost of the `O(n³ · |grammar|)` table fill, so asserting it scales
+    /// cubically (flat per `n³`) catches an accidental complexity regression in the
+    /// CNF conversion or the DP — the CYK analog of the Earley completer-scan gate.
+    #[inline]
+    pub fn add_cyk_table_steps(n: u64) {
+        CYK_TABLE_STEPS.fetch_add(n, Ordering::Relaxed);
+    }
+
     /// Zero every counter. Call before the workload you want to measure.
     pub fn reset() {
         COMPLETER_SCAN_STEPS.store(0, Ordering::Relaxed);
         EXPLICIT_PREFIX_COPIES.store(0, Ordering::Relaxed);
         EXPLICIT_NODE_CHILDREN.store(0, Ordering::Relaxed);
         FOREST_NODES.store(0, Ordering::Relaxed);
+        CYK_TABLE_STEPS.store(0, Ordering::Relaxed);
     }
 
     pub fn completer_scan_steps() -> u64 {
@@ -85,6 +106,10 @@ mod imp {
 
     pub fn forest_nodes() -> u64 {
         FOREST_NODES.load(Ordering::Relaxed)
+    }
+
+    pub fn cyk_table_steps() -> u64 {
+        CYK_TABLE_STEPS.load(Ordering::Relaxed)
     }
 
     /// Turn the Joop-Leo optimization off (`true`) or on (`false`). Lets a
@@ -119,6 +144,9 @@ mod imp {
     #[inline]
     pub fn add_forest_node() {}
 
+    #[inline]
+    pub fn add_cyk_table_steps(_n: u64) {}
+
     pub fn reset() {}
 
     pub fn completer_scan_steps() -> u64 {
@@ -134,6 +162,10 @@ mod imp {
     }
 
     pub fn forest_nodes() -> u64 {
+        0
+    }
+
+    pub fn cyk_table_steps() -> u64 {
         0
     }
 
