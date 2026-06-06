@@ -82,11 +82,15 @@ impl AnyRegex {
     fn match_end_at(&self, text: &str, pos: usize) -> Option<usize> {
         match self {
             AnyRegex::Plain(re) => {
-                let m = re.find_at(text, pos)?;
+                let m = re.find_at(text, pos);
+                record_scan_skip(pos, m.as_ref().map(|m| m.start()));
+                let m = m?;
                 (m.start() == pos && m.end() > pos).then_some(m.end())
             }
             AnyRegex::Fancy(re) => {
-                let m = re.find_from_pos(text, pos).ok()??;
+                let m = re.find_from_pos(text, pos).ok().flatten();
+                record_scan_skip(pos, m.as_ref().map(|m| m.start()));
+                let m = m?;
                 (m.start() == pos && m.end() > pos).then_some(m.end())
             }
         }
@@ -114,6 +118,31 @@ impl AnyRegex {
             AnyRegex::Fancy(re) => re.is_match(text).unwrap_or(false),
         }
     }
+}
+
+/// Account the forward-skip cost of one per-position scan attempt for the
+/// deterministic lexer-scaling gate ([`crate::perf::lexer_scan_steps`]).
+/// `match_start` is where the engine's leftmost match (searched *at or after*
+/// `pos`) actually began, or `None` on a miss. The recorded cost is the number of
+/// bytes the search skipped *past* `pos` before reporting that match, plus one for
+/// the attempt itself.
+///
+/// A miss is charged a flat `1`, deliberately: from the return value alone an
+/// anchored (`\G`) search and an unanchored one are indistinguishable on a no-match
+/// (both yield `None`), even though the unanchored one scanned to end-of-input to
+/// get there. Charging the miss its true scan length would therefore falsely flag
+/// an *anchored* scanner as quadratic. So the pathology is made observable from the
+/// other side: a workload that contains a *sparse* match means the unanchored
+/// search reports a far-ahead `start` (the skip we count) at every position before
+/// it, while the anchored search keeps missing at `pos` — exactly the
+/// `tests/test_lexer_scaling.rs` shape. Compiles to nothing without `perf-counters`.
+#[inline]
+fn record_scan_skip(pos: usize, match_start: Option<usize>) {
+    let skip = match match_start {
+        Some(start) => start.saturating_sub(pos) as u64,
+        None => 0,
+    };
+    crate::perf::add_lexer_scan_steps(skip + 1);
 }
 
 // ─── Configuration ────────────────────────────────────────────────────────────
@@ -356,7 +385,9 @@ impl Scanner {
         let mut best: Option<(usize, SymbolId, &'t str)> = None;
         if let (Some(re), Some(locs)) = (&self.re, &self.locs) {
             let mut locs = locs.borrow_mut();
-            if let Some(m0) = re.captures_read_at(&mut locs, text, pos) {
+            let m0 = re.captures_read_at(&mut locs, text, pos);
+            record_scan_skip(pos, m0.as_ref().map(|m| m.start()));
+            if let Some(m0) = m0 {
                 // Accept only a non-empty match beginning exactly at pos.
                 if m0.start() == pos && m0.end() != pos {
                     let value = m0.as_str();
