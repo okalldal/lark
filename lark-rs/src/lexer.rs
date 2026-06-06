@@ -290,7 +290,15 @@ impl Scanner {
             // (e.g. `(?i:…)` for a case-insensitive terminal) scoped to this group.
             let compiled = AnyRegex::compile(&format!("{prefix}{inline}"))?;
             if compiled.is_fancy() {
-                fancy.push((rank, *id, compiled));
+                // Anchor the per-position fancy match to `pos` with `\G` (start-of-
+                // search anchor). Without it, `fancy-regex`'s `find_from_pos` scans
+                // *forward* to the next match, so trying a sparse lookaround terminal
+                // (e.g. python.lark's `STRING`) at every position is O(n²) over the
+                // input. `\G` makes the search fail immediately when nothing matches
+                // at `pos`. Recompiled separately because the `regex` crate cannot
+                // parse `\G`, so this pattern stays on the `fancy-regex` engine.
+                let anchored = AnyRegex::compile(&format!("{prefix}\\G{inline}"))?;
+                fancy.push((rank, *id, anchored));
             } else {
                 let group = format!("g{}", id.0);
                 parts.push(format!("(?P<{group}>{inline})"));

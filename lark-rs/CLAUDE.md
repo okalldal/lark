@@ -388,7 +388,15 @@ backtracking overlay) while every other terminal stays on the fast combined `reg
 scanner — see `AnyRegex` in `src/lexer.rs`. Detection is automatic (a terminal is sent
 to `fancy-regex` only when the `regex` crate rejects its pattern), so user grammars
 with lookaround work too. **No backreferences** are used by any bundled grammar (and
-`fancy-regex` would support them if needed). Measured cost (`cargo bench --bench
+`fancy-regex` would support them if needed). The per-position scan is **anchored with
+`\G`**: a fancy terminal is tried at each offset with `find_from_pos`, which is an
+*unanchored forward search* — left as-is it scans ahead to the next match, so a
+*sparse* lookaround terminal (e.g. `python.lark`'s `STRING`) is O(n²) over the input
+(a 124 KB Python file took ~177 s before this was fixed; the pure-`regex` JSON/SQL
+scanners were unaffected). Prepending `\G` (start-of-search anchor) to the fancy
+pattern at `Scanner::build` makes the search fail immediately when nothing matches at
+`pos`, restoring linear-per-byte lexing; it is behaviour-preserving because the match
+is already required to start exactly at `pos`. Measured cost (`cargo bench --bench
 redos`): both shipped lookaround terminals stay **linear** — `fancy-regex` runs their
 ambiguous bodies on the linear engine and only backtracks around the fixed leading
 assertion, so there is no ReDoS; `STRING` carries only a constant-factor tax. One

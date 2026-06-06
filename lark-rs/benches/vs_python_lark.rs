@@ -6,8 +6,11 @@
 //! Lark" goal — over four real workloads:
 //!
 //!   1. **JSON**   — the canonical JSON grammar on a ~92 KB array of records.
-//!   2. **Python** — a significant-whitespace Python subset (driven by the
-//!                   `Indenter` postlex hook) over a representative source file.
+//!   2. **Python** — the **real upstream `python.lark`** (issue #79), driven by the
+//!                   `Indenter`/`PythonIndenter` postlex hook, over a generated
+//!                   source file that exercises the full language (classes, async,
+//!                   comprehensions, walrus, f-strings, decorators, *args/**kw,
+//!                   lambda, ternary, try/except, with, slices, imports).
 //!   3. **SQL**    — a SELECT/INSERT/UPDATE/DELETE grammar over a batch of statements.
 //!   4. **NL**     — a small ambiguous natural-language grammar (PP-attachment +
 //!                   coordination) on one short sentence, run under **CYK** — the
@@ -70,55 +73,14 @@ const JSON_GRAMMAR: &str = r#"
     %ignore WS
 "#;
 
-const PY_GRAMMAR: &str = r#"
-start: _NL? stmt*
-?stmt: simple_stmt | compound_stmt
-simple_stmt: expr_stmt _NL
-?expr_stmt: expr ("=" expr)* -> assign
-          | "return" [expr]  -> return_stmt
-          | "pass"           -> pass_stmt
-?compound_stmt: func_def | class_def | if_stmt | for_stmt | while_stmt
-func_def: "def" NAME "(" [params] ")" ":" suite
-class_def: "class" NAME ["(" [arglist] ")"] ":" suite
-if_stmt: "if" expr ":" suite ("elif" expr ":" suite)* ["else" ":" suite]
-for_stmt: "for" NAME "in" expr ":" suite
-while_stmt: "while" expr ":" suite
-suite: _NL _INDENT stmt+ _DEDENT
-params: NAME ("," NAME)*
-arglist: expr ("," expr)*
-?expr: or_test
-?or_test: and_test ("or" and_test)*
-?and_test: comparison ("and" comparison)*
-?comparison: arith (comp_op arith)*
-comp_op: "==" | "!=" | "<" | ">" | "<=" | ">="
-?arith: term (("+"|"-") term)*
-?term: factor (("*"|"/"|"%") factor)*
-?factor: "-" factor | power
-?power: trailer ("**" factor)?
-?trailer: trailer "(" [arglist] ")" -> call
-        | trailer "." NAME           -> getattr
-        | trailer "[" expr "]"        -> getitem
-        | atom
-?atom: NAME | NUMBER | STRING | "True" | "False" | "None"
-     | "(" expr ")"
-     | "[" [arglist] "]" -> list
-     | "{" [pair ("," pair)*] "}" -> dict
-pair: expr ":" expr
-LPAR: "("
-RPAR: ")"
-LSQB: "["
-RSQB: "]"
-LBRACE: "{"
-RBRACE: "}"
-NAME: /[a-zA-Z_]\w*/
-NUMBER: /\d+(\.\d+)?/
-STRING: /"[^"\n]*"/ | /'[^'\n]*'/
-COMMENT: /#[^\n]*/
-_NL: /(\r?\n[\t ]*)+/
-%ignore /[\t ]+/
-%ignore COMMENT
-%declare _INDENT _DEDENT
-"#;
+// The **real upstream** Python 3 grammar (issue #79). lark-rs bundles it verbatim
+// under `src/grammars/python.lark` (a byte-for-byte copy of `lark/grammars/python.lark`),
+// so both engines parse the exact same grammar — no hand-written subset. It builds
+// and parses end-to-end under LALR + the contextual lexer now that #98 (EBNF-helper
+// dedup), #97/#100 (leading-nullable distribution), and the named-keyword-terminal
+// `PatternStr` fix (async/await) have landed. Start symbol is `file_input`; the
+// `Indenter`/`PythonIndenter` postlex drives INDENT/DEDENT off `_NEWLINE`.
+const PY_GRAMMAR: &str = include_str!("../src/grammars/python.lark");
 
 const SQL_GRAMMAR: &str = r#"
 start: (stmt ";")+
@@ -215,30 +177,87 @@ fn gen_json(records: usize, fields: usize) -> String {
     s
 }
 
-/// `classes` repeated Python class blocks — methods with if/else, for loops,
-/// arithmetic, attribute access — exercising the Indenter (INDENT/DEDENT).
+/// `classes` repeated Python class blocks exercising the **full** upstream
+/// `python.lark` (issue #79): classes + decorators, `async def`/`await`/`async
+/// with`/`async for`, list/dict/set comprehensions, walrus (`:=`), f-strings,
+/// `*args`/`**kwargs` (def-site on a top-level fn, call-site + unpacking inside
+/// methods), `lambda`, ternary, `try`/`except`/`finally`, `with`, slices, `del`,
+/// `assert`, `while`, augmented assignment, annotated assignment, and `import`s —
+/// all driven through the `Indenter` (INDENT/DEDENT) postlex.
+///
+/// Both engines parse this byte-for-byte: it stays within what lark-rs *and*
+/// Python Lark accept. (Star-params after a positional in a `def` header — e.g.
+/// `def f(self, *a)` — is the one construct lark-rs's LALR table does not yet
+/// accept where Python Lark does, so def-site `*args`/`**kwargs` is exercised via
+/// the no-positional top-level `make`.)
+///
+/// Mirrors `gen_python` in `vs_python_lark.py` line-for-line; keep them identical.
 fn gen_python(classes: usize) -> String {
     let mut lines: Vec<String> = Vec::new();
+    // Module header — imports + a top-level function (def-site *args/**kwargs;
+    // method defs can't carry star-params after the leading `self`).
+    lines.push("import os".into());
+    lines.push("from typing import List, Dict".into());
+    lines.push("from collections import defaultdict as dd".into());
+    lines.push("".into());
+    lines.push("".into());
+    lines.push("def make(*args, **kwargs):".into());
+    lines.push("    return wrap(*args, **kwargs)".into());
+    lines.push("".into());
     for c in 0..classes {
-        lines.push(format!("class Account{c}:"));
+        lines.push("".into());
+        lines.push("@register".into());
+        lines.push(format!("class Account{c}(Base):"));
+        lines.push(format!("    tag: str = \"acct{c}\""));
+        lines.push("".into());
         lines.push("    def __init__(self, owner, balance):".into());
         lines.push("        self.owner = owner".into());
         lines.push("        self.balance = balance".into());
+        lines.push("        self.history = [x for x in [1, 2, 3] if x is not None]".into());
+        lines.push("        self.meta = {k: v for k, v in zip(keys, vals)}".into());
+        lines.push("        self.tags = {t for t in [1, 2, 3]}".into());
+        lines.push("".into());
+        lines.push("    @property".into());
+        lines.push("    def label(self):".into());
+        lines.push("        return f\"{self.owner}: {self.balance}\"".into());
+        lines.push("".into());
+        lines.push("    async def sync(self, source):".into());
+        lines.push("        async with source.lock() as handle:".into());
+        lines.push("            data = await handle.read()".into());
+        lines.push("        async for chunk in source.stream():".into());
+        lines.push("            self.balance += chunk".into());
+        lines.push("        return data".into());
         lines.push("".into());
         lines.push("    def deposit(self, amount):".into());
-        lines.push("        if amount > 0:".into());
-        lines.push("            self.balance = self.balance + amount".into());
-        lines.push("            return self.balance".into());
+        lines.push("        if (total := self.balance + amount) > 0:".into());
+        lines.push("            self.balance = total".into());
         lines.push("        else:".into());
-        lines.push("            return None".into());
+        lines.push("            raise ValueError(\"negative\")".into());
+        lines.push("        return self.balance if self.balance else 0".into());
         lines.push("".into());
         lines.push("    def summarize(self, items):".into());
         lines.push("        total = 0".into());
-        lines.push("        for it in items:".into());
-        lines.push("            total = total + it * 2".into());
-        lines.push("            if total > 100:".into());
-        lines.push("                total = total - 1".into());
-        lines.push("        return total".into());
+        lines.push("        for it in items[1:]:".into());
+        lines.push("            total += it * 2".into());
+        lines.push("        squares = {n: n ** 2 for n in range(10)}".into());
+        lines.push("        evens = [n for n in range(20) if n % 2 == 0]".into());
+        lines.push("        first = items[::2]".into());
+        lines.push("        seq = [*evens, 0]".into());
+        lines.push("        pair = {**self.meta, \"extra\": 1}".into());
+        lines.push("        key = lambda p: p[1]".into());
+        lines.push("        assert total >= 0, \"bad\"".into());
+        lines.push("        while total > 1000:".into());
+        lines.push("            total -= 1".into());
+        lines.push("        try:".into());
+        lines.push("            result = total / len(items)".into());
+        lines.push("        except ZeroDivisionError as e:".into());
+        lines.push("            result = 0".into());
+        lines.push("        finally:".into());
+        lines.push("            handler = lambda x: x + total".into());
+        lines.push("        del first".into());
+        lines.push("        with open(\"log.txt\") as fh:".into());
+        lines.push("            fh.write(str(result))".into());
+        lines.push("        return make(*evens, **squares)".into());
         lines.push("".into());
     }
     let mut s = lines.join("\n");
@@ -327,8 +346,10 @@ fn measure<F: FnMut()>(mut f: F) -> Stat {
 }
 
 fn python_indenter() -> Indenter {
+    // Matches Python Lark's `PythonIndenter` exactly (upstream `python.lark` names
+    // its newline terminal `_NEWLINE`, not `_NL`).
     Indenter {
-        nl_type: "_NL".to_string(),
+        nl_type: "_NEWLINE".to_string(),
         open_paren_types: vec!["LPAR".into(), "LSQB".into(), "LBRACE".into()],
         close_paren_types: vec!["RPAR".into(), "RSQB".into(), "RBRACE".into()],
         indent_type: "_INDENT".to_string(),
@@ -371,7 +392,13 @@ struct Config {
     algo: Algo,
     lexer: LexerType,
     grammar: &'static str,
+    /// Start symbol — `"start"` for the inline grammars, `"file_input"` for the
+    /// real upstream `python.lark`.
+    start: &'static str,
     postlex: bool,
+    /// `maybe_placeholders=True` (Python Lark's default) — set for `python.lark`,
+    /// whose `[...]` optionals expect placeholder `None`s, matching the Python side.
+    maybe_placeholders: bool,
 }
 
 /// The LALR row uses the contextual lexer (Lark's USP) on all three workloads.
@@ -391,55 +418,68 @@ fn configs() -> Vec<Config> {
             algo: Algo::Lalr,
             lexer: LexerType::Contextual,
             grammar: JSON_GRAMMAR,
+            start: "start",
             postlex: false,
+            maybe_placeholders: false,
         },
         Config {
             name: "python",
             algo: Algo::Lalr,
             lexer: LexerType::Contextual,
             grammar: PY_GRAMMAR,
+            start: "file_input",
             postlex: true,
+            maybe_placeholders: true,
         },
         Config {
             name: "sql",
             algo: Algo::Lalr,
             lexer: LexerType::Contextual,
             grammar: SQL_GRAMMAR,
+            start: "start",
             postlex: false,
+            maybe_placeholders: false,
         },
         Config {
             name: "json",
             algo: Algo::Earley,
             lexer: LexerType::Basic,
             grammar: JSON_GRAMMAR,
+            start: "start",
             postlex: false,
+            maybe_placeholders: false,
         },
         Config {
             name: "sql",
             algo: Algo::Earley,
             lexer: LexerType::Dynamic,
             grammar: SQL_GRAMMAR,
+            start: "start",
             postlex: false,
+            maybe_placeholders: false,
         },
         Config {
             name: "nl",
             algo: Algo::Cyk,
             lexer: LexerType::Basic,
             grammar: NL_GRAMMAR,
+            start: "start",
             postlex: false,
+            maybe_placeholders: false,
         },
     ]
 }
 
 fn build(cfg: &Config) -> Lark {
     let mut opts = LarkOptions {
-        start: vec!["start".to_string()],
+        start: vec![cfg.start.to_string()],
         parser: match cfg.algo {
             Algo::Lalr => ParserAlgorithm::Lalr,
             Algo::Earley => ParserAlgorithm::Earley,
             Algo::Cyk => ParserAlgorithm::Cyk,
         },
         lexer: cfg.lexer.clone(),
+        maybe_placeholders: cfg.maybe_placeholders,
         ..LarkOptions::default()
     };
     if cfg.postlex {
@@ -566,7 +606,7 @@ fn main() {
 
     let inputs: HashMap<&str, String> = HashMap::from([
         ("json", gen_json(512, 5)),
-        ("python", gen_python(220)),
+        ("python", gen_python(80)),
         ("sql", gen_sql(700)),
         // CYK is O(n³): a single ambiguous sentence (12 PPs ≈ 40 tokens), not a file.
         ("nl", gen_nl(12)),
