@@ -45,13 +45,12 @@ fn test_dangling_else_is_lalr_not_slr() {
     }
 }
 
-/// BUG-6 (updated for Phase 2, Sprint 2): the Earley backend is now implemented,
-/// so requesting it must *build and parse*, never silently fall back to LALR.
-/// CYK is still unimplemented and must fail loudly rather than substitute another
-/// algorithm — the original "no silent fallback" guarantee, now pinned on the one
-/// backend that is still a stub.
+/// BUG-6 (updated for Phase 3): every requested backend must *build and parse*
+/// with its own engine, never silently fall back to another. Earley (Phase 2) and
+/// CYK (Phase 3) are both implemented now, so requesting either must use it — the
+/// original "no silent fallback" guarantee, now pinned across all three backends.
 #[test]
-fn test_earley_builds_and_cyk_errors_loudly() {
+fn test_each_backend_builds_with_its_own_engine() {
     // Earley builds and parses (it accepts even grammars LALR cannot build).
     let earley = Lark::new(
         "start: \"a\"",
@@ -60,27 +59,26 @@ fn test_earley_builds_and_cyk_errors_loudly() {
             ..Default::default()
         },
     )
-    .expect("Earley backend should build (Phase 2, Sprint 2)");
+    .expect("Earley backend should build (Phase 2)");
     assert!(
         earley.parse("a").is_ok(),
         "Earley should parse a trivial grammar"
     );
 
-    // CYK remains unimplemented: fail loudly, do not silently fall back.
+    // CYK builds and parses too (Phase 3).
     let cyk = Lark::new(
         "start: \"a\"",
         LarkOptions {
             parser: ParserAlgorithm::Cyk,
             ..Default::default()
         },
+    )
+    .expect("CYK backend should build (Phase 3)");
+    assert!(cyk.parse("a").is_ok(), "CYK should parse a trivial grammar");
+    assert!(
+        cyk.parse("b").is_err(),
+        "CYK should reject input outside the grammar"
     );
-    match cyk {
-        Ok(_) => panic!("CYK must not silently fall back to another backend"),
-        Err(LarkError::Grammar(lark_rs::GrammarError::Other { msg })) => {
-            assert!(msg.contains("CYK"), "unexpected error message: {msg}");
-        }
-        Err(e) => panic!("expected a CYK-not-implemented error, got: {e}"),
-    }
 }
 
 /// BUG-2: grammar construction must fail loudly on unresolvable reduce/reduce

@@ -153,6 +153,65 @@ impl LexerConf {
     }
 }
 
+// ─── Scanner plan (shared with the standalone generator) ──────────────────────
+
+/// The deterministic recipe for a combined scanner: the global-flag prefix, the
+/// alternation members in order (each terminal id paired with its inline regex
+/// source), and the `unless` keyword-retype map.
+///
+/// [`Scanner::build`] consumes this to compile a runtime scanner; the standalone
+/// parser generator (`crate::standalone`) bakes the very same plan into `const`
+/// data, so a generated parser's lexer is byte-identical to the in-process one.
+#[derive(Debug, Clone)]
+pub struct ScannerPlan {
+    /// Leading inline-flag group for `g_regex_flags` (e.g. `(?i)`), or empty.
+    pub global_prefix: String,
+    /// `(terminal id, inline regex source)`, in alternation order.
+    pub groups: Vec<(SymbolId, String)>,
+    /// regex-terminal-id → (matched-text → keyword-terminal-id).
+    pub unless: HashMap<SymbolId, HashMap<String, SymbolId>>,
+}
+
+/// Compute the [`ScannerPlan`] for a candidate terminal set, applying exactly the
+/// selection, ordering and `unless`-embedding rules [`Scanner::build`] relies on.
+/// Factored out so the runtime lexer and the standalone code generator agree by
+/// construction.
+pub fn scanner_plan(
+    terminals: &[(SymbolId, &TerminalDef)],
+    global_flags: u32,
+) -> Result<ScannerPlan, GrammarError> {
+    let mut seen = HashSet::new();
+    let terms: Vec<(SymbolId, &TerminalDef)> = terminals
+        .iter()
+        .copied()
+        .filter(|(id, _)| seen.insert(*id))
+        .collect();
+
+    // unless: embed string terminals fully matched by a same-priority regex
+    // terminal, and record the retype.
+    let unless = compute_unless(&terms, global_flags)?;
+    let embedded: HashSet<SymbolId> = unless.values().flat_map(|m| m.values().copied()).collect();
+
+    // Scanner terminals = everything not embedded, sorted Python-style.
+    let mut scan: Vec<(SymbolId, &TerminalDef)> = terms
+        .iter()
+        .copied()
+        .filter(|(id, _)| !embedded.contains(id))
+        .collect();
+    sort_terminals(&mut scan);
+
+    let groups = scan
+        .iter()
+        .map(|(id, term)| (*id, term.pattern.to_inline_regex()))
+        .collect();
+
+    Ok(ScannerPlan {
+        global_prefix: global_flag_prefix(global_flags),
+        groups,
+        unless,
+    })
+}
+
 // ─── Lexer trait ─────────────────────────────────────────────────────────────
 
 pub trait Lexer {
@@ -209,41 +268,26 @@ impl Scanner {
         terminals: &[(SymbolId, &TerminalDef)],
         global_flags: u32,
     ) -> Result<Scanner, GrammarError> {
-        let mut seen = HashSet::new();
-        let terms: Vec<(SymbolId, &TerminalDef)> = terminals
-            .iter()
-            .copied()
-            .filter(|(id, _)| seen.insert(*id))
-            .collect();
+        // The selection + ordering + unless retyping is shared with the standalone
+        // generator (`scanner_plan`) so a baked scanner is byte-identical to this
+        // runtime one.
+        let plan = scanner_plan(terminals, global_flags)?;
+        let unless = plan.unless;
+        let prefix = plan.global_prefix;
 
-        // unless: embed string terminals fully matched by a same-priority regex
-        // terminal, and record the retype.
-        let unless = compute_unless(&terms, global_flags)?;
-        let embedded: HashSet<SymbolId> =
-            unless.values().flat_map(|m| m.values().copied()).collect();
-
-        // Scanner terminals = everything not embedded, sorted Python-style. The
-        // sorted index is each terminal's `rank`: Python builds the combined
-        // alternation in this order and takes the first branch that matches, so a
-        // lower rank wins ties. We split the list into plain terminals (the fast
-        // combined `regex`) and lookaround terminals (`fancy-regex`, matched
-        // individually) while preserving rank, then merge by rank at match time.
-        let mut scan: Vec<(SymbolId, &TerminalDef)> = terms
-            .iter()
-            .copied()
-            .filter(|(id, _)| !embedded.contains(id))
-            .collect();
-        sort_terminals(&mut scan);
-
-        let prefix = global_flag_prefix(global_flags);
+        // Split the plan's (rank-ordered) terminals into *plain* terminals — which
+        // go into the single fast combined `regex` alternation — and *lookaround*
+        // terminals, which the `regex` crate cannot compile and so are matched
+        // individually via `fancy-regex` (issue #40). `rank` is the index in the
+        // plan's sorted order: Python builds the alternation in this order and takes
+        // the first branch that matches, so the lowest rank wins ties. We preserve it
+        // to merge the two engines' candidates at match time.
         let mut parts = Vec::new();
         let mut group_names = Vec::new();
         let mut fancy: Vec<(usize, SymbolId, AnyRegex)> = Vec::new();
-        for (rank, (id, term)) in scan.iter().enumerate() {
-            // `to_inline_regex` keeps per-terminal flags (e.g. `(?i:…)` for a
-            // case-insensitive terminal) scoped to this group; `as_regex_str`
-            // would drop them, so `"a"i` would not match `A`.
-            let inline = term.pattern.to_inline_regex();
+        for (rank, (id, inline)) in plan.groups.iter().enumerate() {
+            // `to_inline_regex` (used by `scanner_plan`) keeps per-terminal flags
+            // (e.g. `(?i:…)` for a case-insensitive terminal) scoped to this group.
             let compiled = AnyRegex::compile(&format!("{prefix}{inline}"))?;
             if compiled.is_fancy() {
                 fancy.push((rank, *id, compiled));

@@ -462,6 +462,135 @@ def dedup_and_save_earley_dynamic():
           f"{n_conflict} construct-error, {n_complete} dynamic_complete grammars")
 
 
+# ─── CYK bank (Phase 3) ──────────────────────────────────────────────────────
+#
+# A fourth bank, captured the same way but from Lark's *CYK* test class
+# (TestCykBasic), replayed by tests/test_cyk_compliance.rs. Kept separate from the
+# other banks (which stay byte-identical) so CYK burns down independently. CYK
+# always uses the basic lexer (the contextual lexer is LALR-only) and always
+# resolves ambiguity (there is no `ambiguity='explicit'` for CYK), so neither the
+# lexer nor an ambiguity dimension varies — the recorded shape matches the LALR
+# bank's, with parser='cyk'.
+
+_CYK_RECORDS = []
+_CYK_ATTR = "_lark_rs_cyk_record"
+
+
+def representable_cyk(grammar, options):
+    """Can lark-rs's CYK (basic lexer) represent this configuration?"""
+    if not isinstance(grammar, str):
+        return False
+    if options.get("parser", "earley") != "cyk":
+        return False
+    lexer = options.get("lexer")
+    # CYK only supports the basic lexer; custom (callable) lexers are out of scope.
+    if lexer not in (None, "auto", "basic"):
+        return False
+    if options.get("transformer") is not None:
+        return False
+    if options.get("postlex") is not None:
+        return False
+    if RELATIVE_IMPORT.search(grammar):
+        return False
+    return True
+
+
+def _cyk_meta(grammar, options):
+    return {
+        "grammar": grammar if isinstance(grammar, str) else None,
+        "parser": options.get("parser", "earley"),
+        "lexer": options.get("lexer", "auto"),
+        "start": options.get("start", "start"),
+        "maybe_placeholders": options.get("maybe_placeholders", True),
+        "keep_all_tokens": options.get("keep_all_tokens", False),
+        "strict": options.get("strict", False),
+        "g_regex_flags": flag_letters(options.get("g_regex_flags", 0)),
+    }
+
+
+def _cyk_patched_init(self, grammar, **options):
+    rep = representable_cyk(grammar, options)
+    meta = _cyk_meta(grammar, options)
+    try:
+        _orig_init(self, grammar, **options)
+    except Exception as e:
+        if rep:
+            _CYK_RECORDS.append({**meta, "construct_error": True,
+                                 "error_kind": type(e).__name__, "cases": []})
+        raise
+    if rep:
+        rec = {**meta, "construct_error": False, "cases": []}
+        object.__setattr__(self, _CYK_ATTR, rec)
+        _CYK_RECORDS.append(rec)
+
+
+def _cyk_patched_parse(self, text, *args, **kwargs):
+    rec = getattr(self, _CYK_ATTR, None)
+    capture = rec is not None and not args and not kwargs and isinstance(text, str)
+    try:
+        result = _orig_parse(self, text, *args, **kwargs)
+        if capture and isinstance(result, Tree):
+            rec["cases"].append({"input": text, "should_parse": True,
+                                 "tree": tree_to_dict(result), "error_kind": None})
+        return result
+    except Exception as e:
+        if capture:
+            rec["cases"].append({"input": text, "should_parse": False,
+                                 "tree": None, "error_kind": type(e).__name__})
+        raise
+
+
+def run_cyk_suite():
+    Lark.__init__ = _cyk_patched_init
+    Lark.parse = _cyk_patched_parse
+    try:
+        import tests.test_parser as tp  # noqa: F401
+
+        loader = unittest.TestLoader()
+        suite = unittest.TestSuite()
+        for cls_name in ("TestCykBasic",):
+            cls = getattr(tp, cls_name, None)
+            if cls is not None:
+                suite.addTests(loader.loadTestsFromTestCase(cls))
+        runner = unittest.TextTestRunner(stream=open("/dev/null", "w"), verbosity=0)
+        runner.run(suite)
+    finally:
+        Lark.__init__ = _orig_init
+        Lark.parse = _orig_parse
+
+
+def dedup_and_save_cyk():
+    seen = {}
+    for rec in _CYK_RECORDS:
+        if rec["grammar"] is None:
+            continue
+        key = (rec["grammar"], rec["parser"], rec["lexer"], str(rec["start"]),
+               rec["maybe_placeholders"], rec["keep_all_tokens"], rec["construct_error"],
+               rec["strict"], rec["g_regex_flags"])
+        tgt = seen.get(key)
+        if tgt is None:
+            tgt = {**rec, "cases": []}
+            seen[key] = tgt
+        case_inputs = {c["input"] for c in tgt["cases"]}
+        for c in rec["cases"]:
+            if c["input"] not in case_inputs:
+                tgt["cases"].append(c)
+                case_inputs.add(c["input"])
+
+    records = list(seen.values())
+    records.sort(key=lambda r: (r["grammar"], str(r["start"])))
+
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    out = OUT_DIR / "cyk_bank.json"
+    out.write_text(json.dumps(records, indent=2, ensure_ascii=False) + "\n")
+
+    n_parse = sum(len(r["cases"]) for r in records)
+    n_conflict = sum(1 for r in records if r["construct_error"])
+    print(f"  wrote {out.relative_to(LARK_RS_DIR)}")
+    print(f"  {len(records)} grammars, {n_parse} parse cases, "
+          f"{n_conflict} construct-error grammars")
+
+
 if __name__ == "__main__":
     print("Instrumenting Python Lark and running its LALR test suite...")
     run_suite()
@@ -472,4 +601,7 @@ if __name__ == "__main__":
     print("Instrumenting Python Lark and running its Earley dynamic-lexer suite...")
     run_earley_dynamic_suite()
     dedup_and_save_earley_dynamic()
+    print("Instrumenting Python Lark and running its CYK test suite...")
+    run_cyk_suite()
+    dedup_and_save_cyk()
     print("Done. Commit tests/fixtures/oracles/compliance/ to track the banks.")
