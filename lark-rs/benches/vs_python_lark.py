@@ -21,6 +21,7 @@ Lark (repo root on sys.path), so it is version-locked to this repo.
 """
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -31,7 +32,11 @@ sys.path.insert(0, str(REPO_ROOT))
 
 import lark  # noqa: E402
 from lark import Lark  # noqa: E402
-from lark.indenter import Indenter  # noqa: E402
+from lark.indenter import PythonIndenter  # noqa: E402
+
+# Python Lark's own grammars directory — added to `import_paths` so `python.lark`'s
+# library imports resolve when loaded by absolute text (the in-tree copy).
+LARK_GRAMMARS_DIR = os.path.join(os.path.dirname(lark.__file__), "grammars")
 
 # ---------------------------------------------------------------------------
 # Grammars — byte-identical to benches/vs_python_lark.rs
@@ -56,55 +61,11 @@ JSON_GRAMMAR = r"""
     %ignore WS
 """
 
-PY_GRAMMAR = r"""
-start: _NL? stmt*
-?stmt: simple_stmt | compound_stmt
-simple_stmt: expr_stmt _NL
-?expr_stmt: expr ("=" expr)* -> assign
-          | "return" [expr]  -> return_stmt
-          | "pass"           -> pass_stmt
-?compound_stmt: func_def | class_def | if_stmt | for_stmt | while_stmt
-func_def: "def" NAME "(" [params] ")" ":" suite
-class_def: "class" NAME ["(" [arglist] ")"] ":" suite
-if_stmt: "if" expr ":" suite ("elif" expr ":" suite)* ["else" ":" suite]
-for_stmt: "for" NAME "in" expr ":" suite
-while_stmt: "while" expr ":" suite
-suite: _NL _INDENT stmt+ _DEDENT
-params: NAME ("," NAME)*
-arglist: expr ("," expr)*
-?expr: or_test
-?or_test: and_test ("or" and_test)*
-?and_test: comparison ("and" comparison)*
-?comparison: arith (comp_op arith)*
-comp_op: "==" | "!=" | "<" | ">" | "<=" | ">="
-?arith: term (("+"|"-") term)*
-?term: factor (("*"|"/"|"%") factor)*
-?factor: "-" factor | power
-?power: trailer ("**" factor)?
-?trailer: trailer "(" [arglist] ")" -> call
-        | trailer "." NAME           -> getattr
-        | trailer "[" expr "]"        -> getitem
-        | atom
-?atom: NAME | NUMBER | STRING | "True" | "False" | "None"
-     | "(" expr ")"
-     | "[" [arglist] "]" -> list
-     | "{" [pair ("," pair)*] "}" -> dict
-pair: expr ":" expr
-LPAR: "("
-RPAR: ")"
-LSQB: "["
-RSQB: "]"
-LBRACE: "{"
-RBRACE: "}"
-NAME: /[a-zA-Z_]\w*/
-NUMBER: /\d+(\.\d+)?/
-STRING: /"[^"\n]*"/ | /'[^'\n]*'/
-COMMENT: /#[^\n]*/
-_NL: /(\r?\n[\t ]*)+/
-%ignore /[\t ]+/
-%ignore COMMENT
-%declare _INDENT _DEDENT
-"""
+# The **real upstream** Python 3 grammar (issue #79): the in-tree, byte-for-byte
+# copy that lark-rs bundles and `include_str!`s, so both engines parse the exact
+# same grammar. Start symbol is `file_input`; the `PythonIndenter` postlex drives
+# INDENT/DEDENT off `_NEWLINE`.
+PY_GRAMMAR = (REPO_ROOT / "lark-rs" / "src" / "grammars" / "python.lark").read_text()
 
 SQL_GRAMMAR = r"""
 start: (stmt ";")+
@@ -170,15 +131,6 @@ PREP: "in" | "with" | "on" | "near" | "by"
 """
 
 
-class PyIndenter(Indenter):
-    NL_type = "_NL"
-    OPEN_PAREN_types = ["LPAR", "LSQB", "LBRACE"]
-    CLOSE_PAREN_types = ["RPAR", "RSQB", "RBRACE"]
-    INDENT_type = "_INDENT"
-    DEDENT_type = "_DEDENT"
-    tab_len = 8
-
-
 # ---------------------------------------------------------------------------
 # Input generators — mirror benches/vs_python_lark.rs (used only in standalone
 # mode; with --inputs the Rust harness supplies byte-identical files).
@@ -195,27 +147,73 @@ def gen_json(records, fields):
 
 
 def gen_python(classes):
+    # Exercises the **full** upstream python.lark (issue #79). Mirrors
+    # gen_python in vs_python_lark.rs line-for-line — keep them byte-identical.
     out = []
+    # Module header — imports + a top-level function (def-site *args/**kwargs;
+    # method defs can't carry star-params after the leading `self`).
+    out.append("import os")
+    out.append("from typing import List, Dict")
+    out.append("from collections import defaultdict as dd")
+    out.append("")
+    out.append("")
+    out.append("def make(*args, **kwargs):")
+    out.append("    return wrap(*args, **kwargs)")
+    out.append("")
     for c in range(classes):
-        out.append(f"class Account{c}:")
+        out.append("")
+        out.append("@register")
+        out.append(f"class Account{c}(Base):")
+        out.append(f'    tag: str = "acct{c}"')
+        out.append("")
         out.append("    def __init__(self, owner, balance):")
         out.append("        self.owner = owner")
         out.append("        self.balance = balance")
+        out.append("        self.history = [x for x in [1, 2, 3] if x is not None]")
+        out.append("        self.meta = {k: v for k, v in zip(keys, vals)}")
+        out.append("        self.tags = {t for t in [1, 2, 3]}")
+        out.append("")
+        out.append("    @property")
+        out.append("    def label(self):")
+        out.append('        return f"{self.owner}: {self.balance}"')
+        out.append("")
+        out.append("    async def sync(self, source):")
+        out.append("        async with source.lock() as handle:")
+        out.append("            data = await handle.read()")
+        out.append("        async for chunk in source.stream():")
+        out.append("            self.balance += chunk")
+        out.append("        return data")
         out.append("")
         out.append("    def deposit(self, amount):")
-        out.append("        if amount > 0:")
-        out.append("            self.balance = self.balance + amount")
-        out.append("            return self.balance")
+        out.append("        if (total := self.balance + amount) > 0:")
+        out.append("            self.balance = total")
         out.append("        else:")
-        out.append("            return None")
+        out.append('            raise ValueError("negative")')
+        out.append("        return self.balance if self.balance else 0")
         out.append("")
         out.append("    def summarize(self, items):")
         out.append("        total = 0")
-        out.append("        for it in items:")
-        out.append("            total = total + it * 2")
-        out.append("            if total > 100:")
-        out.append("                total = total - 1")
-        out.append("        return total")
+        out.append("        for it in items[1:]:")
+        out.append("            total += it * 2")
+        out.append("        squares = {n: n ** 2 for n in range(10)}")
+        out.append("        evens = [n for n in range(20) if n % 2 == 0]")
+        out.append("        first = items[::2]")
+        out.append("        seq = [*evens, 0]")
+        out.append('        pair = {**self.meta, "extra": 1}')
+        out.append("        key = lambda p: p[1]")
+        out.append('        assert total >= 0, "bad"')
+        out.append("        while total > 1000:")
+        out.append("            total -= 1")
+        out.append("        try:")
+        out.append("            result = total / len(items)")
+        out.append("        except ZeroDivisionError as e:")
+        out.append("            result = 0")
+        out.append("        finally:")
+        out.append("            handler = lambda x: x + total")
+        out.append("        del first")
+        out.append('        with open("log.txt") as fh:')
+        out.append("            fh.write(str(result))")
+        out.append("        return make(*evens, **squares)")
         out.append("")
     return "\n".join(out) + "\n"
 
@@ -270,27 +268,28 @@ def measure(fn):
 
 GRAMMARS = {"json": JSON_GRAMMAR, "python": PY_GRAMMAR, "sql": SQL_GRAMMAR, "nl": NL_GRAMMAR}
 
-# (algo, workload, lexer, postlex) — mirrored in benches/vs_python_lark.rs.
+# (algo, workload, lexer, postlex, start) — mirrored in benches/vs_python_lark.rs.
 # LALR + contextual on JSON/Python/SQL; Earley on the two workloads it can run
-# cross-engine (JSON/basic, SQL/dynamic). Python has no Earley row: postlex is
-# incompatible with the dynamic lexer, and the basic lexer can't drive the
+# cross-engine (JSON/basic, SQL/dynamic). Python uses the real upstream
+# python.lark (start="file_input" + PythonIndenter); it has no Earley row: postlex
+# is incompatible with the dynamic lexer, and the basic lexer can't drive the
 # Indenter the way the workload needs — see the .rs module header. CYK runs the
 # NL workload (the one genuinely ambiguous grammar that needs a general-CFG
 # engine), bounded to a short sentence since CYK is O(n³).
 CONFIGS = [
-    ("lalr", "json", "contextual", False),
-    ("lalr", "python", "contextual", True),
-    ("lalr", "sql", "contextual", False),
-    ("earley", "json", "basic", False),
-    ("earley", "sql", "dynamic", False),
-    ("cyk", "nl", "basic", False),
+    ("lalr", "json", "contextual", False, "start"),
+    ("lalr", "python", "contextual", True, "file_input"),
+    ("lalr", "sql", "contextual", False, "start"),
+    ("earley", "json", "basic", False, "start"),
+    ("earley", "sql", "dynamic", False, "start"),
+    ("cyk", "nl", "basic", False, "start"),
 ]
 
 
-def build(algo, name, lexer, postlex):
-    kwargs = dict(parser=algo, lexer=lexer, start="start")
+def build(algo, name, lexer, postlex, start):
+    kwargs = dict(parser=algo, lexer=lexer, start=start, import_paths=[LARK_GRAMMARS_DIR])
     if postlex:
-        kwargs["postlex"] = PyIndenter()
+        kwargs["postlex"] = PythonIndenter()
     return Lark(GRAMMARS[name], **kwargs)
 
 
@@ -319,7 +318,7 @@ def main():
     else:
         inputs = {
             "json": gen_json(512, 5),
-            "python": gen_python(220),
+            "python": gen_python(80),
             "sql": gen_sql(700),
             "nl": gen_nl(12),
         }
@@ -328,8 +327,8 @@ def main():
     print("# columns: PYBENCH<TAB>algo<TAB>name<TAB>bytes<TAB>median_ns<TAB>min_ns<TAB>mb_per_s")
     print()
 
-    for algo, name, lexer, postlex in CONFIGS:
-        parser = build(algo, name, lexer, postlex)
+    for algo, name, lexer, postlex, start in CONFIGS:
+        parser = build(algo, name, lexer, postlex, start)
         text = inputs[name]
         parser.parse(text)  # fail loudly if the workload does not parse
         mn, md = measure(lambda p=parser, t=text: p.parse(t))

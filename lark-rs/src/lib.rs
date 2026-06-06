@@ -523,9 +523,13 @@ mod tests {
         // many repeated `("," X)*` patterns that, without `rules_cache`-style
         // sharing, expand to duplicate nullable helpers and collide as
         // unresolvable reduce/reduce — so the LALR table cannot be built at all
-        // (see issue #79). With sharing the table builds. (Parsing a Python file
-        // end-to-end is gated separately on a distinct terminal/assignment issue,
-        // so this only asserts the build.)
+        // (see issue #79). With sharing the table builds — and with #97/#100
+        // (leading-nullable distribution) and the named-keyword-terminal
+        // `PatternStr` fix (async/await) also landed, it now *parses* end-to-end
+        // too, so this asserts both: the table builds and a multi-feature program
+        // (class + decorator + `async def`/`await`/`async for` + a comprehension)
+        // parses. Trees verified against Python Lark 1.3.1 (`PythonIndenter`,
+        // contextual lexer).
         let src = include_str!("grammars/python.lark");
         let res = Lark::new(
             src,
@@ -533,6 +537,7 @@ mod tests {
                 parser: ParserAlgorithm::Lalr,
                 lexer: LexerType::Contextual,
                 start: vec!["file_input".to_string()],
+                maybe_placeholders: true,
                 postlex: Some(Indenter {
                     nl_type: "_NEWLINE".to_string(),
                     open_paren_types: vec!["LPAR".into(), "LSQB".into(), "LBRACE".into()],
@@ -544,10 +549,17 @@ mod tests {
                 ..Default::default()
             },
         );
+        let l = res.expect("python.lark must build under LALR");
+        let prog = "@register\n\
+                    class Account(Base):\n\
+                    \x20   async def sync(self, source):\n\
+                    \x20       async for chunk in source.stream():\n\
+                    \x20           self.balance += await chunk.read()\n\
+                    \x20       return [x for x in source if x is not None]\n";
         assert!(
-            res.is_ok(),
-            "python.lark LALR build failed: {:?}",
-            res.err()
+            l.parse(prog).is_ok(),
+            "python.lark must parse a multi-feature program, got {:?}",
+            l.parse(prog).err()
         );
     }
 

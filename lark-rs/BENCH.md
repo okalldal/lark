@@ -182,18 +182,40 @@ cross-engine number (see "Earley arm" and "CYK arm" below).
 
 - **JSON** — the canonical JSON grammar over a ~92 KB array of records (the
   `json_large` shape from `parse.rs`).
-- **Python** — a significant-whitespace Python *subset* driven by the `Indenter`
-  postlex hook (classes, methods, `if`/`else`, `for`, arithmetic, attribute
-  access). This exercises `%declare _INDENT _DEDENT` + postlex end-to-end — the
-  feature that makes Python-style indentation parseable. The *full* upstream
-  `python.lark` is still not parseable end-to-end by lark-rs — but no longer for
-  the reason once tracked under #40 (now closed; the lookaround terminals route to
-  `fancy-regex`). The current blocker is a core EBNF gap: lark-rs gives
-  structurally-identical group/optional helpers distinct anon rules where Python
-  Lark dedups them (its `rules_cache`), so `python.lark` hits reduce/reduce
-  conflicts under LALR that Python Lark does not (full analysis on #79). So the
-  workload remains a representative subset both engines accept (see #79 for the
-  swap once that gap is fixed).
+- **Python** — the **real upstream `python.lark`** (issue #79), driven by the
+  `Indenter`/`PythonIndenter` postlex hook over a generated source file that
+  exercises the full language: classes + decorators, `async def`/`await`/`async
+  with`/`async for`, list/dict/set comprehensions, the walrus `:=`, f-strings,
+  `*args`/`**kwargs`, `lambda`, ternary, `try`/`except`/`finally`, `with`, slices,
+  `del`/`assert`/`while`, augmented + annotated assignment, and `import`s. This is
+  no longer a curated subset: lark-rs and Python Lark load the *same* in-tree
+  `python.lark` (start `file_input`) and parse the byte-identical input. It became
+  parseable end-to-end once #98 (EBNF-helper dedup → builds under LALR), #97/#100
+  (leading-nullable distribution → parses), and the named-keyword-terminal
+  `PatternStr` fix (async/await) landed; the lookaround terminals route to
+  `fancy-regex` (#40). One construct stays off the generator — star-params *after*
+  a positional in a `def` header (`def f(self, *a)`), which lark-rs's LALR table
+  does not yet accept where Python Lark does — so def-site `*args`/`**kwargs` is
+  exercised via a no-positional top-level function (call-site unpacking, which both
+  accept, is used everywhere else). The bench both *builds* and *parse-checks* the
+  workload on each engine before timing, so any divergence fails loudly.
+
+  > **Perf note (2026-06-06): an O(n²) lexer pathology, found and fixed by this
+  > swap.** Swapping in the real `python.lark` first exposed a quadratic: the
+  > `fancy-regex`-routed lookaround terminals (`STRING`/`LONG_STRING`/`DEC_NUMBER`)
+  > were matched per position with `find_from_pos`, an *unanchored forward search*,
+  > so trying a sparse terminal like `STRING` at every offset scanned ahead to the
+  > next quote — O(n²) over the file (a 124 KB parse took ~177 s; JSON/SQL, which
+  > use no lookaround terminals, were unaffected, which is what localized it). The
+  > fix anchors the per-position fancy match to the search start with `\G`
+  > (`src/lexer.rs`, `Scanner::build`), so the search fails immediately when nothing
+  > matches at `pos`. Behaviour-preserving by construction — `match_end_at` already
+  > required `m.start() == pos`, so the match set is identical, only the forward
+  > scan is gone — and verified green across the full compliance/oracle/stdlib
+  > suite. Parsing dropped from ~177 s to ~0.24 s on the 124 KB workload and is now
+  > linear per byte. (Follow-up: a committed deterministic lexer-scan-step gate, the
+  > analog of the Earley/CYK scaling nets, would pin this so it can't silently
+  > regress — the current net is only this wall-clock row.)
 - **SQL** — a `SELECT`/`INSERT`/`UPDATE`/`DELETE` grammar (joins, `WHERE`,
   `GROUP BY`, `ORDER BY`, `BETWEEN`/`IN`) over a batch of statements.
 - **NL** (CYK) — a small ambiguous natural-language grammar (PP-attachment +
@@ -249,25 +271,31 @@ Machine-specific — **only ratios travel**; capture fresh numbers on your own b
 - `Linux x86_64`, Intel Xeon @ 2.80 GHz, 4 cores, `rustc 1.94.1`, release + LTO.
 - **Python Lark 1.3.1**, CPython 3.11.15 (the in-tree copy). LALR rows use
   `lexer='contextual'`; Earley rows use `lexer='basic'` (JSON) / `'dynamic'` (SQL).
-  Measured 2026-06-05.
+  Measured 2026-06-06 (the Python row re-measured against the **real upstream
+  `python.lark`** — issue #79; see below).
 
 | engine | workload | bytes | Rust MB/s | Python MB/s | speedup |
 |--------|----------|------:|----------:|------------:|--------:|
-| LALR   | JSON   | ~92 KB  | ~4.3 | ~0.8 | **~5.3×** |
-| LALR   | Python | ~104 KB | ~2.9 | ~0.5 | **~5.8×** |
-| LALR   | SQL    | ~57 KB  | ~2.8 | ~0.7 | **~4.4×** |
-| Earley | JSON   | ~92 KB  | ~0.5 | ~0.04 | **~12.8×** |
-| Earley | SQL    | ~57 KB  | ~0.1 | ~0.009 | **~16.2×** |
-| CYK    | NL     | ~186 B  | ~0.5 | ~0.02 | **~29×** |
+| LALR   | JSON   | ~92 KB  | ~4.3 | ~0.9 | **~4.5×** |
+| LALR   | Python | ~122 KB | ~0.5 | ~0.3 | **~1.8×** |
+| LALR   | SQL    | ~57 KB  | ~3.2 | ~0.8 | **~4.2×** |
+| Earley | JSON   | ~92 KB  | ~0.5 | ~0.1 | **~10.2×** |
+| Earley | SQL    | ~57 KB  | ~0.1 | ~0.01 | **~13.5×** |
+| CYK    | NL     | ~186 B  | ~0.6 | ~0.02 | **~29.5×** |
 
 **Reading.** Three separate stories:
 
-- **LALR** — lark-rs is ~4–6× faster than Python Lark end-to-end, consistent with
-  the internal baseline above (~4–5× on JSON/arith). Real, but short of the
-  "10–100×" headline: the gap is the deliberately-deferred tree-representation work
-  (`Box<str>`/arena labels, zero-copy spans — see the profiling findings below;
-  parse throughput is allocation-bound, ~3 allocations per input byte, not
-  algorithm-bound).
+- **LALR** — lark-rs is ~4–5× faster than Python Lark on JSON/SQL, consistent with
+  the internal baseline above (~4–5× on JSON/arith). The **Python** row is lower
+  (~1.8×) and is the honest outlier: the real upstream `python.lark` routes its
+  `STRING`/`LONG_STRING`/`DEC_NUMBER` terminals through `fancy-regex` (lookaround —
+  see the "Key Design Decisions" note in `CLAUDE.md`), which carries a per-token
+  constant-factor tax the pure-`regex` JSON/SQL scanners do not, and it is a far
+  larger grammar. Still a real win on the *actual* Python grammar (issue #79), not a
+  curated subset. The general gap to the "10–100×" headline is the
+  deliberately-deferred tree-representation work (`Box<str>`/arena labels, zero-copy
+  spans — see the profiling findings below; parse throughput is allocation-bound,
+  ~3 allocations per input byte, not algorithm-bound).
 - **Earley** — the margin is *larger* (~13–16×), because Python Lark's Earley is
   dramatically slower in absolute terms (multiple seconds per parse here) while
   lark-rs's Earley stays in the tens-to-hundreds of ms. This is the second engine
