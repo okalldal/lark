@@ -1,48 +1,52 @@
-# Lookaround in lark-rs: strategy analysis and recommendation
+# Lookaround in lark-rs: decision memo
 
-*Status: analysis / decision input — not yet a committed implementation plan.*
-*Date: 2026-06-07. Context: review of [PR #110](https://github.com/okalldal/lark/pull/110)
-("Lexer DFA M1–M3 — lower lookaround to a linear Pike-VM engine, remove fancy-regex").*
+*Status: decision input for [PR #110](https://github.com/okalldal/lark/pull/110)
+("Lexer DFA M1–M3 — lower lookaround to a linear Pike-VM engine, remove
+fancy-regex"). Not yet a committed implementation plan.*
+*Date: 2026-06-07.*
 
 ## TL;DR
 
-PR #110 replaces the `fancy-regex` backtracking overlay with a hand-rolled,
-linear **Pike-VM** that *executes* bounded lookaround at match time. It is well
-built and removes a real ReDoS. But it answers the wrong question. The lookaround
-in Lark grammars is an inherited Python-`re` **idiom**, not a load-bearing
-language feature, and a bounded assertion is by definition regular — so it can be
-**eliminated at grammar-load time** and run on the one fast linear engine lark-rs
-already depends on (the `regex` crate), instead of *re-implemented* at runtime.
+PR #110 removes the `fancy-regex` backtracking overlay (a real ReDoS) and replaces
+it with a hand-rolled linear **Pike-VM** that *executes* bounded lookaround at match
+time. This memo asks whether that is the right shape and concludes:
 
-This document works through the question from first principles and backs it with a
-two-corpus census of real Lark grammars. The findings:
+1. **An elimination fast-path should exist regardless.** The bundled terminals and
+   the common reducible idioms can be rewritten to lookaround-free regex at
+   grammar-load time, rejoin the combined-DFA scan, and run faster with provably
+   identical behavior. This is pure win and both approaches should include it.
+2. **Full, *general* elimination is not a small pass.** A bounded assertion is
+   regular as a *recognizer*, but a lexer needs Python's leftmost-first/lazy
+   **priority** match semantics, and there is no known way to rewrite an arbitrary
+   bounded assertion to a priority-preserving lookaround-free *regex string*. General
+   priority-preserving elimination yields an *automaton with priority* — which is
+   exactly a Pike-VM. So "auto-rewrite the reducible class" is realistically a
+   **finite template set**, not a general algorithm. (This corrects an overclaim in
+   the first draft of this doc, raised by the PR author — see §6.)
+3. **Therefore the real decision is only about the long tail:** a *novel but valid
+   bounded* lookaround that no template matches. Reject it (smaller surface, a real
+   compatibility cost) or run it on a bounded fallback VM (full compatibility, keeps
+   the engine). PR #110's engine **is** that fallback.
 
-- **Both engines are linear** (no ReDoS); the contest is average-case speed and
-  scope, and on both the load-time-elimination approach wins **structurally**, not
-  by tuning.
-- **Faithfulness is barely sacrificed.** Every lookaround construct found in the
-  wild is *bounded → regular → reducible*. We found **zero** irreducible cases,
-  **zero** backreferences, and **zero** variable-width lookbehind across ~40
-  distinct real grammars.
-- The one nastiest real pattern found (an unbounded-width negative lookahead in
-  `strictdoc`) is simultaneously the case the Pike-VM handles *worst* (O(n²)) and a
-  case the elimination approach handles *fine* (it is still regular).
+**Recommendation:** land the elimination fast-path in front of PR #110's engine, and
+keep that engine as a **bounded, fuzzed, off-the-hot-path fallback** rather than the
+primary lexer path. This is the honest best-of-both: fast and surface-light on the
+99% (idioms + plain terminals), fully Python-compatible on the rare tail, linear
+everywhere. If minimizing the parity-maintenance surface is valued above tail
+compatibility, the alternative is the same fast-path plus a **loud reject** for the
+tail — but that carries the compatibility cost spelled out in §6.
 
-**Recommendation (Option 1b):** ship lookaround-free equivalents of the bundled
-grammars, add a small load-time pass that rewrites the two dominant reducible
-idiom-classes automatically, and reject anything genuinely irreducible with a loud,
-actionable build-time error. This wins linearity, speed, and a far smaller
-maintenance surface, while preserving observable behavior for essentially every
-grammar that works in Python Lark today.
+The two approaches are **complementary, not opposed.** The fast-path fixes PR #110's
+speed and scope problems without discarding its engine; the engine supplies the
+compatibility the fast-path alone cannot.
 
 ---
 
-## 1. The problem
+## 1. Context and problem
 
-The `regex` crate (and `regex-automata`) deliberately reject lookaround
-(`(?=…)`, `(?!…)`, `(?<=…)`, `(?<!…)`) and backreferences, because they break the
-linear-time finite-automaton model. A handful of Lark's bundled grammars use
-bounded lookaround:
+The `regex` crate (and `regex-automata`) reject lookaround and backreferences
+because they break the linear-time finite-automaton model. A few of Lark's bundled
+grammars use **bounded** lookaround:
 
 | Terminal | Grammar | Assertion(s) |
 |---|---|---|
@@ -51,53 +55,11 @@ bounded lookaround:
 | `DEC_NUMBER` | `common.lark` | `(?![1-9])` |
 | `MULTILINE_COMMENT` | `verilog.lark` (examples) | `\*(?!\/)` |
 
-lark-rs previously routed these terminals to `fancy-regex` (a backtracking engine).
-That carried a genuine ReDoS in `lark.REGEXP` and a "bail-to-wrong-answer" risk if
-the backtrack limit is exceeded.
+lark-rs previously routed these to `fancy-regex` (backtracking), which carried a real
+ReDoS in `lark.REGEXP` and a bail-to-wrong-answer risk on backtrack-limit. PR #110
+replaces that with a linear Pike-VM and deletes `fancy-regex`.
 
-PR #110's response: write a linear Pike-VM that lowers each bounded assertion and
-executes it at match time, and delete `fancy-regex`.
-
-## 2. Are we re-implementing Python's regex engine?
-
-Partly — and the part that matters is brittle.
-
-Both `fancy-regex` and PR #110's engine are **hybrids**: they lean on the `regex`
-crate for the regular parts and hand-roll only what `regex` can't do. So PR #110 is
-not a from-scratch regex engine. The genuinely unbounded, bottomless part of a
-regex engine — Unicode classes (`\w`, `\d`, `.`, case folding, property tables) —
-is delegated to `regex`. What is hand-rolled is the *structural* machinery:
-quantifier greedy/lazy priority, alternation order, anchors, assertion gating,
-flag scoping, fixed-width analysis, and a bytecode VM.
-
-That structural core is a closed, textbook artifact (Thompson/Pike/Cox). The
-*brittleness* is not the engine — it is the **parity contract**: to be the "Python
-Lark oracle," the engine must match CPython `re` byte-for-byte across the long tail
-of corner cases (empty matches, `{,n}` vs `{0,n}`, nested-quantifier priority,
-anchor edge behavior, flag inheritance, the exact escape set). Each divergence is a
-latent silent mis-parse, and there is no differential fuzzer against CPython `re` to
-bound that tail. (The review of PR #110 already found two cracks: an unbounded
-lookahead falling back to O(n²), and `(?i)`-bodiless-groups rejected.)
-
-### Key differences from `fancy-regex`
-
-| Decision | `fancy-regex` | PR #110 Pike-VM |
-|---|---|---|
-| Core model | backtracking | linear NFA simulation |
-| Worst case | exponential (ReDoS), capped by a backtrack limit | linear; no cap needed |
-| Capability | backreferences, atomic groups, broad lookbehind | bounded lookaround only; **no** backrefs; fixed-width lookbehind |
-| Delegation to `regex` | whole regular spans, at DFA speed | only single-char classes, one `regex` match per char |
-| Failure mode | limit-exceed → `Err` (caller can mis-handle → wrong answer) | unlowerable construct → build-time error |
-
-The surprising one is **delegation granularity**: `fancy-regex` runs long regular
-runs as compiled `regex` DFAs and only touches its VM at the lookaround seams;
-PR #110 runs the *entire* match loop itself and calls `regex` only to test one
-character at a time. So in the matching loop, **PR #110 re-implements *more* of the
-engine than `fancy-regex` does** — and pays a per-char constant-factor cost for it.
-
-## 3. The requirement axes
-
-"Best of both worlds" is only meaningful once the competing requirements are named:
+## 2. Decision drivers (the axes)
 
 1. **Linear / no ReDoS** (safety)
 2. **Faithful Python-`re` behavior** (correctness as oracle)
@@ -107,233 +69,306 @@ engine than `fancy-regex` does** — and pays a per-char constant-factor cost fo
 6. **WASM / C / standalone bakeability**
 
 `fancy-regex` gives 2,3,5,6 but not 1,4. PR #110's Pike-VM gives 1,2,3,6 but
-sacrifices 4 and 5 (and is leaky on boundedness). The question is whether anything
-gets **1 + 4 + 5 without losing 2 + 3.**
+sacrifices 5 and (because it is a bespoke parity surface) 4.
 
-## 4. The options
+## 3. The core constraint: an impossibility triangle
 
-- **Option 0 — keep `fancy-regex`.** Rejected: ReDoS and bail-to-wrong-answer.
-  (Note: the "can't go to WASM/C" argument is weak — `fancy-regex` is pure Rust.
-  The honest sole justification is ReDoS.)
-- **Option A — PR #110's Pike-VM** (execute lookaround linearly at match time).
-- **Option 1 — eliminate lookaround at grammar-load time** so all matching runs on
-  the `regex` crate:
-  - **1a (manual):** rewrite the bundled terminals; reject other lookaround.
-  - **1b (automatic):** a load-time pass that rewrites the *reducible* class of
-    bounded assertions to regular form, with loud rejection for the irreducible
-    tail.
+You cannot have all three of:
 
-### The trap to avoid: "just compile to a DFA"
+- **(C) Compatibility** — accept every bounded lookaround Python Lark accepts.
+- **(L) Hard linearity** — a guaranteed linear-time bound on every input.
+- **(S) No bespoke priority engine** — match purely on the `regex` crate, no
+  hand-rolled priority automaton to maintain.
 
-The obvious "best of both" — compile the whole terminal to a single DFA via
-intersection/complement and take the longest match — is **wrong** for these
-grammars. A DFA gives longest-match / recognition; Python's `STRING` uses **lazy**
-`.*?` (shortest), and the assertion selects the correct closing quote. A
-longest-match DFA would swallow everything to the last quote in the file. So you
-genuinely need greedy/lazy **priority** semantics — which is exactly what a Pike-VM
-provides. **PR #110's core engine choice is therefore defensible.** The flaw is not
-the Pike-VM; it is *executing* lookaround at runtime when the idiom can be
-*eliminated* at load time.
+- **PR #110** takes **C + L**, so it must pay **S** (the Pike-VM). And it currently
+  leaks **L** on unbounded-width lookahead bodies (see §7), so in practice it is
+  C + *soft*-L + ¬S.
+- **Pure elimination ("Option 1b")** takes **L + S**, so it must pay **C** (reject
+  the novel-pattern tail). The census (§5) shows that tail is empirically tiny, but
+  it is not empty in principle.
+- **`fancy-regex`** took **C** alone (¬L, and ¬S since it is still a dependency).
 
-## 5. Speed (axes 1 and 5)
+Naming this triangle is the point of the memo: there is no option that is
+simultaneously fully compatible, hard-linear, and engine-free. Every choice below is
+a position on it.
 
-Both options are linear, so axis 1 is a tie. Axis 5 goes to Option 1, and the gap
+## 4. Options
+
+- **Option 0 — keep `fancy-regex`.** Rejected: ReDoS + bail-to-wrong-answer. (The
+  "can't bake into WASM/C" argument is weak — `fancy-regex` is pure Rust; the honest
+  sole justification is ReDoS.)
+- **Option A — PR #110's Pike-VM** as the primary lookaround path. C + L − S, with
+  the §7 linearity leak.
+- **Option 1a — manual bundled rewrites + reject all other lookaround.** L + S − C,
+  maximal compatibility cost.
+- **Option 1b — manual bundled rewrites + a finite auto-rewrite template set +
+  reject the rest.** L + S − C, smaller compatibility cost than 1a but still real
+  (see §6).
+- **Option H (hybrid, recommended) — elimination fast-path + bounded fallback VM.**
+  Reducible idioms are rewritten and rejoin the combined-DFA scan (speed); the
+  remaining bounded lookaround runs on PR #110's engine as a rare, bounded, fuzzed
+  fallback (compatibility). C + L − (partial S): keeps the engine, but off the hot
+  path and with boundedness enforced.
+
+### Why not "just compile to a DFA"
+
+A DFA gives longest-match / recognition. Python's `STRING` uses **lazy** `.*?`
+(shortest) with an assertion selecting the closing quote; a longest-match DFA would
+swallow to the last quote in the file. So priority semantics are mandatory, and a
+Pike-VM is the right linear engine for them. **PR #110's core engine choice is
+sound.** The disagreement is only about whether it sits on the hot path.
+
+## 5. Speed: why the elimination fast-path matters (axes 1, 5)
+
+Both engines are linear, so axis 1 is a tie. Axis 5 favors elimination, and the gap
 is **structural**, at two levels:
 
-**Micro (within one token).** A rewritten lookaround-free pattern compiles to one
-`regex` automaton: a table-driven, byte-at-a-time pass with literal prefilters and
-SIMD. The Pike-VM pays thread-list/ε-closure bookkeeping, per-span dispatch, and
-re-entry at every assertion seam — even if each span were a compiled DFA.
+- **Micro:** a rewritten lookaround-free pattern is one `regex` automaton — a
+  table-driven, prefiltered, byte-at-a-time pass. The Pike-VM pays thread-list /
+  ε-closure bookkeeping and re-entry at each assertion seam.
+- **Macro (decisive):** a lookaround terminal **cannot join the combined scanner
+  alternation** (the combined `regex` can't express assertions), so it is probed
+  individually, anchored, at every token boundary. A rewritten terminal rejoins
+  `(?P<g>…)|…` and rides the single combined-DFA pass. **A DFA matches N alternatives
+  in one pass; the side-probe matches them in N passes.** With `k` lookaround
+  terminals over `T` tokens, the side-probe adds ~`O(k·T)` work the combined scan
+  gets for free.
 
-**Macro (how the lexer drives it) — the decisive level.** A lookaround-bearing
-terminal **cannot join the combined scanner alternation** (the combined `regex` can't
-express the assertions), so it is probed *individually, anchored, at every token
-boundary*. A rewritten terminal is plain regular and rejoins
-`(?P<g>…)|…`, riding the single combined DFA pass. This is the whole reason lexers
-combine terminals into one regex: **a DFA matches N alternatives in one pass; the
-side-probe approach matches them in N passes.** With `k` lookaround terminals and
-`T` tokens, Option A adds ~`O(k·T)` extra anchored probes that Option 1 gets for
-free.
+This is why the fast-path is worth having *regardless of the tail decision*: it moves
+the bundled terminals and common idioms — the bulk of real lookaround (§5 census) —
+onto the fast path, leaving only the rare tail on the slower per-terminal probe.
 
-**Can Option A reach Option 1's speed? Only by degenerating into Option 1** — i.e.
-by expressing the terminal without assertions so it can fuse back into the combined
-scan, which *is* the elimination rewrite. Where elimination applies (all bundled
-terminals), Option A's ceiling is Option 1, reached only by becoming Option 1.
+## 6. The generality limitation of "auto-rewrite" (the correction)
 
-Ranking on axis 5: **Option 1 (combined DFA) > Option A improved (span-delegating
-Pike-VM) > PR #110 as written (char-at-a-time membership).**
+The first draft framed Option 1b's auto-rewrite as if it were near-general. It is
+not, and the PR author's objection is correct. The precise statement:
 
-## 6. Faithfulness (axes 2 and 3) — decomposed
+- A bounded assertion denotes a regular **language**, so an equivalent
+  lookaround-free **recognizer** always exists.
+- But a lexer needs the **match-end function under leftmost-first/greedy-lazy
+  priority**, not language membership. Two regexes with the same language can have
+  different match-end functions.
+- The clean bundled rewrites (e.g. `"(?!"").*?(?<!\\)(\\\\)*?"` → `"(?:[^"\\]|\\.)*"`)
+  work because they **remove ambiguity** — once `[^"\\]` cannot consume the closing
+  quote, greedy and the original lazy `.*?` coincide. That is a **per-idiom
+  insight**, not a general procedure.
+- General, priority-preserving elimination of an arbitrary bounded assertion yields
+  an **automaton with priority**, which is exactly a Pike-VM. There is no known
+  algorithm that emits a priority-preserving lookaround-free **regex string** for the
+  general case.
 
-"2/3" is not one scalar. Split it:
+**Consequence — and the cost the first draft underweighted:** a realistic
+auto-rewriter is a **finite template set** (escaped-string family, block-comment,
+negated-char lookahead `(?!set). → [^set]`, reserved-word exclusion `(?!(KW|…)) →`
+`unless`/keyword priority, fixed-width lookbehind, leading/trailing boundary
+assertions). The reject-class is therefore **"not template-matched," not
+"irreducible."** That gap is real: a user could write a *novel but perfectly valid
+bounded* lookaround that Python Lark accepts and that no template covers, and pure
+1a/1b would reject it. The census says this is empirically near-empty, but
+"empirically empty in a public sample" ≠ "impossible," and rejecting valid input is a
+genuine compatibility regression versus Python Lark.
 
-- **Axis 2 = behavior:** same tokens/tree as Python Lark.
-- **Axis 3 = artifact:** byte-identical bundled `.lark` files.
+This is exactly why **Option H keeps PR #110's engine as the fallback**: the engine
+*is* the general priority automaton, so the novel-tail keeps working instead of being
+rejected. Note that some classes *do* admit general sub-algorithms — boundary
+assertions, negated-char lookahead, and reserved-word exclusion are general, not
+template-bound — so the fallback only ever sees genuinely internal, length-changing,
+novel assertions, which the census suggests are vanishingly rare.
 
-**Axis 3 mostly collapses into axis 2 and becomes invisible.** When a user writes
-`%import python.STRING`, they load *lark-rs's* bundled grammar; they never author or
-read that file. If our rewrite is behavior-identical, the fact that our internal copy
-differs from upstream is unobservable. Axis 3's irreducible residue is therefore
-narrow: (a) maintainer-side upstream-sync ergonomics, and (b) the rare user who
-pastes the *entire* upstream grammar as their own source.
+### The one tension Option H cannot dissolve
 
-So the analysis reduces to **axis 2 plus a small maintainer tax** — and a correct
-rewrite preserves axis 2 by construction.
+Unbounded-width lookahead bodies (e.g. `(?![ ]*X)`) are accepted by Python `re`
+(itself backtracking, hence potentially non-linear there too), but a hard linear
+bound requires either rejecting them or accepting super-linear cost. So even Option H
+must choose, for that sub-case, between **C** (accept, match Python, risk O(n²)) and
+**L** (reject/limit). The memo recommends enforcing boundedness in the fallback (pick
+**L**) and rejecting unbounded lookahead with a clear message, because a guaranteed
+bound is the whole reason for leaving `fancy-regex`. This is a small, well-defined
+slice of **C** to give up, and `strictdoc` (§7) is the only observed instance.
 
-### Faithfulness is *decidable* in the world we chose
+## 7. The unbounded-lookahead hazard (a standalone review note)
 
-Because Option 1 lives entirely in the regular world, "does the rewrite behave
-identically?" is **machine-checkable**, not merely sampleable. Language equivalence
-of two regexes is decidable; the stronger match-end-at-every-position equivalence a
-lexer needs is also a regular property (the matched-prefix set from a position is
-regular). The bundled rewrites are equivalent *precisely because they remove
-ambiguity* (`"(?:[^"\\]|\\.)*"` is greedy, but `[^"\\]` cannot consume the closing
-quote, so greedy and the original lazy `.*?` coincide). This guarantee is impossible
-for a runtime engine that admits backreferences — equivalence there is undecidable.
+PR #110's engine width-checks **lookbehind** but not **lookahead** bodies, so
+`(?![ ]*X)` inside a quantifier is re-evaluated per position → **O(n²)**. This is
+reachable by real grammars: `strictdoc-project/strictdoc` defines
+`NODE_STRING_VALUE.2: /(?![ ]*##RELATION_MARKER_START)(?!…)…/`. It is simultaneously
+the case PR #110 handles **worst** (super-linear) and a case still **regular** (so
+the fast-path/fallback can handle it correctly; the choice is only whether to accept
+the super-linear cost or reject for linearity — see §6). Recommendation: enforce
+assertion boundedness, or document the guarantee as "linear for bounded assertions."
 
-### Severity asymmetry
+## 8. Faithfulness, decomposed (axes 2, 3)
 
-Option 1's failure on an unsupported pattern is a **load-time, loud refusal**
-surfaced to the grammar author. PR #110's faithfulness risk is a **parse-time,
-silent divergence** surfaced (if ever) to a downstream consumer. Load-loud ≪
-parse-silent. And PR #110's faithfulness on hand-written lookaround is *unverified*
-(no differential fuzzer). **An honest rejection can be more faithful than a buggy
-acceptance** — faithfulness is "never lies about the result," not "accepts more
-inputs."
+- **Axis 2 = behavior; Axis 3 = artifact (byte-identical `.lark`).**
+- **Axis 3 largely collapses into axis 2 and is mostly invisible:** `%import
+  python.STRING` loads *lark-rs's* bundled grammar; the user never reads it, so an
+  internal rewrite that is behavior-identical is unobservable. Axis 3's residue is a
+  maintainer-side upstream-sync tax plus the rare user who pastes a whole upstream
+  grammar as their own source.
+- **Faithfulness is decidable in the regular world:** equivalence of the bundled
+  rewrites is machine-checkable (language equivalence, and the stronger
+  match-end-at-every-position equivalence, are regular properties). This guarantee is
+  impossible once backreferences are admitted.
+- **Severity asymmetry:** an elimination reject is a **load-time, loud** error to the
+  grammar author; an engine parity bug is a **parse-time, silent** divergence to a
+  downstream consumer. Load-loud ≪ parse-silent. But note this cuts both ways: the
+  reject is loud *and* it denies a valid grammar (§6), whereas the fallback engine
+  accepts it. Option H gets the loud-on-truly-unsupported behavior *and* keeps valid
+  grammars working.
 
-## 7. Tiering the grammar population
+## 9. Tiering the grammar population
 
-Every grammar lark-rs is handed falls into:
+| Tier | What it is | Fast-path | Fallback (Option H) | Pure 1b |
+|---|---|---|---|---|
+| T0 | No lookaround | combined DFA | — | combined DFA |
+| T1 | Imports stdlib lookaround | pre-rewritten, rejoins DFA | — | same |
+| T2 | Hand-written, template-matched | rewritten, rejoins DFA | — | rewritten |
+| T2′ | Hand-written, reducible but **novel** (no template) | — | bounded VM ✅ | **reject ❌** |
+| T3 | Bounded, internal, length-changing, novel | — | bounded VM ✅ | **reject ❌** |
+| T4 | Backref / variable-width behind / unbounded-ahead | reject | reject (boundedness) | reject |
 
-| Tier | What it is | Option 1 outcome | Sacrifice |
-|---|---|---|---|
-| T0 | No lookaround | combined DFA | none |
-| T1 | Imports stdlib lookaround terminals | pre-rewritten bundled grammar | none (invisible) |
-| T2 | Hand-written, reducible to regular | 1b auto-rewrites / 1a rejects | none (1b) or loud reject (1a) |
-| T3 | Hand-written, bounded, **not** reducible in practice | loud reject | **the real sacrifice** |
-| T4 | Backreferences / variable-width lookbehind | reject | none — Python `re` **and** PR #110 reject these too |
+The first draft hid **T2′** inside "reducible," implying the auto-rewriter covered
+it. It does not. T2′ + T3 are the compatibility cost of pure 1a/1b, and the reason
+Option H is recommended. T4 is rejected by Python `re` too (except unbounded-ahead;
+see §6/§7).
 
-The entire sacrifice lives in **T3** (and T2 only under the lazy 1a variant). T0/T1
-are free; T4 is a wash. So the empirical question is precisely: *how big is T3?*
+## 10. Evidence: a two-corpus census
 
-## 8. Empirical evidence: a two-corpus census
+Public-GitHub sample; caveats in §11. Measures the size of the at-risk tail
+(T2′/T3/T4).
 
-We measured the base rate via GitHub code search across two corpora. **This is a
-public-GitHub sample with the caveats in §9; it is not exhaustive.**
+**Corpus A — `.lark` files.** `path:*.lark /\(\?[=!<]/` → **183 results**, first page
+**51 unique pairs ≈ ~20 distinct grammars**, heavily fork/vendor-inflated.
 
-### Corpus A — `.lark` files
+**Corpus B — inline Python grammars.** `language:python /\(\?[=!<]/ "Lark("` →
+**145 results**, **38 on the first page**. Noisier, but covers the population
+`path:*.lark` misses.
 
-Query: `path:*.lark /\(\?[=!<]/` → **183 results**, of which the first page is
-**51 unique (repo, file) pairs ≈ ~20 distinct grammars.** The count is heavily
-**fork/vendor-inflated** (e.g. 5× `xlm-macro-en.lark`, 5× `pep508.lark`, 4×
-`gdscript.lark`, 4× vendored `lark.lark`, 4× vendored `python.lark`).
+**After de-forking (~40 distinct grammars), every genuine case is bounded and falls
+into a small set of classes:**
 
-### Corpus B — inline grammars in Python (`.lark`'s blind spot)
-
-Query: `language:python /\(\?[=!<]/ "Lark("` → **145 results**, **38 on the first
-page**. Noisier (matches lookaround anywhere in a file that also calls `Lark(`), but
-it probes grammars defined as Python strings — the population `path:*.lark` misses.
-
-### What both corpora contain
-
-After de-forking, ~40 distinct grammars. **Every genuine case is bounded → regular
-→ reducible.** The classes:
-
-1. **The Python-string idiom** (`("(?!"").*?(?<!\\)(\\\\)*?"…)`), copy-pasted from
-   `python.lark`: Vork, godot-gdscript-toolkit, mmlang, **erezsh/Preql** (Lark's own
-   author), birp, **google-research/kauldron**, DianaVM, optimade, confit, spinta.
-   This single idiom is the most common lookaround in the wild; its canonical
-   lookaround-free form is `"(?:[^"\\]|\\.)*"`.
-2. **The block-comment idiom** (`/\*(\*(?!\/)|[^*])*\*\//`): DianaVM,
+1. **Python-string idiom** (most common; canonical rewrite `"(?:[^"\\]|\\.)*"`):
+   Vork, godot-gdscript-toolkit, mmlang, **erezsh/Preql**, birp,
+   **google-research/kauldron**, DianaVM, optimade, confit, spinta.
+2. **Block-comment idiom** (`/\*(\*(?!\/)|[^*])*\*\//`): DianaVM,
    **microsoft/LayoutGeneration**.
-3. **Reserved-word exclusion** (the Lark `unless`/keyword case):
-   `chunkhound` (`IDENTIFIER: /(?!(END_VAR|END_PROGRAM|…))/`), **graphistry/pygraphistry**
-   (`NAME: /(?!(?i:AND|OR|…))/`), `Hexa-Da/NanoC`.
-4. **Operator / delimiter / boundary lookaheads:** `FUNCTION(?!_)`, `=(?!=|>)`,
-   `:(?!:)`, `-(?!-)`, `(?=;|,)`, `(?![a-z])`, `(?![1-9])`, `/ +(?=[^.])/`,
-   `(?!{{|…)`, `INT "." /(?![.])/`.
-5. **Fixed-width lookbehind:** `pep508` `(?<====)` / `(?<===|!=)`, ROS
-   `PACKAGE_NAME` `(?<!_)\/`, and the `(?<!\\)` of the string idiom.
+3. **Reserved-word exclusion** (the `unless` case): chunkhound, **pygraphistry**,
+   NanoC.
+4. **Operator/delimiter/boundary lookahead:** `FUNCTION(?!_)`, `=(?!=|>)`, `:(?!:)`,
+   `-(?!-)`, `(?=;|,)`, `(?![a-z])`, `(?![1-9])`, `/ +(?=[^.])/`, `(?!{{|…)`.
+5. **Fixed-width lookbehind:** pep508 `(?<====)`/`(?<===|!=)`, ROS `(?<!_)\/`, and the
+   string idiom's `(?<!\\)`.
 
-### What both corpora do **not** contain
+**Not found:** irreducible (T3) cases — **zero**; backreferences — **zero** (the
+`(?P<name>` hits are named *groups*; note this query cannot find backrefs, §11);
+variable-width lookbehind — **zero**. **One** unbounded-lookahead-body (strictdoc,
+§7). **False positives confirmed:** berlino/grammar-prompting (literal `(?=` in DSL
+string terminals), Bryantad/Sona and acorderob/…prompt-postprocessor (`re.sub` in app
+code) — so true counts are below the raw numbers.
 
-- **T3 (irreducible): zero.**
-- **Backreferences: zero** (the `(?P<name>` hits are named *groups*, not backrefs —
-  though note this query cannot find backrefs; see §9).
-- **Variable-width lookbehind: zero** (every `(?<!` seen is the fixed-width `(?<!\\)`).
-- **False positives confirmed:** `berlino/grammar-prompting` (`(?=` is literal DSL
-  syntax inside quoted string terminals, an entire file of non-regex matches);
-  `Bryantad/Sona` and `acorderob/...prompt-postprocessor` (lookaround in ordinary
-  `re.sub` app code, not the grammar). So the true count is *below* the raw numbers.
+So the at-risk tail (T2′/T3) is, in this sample, **empty**; everything is T1, a
+template class, or a false positive. That makes pure 1b's compatibility cost small in
+practice — but §6 explains why "small in a sample" is not "zero," which is what tips
+the recommendation to Option H (keep the fallback for ~free, since the engine already
+exists).
 
-### The one most-valuable find
+## 11. Coverage and limitations
 
-**`strictdoc-project/strictdoc`** (a real, maintained docs-as-code tool) defines:
+- **Feature coverage:** the search finds only `(?=`/`(?!`/`(?<`. It does **not**
+  search backreferences (`\1`, `(?P=`, `\k<`), atomic groups (`(?>`), possessive
+  quantifiers, or conditionals. "Zero backreferences" = not visible, not searched.
+  Follow-ups: `path:*.lark /\\[1-9]/`, `/\(\?>/`, `/\(\?\(/`.
+- **Corpus coverage:** public GitHub only; private grammars unmeasured. Corpus B is
+  noisy; Corpus A misses inline grammars (mitigated by running both).
+- **Sampling:** only the first results page of each query was hand-classified
+  (51/183, 38/145); fork-heavy tails extrapolated.
+- **Why the decision survives the gaps:** the unsearched features are T4 — rejected
+  by Python `re` and by every option here — so they cannot favor one option; they
+  only resize the reject tail. And the theory (§3, §6) dominates the census.
 
-```
-NODE_STRING_VALUE.2: /(?![ ]*##RELATION_MARKER_START)(?!…)…/
-```
+## 12. Reasoning chain (how the conclusion follows)
 
-The `(?![ ]*##…)` is a negative lookahead with an **unbounded-width body** (`[ ]*`).
-This is a concrete, in-the-wild instance of *exactly* the O(n²) hazard in PR #110's
-Pike-VM (an assertion body containing `*`, re-evaluated per position). It is
-simultaneously:
+The logical spine, tying the **axes** (§2) and **usage tiers** (§9) to the
+recommendation:
 
-- the case PR #110's engine handles **worst** (super-linear), and
-- **still regular**, hence handled **fine** by Option 1 (the body `[ ]*##…` is a
-  regular language; the rewrite/automata path absorbs it).
+1. **Frame by axes (§2).** No engine maxes all six axes at once. `fancy-regex` fails
+   linearity (1) and maintenance surface (4); PR #110's Pike-VM fails average-case
+   speed (5) and is itself a parity surface (4). The conflict is real, so a choice is
+   unavoidable.
+2. **The conflict is structural → the impossibility triangle (§3).** Compatibility
+   (C), hard linearity (L), and no-bespoke-engine (S) cannot all hold. Every option is
+   a position on this triangle, which is what makes the decision principled rather
+   than a matter of taste.
+3. **The DFA shortcut is closed (§4, §6).** Python's lazy `.*?` + assertion needs
+   *priority* match semantics, so longest-match automata cannot stand in. The only
+   general linear matcher for priority semantics is a Pike-VM. Therefore **S is
+   attainable only by surrendering some C**: you can template the common reducible
+   shapes, but there is no general priority-preserving rewrite to a plain regex
+   string.
+4. **Speed splits along the combined-scan boundary (§5).** Anything expressible
+   *without* assertions rejoins the single-pass combined DFA; anything *with*
+   assertions is an N-pass per-terminal side-probe. So eliminating the reducible
+   cases is a structural speed win **regardless of the tail decision**.
+5. **Faithfulness decomposes (§8).** Axis 3 (verbatim text) mostly collapses into
+   axis 2 (behavior) for importers, and behavior-equivalence of the *regular*
+   rewrites is machine-checkable. So the elimination fast-path costs ~nothing on
+   faithfulness for the cases it covers.
+6. **The tiers (§9) localize the only real cost.** T0/T1/T2 are handled by the
+   fast-path with no compatibility loss; T4 is rejected by every option (Python `re`
+   included). The entire disagreement is **T2′/T3** — novel bounded lookaround with no
+   template.
+7. **The census (§10) sizes that tail.** Across ~40 distinct real grammars,
+   T2′/T3 = empty; the population is fork-inflated idioms. So the disputed cost is
+   empirically tiny — but §6 shows it is not zero *in principle*.
+8. **Conclusion.** Do the fast-path regardless (free speed + faithfulness on T0–T2);
+   for the tiny T2′/T3 tail, keep PR #110's engine as a *bounded fallback* so those
+   grammars still parse (Option H) instead of rejecting valid input. The engine
+   already exists, so full compatibility is cheap; demoting it off the hot path fixes
+   the speed and shrinks — rather than removes — the parity surface.
 
-So this single grammar argues both *for* removing the backtracking engine **and**
-*against* shipping the unbounded-capable Pike-VM.
+## 13. Recommendation and consequences
 
-## 9. Coverage and limitations of the census
+**Recommend Option H, in two layers:**
 
-Stated honestly so the conclusion is not over-read:
+1. **Elimination fast-path (do regardless of the tail choice).** Rewrite the bundled
+   grammars and the general/template-able classes (boundary assertions, negated-char
+   lookahead, reserved-word exclusion → `unless`, fixed-width lookbehind, the
+   string/comment idioms) to lookaround-free form so they rejoin the combined-DFA
+   scan. Verify equivalence via the existing oracle matrix and, ideally, DFA
+   match-length equivalence. **Wins: speed (axis 5), and shrinks the engine's hot-path
+   role.**
+2. **Bounded fallback (keep PR #110's engine, demoted).** Route only the
+   non-template, bounded tail (T2′/T3) to the Pike-VM. **Enforce assertion
+   boundedness** (close the §7 hole) and **add a CPython differential fuzzer** to
+   bound the parity surface. Reject T4 (backref/var-width-behind/unbounded-ahead)
+   with a clear, actionable error.
 
-- **Feature coverage:** the search finds only `(?=`/`(?!`/`(?<` openers. It does
-  **not** search for backreferences (`\1`, `(?P=`, `\k<`), atomic groups (`(?>`),
-  possessive quantifiers, or conditionals. "Zero backreferences" reflects what was
-  *visible*, not a search for them. Suggested follow-ups: `path:*.lark /\\[1-9]/`,
-  `path:*.lark /\(\?>/`, `path:*.lark /\(\?\(/`.
-- **Corpus coverage:** public GitHub only; private/enterprise grammars are
-  unmeasured. Corpus B is noisy and Corpus A misses inline grammars (mitigated by
-  running both).
-- **Sampling:** only the first results page of each query was classified by hand
-  (51/183 and 38/145); the fork-heavy tails were extrapolated, not verified.
-- **Why the decision survives the gaps anyway:** the unsearched features (T4) are
-  rejected by Python `re` **and** by PR #110 alike, so they cannot favor either
-  option — they only resize the loud-reject tail. And the theory dominates the
-  census: bounded ⇒ reducible regardless of count. A wider search can change the
-  *estimated size* of T3, not the architecture.
+**What we explicitly give up under Option H:** unbounded-width lookahead bodies are
+rejected for hard linearity (one observed grammar, strictdoc; the §6 tension). The
+parity-maintenance surface (axis 4) is retained, but minimized (off hot path,
+bounded, fuzzed).
 
-## 10. Recommendation
+**If axis 4 (zero parity surface) is valued above tail compatibility,** drop layer 2
+and loud-reject the tail (pure 1b). The cost is the §6 compatibility regression for
+novel valid bounded lookaround — empirically near-zero today, but a real divergence
+from Python Lark and a latent source of "works in Python Lark, rejected by lark-rs"
+reports. This memo does not recommend it, because the fallback engine already exists
+(PR #110) and keeping it bounded+fuzzed buys full compatibility cheaply.
 
-Adopt **Option 1b**:
+**What PR #110 contributes either way:** removing `fancy-regex`, the deterministic
+linearity gate, and the Pike-VM itself are all reusable. The change requested is not
+"discard the engine" but "put an elimination fast-path in front of it, demote it to a
+bounded fallback, and close the unbounded-lookahead hole + add fuzzing."
 
-1. **Ship lookaround-free equivalents of the bundled grammars** (`python.lark`,
-   `lark.lark`, `common.lark`, and the `examples/` comment terminal). Prove each
-   equivalent via the existing oracle matrix and, ideally, DFA match-length
-   equivalence. These rejoin the combined-DFA scanner.
-2. **Add a small load-time rewrite pass** for the two dominant reducible classes:
-   the Python-string/block-comment idioms, and boundary / reserved-word / fixed-width
-   assertions. This auto-handles essentially the entire observed wild population.
-3. **Reject anything genuinely irreducible** (the empty-in-practice T3, plus T4) with
-   a **loud, actionable build-time error** that names the terminal and suggests the
-   rewrite or `unless`/rules.
-4. **Retire the runtime lookaround engine** (or keep a tiny, *bounded*, fuzzed
-   Pike-VM strictly as a rarely-hit fallback, never on the common path).
+## 14. Open questions / follow-ups
 
-This keeps the single fast linear engine, removes the ReDoS, removes the
-parity-with-`re` maintenance surface, and preserves observable behavior for every
-grammar shown to work in Python Lark today.
-
-### What PR #110 still contributes
-
-Removing `fancy-regex` and the deterministic linearity gate are good and reusable
-regardless. If verbatim upstream text is later deemed non-negotiable (axis 3
-elevated above all), the fallback is "Option A, fixed": delegate whole spans to
-`regex` (recover speed), enforce assertion boundedness (close the `strictdoc`-shaped
-O(n²) hole), and add a CPython differential fuzzer (bound the parity surface).
+- Prove the bundled rewrites behavior-identical through the oracle matrix (and DFA
+  match-length equivalence) — turns the §5 idiom claims into facts.
+- Run the §11 backref/atomic/conditional queries and paginate the censuses to firm up
+  the T4 estimate.
+- Decide the unbounded-lookahead policy (§6/§7): reject for **L**, or accept for
+  **C** with a documented non-linear caveat.
+- Decide axis-4 weight: fallback engine (Option H) vs. loud-reject (pure 1b).
 
 ## Appendix: distinct grammars observed (de-forked)
 
@@ -343,23 +378,23 @@ Corpus A (`.lark`):
 |---|---|---|---|
 | ytsaurus (vendored) | `lark.lark` | `OP`, `REGEXP` | stdlib (T1) |
 | poetry-core (vendored) | `python.lark` | `STRING`/`LONG_STRING`/`DEC_NUMBER` | stdlib (T1) |
-| godot-gdscript-toolkit | `gdscript.lark` | string idiom | T2-reducible |
-| DissectMalware/XLMMacroDeobfuscator | `xlm-macro-en.lark` | `NAME /…(?!\d{1,6}\b)…/` | T2-reducible |
-| poetry/conda pep508 | `pep508.lark` | `(?<====)`, `(?<===\|!=)` | T2 (fixed-width behind) |
-| Systems-Modeling/SysML | `kgbnf…lark` | `(?![ \t])` | T2-reducible |
-| chunkhound | `twincat/declarations.lark` | `FUNCTION(?!_)`, reserved-word `IDENTIFIER` | T2 (`unless`) |
-| microsoft/LayoutGeneration | `grammar_rico.lark` | comment idiom + escaped id | T2-reducible |
-| google-research/kauldron | `path_grammar.lark` | string idiom | T2-reducible |
-| vertexproject/synapse | `imap.lark` | `(?!\r\|\n\|\\"\|\\\\).` | T2 (negated set) |
-| Itay2805/Vork | `v.lark` | string idiom | T2-reducible |
-| Extelligence-ai/bagel | `ros1/grammar.lark` | `(?<!_)\/` | T2 (fixed-width behind) |
-| amplify-education/python-hcl2 | `hcl2.lark` | `=(?!=\|>)`, `:(?!:)`, `STRING_CHARS` | T2-reducible |
-| erezsh/Preql | `preql.lark` | string idiom, `INT "." /(?![.])/` | T2-reducible |
-| evtn/birp | `birp.lark` | string idiom | T2-reducible |
-| hpc/pavilion2 | `filters.lark` | `/ +(?=[^.])/` | T2-reducible |
-| thautwarm/DianaVM | `ch.lark` | string + comment idiom | T2-reducible |
-| Materials-Consortia/optimade | `v1.2.0.lark` | `(?<!\\)(\\\\)*?` | T2-reducible |
-| colun/mmlang | `mmlang.lark` | string idiom | T2-reducible |
+| godot-gdscript-toolkit | `gdscript.lark` | string idiom | template |
+| DissectMalware/XLMMacroDeobfuscator | `xlm-macro-en.lark` | `NAME /…(?!\d{1,6}\b)…/` | template/boundary |
+| poetry/conda pep508 | `pep508.lark` | `(?<====)`, `(?<===\|!=)` | fixed-width behind |
+| Systems-Modeling/SysML | `kgbnf…lark` | `(?![ \t])` | boundary |
+| chunkhound | `twincat/declarations.lark` | `FUNCTION(?!_)`, reserved-word `IDENTIFIER` | `unless`/boundary |
+| microsoft/LayoutGeneration | `grammar_rico.lark` | comment idiom + escaped id | template |
+| google-research/kauldron | `path_grammar.lark` | string idiom | template |
+| vertexproject/synapse | `imap.lark` | `(?!\r\|\n\|\\"\|\\\\).` | negated set |
+| Itay2805/Vork | `v.lark` | string idiom | template |
+| Extelligence-ai/bagel | `ros1/grammar.lark` | `(?<!_)\/` | fixed-width behind |
+| amplify-education/python-hcl2 | `hcl2.lark` | `=(?!=\|>)`, `:(?!:)`, `STRING_CHARS` | boundary/internal |
+| erezsh/Preql | `preql.lark` | string idiom, `INT "." /(?![.])/` | template/boundary |
+| evtn/birp | `birp.lark` | string idiom | template |
+| hpc/pavilion2 | `filters.lark` | `/ +(?=[^.])/` | boundary |
+| thautwarm/DianaVM | `ch.lark` | string + comment idiom | template |
+| Materials-Consortia/optimade | `v1.2.0.lark` | `(?<!\\)(\\\\)*?` | template |
+| colun/mmlang | `mmlang.lark` | string idiom | template |
 | berlino/grammar-prompting | `lispress_full_3.lark` | — | **false positive** |
 
 Corpus B (inline Python):
@@ -367,17 +402,17 @@ Corpus B (inline Python):
 | Project (representative) | File | Lookaround | Class |
 |---|---|---|---|
 | lark-parser/lark-language-server | `lark_grammar.py` | `OP: /[+*]\|[?](?![a-z])/` | stdlib (T1) |
-| graphistry/pygraphistry | `expr_parser.py` | `-(?!-)`, reserved-word `NAME` | T2 (`unless`) |
-| theY4Kman/parsuricata (+pCraft) | `_parser.py` | `(?=;\|,)`, `LITERAL` | T2-reducible |
-| vertexproject/synapse | `imap.py` | `.*?(?! {…)` | T2-reducible |
-| strictdoc-project/strictdoc | `marker_lexer.py` | `(?![ ]*##RELATION_MARKER_START)` | T2-reducible **(unbounded body — PR #110 O(n²))** |
-| nlothian/Vibe-Prolog | `parser.py` | `-?(?=[…])`, `(?![a-zA-Z0-9_])` | T2-reducible |
-| hpc/pavilion2 | `strings.py` | `(?!{{\|…)`, `(?=$\|}}\|{{…)` | T2-reducible |
-| Hexa-Da/NanoC | `nanoC.py` | reserved-word `IDENTIFIER` | T2 (`unless`) |
-| aphp/confit | `xjson.py` | string idiom | T2-reducible |
-| atviriduomenys/spinta | `spyna.py` | string idiom | T2-reducible |
-| hyphatech/jailrun | `ucl.py` | `(?=[…` | T2-reducible |
-| luan-xiaokun/isabelle-export-deps | `root_parser.py` | `(?:(?!…)` | T2-reducible |
+| graphistry/pygraphistry | `expr_parser.py` | `-(?!-)`, reserved-word `NAME` | `unless`/boundary |
+| theY4Kman/parsuricata (+pCraft) | `_parser.py` | `(?=;\|,)`, `LITERAL` | boundary |
+| vertexproject/synapse | `imap.py` | `.*?(?! {…)` | boundary |
+| strictdoc-project/strictdoc | `marker_lexer.py` | `(?![ ]*##RELATION_MARKER_START)` | **unbounded body — see §7** |
+| nlothian/Vibe-Prolog | `parser.py` | `-?(?=[…])`, `(?![a-zA-Z0-9_])` | boundary |
+| hpc/pavilion2 | `strings.py` | `(?!{{\|…)`, `(?=$\|}}\|{{…)` | delimiter/boundary |
+| Hexa-Da/NanoC | `nanoC.py` | reserved-word `IDENTIFIER` | `unless` |
+| aphp/confit | `xjson.py` | string idiom | template |
+| atviriduomenys/spinta | `spyna.py` | string idiom | template |
+| hyphatech/jailrun | `ucl.py` | `(?=[…` | boundary |
+| luan-xiaokun/isabelle-export-deps | `root_parser.py` | `(?:(?!…)` | boundary |
 | Bryantad/Sona | `lsp_server.py` | `re.sub(r'(?<!=)=(?!=)'…)` | **false positive** |
 | acorderob/sd-webui-prompt-postprocessor | `ppp.py` | `re` app code | **false positive** |
 | IfcOpenShell, penn-courses, tracardi | (various) | not captured | unclassified |
