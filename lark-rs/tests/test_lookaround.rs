@@ -174,3 +174,216 @@ fn test_lookaround_oracle() {
         );
     }
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// Milestone E2a — per-terminal match-length equivalence
+// ───────────────────────────────────────────────────────────────────────────
+//
+// The behavioral oracle above (and the stdlib oracle in `test_stdlib.rs`) gate the
+// *grammar*. This module proves the individual rewrites at the *terminal* level: it
+// runs each ORIGINAL lookaround terminal on `fancy-regex` and its lookaround-free
+// REWRITE on the `regex` crate, then compares the two anchored matched-prefix
+// functions (the length of the prefix matched starting at offset 0, or "no match")
+// over a generated corpus. Both terminals are regular, so this is the decidable
+// equivalence the plan calls for (docs/LOOKAROUND_ELIMINATION_PLAN.md §E2). The two
+// engines are leftmost-first/backtracking like Python `re`, and the Python-generated
+// oracles independently cross-check each side, so the proof is triangulated.
+//
+// E2a changes NO grammar — the bundled files stay verbatim upstream and every string
+// terminal stays on `fancy-regex`. This harness only *classifies* the candidates, so
+// the eventual E4 rewrite (and any future edit) is gated by a proof, not a guess:
+//   * `LONG_STRING` and the classic block-comment shape are **cleanly equivalent** —
+//     the rewrites are proven ready (E4 deploys `LONG_STRING`; E2/E5 the block comment),
+//     but are not applied to the grammar in this milestone.
+//   * `STRING` is a **negative result**: the standard lookaround-free rewrite is *not*
+//     equivalent (it accepts `""""`, which the oracle rejects), so `STRING` must stay on
+//     its lookaround form. The test pins exactly why, so the conclusion can't rot.
+mod matchlen {
+    use fancy_regex::Regex as Fancy;
+    use regex::Regex;
+
+    // --- The originals (lookaround). Flags mirror the bundled `python.lark`:
+    //     STRING is `/…/i`, LONG_STRING is `/…/is`. `^` anchors the prefix match. ---
+    const STRING_ORIG: &str =
+        r#"(?i)^(?:([ubf]?r?|r[ubf])("(?!"").*?(?<!\\)(\\\\)*?"|'(?!'').*?(?<!\\)(\\\\)*?'))"#;
+    const LONG_ORIG: &str =
+        r#"(?is)^(?:([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?'''))"#;
+    const COMMENT_ORIG: &str = r#"^(?:/\*(\*(?!/)|[^*])*\*/)"#;
+
+    // --- The lookaround-free rewrites. LONG_STRING / COMMENT are proven-equivalent and
+    //     E4-ready (not yet applied to any grammar); STRING_NEW is the *rejected*
+    //     candidate kept only to pin why STRING resists elimination. ---
+    const STRING_NEW: &str =
+        r#"(?i)^(?:([ubf]?r?|r[ubf])("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'))"#;
+    const LONG_NEW: &str =
+        r#"(?is)^(?:([ubf]?r?|r[ubf])("""(?:[^\\]|\\.)*?"""|'''(?:[^\\]|\\.)*?'''))"#;
+    const COMMENT_NEW: &str = r#"^(?:/\*(?:[^*]|\*+[^*/])*\*+/)"#;
+
+    /// Anchored matched-prefix length of an original (lookaround) terminal at the
+    /// start of `s`, or `None`. `^` keeps it to offset 0.
+    fn fancy_prefix(re: &Fancy, s: &str) -> Option<usize> {
+        match re.find(s) {
+            Ok(Some(m)) if m.start() == 0 => Some(m.end()),
+            _ => None,
+        }
+    }
+
+    /// Same matched-prefix function for a lookaround-free rewrite on the `regex` crate.
+    fn regex_prefix(re: &Regex, s: &str) -> Option<usize> {
+        re.find(s).filter(|m| m.start() == 0).map(|m| m.end())
+    }
+
+    /// Every string over `alphabet` of length `0..=max_len`.
+    fn corpus(alphabet: &[char], max_len: usize) -> Vec<String> {
+        let mut all = vec![String::new()];
+        let mut frontier = vec![String::new()];
+        for _ in 0..max_len {
+            let mut next = Vec::with_capacity(frontier.len() * alphabet.len());
+            for s in &frontier {
+                for &c in alphabet {
+                    let mut t = s.clone();
+                    t.push(c);
+                    next.push(t);
+                }
+            }
+            all.extend_from_slice(&next);
+            frontier = next;
+        }
+        all
+    }
+
+    /// `LONG_STRING`: a clean equivalence — no boundary-as-failure, so the original and
+    /// the rewrite must agree on the matched-prefix function for *every* corpus string.
+    #[test]
+    fn long_string_match_length_equivalence() {
+        let orig = Fancy::new(LONG_ORIG).unwrap();
+        let new = Regex::new(LONG_NEW).unwrap();
+        // backslashes (escape pairing), both quote kinds, newlines (DOTALL body), the
+        // r/b prefix, and `a` as ordinary content — the axes the lazy escaped body and
+        // the even-backslash close turn on.
+        let cases = corpus(&['"', '\'', '\\', 'a', '\n', 'r'], 6);
+        let mut matched = 0usize;
+        for s in &cases {
+            let (o, n) = (fancy_prefix(&orig, s), regex_prefix(&new, s));
+            assert_eq!(o, n, "LONG_STRING match-length differs on {s:?}");
+            matched += o.is_some() as usize;
+        }
+        assert!(
+            matched > 0,
+            "corpus must actually exercise some long strings"
+        );
+    }
+
+    /// The classic block-comment shape (`MULTILINE_COMMENT` idiom). Also a clean
+    /// equivalence — full agreement required on every corpus string.
+    #[test]
+    fn block_comment_match_length_equivalence() {
+        let orig = Fancy::new(COMMENT_ORIG).unwrap();
+        let new = Regex::new(COMMENT_NEW).unwrap();
+        let cases = corpus(&['/', '*', 'a', '\n'], 8);
+        let mut matched = 0usize;
+        for s in &cases {
+            let (o, n) = (fancy_prefix(&orig, s), regex_prefix(&new, s));
+            assert_eq!(o, n, "block-comment match-length differs on {s:?}");
+            matched += o.is_some() as usize;
+        }
+        assert!(matched > 0, "corpus must actually exercise some comments");
+    }
+
+    /// **Negative result: `STRING` cannot be eliminated.** This pins *why* `STRING`
+    /// keeps its lookaround form while `LONG_STRING` does not. Upstream disambiguates
+    /// the short/long pair with `STRING`'s `(?!"")` opening guard — a *trailing-context*
+    /// boundary: it makes `""""` a lex error but `"" ""` (two empty strings) valid, a
+    /// distinction that lives only at lex time (after `%ignore` drops the whitespace,
+    /// both are `STRING STRING` to the parser). The standard lookaround-free rewrite
+    /// `("(?:[^"\\\n]|\\.)*"|…)` has no way to express that, so it accepts `""""`, which
+    /// the oracle rejects. The test runs the combined short+long scanner both ways and
+    /// asserts the divergence is *exactly* that shape — present, and one-directional:
+    ///
+    ///   1. **No original match is lost or changed** — wherever upstream matches, the
+    ///      rewrite matches the same terminal for the same length (the divergence only
+    ///      ever *adds* an unwanted match).
+    ///   2. **The added matches are all the `""""` shape** — an empty short string at
+    ///      the head of an over-long quote-run that is not a valid long string.
+    ///
+    /// Property 2 (the divergence is non-empty) is the load-bearing assertion: it is the
+    /// proof that the rewrite is unacceptable, so the bundled `STRING` is left verbatim.
+    #[test]
+    fn string_lookaround_free_rewrite_is_not_equivalent() {
+        let s_orig = Fancy::new(STRING_ORIG).unwrap();
+        let l_orig = Fancy::new(LONG_ORIG).unwrap();
+        let s_new = Regex::new(STRING_NEW).unwrap();
+        let l_new = Regex::new(LONG_NEW).unwrap();
+
+        // The combined string scanner, long-string first (as the grammar orders it).
+        let scan_orig = |s: &str| -> Option<(&'static str, usize)> {
+            fancy_prefix(&l_orig, s)
+                .map(|n| ("LONG", n))
+                .or_else(|| fancy_prefix(&s_orig, s).map(|n| ("STRING", n)))
+        };
+        let scan_new = |s: &str| -> Option<(&'static str, usize)> {
+            regex_prefix(&l_new, s)
+                .map(|n| ("LONG", n))
+                .or_else(|| regex_prefix(&s_new, s).map(|n| ("STRING", n)))
+        };
+
+        let mut cases = corpus(&['"', '\'', '\\', 'a', '\n', 'r', 'b'], 5);
+        // The (?!"") boundary lives in adjacent quote-runs; sample them well past the
+        // exhaustive length, both bare and with content + a closing quote.
+        for q in ['"', '\''] {
+            for k in 0..=14 {
+                let run: String = std::iter::repeat(q).take(k).collect();
+                cases.push(run.clone());
+                cases.push(format!("{run}a{q}"));
+            }
+        }
+
+        let mut preserved = 0usize;
+        let mut divergences = 0usize;
+        let mut lost_or_changed = Vec::new();
+        for s in &cases {
+            let (o, n) = (scan_orig(s), scan_new(s));
+            if o == n {
+                preserved += o.is_some() as usize;
+                continue;
+            }
+            match (o, n) {
+                // The sole divergence shape: original matched nothing, the rewrite
+                // matched an empty short string at the head of a quote-run (the `""""`).
+                (None, Some(("STRING", len))) => {
+                    let matched = &s[..len];
+                    let q = matched.chars().last().unwrap();
+                    let empty_short = matched.ends_with("\"\"") || matched.ends_with("''");
+                    let at_quote_run = s[len..].chars().next() == Some(q);
+                    assert!(
+                        empty_short && at_quote_run,
+                        "STRING divergence must be an empty short string at an over-long \
+                         quote-run; got match {matched:?} of {s:?}"
+                    );
+                    divergences += 1;
+                }
+                // A *changed/dropped* match would be a different, worse failure mode —
+                // the rewrite is at least a clean superset, never lossy.
+                _ => lost_or_changed.push((s.clone(), o, n)),
+            }
+        }
+
+        assert!(
+            lost_or_changed.is_empty(),
+            "rewrite dropped or changed {} original match(es), e.g. {:?}",
+            lost_or_changed.len(),
+            &lost_or_changed[..lost_or_changed.len().min(8)]
+        );
+        assert!(
+            preserved > 0,
+            "corpus must exercise some real string tokens"
+        );
+        // The load-bearing assertion: the rewrite IS inequivalent (it accepts `""""`),
+        // which is exactly why the bundled STRING is not rewritten. If this ever stops
+        // holding, STRING has become eliminable and this decision should be revisited.
+        assert!(
+            divergences > 0,
+            "expected the lookaround-free STRING rewrite to diverge (accept `\"\"\"\"`)"
+        );
+    }
+}

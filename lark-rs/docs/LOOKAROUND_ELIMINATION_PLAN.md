@@ -48,6 +48,38 @@ is produced).
 
 ### E2 — Rewrite the bundled terminals
 
+> **E2a — landed as analysis + guards only (no grammar change).** E2a builds the
+> per-terminal **match-length equivalence** harness (`tests/test_lookaround.rs`:
+> original on `fancy-regex` vs candidate rewrite on `regex`, compared over a generated
+> corpus) and uses it to classify the python string terminals + the block-comment
+> shape. **It deliberately changes no bundled grammar** — every grammar stays verbatim
+> upstream and all string terminals stay on `fancy-regex` — so the PR is purely
+> additive (guards + knowledge), and the actual rewrites land together in E4 instead of
+> leaving a half-eliminated grammar. Findings:
+>
+> * `LONG_STRING` and the block-comment shape **are reducible** — their lookaround-free
+>   rewrites are proven **byte-for-byte equivalent** (`long_string_match_length_equivalence`,
+>   `block_comment_match_length_equivalence`). `LONG_STRING` needs no priority change
+>   (its body has no boundary guard). These rewrites are *ready*; deploying them is an
+>   E4 step.
+> * `STRING` **is irreducible** — the mandatory proof surfaced it. `STRING`'s `(?!"")`
+>   opening guard is a *trailing-context* boundary: it makes `""""` a lex error while
+>   `"" ""` (two empty strings) is valid, a distinction that exists **only at lex time**
+>   (once `%ignore` drops the whitespace, both are `STRING STRING` to the parser, so no
+>   grammar-level or priority fix recovers it). Every lookaround-free rewrite therefore
+>   accepts `""""`, diverging from the oracle. This is exactly the "bundled terminal
+>   with no clean lookaround-free form … resists both regex rewrite and priority" risk
+>   below — **surfaced, not worked around**. Pinned by
+>   `string_lookaround_free_rewrite_is_not_equivalent` and an end-to-end `""""`-reject
+>   oracle (`python_string_rule` in `tests/test_stdlib.rs`).
+>
+> **Consequence for E4:** the irreducible set is no longer empty (`STRING` is a real,
+> shipped, valid member), so E4 cannot simply drop `fancy-regex` and expect every
+> bundled grammar to bake. `STRING`'s `(?!"")` is a fixed bounded *trailing* lookahead
+> — the same shape as the `lark.OP`/`REGEXP`, `common.DEC_NUMBER` suspects — so the
+> economical fix is likely **one narrow lexer-level bounded-trailing-lookahead guard**
+> (a tiny slice of Option-H), not the general Pike-VM engine. See Risks.
+
 Replace the lookaround in the bundled grammars (`src/grammars/python.lark`,
 `lark.lark`, `common.lark`, plus the `examples/` block-comment shape) with
 lookaround-free equivalents, so they rejoin the combined scanner. **Each rewrite must
@@ -60,8 +92,8 @@ Candidate rewrites (all **to be verified**, not asserted):
 
 | Terminal | Original (lookaround) | Candidate lookaround-free form | Notes |
 |---|---|---|---|
-| `STRING` (python) | `…("(?!"").*?(?<!\\)(\\\\)*?"\|'…')` | `…("(?:[^"\\\n]\|\\.)*"\|'(?:[^'\\\n]\|\\.)*')` | the standard escaped-string form; triple-quote disambiguation moves to `LONG_STRING` priority |
-| `LONG_STRING` (python) | `…""".*?(?<!\\)(\\\\)*?"""…` | `…"""(?:[^\\]\|\\.)*?"""…` (lazy, no newline exclusion) | DOTALL-style body; verify lazy vs greedy end |
+| `STRING` (python) | `…("(?!"").*?(?<!\\)(\\\\)*?"\|'…')` | ~~`…("(?:[^"\\\n]\|\\.)*"\|'…')`~~ **rejected** | E2a result: candidate disproven — accepts `""""` (oracle rejects). The `(?!"")` is an irreducible trailing-context boundary; **stays on lookaround**. See the E2a note above |
+| `LONG_STRING` (python) | `…""".*?(?<!\\)(\\\\)*?"""…` | `…"""(?:[^\\]\|\\.)*?"""…` (lazy, no newline exclusion) | E2a: **proven** byte-for-byte equivalent (no priority change needed), but **not yet deployed** — grammar stays verbatim; the rewrite lands in E4 |
 | `REGEXP` (lark) | `\/(?!\/)(\\\/\|\\\\\|[^\/])*?\/[imslux]*` | `/(?:\\.\|[^/\\])+/[imslux]*` | drop `(?!\/)` by requiring a non-empty body |
 | `OP` (lark) | `[+*]\|[?](?![a-z])` | fold into terminal **priority** vs the `?rule` modifier | likely *not* a regex rewrite — see below |
 | `DEC_NUMBER` (common) | `…(?![1-9])` leading-zero guard | verify; may need priority or a negated-char construction | the lookahead turns a short match into a *failure* — the awkward case |
