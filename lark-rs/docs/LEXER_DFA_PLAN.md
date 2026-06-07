@@ -323,7 +323,10 @@ against the Python oracle. The ordering front-loads the safety nets.
   `unless`). This is the step that **removes the `REGEXP` ReDoS and the
   bail-wrong-answer risk** (those terminals are now on the linear engine). Gated by
   the full cross-algorithm `test_lookaround` matrix + `test_stdlib` + the compliance
-  banks + the JSON corpus, all green.
+  banks + the JSON corpus, all green — **and** by a deterministic linearity gate
+  (`tests/test_lookaround_scaling.rs`, the `pike_vm_steps` counter) asserting the
+  engine's work stays flat per byte on the ambiguous `lark.REGEXP` shape that was the
+  ReDoS — the noise-free proof the lowering is backtracking-free ("gap #2").
   *(Re-scoped 2026-06-06: was "boundary-assertion lowering" only, which the §4
   Amendment shows covers just `DEC_NUMBER`/`OP` — the bundled `STRING`/`LONG_STRING`/
   `REGEXP` need the internal path here, not in a deferred follow-up. Mechanism chosen

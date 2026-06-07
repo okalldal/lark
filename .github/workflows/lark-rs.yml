@@ -69,6 +69,14 @@ jobs:
       - name: Lexer scaling gate (perf-counters)
         run: cargo test --features perf-counters --test test_lexer_scaling
 
+      # Lookaround lowering linearity gate (Lexer DFA / B1 plan, "gap #2"). The
+      # Pike-VM that replaced fancy-regex visits each (instruction, position) once,
+      # so it is linear even on the ambiguous lark.REGEXP shape that was a ReDoS
+      # under backtracking. This keys on the pike_vm_steps work counter and asserts
+      # flat-per-byte work, so a re-introduced backtracking path is caught.
+      - name: Lookaround lowering scaling gate (perf-counters)
+        run: cargo test --features perf-counters --test test_lookaround_scaling
+
       # python.lark LALR build gate (#79). The headline result of the EBNF-helper
       # dedup is that upstream python.lark's full LALR table now *builds* (without
       # sharing, its repeated `("," X)*` helpers collide as unresolvable R/R). The

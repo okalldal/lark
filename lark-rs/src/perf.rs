@@ -47,6 +47,7 @@ mod imp {
     static FOREST_NODES: AtomicU64 = AtomicU64::new(0);
     static CYK_TABLE_STEPS: AtomicU64 = AtomicU64::new(0);
     static LEXER_SCAN_STEPS: AtomicU64 = AtomicU64::new(0);
+    static PIKE_VM_STEPS: AtomicU64 = AtomicU64::new(0);
     static LEO_DISABLED: AtomicBool = AtomicBool::new(false);
 
     #[inline]
@@ -99,6 +100,21 @@ mod imp {
         LEXER_SCAN_STEPS.fetch_add(n, Ordering::Relaxed);
     }
 
+    /// Count one Pike-VM thread step: each distinct `(instruction, input position)`
+    /// the lookaround lowering engine visits (`crate::lookaround::matcher`), in both
+    /// the main program and any assertion sub-program. A Pike-VM dedups by
+    /// `(pc, pos)`, so this total is bounded by `program_size · match_length` — i.e.
+    /// **linear** in input regardless of how ambiguous the pattern is. The whole
+    /// point of replacing `fancy-regex` is that a backtracking engine has no such
+    /// bound: the very patterns that made `lark.REGEXP` a ReDoS (an ambiguous
+    /// alternation under a lazy star) would make a backtracker's step count explode.
+    /// Asserting this stays flat per byte (`tests/test_lookaround_scaling.rs`) is the
+    /// deterministic proof that the lowering is backtracking-free.
+    #[inline]
+    pub fn add_pike_vm_steps(n: u64) {
+        PIKE_VM_STEPS.fetch_add(n, Ordering::Relaxed);
+    }
+
     /// Zero every counter. Call before the workload you want to measure.
     pub fn reset() {
         COMPLETER_SCAN_STEPS.store(0, Ordering::Relaxed);
@@ -107,6 +123,7 @@ mod imp {
         FOREST_NODES.store(0, Ordering::Relaxed);
         CYK_TABLE_STEPS.store(0, Ordering::Relaxed);
         LEXER_SCAN_STEPS.store(0, Ordering::Relaxed);
+        PIKE_VM_STEPS.store(0, Ordering::Relaxed);
     }
 
     pub fn completer_scan_steps() -> u64 {
@@ -131,6 +148,10 @@ mod imp {
 
     pub fn lexer_scan_steps() -> u64 {
         LEXER_SCAN_STEPS.load(Ordering::Relaxed)
+    }
+
+    pub fn pike_vm_steps() -> u64 {
+        PIKE_VM_STEPS.load(Ordering::Relaxed)
     }
 
     /// Turn the Joop-Leo optimization off (`true`) or on (`false`). Lets a
@@ -171,6 +192,9 @@ mod imp {
     #[inline]
     pub fn add_lexer_scan_steps(_n: u64) {}
 
+    #[inline]
+    pub fn add_pike_vm_steps(_n: u64) {}
+
     pub fn reset() {}
 
     pub fn completer_scan_steps() -> u64 {
@@ -194,6 +218,10 @@ mod imp {
     }
 
     pub fn lexer_scan_steps() -> u64 {
+        0
+    }
+
+    pub fn pike_vm_steps() -> u64 {
         0
     }
 

@@ -71,8 +71,12 @@ gated on the *deterministic* work counters in `src/perf.rs` (compiled in only wi
 `BENCH.md`. `tests/test_earley_scaling.rs` asserts flat-per-byte (or capped-n²)
 scaling; `tests/test_cyk_scaling.rs` (#87) asserts a cubic envelope (flat per n³,
 each doubling within [5×,12×]) for CYK's O(n³·|grammar|) table fill via the
-`cyk_table_steps` counter; `examples/profile_parse.rs scaling` prints the same
-counters as a demonstration table. CI runs both gating variants as their own steps.
+`cyk_table_steps` counter; `tests/test_lexer_scaling.rs` (#104) asserts flat-per-byte
+lexer scan work (`lexer_scan_steps`); `tests/test_lookaround_scaling.rs` (Lexer DFA
+plan) asserts flat-per-byte Pike-VM work (`pike_vm_steps`) on the ambiguous
+`lark.REGEXP` shape that was a ReDoS under `fancy-regex` — the deterministic proof the
+lowering is backtracking-free; `examples/profile_parse.rs scaling` prints the same
+counters as a demonstration table. CI runs each gating variant as its own step.
 
 **Earley / ambiguity oracles (Phase 2).** `generate_oracles.py` and
 `extract_lark_compliance.py` already emit the Earley fixtures as part of their
@@ -159,6 +163,7 @@ tests/
   test_earley_dynamic_compliance.rs  Replays the dynamic-lexer Earley bank (XFAIL-gated)
   test_cyk_compliance.rs  Replays the CYK compliance bank (XFAIL-gated); the Phase-3 CYK regression net
   test_cyk_scaling.rs Deterministic cubic-envelope gate (#87): asserts the O(n³·|grammar|) table fill stays flat per n³ on a densely ambiguous grammar (perf-counters feature)
+  test_lookaround_scaling.rs  Deterministic linearity gate for the lookaround lowering engine (Lexer DFA plan): asserts pike_vm_steps stays flat per byte on the ambiguous lark.REGEXP shape — proves the Pike VM that replaced fancy-regex is backtracking-free (perf-counters feature)
   test_recovery.rs    Error-recovery oracle (#43) — single-token-deletion recovery vs Python Lark's `on_error` driver: tree + deletion-count parity, plus on_error/partial-tree behaviour
   test_common.rs      common.lark terminal library vs oracle (Phase 3) — each
                       user-facing common terminal lexes as Python Lark's does

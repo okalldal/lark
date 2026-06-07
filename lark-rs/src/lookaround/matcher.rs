@@ -1005,6 +1005,10 @@ impl Program {
             return;
         }
         list.seen[pc] = true;
+        // One Pike-VM work unit: a distinct (pc, pos) visit. Bounded by
+        // program_size · match_length ⇒ linear in input, the deterministic proof
+        // that the lowering never backtracks (see `crate::perf::add_pike_vm_steps`).
+        crate::perf::add_pike_vm_steps(1);
         match self.insts[pc] {
             Inst::Jmp(t) => self.add_thread(list, t, text, pos),
             Inst::Split(a, b) => {
