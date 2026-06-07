@@ -172,8 +172,8 @@ tests/
                       lexer engines that route lookaround (Scanner, DynamicMatcher,
                       unless) are pinned. The oracle records Python's actual per-combo
                       result (e.g. dynamic_complete accepts the shorter tokenization
-                      where maximal-munch lexers reject). Passes on today's fancy-regex
-                      lexer, so it locks the semantics the M2/M3 rewrite must reproduce
+                      where maximal-munch lexers reject). Locked Python's per-combo
+                      semantics; now runs on the lowered Pike-VM engine (fancy-regex removed)
   test_oracle_coverage.rs  Meta-test: every grammar needs an oracle or quarantine
   test_json_corpus.rs 293-file JSONTestSuite corpus test
   test_standalone.rs  Standalone parser gen (#42): `include!`s the committed
@@ -344,8 +344,8 @@ underlying super-linearity has since been removed by the Joop-Leo work (#58).
 | `%import` from file path | ✅ | Relative imports (`%import .module (X, ...)`) resolve against the importing grammar's directory (`LarkOptions.base_path`), load through `load_grammar`, and copy the requested terminal/rule — a rule pulls in its dependency closure, mangled under the module name (Python's `_get_mangle`). Pinned by `test_imports.rs` (oracles in `fixtures/oracles/imports/`, grammars under `tests/grammars/imports/`) |
 | `%declare` semantic action | ✅ | `%declare _INDENT _DEDENT` registers pattern-less terminals (`TerminalDef::declared`): interned + reserved a parse-table column, filtered out of every scanner (`basic_lexer_conf`), injected by a postlex hook. Pinned by `test_indenter.rs` |
 | Indenter / postlex | ✅ (basic + contextual lexer) | `LarkOptions.postlex: Option<Indenter>` (LALR backend), on **both** the basic and the contextual (default) lexer. Basic lexer: materialize the stream, `Indenter::process` rewrites it (INDENT/DEDENT injection, paren-depth suppression, tab expansion, end-of-input dedent flush — a token-for-token port of `lark.indenter.Indenter`), then the parser replays it. **#67: contextual lexer** — the lazy per-state lexer can't be materialized up front, so the indenter runs as a streaming `TokenSource` adapter (`PostlexContextual`) inside the pull loop, driving the shared `IndenterStream` core so it injects a byte-identical stream; the NL terminal is forced into every state's scanner via `always_accept` (Python Lark's `PostLex.always_accept`). Pinned by `test_indenter.rs`, which replays the `indent`/`indent_paren` oracles under both lexers **and** adds `indent_context` — a grammar where the contextual lexer's state-narrowing is load-bearing (`NAME`/`VALUE` overlap, basic lexer provably can't parse it) *while* postlex injects INDENT/DEDENT, so the two mechanisms are pinned together, not just for parity. **#69: a general trait-object postlex** (beyond the built-in `Indenter`) is the remaining follow-up |
-| Grammar standard library | ✅ | Beyond `common.lark`, lark-rs bundles every grammar Python Lark ships under `lark/grammars/` — `python.lark`, `unicode.lark`, and `lark.lark` — under `src/grammars/`, resolvable via the same `%import <lib>.<X>` directive. The files are **verbatim** copies (no hand-edits): the loader's bundled-library path parses each through lark-rs's own loader and copies the requested terminal/rule closure, mangled under the module prefix (`python__HEX_NUMBER`). A handful of their terminals use lookaround, which the lexer transparently routes to `fancy-regex` (see the parity-gap note below), so the grammar text matches upstream byte-for-byte and cannot drift. Pinned by `tests/test_stdlib.rs` (oracles in `fixtures/oracles/stdlib/`). SQL/C/Lua are *not* bundled — upstream distributes them as separate packages, not under `lark/grammars/` |
-| Standalone parser gen | ✅ (Rust) | `lark-rs generate-parser --grammar foo.lark --output parser.rs` (`src/bin/generate_parser.rs`) emits a self-contained Rust LALR parser depending only on `regex` + std, not on lark-rs (#42). `src/standalone/mod.rs` runs the normal pipeline once and bakes the `ParseTable` (sparse ACTION/GOTO), per-rule tree-shaping flags, the symbol-name table, and the `ScannerPlan` (alternation order + `unless` retype) into one `static DATA: GrammarData`. The driver (basic lexer + LALR + tree-shaping) lives in `src/standalone/runtime.rs` — a **real compiled, type-checked, unit-tested module** that is `include_str!`d into each generated parser, not a hand-copied text blob. Both drift vectors are shared by construction: the lexer recipe is the **same** `lexer::scanner_plan` the in-process `Scanner::build` uses, and the driver is the one compiled module. So a generated parser is byte-identical to lark-rs — pinned two ways: `test_standalone.rs` (committed `tests/standalone/*.rs` fixtures `include!`d + run vs the live oracle, plus a determinism/freshness gate), **and** a compliance-bank replay (`standalone::tests::standalone_compliance_bank`, #86) that runs the shared `runtime` over the **full strip-mined Python-Lark bank** — 509/512 cases agree with the captured oracle (the 3 XFAILs in `standalone_xfail.json` are basic-lexer-incompatible grammars, e.g. `"a"i "a"`, allow-listed via `LARK_STANDALONE_WRITE_XFAIL=1` with the same burndown discipline as the LALR/Earley banks). Value is dependency footprint + Python-`standalone` parity, **not** throughput (still table-interpreted) or `no_std` (runtime regex compile); see the module docs. Limitations: LALR + basic lexer only, no postlex (rejected with a clear error); a grammar with **lookaround terminals** (the bundled `python`/`lark`) is not standalone-able since the baked runtime is pure-`regex`. Follow-ups: Python standalone; `fancy-regex` in the emitted runtime; unify the `ParseTable→Rust` emitter with `include_lark!` (#49) |
+| Grammar standard library | ✅ | Beyond `common.lark`, lark-rs bundles every grammar Python Lark ships under `lark/grammars/` — `python.lark`, `unicode.lark`, and `lark.lark` — under `src/grammars/`, resolvable via the same `%import <lib>.<X>` directive. The files are **verbatim** copies (no hand-edits): the loader's bundled-library path parses each through lark-rs's own loader and copies the requested terminal/rule closure, mangled under the module prefix (`python__HEX_NUMBER`). A handful of their terminals use lookaround, which the lexer transparently *lowers* to its linear Pike-VM engine (`src/lookaround/`; see the parity-gap note below), so the grammar text matches upstream byte-for-byte and cannot drift. Pinned by `tests/test_stdlib.rs` (oracles in `fixtures/oracles/stdlib/`). SQL/C/Lua are *not* bundled — upstream distributes them as separate packages, not under `lark/grammars/` |
+| Standalone parser gen | ✅ (Rust) | `lark-rs generate-parser --grammar foo.lark --output parser.rs` (`src/bin/generate_parser.rs`) emits a self-contained Rust LALR parser depending only on `regex` + std, not on lark-rs (#42). `src/standalone/mod.rs` runs the normal pipeline once and bakes the `ParseTable` (sparse ACTION/GOTO), per-rule tree-shaping flags, the symbol-name table, and the `ScannerPlan` (alternation order + `unless` retype) into one `static DATA: GrammarData`. The driver (basic lexer + LALR + tree-shaping) lives in `src/standalone/runtime.rs` — a **real compiled, type-checked, unit-tested module** that is `include_str!`d into each generated parser, not a hand-copied text blob. Both drift vectors are shared by construction: the lexer recipe is the **same** `lexer::scanner_plan` the in-process `Scanner::build` uses, and the driver is the one compiled module. So a generated parser is byte-identical to lark-rs — pinned two ways: `test_standalone.rs` (committed `tests/standalone/*.rs` fixtures `include!`d + run vs the live oracle, plus a determinism/freshness gate), **and** a compliance-bank replay (`standalone::tests::standalone_compliance_bank`, #86) that runs the shared `runtime` over the **full strip-mined Python-Lark bank** — 509/512 cases agree with the captured oracle (the 3 XFAILs in `standalone_xfail.json` are basic-lexer-incompatible grammars, e.g. `"a"i "a"`, allow-listed via `LARK_STANDALONE_WRITE_XFAIL=1` with the same burndown discipline as the LALR/Earley banks). Value is dependency footprint + Python-`standalone` parity, **not** throughput (still table-interpreted) or `no_std` (runtime regex compile); see the module docs. Limitations: LALR + basic lexer only, no postlex (rejected with a clear error); a grammar with **lookaround terminals** (the bundled `python`/`lark`) is not standalone-able since the baked runtime is pure-`regex`. Follow-ups: Python standalone; the Pike-VM lookaround lowering in the emitted runtime; unify the `ParseTable→Rust` emitter with `include_lark!` (#49) |
 | Error recovery | ✅ | Panic-mode **single-token-deletion** recovery on the LALR backend (#43). `Lark::parse_with_recovery` (built-in strategy) and `parse_on_error` (custom handler) mirror Python Lark's `on_error` callback — which, with `on_error=lambda e: True`, *is* delete-and-resume (its `interactive_parser.resume_parse()` has already pulled the bad token off the lexer). Same LALR tables ⇒ the surviving stream builds the **same tree**, so it is oracle-gated: `tests/test_recovery.rs` asserts tree + deletion-count parity vs Python (`recovery/cases.json`). Returns a `RecoveredTree { tree, errors }` — the partial tree plus the recovered errors (the "error nodes"; an LR value stack has no slot to splice them inline without a yacc-style `error` production, which Lark's grammar syntax lacks, so they sit alongside, exactly as Python's recovery does). Recovery lexes with the basic/global lexer so out-of-context-but-valid tokens are deletable; a `$END` error returns a best-effort partial instead of aborting (Python re-raises). Plan: [`docs/PHASE_3_RECOVERY_PLAN.md`](docs/PHASE_3_RECOVERY_PLAN.md). Follow-ups: character-level recovery, Earley/CYK/postlex recovery |
 | CYK parser | ✅ | `parser='cyk'` (#44). Faithful port of Python Lark's `cyk.py`: CNF conversion (TERM lifts non-solitary terminals into `__T_` wrappers, BIN binarizes >2-symbol rules via `__SP_` splits, UNIT eliminates non-terminal unit rules recording the skipped chain) + an O(n³) DP that keeps the lightest derivation per span/non-terminal, then a CNF revert that feeds the shared `TreeBuilder` — so an unambiguous parse is byte-identical to LALR/Earley. lark-rs's nullable `*`/`?`/`+` helpers are transparent, so a reachability prune + ε-removal pass (duplicate each rule over its nullable occurrences; refill omitted transparent positions with an empty splice) reproduces Python's ε-free EBNF expansion without changing the tree; a nullable *non-transparent* rule is a genuine ε-rule CYK can't model and is rejected at build time, matching Python. Uses the basic lexer (no parser-state lexer, like Earley). Pinned by `test_cyk_compliance.rs` — the CYK bank (TestCykBasic) is **124/124 = 100%** oracle agreement (0 XFAIL) — plus inline parity/ambiguity/EBNF unit tests in `cyk.rs`. **#87: a deterministic cubic-envelope scaling gate** (`test_cyk_scaling.rs`) keys on the `cyk_table_steps` work counter and asserts the table fill stays flat per n³ on a densely ambiguous grammar (`s: s s \| "a"`), so a complexity regression in the CNF conversion or DP is caught — the CYK analog of the Earley scaling net |
 
@@ -398,23 +398,30 @@ over-report conflicts, so accurate `GrammarError::Conflict` reporting requires i
 **`regex` crate has no lookahead or backreferences.** Some Python Lark grammars rely
 on lookaround (the bundled `python.lark`/`lark.lark` do: `STRING`'s `(?<!\\)(\\\\)*?`
 escaped-quote guard, `DEC_NUMBER`'s `(?![1-9])`, `lark.OP`/`REGEXP`). lark-rs handles
-these by **routing only the lookaround-bearing terminals to `fancy-regex`** (a
-backtracking overlay) while every other terminal stays on the fast combined `regex`
-scanner — see `AnyRegex` in `src/lexer.rs`. Detection is automatic (a terminal is sent
-to `fancy-regex` only when the `regex` crate rejects its pattern), so user grammars
-with lookaround work too. **No backreferences** are used by any bundled grammar (and
-`fancy-regex` would support them if needed). The per-position scan is **anchored with
-`\G`**: a fancy terminal is tried at each offset with `find_from_pos`, which is an
-*unanchored forward search* — left as-is it scans ahead to the next match, so a
-*sparse* lookaround terminal (e.g. `python.lark`'s `STRING`) is O(n²) over the input
-(a 124 KB Python file took ~177 s before this was fixed; the pure-`regex` JSON/SQL
-scanners were unaffected). Prepending `\G` (start-of-search anchor) to the fancy
-pattern at `Scanner::build` makes the search fail immediately when nothing matches at
-`pos`, restoring linear-per-byte lexing; it is behaviour-preserving because the match
-is already required to start exactly at `pos`. Measured cost (`cargo bench --bench
-redos`): both shipped lookaround terminals stay **linear** — `fancy-regex` runs their
-ambiguous bodies on the linear engine and only backtracks around the fixed leading
-assertion, so there is no ReDoS; `STRING` carries only a constant-factor tax. One
+these by **lowering only the lookaround-bearing terminals to a linear Pike-VM engine**
+(`src/lookaround/`, the Lexer DFA / B1 plan in `docs/LEXER_DFA_PLAN.md`) while every
+other terminal stays on the fast combined `regex` scanner — see `AnyRegex` in
+`src/lexer.rs`. **No `fancy-regex` / no backtracking engine remains on any path**, so
+there is no ReDoS and no bail-to-wrong-answer risk. The flow: a lookaround-aware
+front-end (`lookaround::parse`) parses a terminal pattern into a `Node` tree exposing
+its `(?=)/(?!)/(?<=)/(?<!)` assertions (boundary *and internal* — the §4 amendment
+census corrected the original plan's claim that all bundled assertions are at token
+boundaries; `STRING`/`LONG_STRING`/`REGEXP` are internal); `LoweredMatcher` compiles
+that tree into a Pike-VM program and runs a priority-ordered, backtracking-free
+simulation that reproduces Python `re`'s leftmost-first semantics, including the
+length-changing case (`a+(?!b)` on `"aaab"` → `"aa"`). Each assertion is a zero-width
+*gate* (a thread dies if it fails); look-behind requires fixed width (enforced, as
+Python does). Character-class membership delegates to the `regex` crate (one cached
+anchored single-char test), so Unicode semantics match Python exactly. The matcher is
+inherently **anchored at `pos`**, so the per-position scan is linear by construction —
+the O(n²) sparse-terminal pathology PR #104 patched with `\G` cannot recur (a 124 KB
+Python file is linear). Routing is automatic: a terminal is lowered iff its pattern
+parses to a tree with an assertion, so user grammars with lookaround work too.
+**Backreferences and variable-width look-behind** (neither used by any bundled
+grammar, both rejected by Python too) are rejected at build time with a clear error.
+This is wired into all three lexer engines (`Scanner` basic+contextual,
+`DynamicMatcher` for Earley dynamic/dynamic_complete, and the `unless` retype),
+pinned by `tests/test_lookaround.rs` across the full parser×lexer matrix. One
 terminal — `common.lark`'s `ESCAPED_STRING` — keeps its hand-written lookaround-free
 adaptation (it's the hottest terminal in the library and already linear on the pure
 `regex` engine); it is the single standing exception to "verbatim upstream."
@@ -430,10 +437,11 @@ parser — Rust variant), #40 (grammar stdlib), #32 (Earley XFAIL burndown), and
 (error recovery) are ✅ done. Phase 3 is feature-complete; remaining work is the
 follow-ups below.
 
-Follow-ups: a Python standalone emitter (#42); and `fancy-regex` routing in the
-standalone runtime — it emits a pure-`regex` parser, so a grammar with lookaround
-terminals (the bundled `python`/`lark`) is not yet standalone-able, since that
-routing lives only in the in-process lexer.
+Follow-ups: a Python standalone emitter (#42); and Pike-VM lookaround lowering in
+the standalone runtime — it emits a pure-`regex` parser, so a grammar with lookaround
+terminals (the bundled `python`/`lark`) is not yet standalone-able, since the
+lowering engine (`src/lookaround/`) lives only in the in-process lexer (Lexer DFA
+plan M5 bakes it into the standalone/WASM/C runtimes).
 
 Deferred until specialist work is available: #33 (de-recurse forest walk,
 profiler-gated).

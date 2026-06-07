@@ -1,9 +1,11 @@
 # Lexer Strategy — Remove `fancy-regex`, Unify on a Linear DFA Lexer (B1)
 
-**Status:** 🟡 in progress. Strategy decided 2026-06-06; PR 1 (the lookaround
-behavioral oracles, `tests/test_lookaround.rs`) landed. **Amended 2026-06-06** after
-a direct re-scan of the grammar corpus invalidated the boundary-assertion premise —
-see the **Amendment** callout in §4.
+**Status:** 🟢 M0–M3 landed (2026-06-07). `fancy-regex` is removed; every lookaround
+terminal runs on the linear Pike-VM lowering engine (`src/lookaround/`). Strategy
+decided 2026-06-06; **amended 2026-06-06** after a direct re-scan of the corpus
+invalidated the boundary-assertion premise (see the **Amendment** callout in §4);
+M2 mechanism chosen 2026-06-07 (Pike-VM simulation). M4 (unify the scanner on one
+multi-pattern DFA — perf) and M5 (bake into standalone/WASM/C — distribution) remain.
 
 **Decision:** retire `fancy-regex` from lark-rs entirely. Replace it with a
 **general lowering of bounded lookaround to finite automata** ("B1" in the issue
@@ -309,21 +311,30 @@ against the Python oracle. The ordering front-loads the safety nets.
   assertions (`STRING`/`LONG_STRING`/`REGEXP`/`DEC_NUMBER`/`OP` + verilog
   `MULTILINE_COMMENT`) — round-trip + correct internal-vs-boundary classification —
   not just the boundary pair.
-- **M2 — General regular lowering + validation (§2 / §4 Amendment),** still alongside
-  the existing scanner. Compile each assertion into the terminal's automaton via the
-  intersection/complement construction (boundary assertions take the §4.2 peek
-  fast-path; internal ones the product-construction). Route the bundled lookaround
-  terminals through it; oracle suite (`test_stdlib`, `test_common`, `test_json_corpus`,
-  `test_lookaround`) stays green. This is the step that **removes the `REGEXP` ReDoS
-  and the bail-wrong-answer risk** (those terminals are now on the linear engine).
+- **M2 — General regular lowering + validation (§2 / §4 Amendment).** ✅ **Landed**
+  (`src/lookaround/matcher.rs`). The general lowering was realized as a **Pike-VM with
+  assertion gates** (the user-chosen "linear NFA simulation" mechanism, not a
+  determinized product-construction): the M1 `Node` tree compiles to a priority-
+  ordered thread program; each bounded assertion is a zero-width gate (a thread dies
+  if it fails), so internal *and* boundary assertions are handled by one uniform,
+  backtracking-free mechanism that reproduces Python's leftmost-first / length-
+  changing semantics. Character-class membership delegates to the `regex` crate for
+  Unicode parity. Wired into all three lexer engines (`Scanner`, `DynamicMatcher`,
+  `unless`). This is the step that **removes the `REGEXP` ReDoS and the
+  bail-wrong-answer risk** (those terminals are now on the linear engine). Gated by
+  the full cross-algorithm `test_lookaround` matrix + `test_stdlib` + the compliance
+  banks + the JSON corpus, all green.
   *(Re-scoped 2026-06-06: was "boundary-assertion lowering" only, which the §4
   Amendment shows covers just `DEC_NUMBER`/`OP` — the bundled `STRING`/`LONG_STRING`/
-  `REGEXP` need the internal path here, not in a deferred follow-up.)*
-- **M3 — Delete `fancy-regex`.** Remove the `AnyRegex::Fancy` arm, the dependency,
-  and the dual-engine merge in `match_at`. With M2's general lowering, the bundled
-  internal-assertion terminals stay green on the pure-`regex` engine; only a
-  genuinely *unbounded/non-regular* assertion (none in the corpus) hits the rejection
-  error. Compliance banks regenerated; `CLAUDE.md` parity-gap note rewritten.
+  `REGEXP` need the internal path here, not in a deferred follow-up. Mechanism chosen
+  2026-06-07: Pike-VM simulation over determinization — see §4 Amendment.)*
+- **M3 — Delete `fancy-regex`.** ✅ **Landed.** Removed the `AnyRegex::Fancy` arm, the
+  `fancy-regex` dependency (`Cargo.toml`), and the `\G`-overlay/dual-engine merge; the
+  build-time pattern validation (`PatternRe::new`) now accepts a lookaround pattern by
+  *lowering* it, not by asking `fancy-regex`. No backtracking engine remains on any
+  path. Only a genuinely *unbounded/non-regular* assertion (backreference,
+  variable-width look-behind — none in the corpus) hits the rejection error.
+  `CLAUDE.md` parity-gap note rewritten. All banks green.
   *(Re-scoped 2026-06-06: the original "internal assertions now hit the rejection
   error" would have regressed `%import python.STRING` / `lark.REGEXP`, which ship
   today — see §4 Amendment consequence 3.)*

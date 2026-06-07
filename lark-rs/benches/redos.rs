@@ -1,33 +1,32 @@
-//! Cost characterization of the lookaround terminals routed to `fancy-regex`
-//! (issue #40). A recorded trend printed to stdout — NOT a CI gate (see BENCH.md).
+//! Cost characterization of the lookaround terminals, now lowered to the linear
+//! Pike-VM engine (`src/lookaround/`, Lexer DFA / B1 plan; `fancy-regex` removed in
+//! M3). A recorded trend printed to stdout — NOT a CI gate (see BENCH.md; the
+//! *deterministic* linearity gate is `tests/test_lexer_scaling.rs`).
 //!
 //! Run with:  cargo bench --bench redos
 //!
 //! The bundled grammars are shipped *verbatim* from Python Lark; their lookaround
-//! terminals (which the linear `regex` crate cannot compile) are routed to
-//! `fancy-regex`. The concern this bench was written to investigate: does that lose
-//! `regex`'s linear-time / ReDoS-safety guarantee?
+//! terminals (which the linear `regex` crate cannot compile) are lowered to a
+//! Pike-VM simulation. The concern this bench tracks: does that keep `regex`'s
+//! linear-time / ReDoS-safety guarantee?
 //!
-//! Measured answer (fancy-regex 0.18): **no catastrophic blowup on the shipped
-//! terminals.** `fancy-regex` splits a pattern at its lookaround boundaries and runs
-//! the lookaround-*free* portions on the linear NFA engine, only backtracking around
-//! the assertions themselves. The terminals here have just a fixed leading
-//! assertion (`(?<!\\)`, `(?!/)`, `(?![1-9])`), so their ambiguous bodies stay on
-//! the linear engine. The two terminals measured:
+//! Expected answer: **yes, by construction.** A Pike-VM is a priority-ordered
+//! Thompson simulation — O(n · program) with no backtracking — and each lookaround
+//! assertion is a zero-width gate that kills a thread rather than backtracking. So
+//! the two historically worrying terminals stay linear:
 //!
 //!   * `python.STRING` — `(?<!\\)(\\\\)*?` escaped-quote guard. Linear in input
-//!     length; the only cost is a constant factor over the pure-`regex` engine.
+//!     length.
 //!
 //!   * `lark.REGEXP` — body `(\\/ | \\\\ | [^/])*?` is an ambiguous alternation
-//!     (the classic ReDoS shape) under a lazy star plus a `(?!/)` lookahead. Because
-//!     the alternation carries no lookaround, `fancy-regex` runs it on the linear
-//!     engine even on an unterminated literal with a long backslash run — it stays
-//!     linear, NOT exponential. (An earlier hand-extracted spike that ran the body
-//!     under a pure backtracker saw blowup; the integrated engine does not.)
+//!     (the classic ReDoS shape) under a lazy star plus a `(?!/)` lookahead. Under a
+//!     backtracking engine this is the textbook blowup; under the Pike-VM each
+//!     (state, position) is visited once, so an unterminated literal with a long
+//!     backslash run stays linear, NOT exponential.
 //!
-//! Conclusion: the lookaround terminals are safe to ship as-is. Rewriting them back
-//! onto the pure-`regex` engine (as `common.lark`'s `ESCAPED_STRING` already is)
-//! would only shave the constant factor — a perf nicety, not a safety fix.
+//! Conclusion: the lookaround terminals are safe to ship. `common.lark`'s
+//! `ESCAPED_STRING` keeps its hand-written lookaround-free adaptation (hottest
+//! terminal; already linear on the pure-`regex` engine).
 
 use std::time::{Duration, Instant};
 

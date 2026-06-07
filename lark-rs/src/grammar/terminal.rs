@@ -92,13 +92,20 @@ impl PatternRe {
         let flag_prefix = build_flag_prefix(flags);
         let full = format!("{}{}", flag_prefix, pattern);
         // Validate the regex early to surface grammar errors. A pattern the linear
-        // `regex` crate rejects may still be a valid *lookaround* pattern (some
-        // bundled grammars use lookahead/lookbehind — issue #40); accept it if
-        // `fancy-regex` can compile it, since the lexer routes such terminals to the
-        // backtracking engine. Only a pattern neither engine accepts is a real error,
-        // reported with the (more familiar) `regex`-crate message.
+        // `regex` crate rejects may still be a valid *bounded lookaround* pattern
+        // (some bundled grammars use lookahead/lookbehind — issue #40); accept it if
+        // it parses and lowers to the linear Pike-VM engine (Lexer DFA / B1 plan),
+        // which is where the lexer routes such terminals. Only a pattern that is
+        // neither plain-`regex`-compilable nor lowerable is a real error, reported
+        // with the (more familiar) `regex`-crate message.
         if let Err(e) = Regex::new(&full) {
-            if fancy_regex::Regex::new(&full).is_err() {
+            let lowerable = crate::lookaround::parse(&pattern)
+                .ok()
+                .filter(|node| node.has_assertion())
+                .is_some_and(|node| {
+                    crate::lookaround::matcher::LoweredMatcher::compile(&node, flags).is_ok()
+                });
+            if !lowerable {
                 return Err(GrammarError::InvalidRegex {
                     pattern: pattern.clone(),
                     reason: e.to_string(),

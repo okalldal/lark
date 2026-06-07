@@ -3036,8 +3036,8 @@ static TERMINAL_NAMES: &[(&str, &str)] = &[
 /// same source-parse + closure-copy path as a sibling-file import. The files are
 /// verbatim copies of Python Lark's grammars — a handful of their terminals use
 /// lookaround (the `regex` crate has no lookahead/lookbehind), which the lexer
-/// transparently routes to `fancy-regex`, so the grammar text needs no hand-edits.
-/// Pinned by `tests/test_stdlib.rs`.
+/// transparently *lowers* to its linear Pike-VM engine (`crate::lookaround`), so the
+/// grammar text needs no hand-edits. Pinned by `tests/test_stdlib.rs`.
 fn bundled_grammar_source(module: &str) -> Option<&'static str> {
     match module {
         "python" => Some(include_str!("../grammars/python.lark")),

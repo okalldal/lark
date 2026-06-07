@@ -29,12 +29,6 @@ perf-counters = []
 
 [dependencies]
 regex = "1.10"
-# Backtracking-regex overlay for the handful of bundled-grammar terminals that use
-# lookaround (lookahead/lookbehind), which the linear-time `regex` crate cannot
-# compile (issue #40). Only lookaround-bearing terminals route here; every other
-# terminal stays on the fast combined `regex` scanner. Because `regex` is a subset,
-# a pattern that compiles with `regex` is never handed to `fancy-regex`.
-fancy-regex = "0.18"
 # Dense-DFA support for the strict-mode regex-collision check (issue #35): the
 # `regex` crate has no intersection/emptiness test, so we drop to its automata
 # layer and run a product construction over two terminals' DFAs.
