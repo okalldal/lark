@@ -1002,14 +1002,16 @@ STDLIB_GROUPS = [
 ]
 
 
-# ─── Lowering-aware lookaround oracles (Lexer DFA / B1 plan) ─────────────────
+# ─── Lookaround behavioral oracles (lookaround elimination strategy) ─────────
 #
-# The lexer-DFA strategy (docs/LEXER_DFA_PLAN.md) retires `fancy-regex` by lowering
-# every bounded lookaround terminal onto the linear engine. These oracles are the
-# behavioral gate that lowering must reproduce — they PASS against today's
-# `fancy-regex` lexer and lock its semantics so the B1 rewrite (PR 2/3) cannot
-# silently diverge. Each of the four boundary-assertion forms (§4.2) gets a minimal,
-# isolated grammar, plus the two `g_regex_flags`/inline-flag risks §6 calls out:
+# The strategy (docs/LOOKAROUND_ELIMINATION_PLAN.md; rationale in
+# docs/LOOKAROUND_STRATEGY_ANALYSIS.md) retires `fancy-regex` by *eliminating* every
+# bounded lookaround terminal at grammar-load time (rewrite to lookaround-free regex),
+# and rejecting anything that cannot be lowered. These oracles are the engine-agnostic
+# behavioral gate that rewrite must reproduce — they PASS against today's `fancy-regex`
+# lexer and lock its semantics so the rewrite cannot silently diverge. Each of the four
+# boundary-assertion forms gets a minimal, isolated grammar, plus the two
+# `g_regex_flags`/inline-flag risks:
 #
 #   * trailing `(?!)` — *length-changing*: a greedy `a+` forced to a SHORTER match
 #     by the trailing negative lookahead (`"aaab"` → `A="aa"`, not `"aaa"`). This is
@@ -1086,6 +1088,24 @@ B: /[ab]+/
     ]),
 ]
 
+# The (parser, lexer) combos every lookaround grammar is exercised under. The
+# lookaround terminals flow through THREE distinct lexer engines that all route to
+# `fancy-regex` today (and that the rewrite must cover together): the combined `Scanner`
+# (basic + contextual lexers), the per-terminal `DynamicMatcher` (Earley dynamic +
+# dynamic_complete), and the `unless` retype. Testing only one combo would leave the
+# others unwatched through the rewrite, so the oracle pins all of them — mirroring
+# the valid combinations Python Lark itself allows (cyk ⇒ basic lexer only).
+_LOOKAROUND_MATRIX = [
+    ("lalr", "contextual"),
+    ("lalr", "basic"),
+    ("earley", "basic"),
+    ("earley", "dynamic"),
+    ("earley", "dynamic_complete"),
+    ("cyk", "basic"),
+]
+# The combo whose result is checked against the human-written `should_pass` intent.
+_LOOKAROUND_PRIMARY = ("lalr", "contextual")
+
 # Map the serialized flag names to Python `re` flags. The Rust replay maps the same
 # names to `lark_rs::grammar::terminal::flags` bits, so the two stay in lockstep.
 _RE_FLAGS = {
@@ -1097,41 +1117,76 @@ _RE_FLAGS = {
 
 
 def generate_lookaround():
-    print("Generating lookaround lowering oracles (Lexer DFA / B1 gate)...")
+    print("Generating lookaround behavioral oracles (elimination gate)...")
     groups = []
     for name, grammar, flag_names, cases in LOOKAROUND_GROUPS:
         g_flags = 0
         for fn in flag_names:
             g_flags |= _RE_FLAGS[fn]
-        built = []
-        for inp, should_parse in cases:
+
+        combos = []
+        for parser, lexer in _LOOKAROUND_MATRIX:
+            # Build the parser once per (parser, lexer) combo. If Python Lark itself
+            # cannot build this combo for this grammar (e.g. a feature CYK rejects),
+            # record it as unavailable with the reason — the Rust replay then skips
+            # that combo rather than asserting against a behavior the oracle never
+            # defined.
             try:
-                lark = Lark(grammar, parser="lalr", lexer="contextual", start="start",
+                lark = Lark(grammar, parser=parser, lexer=lexer, start="start",
                             maybe_placeholders=False, g_regex_flags=g_flags)
-                tree = lark.parse(inp)
-                ok, payload = True, tree_to_dict(tree)
-            except Exception as e:
-                ok, payload = False, str(e)
-            if should_parse and not ok:
-                print(f"  WARNING: {name} expected to parse {inp!r}: {payload}")
-            if not should_parse and ok:
-                print(f"  WARNING: {name} expected to reject {inp!r}")
-            built.append({
-                "input": inp,
-                "should_pass": should_parse,
-                "ok": ok,
-                "tree": payload if ok else None,
-                "error": payload if not ok else None,
+                build_error = None
+            except Exception as e:  # noqa: BLE001 — record any build failure verbatim
+                combos.append({
+                    "parser": parser,
+                    "lexer": lexer,
+                    "available": False,
+                    "build_error": str(e),
+                    "cases": [],
+                })
+                continue
+
+            built = []
+            for inp, should_parse in cases:
+                try:
+                    tree = lark.parse(inp)
+                    ok, payload = True, tree_to_dict(tree)
+                except Exception as e:  # noqa: BLE001
+                    ok, payload = False, str(e)
+                # `should_parse` is the human-intended (LALR/contextual) expectation;
+                # the *gate* is "lark-rs reproduces Python's actual result for THIS
+                # combo". Only warn when the primary combo diverges from intent.
+                if (parser, lexer) == _LOOKAROUND_PRIMARY:
+                    if should_parse and not ok:
+                        print(f"  WARNING: {name} expected to parse {inp!r}: {payload}")
+                    if not should_parse and ok:
+                        print(f"  WARNING: {name} expected to reject {inp!r}")
+                built.append({
+                    "input": inp,
+                    "should_pass": should_parse,
+                    "ok": ok,
+                    "tree": payload if ok else None,
+                    "error": payload if not ok else None,
+                })
+            combos.append({
+                "parser": parser,
+                "lexer": lexer,
+                "available": True,
+                "build_error": None,
+                "cases": built,
             })
+
         groups.append({
             "name": name,
             "grammar": grammar,
             "g_regex_flags": flag_names,
-            "cases": built,
+            "combos": combos,
         })
     save_oracle("lookaround", "cases", groups)
-    n_cases = sum(len(g["cases"]) for g in groups)
-    print(f"  {len(groups)} groups, {n_cases} cases")
+    n_combos = sum(len(g["combos"]) for g in groups)
+    n_avail = sum(1 for g in groups for c in g["combos"] if c["available"])
+    n_cases = sum(len(c["cases"]) for g in groups for c in g["combos"])
+    print(f"  {len(groups)} groups × {len(_LOOKAROUND_MATRIX)} combos "
+          f"({n_avail}/{n_combos} available), {n_cases} oracle cases")
 
 
 def generate_stdlib():

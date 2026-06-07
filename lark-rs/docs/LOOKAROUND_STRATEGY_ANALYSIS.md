@@ -1,9 +1,18 @@
 # Lookaround in lark-rs: decision memo
 
-*Status: decision input for [PR #110](https://github.com/okalldal/lark/pull/110)
-("Lexer DFA M1–M3 — lower lookaround to a linear Pike-VM engine, remove
-fancy-regex"). Not yet a committed implementation plan.*
+*Status: **decided** — pure elimination (Option 1b). Implementation is tracked in
+[`LOOKAROUND_ELIMINATION_PLAN.md`](LOOKAROUND_ELIMINATION_PLAN.md).*
 *Date: 2026-06-07.*
+
+> **Outcome.** This memo evaluated [PR #110](https://github.com/okalldal/lark/pull/110)
+> ("Lexer DFA M1–M3 — lower lookaround to a linear Pike-VM engine, remove
+> fancy-regex"). The conclusion was to **not** ship the runtime Pike-VM and instead
+> eliminate lookaround at grammar-load time. **PR #110 was closed** (not merged); its
+> branch is preserved as the spec + working implementation of the shelved Option-H
+> fallback engine, to revisit only if a real irreducible-but-valid bounded lookaround
+> grammar ever appears. The former `LEXER_DFA_PLAN.md` (the lowering strategy) was
+> removed and superseded by `LOOKAROUND_ELIMINATION_PLAN.md`; it remains in git history
+> and on the closed-PR branch.
 
 ## TL;DR
 

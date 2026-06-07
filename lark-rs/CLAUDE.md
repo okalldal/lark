@@ -160,10 +160,11 @@ tests/
                       user-facing common terminal lexes as Python Lark's does
   test_indenter.rs    %declare + Indenter/postlex vs oracle (Phase 3) — INDENT/
                       DEDENT injection, nested blocks, dedent errors, paren suppression
-  test_lookaround.rs  Lookaround lowering oracles (Lexer DFA / B1 plan, docs/LEXER_DFA_PLAN.md):
+  test_lookaround.rs  Lookaround behavioral oracles (docs/LOOKAROUND_ELIMINATION_PLAN.md):
                       the four boundary-assertion forms + the length-changing trailing
-                      lookahead + inline/global flag cases. Passes on today's fancy-regex
-                      lexer, so it locks the semantics the B1 rewrite must reproduce
+                      lookahead + inline/global flag cases. Engine-agnostic; passes on
+                      today's fancy-regex lexer, so it locks the semantics the rewrite
+                      must reproduce
   test_oracle_coverage.rs  Meta-test: every grammar needs an oracle or quarantine
   test_json_corpus.rs 293-file JSONTestSuite corpus test
   test_standalone.rs  Standalone parser gen (#42): `include!`s the committed

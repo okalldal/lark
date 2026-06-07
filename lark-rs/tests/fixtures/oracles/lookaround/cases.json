@@ -3,64 +3,417 @@
     "name": "trailing_neg_lookahead",
     "grammar": "\nstart: A B\nA: /a+(?!b)/\nB: /[ab]+/\n",
     "g_regex_flags": [],
-    "cases": [
+    "combos": [
       {
-        "input": "aaab",
-        "should_pass": true,
-        "ok": true,
-        "tree": {
-          "type": "tree",
-          "data": "start",
-          "children": [
-            {
-              "type": "token",
-              "token_type": "A",
-              "value": "aa"
+        "parser": "lalr",
+        "lexer": "contextual",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "aaab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "ab"
+                }
+              ]
             },
-            {
-              "type": "token",
-              "token_type": "B",
-              "value": "ab"
-            }
-          ]
-        },
-        "error": null
-      },
-      {
-        "input": "aab",
-        "should_pass": true,
-        "ok": true,
-        "tree": {
-          "type": "tree",
-          "data": "start",
-          "children": [
-            {
-              "type": "token",
-              "token_type": "A",
-              "value": "a"
+            "error": null
+          },
+          {
+            "input": "aab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "ab"
+                }
+              ]
             },
-            {
-              "type": "token",
-              "token_type": "B",
-              "value": "ab"
-            }
-          ]
-        },
-        "error": null
+            "error": null
+          },
+          {
+            "input": "ab",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Unexpected token Token('B', 'ab') at line 1, column 1.\nExpected one of: \n\t* A\nPrevious tokens: [None]\n"
+          },
+          {
+            "input": "aaa",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* B\n"
+          }
+        ]
       },
       {
-        "input": "ab",
-        "should_pass": false,
-        "ok": false,
-        "tree": null,
-        "error": "Unexpected token Token('B', 'ab') at line 1, column 1.\nExpected one of: \n\t* A\nPrevious tokens: [None]\n"
+        "parser": "lalr",
+        "lexer": "basic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "aaab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "ab"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "ab"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "ab",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Unexpected token Token('B', 'ab') at line 1, column 1.\nExpected one of: \n\t* A\n"
+          },
+          {
+            "input": "aaa",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* B\n"
+          }
+        ]
       },
       {
-        "input": "aaa",
-        "should_pass": false,
-        "ok": false,
-        "tree": null,
-        "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* B\n"
+        "parser": "earley",
+        "lexer": "basic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "aaab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "ab"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "ab"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "ab",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Unexpected token Token('B', 'ab') at line 1, column 1.\nExpected one of: \n\t* A\n"
+          },
+          {
+            "input": "aaa",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Unexpected end-of-input. Expected one of: \n\t* B\n"
+          }
+        ]
+      },
+      {
+        "parser": "earley",
+        "lexer": "dynamic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "aaab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "ab"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "ab"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "ab",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\nab\n^\nExpected one of: \n\t* A\n"
+          },
+          {
+            "input": "aaa",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Unexpected end-of-input. Expected one of: \n\t* B\n"
+          }
+        ]
+      },
+      {
+        "parser": "earley",
+        "lexer": "dynamic_complete",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "aaab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "aab"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "ab"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "ab",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\nab\n^\nExpected one of: \n\t* A\n"
+          },
+          {
+            "input": "aaa",
+            "should_pass": false,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "aa"
+                }
+              ]
+            },
+            "error": null
+          }
+        ]
+      },
+      {
+        "parser": "cyk",
+        "lexer": "basic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "aaab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "ab"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "ab"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "ab",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Parsing failed."
+          },
+          {
+            "input": "aaa",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Parsing failed."
+          }
+        ]
       }
     ]
   },
@@ -68,86 +421,534 @@
     "name": "trailing_pos_lookahead",
     "grammar": "\nstart: A B\nA: /a+(?=b)/\nB: /b+/\n",
     "g_regex_flags": [],
-    "cases": [
+    "combos": [
       {
-        "input": "aaab",
-        "should_pass": true,
-        "ok": true,
-        "tree": {
-          "type": "tree",
-          "data": "start",
-          "children": [
-            {
-              "type": "token",
-              "token_type": "A",
-              "value": "aaa"
+        "parser": "lalr",
+        "lexer": "contextual",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "aaab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "b"
+                }
+              ]
             },
-            {
-              "type": "token",
-              "token_type": "B",
-              "value": "b"
-            }
-          ]
-        },
-        "error": null
-      },
-      {
-        "input": "ab",
-        "should_pass": true,
-        "ok": true,
-        "tree": {
-          "type": "tree",
-          "data": "start",
-          "children": [
-            {
-              "type": "token",
-              "token_type": "A",
-              "value": "a"
+            "error": null
+          },
+          {
+            "input": "ab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "b"
+                }
+              ]
             },
-            {
-              "type": "token",
-              "token_type": "B",
-              "value": "b"
-            }
-          ]
-        },
-        "error": null
-      },
-      {
-        "input": "aaabb",
-        "should_pass": true,
-        "ok": true,
-        "tree": {
-          "type": "tree",
-          "data": "start",
-          "children": [
-            {
-              "type": "token",
-              "token_type": "A",
-              "value": "aaa"
+            "error": null
+          },
+          {
+            "input": "aaabb",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "bb"
+                }
+              ]
             },
-            {
-              "type": "token",
-              "token_type": "B",
-              "value": "bb"
-            }
-          ]
-        },
-        "error": null
+            "error": null
+          },
+          {
+            "input": "aaa",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\naaa\n^\nExpected one of: \n\t* A\n"
+          },
+          {
+            "input": "b",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Unexpected token Token('B', 'b') at line 1, column 1.\nExpected one of: \n\t* A\nPrevious tokens: [None]\n"
+          }
+        ]
       },
       {
-        "input": "aaa",
-        "should_pass": false,
-        "ok": false,
-        "tree": null,
-        "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\naaa\n^\nExpected one of: \n\t* A\n"
+        "parser": "lalr",
+        "lexer": "basic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "aaab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "b"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "ab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "b"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaabb",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "bb"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaa",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\naaa\n^\nExpected one of: \n\t* A\n\t* B\n"
+          },
+          {
+            "input": "b",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Unexpected token Token('B', 'b') at line 1, column 1.\nExpected one of: \n\t* A\n"
+          }
+        ]
       },
       {
-        "input": "b",
-        "should_pass": false,
-        "ok": false,
-        "tree": null,
-        "error": "Unexpected token Token('B', 'b') at line 1, column 1.\nExpected one of: \n\t* A\nPrevious tokens: [None]\n"
+        "parser": "earley",
+        "lexer": "basic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "aaab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "b"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "ab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "b"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaabb",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "bb"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaa",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\naaa\n^\nExpected one of: \n\t* A\n\t* B\n"
+          },
+          {
+            "input": "b",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Unexpected token Token('B', 'b') at line 1, column 1.\nExpected one of: \n\t* A\n"
+          }
+        ]
+      },
+      {
+        "parser": "earley",
+        "lexer": "dynamic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "aaab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "b"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "ab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "b"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaabb",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "bb"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaa",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\naaa\n^\nExpected one of: \n\t* A\n"
+          },
+          {
+            "input": "b",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches 'b' in the current parser context, at line 1 col 1\n\nb\n^\nExpected one of: \n\t* A\n"
+          }
+        ]
+      },
+      {
+        "parser": "earley",
+        "lexer": "dynamic_complete",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "aaab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "b"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "ab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "b"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaabb",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "bb"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaa",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\naaa\n^\nExpected one of: \n\t* A\n"
+          },
+          {
+            "input": "b",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches 'b' in the current parser context, at line 1 col 1\n\nb\n^\nExpected one of: \n\t* A\n"
+          }
+        ]
+      },
+      {
+        "parser": "cyk",
+        "lexer": "basic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "aaab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "b"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "ab",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "b"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaabb",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "bb"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaa",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\naaa\n^\nExpected one of: \n\t* A\n\t* B\n"
+          },
+          {
+            "input": "b",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Parsing failed."
+          }
+        ]
       }
     ]
   },
@@ -155,59 +956,372 @@
     "name": "leading_neg_lookbehind",
     "grammar": "\nstart: items\nitems: (BS | Q)+\nQ: /(?<!\\\\)(?:\\\\\\\\)*\"/\nBS: /\\\\/\n",
     "g_regex_flags": [],
-    "cases": [
+    "combos": [
       {
-        "input": "\"",
-        "should_pass": true,
-        "ok": true,
-        "tree": {
-          "type": "tree",
-          "data": "start",
-          "children": [
-            {
+        "parser": "lalr",
+        "lexer": "contextual",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "\"",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
               "type": "tree",
-              "data": "items",
+              "data": "start",
               "children": [
                 {
-                  "type": "token",
-                  "token_type": "Q",
-                  "value": "\""
+                  "type": "tree",
+                  "data": "items",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Q",
+                      "value": "\""
+                    }
+                  ]
                 }
               ]
-            }
-          ]
-        },
-        "error": null
-      },
-      {
-        "input": "\\\\\"",
-        "should_pass": true,
-        "ok": true,
-        "tree": {
-          "type": "tree",
-          "data": "start",
-          "children": [
-            {
+            },
+            "error": null
+          },
+          {
+            "input": "\\\\\"",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
               "type": "tree",
-              "data": "items",
+              "data": "start",
               "children": [
                 {
-                  "type": "token",
-                  "token_type": "Q",
-                  "value": "\\\\\""
+                  "type": "tree",
+                  "data": "items",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Q",
+                      "value": "\\\\\""
+                    }
+                  ]
                 }
               ]
-            }
-          ]
-        },
-        "error": null
+            },
+            "error": null
+          },
+          {
+            "input": "\\\"",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '\"' in the current parser context, at line 1 col 2\n\n\\\"\n ^\nExpected one of: \n\t* BS\n\t* Q\n\nPrevious tokens: Token('BS', '\\\\')\n"
+          }
+        ]
       },
       {
-        "input": "\\\"",
-        "should_pass": false,
-        "ok": false,
-        "tree": null,
-        "error": "No terminal matches '\"' in the current parser context, at line 1 col 2\n\n\\\"\n ^\nExpected one of: \n\t* BS\n\t* Q\n\nPrevious tokens: Token('BS', '\\\\')\n"
+        "parser": "lalr",
+        "lexer": "basic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "\"",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "items",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Q",
+                      "value": "\""
+                    }
+                  ]
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "\\\\\"",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "items",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Q",
+                      "value": "\\\\\""
+                    }
+                  ]
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "\\\"",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '\"' in the current parser context, at line 1 col 2\n\n\\\"\n ^\nExpected one of: \n\t* BS\n\t* Q\n\nPrevious tokens: Token('BS', '\\\\')\n"
+          }
+        ]
+      },
+      {
+        "parser": "earley",
+        "lexer": "basic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "\"",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "items",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Q",
+                      "value": "\""
+                    }
+                  ]
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "\\\\\"",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "items",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Q",
+                      "value": "\\\\\""
+                    }
+                  ]
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "\\\"",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '\"' in the current parser context, at line 1 col 2\n\n\\\"\n ^\nExpected one of: \n\t* BS\n\t* Q\n\nPrevious tokens: Token('BS', '\\\\')\n"
+          }
+        ]
+      },
+      {
+        "parser": "earley",
+        "lexer": "dynamic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "\"",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "items",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Q",
+                      "value": "\""
+                    }
+                  ]
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "\\\\\"",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "items",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Q",
+                      "value": "\\\\\""
+                    }
+                  ]
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "\\\"",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '\"' in the current parser context, at line 1 col 2\n\n\\\"\n ^\nExpected one of: \n\t* BS\n\t* Q\n"
+          }
+        ]
+      },
+      {
+        "parser": "earley",
+        "lexer": "dynamic_complete",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "\"",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "items",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Q",
+                      "value": "\""
+                    }
+                  ]
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "\\\\\"",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "items",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Q",
+                      "value": "\\\\\""
+                    }
+                  ]
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "\\\"",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '\"' in the current parser context, at line 1 col 2\n\n\\\"\n ^\nExpected one of: \n\t* BS\n\t* Q\n"
+          }
+        ]
+      },
+      {
+        "parser": "cyk",
+        "lexer": "basic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "\"",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "items",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Q",
+                      "value": "\""
+                    }
+                  ]
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "\\\\\"",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "items",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Q",
+                      "value": "\\\\\""
+                    }
+                  ]
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "\\\"",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '\"' in the current parser context, at line 1 col 2\n\n\\\"\n ^\nExpected one of: \n\t* BS\n\t* Q\n\nPrevious tokens: Token('BS', '\\\\')\n"
+          }
+        ]
       }
     ]
   },
@@ -215,35 +1329,228 @@
     "name": "leading_pos_lookbehind",
     "grammar": "\nstart: AT C\nAT: /@/\nC: /(?<=@)[a-z]+/\n",
     "g_regex_flags": [],
-    "cases": [
+    "combos": [
       {
-        "input": "@abc",
-        "should_pass": true,
-        "ok": true,
-        "tree": {
-          "type": "tree",
-          "data": "start",
-          "children": [
-            {
-              "type": "token",
-              "token_type": "AT",
-              "value": "@"
+        "parser": "lalr",
+        "lexer": "contextual",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "@abc",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "AT",
+                  "value": "@"
+                },
+                {
+                  "type": "token",
+                  "token_type": "C",
+                  "value": "abc"
+                }
+              ]
             },
-            {
-              "type": "token",
-              "token_type": "C",
-              "value": "abc"
-            }
-          ]
-        },
-        "error": null
+            "error": null
+          },
+          {
+            "input": "abc",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\nabc\n^\nExpected one of: \n\t* AT\n"
+          }
+        ]
       },
       {
-        "input": "abc",
-        "should_pass": false,
-        "ok": false,
-        "tree": null,
-        "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\nabc\n^\nExpected one of: \n\t* AT\n"
+        "parser": "lalr",
+        "lexer": "basic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "@abc",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "AT",
+                  "value": "@"
+                },
+                {
+                  "type": "token",
+                  "token_type": "C",
+                  "value": "abc"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "abc",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\nabc\n^\nExpected one of: \n\t* AT\n\t* C\n"
+          }
+        ]
+      },
+      {
+        "parser": "earley",
+        "lexer": "basic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "@abc",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "AT",
+                  "value": "@"
+                },
+                {
+                  "type": "token",
+                  "token_type": "C",
+                  "value": "abc"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "abc",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\nabc\n^\nExpected one of: \n\t* AT\n\t* C\n"
+          }
+        ]
+      },
+      {
+        "parser": "earley",
+        "lexer": "dynamic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "@abc",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "AT",
+                  "value": "@"
+                },
+                {
+                  "type": "token",
+                  "token_type": "C",
+                  "value": "abc"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "abc",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\nabc\n^\nExpected one of: \n\t* AT\n"
+          }
+        ]
+      },
+      {
+        "parser": "earley",
+        "lexer": "dynamic_complete",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "@abc",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "AT",
+                  "value": "@"
+                },
+                {
+                  "type": "token",
+                  "token_type": "C",
+                  "value": "abc"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "abc",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\nabc\n^\nExpected one of: \n\t* AT\n"
+          }
+        ]
+      },
+      {
+        "parser": "cyk",
+        "lexer": "basic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "@abc",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "AT",
+                  "value": "@"
+                },
+                {
+                  "type": "token",
+                  "token_type": "C",
+                  "value": "abc"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "abc",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\nabc\n^\nExpected one of: \n\t* AT\n\t* C\n"
+          }
+        ]
       }
     ]
   },
@@ -251,79 +1558,492 @@
     "name": "inline_flag_in_assertion",
     "grammar": "\nstart: A REST\nA: /a+(?=(?i:END))/\nREST: /.+/\n",
     "g_regex_flags": [],
-    "cases": [
+    "combos": [
       {
-        "input": "aaaEND",
-        "should_pass": true,
-        "ok": true,
-        "tree": {
-          "type": "tree",
-          "data": "start",
-          "children": [
-            {
-              "type": "token",
-              "token_type": "A",
-              "value": "aaa"
+        "parser": "lalr",
+        "lexer": "contextual",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "aaaEND",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "REST",
+                  "value": "END"
+                }
+              ]
             },
-            {
-              "type": "token",
-              "token_type": "REST",
-              "value": "END"
-            }
-          ]
-        },
-        "error": null
+            "error": null
+          },
+          {
+            "input": "aaaend",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "REST",
+                  "value": "end"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaaEnd",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "REST",
+                  "value": "End"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaaxyz",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Unexpected token Token('REST', 'aaaxyz') at line 1, column 1.\nExpected one of: \n\t* A\nPrevious tokens: [None]\n"
+          }
+        ]
       },
       {
-        "input": "aaaend",
-        "should_pass": true,
-        "ok": true,
-        "tree": {
-          "type": "tree",
-          "data": "start",
-          "children": [
-            {
-              "type": "token",
-              "token_type": "A",
-              "value": "aaa"
+        "parser": "lalr",
+        "lexer": "basic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "aaaEND",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "REST",
+                  "value": "END"
+                }
+              ]
             },
-            {
-              "type": "token",
-              "token_type": "REST",
-              "value": "end"
-            }
-          ]
-        },
-        "error": null
+            "error": null
+          },
+          {
+            "input": "aaaend",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "REST",
+                  "value": "end"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaaEnd",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "REST",
+                  "value": "End"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaaxyz",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Unexpected token Token('REST', 'aaaxyz') at line 1, column 1.\nExpected one of: \n\t* A\n"
+          }
+        ]
       },
       {
-        "input": "aaaEnd",
-        "should_pass": true,
-        "ok": true,
-        "tree": {
-          "type": "tree",
-          "data": "start",
-          "children": [
-            {
-              "type": "token",
-              "token_type": "A",
-              "value": "aaa"
+        "parser": "earley",
+        "lexer": "basic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "aaaEND",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "REST",
+                  "value": "END"
+                }
+              ]
             },
-            {
-              "type": "token",
-              "token_type": "REST",
-              "value": "End"
-            }
-          ]
-        },
-        "error": null
+            "error": null
+          },
+          {
+            "input": "aaaend",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "REST",
+                  "value": "end"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaaEnd",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "REST",
+                  "value": "End"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaaxyz",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Unexpected token Token('REST', 'aaaxyz') at line 1, column 1.\nExpected one of: \n\t* A\n"
+          }
+        ]
       },
       {
-        "input": "aaaxyz",
-        "should_pass": false,
-        "ok": false,
-        "tree": null,
-        "error": "Unexpected token Token('REST', 'aaaxyz') at line 1, column 1.\nExpected one of: \n\t* A\nPrevious tokens: [None]\n"
+        "parser": "earley",
+        "lexer": "dynamic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "aaaEND",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "REST",
+                  "value": "END"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaaend",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "REST",
+                  "value": "end"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaaEnd",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "REST",
+                  "value": "End"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaaxyz",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\naaaxyz\n^\nExpected one of: \n\t* A\n"
+          }
+        ]
+      },
+      {
+        "parser": "earley",
+        "lexer": "dynamic_complete",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "aaaEND",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "REST",
+                  "value": "END"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaaend",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "REST",
+                  "value": "end"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaaEnd",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "REST",
+                  "value": "End"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaaxyz",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches 'a' in the current parser context, at line 1 col 1\n\naaaxyz\n^\nExpected one of: \n\t* A\n"
+          }
+        ]
+      },
+      {
+        "parser": "cyk",
+        "lexer": "basic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "aaaEND",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "REST",
+                  "value": "END"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaaend",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "REST",
+                  "value": "end"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaaEnd",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "aaa"
+                },
+                {
+                  "type": "token",
+                  "token_type": "REST",
+                  "value": "End"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaaxyz",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Parsing failed."
+          }
+        ]
       }
     ]
   },
@@ -333,57 +2053,375 @@
     "g_regex_flags": [
       "IGNORECASE"
     ],
-    "cases": [
+    "combos": [
       {
-        "input": "AAAB",
-        "should_pass": true,
-        "ok": true,
-        "tree": {
-          "type": "tree",
-          "data": "start",
-          "children": [
-            {
-              "type": "token",
-              "token_type": "A",
-              "value": "AA"
+        "parser": "lalr",
+        "lexer": "contextual",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "AAAB",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "AA"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "AB"
+                }
+              ]
             },
-            {
-              "type": "token",
-              "token_type": "B",
-              "value": "AB"
-            }
-          ]
-        },
-        "error": null
+            "error": null
+          },
+          {
+            "input": "aAbB",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "AbB"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaa",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* B\n"
+          }
+        ]
       },
       {
-        "input": "aAbB",
-        "should_pass": true,
-        "ok": true,
-        "tree": {
-          "type": "tree",
-          "data": "start",
-          "children": [
-            {
-              "type": "token",
-              "token_type": "A",
-              "value": "a"
+        "parser": "lalr",
+        "lexer": "basic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "AAAB",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "AA"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "AB"
+                }
+              ]
             },
-            {
-              "type": "token",
-              "token_type": "B",
-              "value": "AbB"
-            }
-          ]
-        },
-        "error": null
+            "error": null
+          },
+          {
+            "input": "aAbB",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "AbB"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaa",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* B\n"
+          }
+        ]
       },
       {
-        "input": "aaa",
-        "should_pass": false,
-        "ok": false,
-        "tree": null,
-        "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* B\n"
+        "parser": "earley",
+        "lexer": "basic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "AAAB",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "AA"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "AB"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aAbB",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "AbB"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaa",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Unexpected end-of-input. Expected one of: \n\t* B\n"
+          }
+        ]
+      },
+      {
+        "parser": "earley",
+        "lexer": "dynamic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "AAAB",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "AA"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "AB"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aAbB",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "AbB"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaa",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Unexpected end-of-input. Expected one of: \n\t* B\n"
+          }
+        ]
+      },
+      {
+        "parser": "earley",
+        "lexer": "dynamic_complete",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "AAAB",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "A"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "AAB"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aAbB",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "AbB"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaa",
+            "should_pass": false,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "aa"
+                }
+              ]
+            },
+            "error": null
+          }
+        ]
+      },
+      {
+        "parser": "cyk",
+        "lexer": "basic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "AAAB",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "AA"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "AB"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aAbB",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "A",
+                  "value": "a"
+                },
+                {
+                  "type": "token",
+                  "token_type": "B",
+                  "value": "AbB"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "aaa",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Parsing failed."
+          }
+        ]
       }
     ]
   }
