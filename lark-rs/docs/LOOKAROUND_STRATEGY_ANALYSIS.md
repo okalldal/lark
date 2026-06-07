@@ -24,21 +24,31 @@ time. This memo asks whether that is the right shape and concludes:
    **finite template set**, not a general algorithm. (This corrects an overclaim in
    the first draft of this doc, raised by the PR author — see §6.)
 3. **Therefore the real decision is only about the long tail:** a *novel but valid
-   bounded* lookaround that no template matches. Reject it (smaller surface, a real
-   compatibility cost) or run it on a bounded fallback VM (full compatibility, keeps
-   the engine). PR #110's engine **is** that fallback.
+   bounded* lookaround that no template matches. The census (§10) finds **zero** such
+   patterns across ~40 distinct real grammars, so the tail is empirically empty.
 
-**Recommendation:** land the elimination fast-path in front of PR #110's engine, and
-keep that engine as a **bounded, fuzzed, off-the-hot-path fallback** rather than the
-primary lexer path. This is the honest best-of-both: fast and surface-light on the
-99% (idioms + plain terminals), fully Python-compatible on the rare tail, linear
-everywhere. If minimizing the parity-maintenance surface is valued above tail
-compatibility, the alternative is the same fast-path plus a **loud reject** for the
-tail — but that carries the compatibility cost spelled out in §6.
+**Recommendation: pure elimination, no runtime engine ("Option 1b").** Rewrite the
+bundled grammars and the common reducible idioms to lookaround-free regex so they run
+on the `regex` crate (rejoining the fast combined-DFA scan), and **reject** any
+remaining lookaround with a loud, actionable build-time error. **Do not ship the
+Pike-VM.** The rationale: maintaining a hand-rolled engine that matches CPython `re`
+byte-for-byte is a large, brittle, permanent cost (axis 4), and the census shows it
+would serve a population that does not exist. A reject is a humane, *visible* failure
+with a fix-it message — and a signal: if real "valid in Python Lark, rejected here"
+reports ever appear, add the bounded fallback **then** (YAGNI). Building the engine
+speculatively is the expensive mistake; deferring it is cheap and reversible.
 
-The two approaches are **complementary, not opposed.** The fast-path fixes PR #110's
-speed and scope problems without discarding its engine; the engine supplies the
-compatibility the fast-path alone cannot.
+**Alternative (Option H) — only if "never reject a bounded-lookaround grammar that
+Python Lark accepts" is a hard, non-negotiable requirement:** keep PR #110's engine
+as a bounded, fuzzed, off-the-hot-path fallback behind the elimination fast-path.
+This buys full tail compatibility at the price of carrying the parity surface
+forever — a premium the evidence says insures against nothing today, which is why it
+is the fallback choice, not the default.
+
+Either way, the elimination fast-path is **mandatory** — it is the part that wins
+speed and faithfulness on every grammar that exists. The only open question is what
+to do with the (empirically empty) tail: reject (recommended) or fall back to an
+engine.
 
 ---
 
@@ -101,14 +111,17 @@ a position on it.
   the §7 linearity leak.
 - **Option 1a — manual bundled rewrites + reject all other lookaround.** L + S − C,
   maximal compatibility cost.
-- **Option 1b — manual bundled rewrites + a finite auto-rewrite template set +
-  reject the rest.** L + S − C, smaller compatibility cost than 1a but still real
-  (see §6).
-- **Option H (hybrid, recommended) — elimination fast-path + bounded fallback VM.**
+- **Option 1b (recommended) — manual bundled rewrites + a finite auto-rewrite
+  template set + reject the rest.** L + S − C, smaller compatibility cost than 1a but
+  still real in principle (see §6) — though the census (§10) shows the rejected set is
+  empty in practice. **No runtime engine.**
+- **Option H (hybrid, fallback choice) — elimination fast-path + bounded fallback VM.**
   Reducible idioms are rewritten and rejoin the combined-DFA scan (speed); the
   remaining bounded lookaround runs on PR #110's engine as a rare, bounded, fuzzed
   fallback (compatibility). C + L − (partial S): keeps the engine, but off the hot
-  path and with boundedness enforced.
+  path and with boundedness enforced. Only warranted if zero-rejection is a hard
+  requirement; otherwise it pays the parity-surface premium to insure against an
+  empty population.
 
 ### Why not "just compile to a DFA"
 
@@ -168,22 +181,26 @@ bounded* lookaround that Python Lark accepts and that no template covers, and pu
 "empirically empty in a public sample" ≠ "impossible," and rejecting valid input is a
 genuine compatibility regression versus Python Lark.
 
-This is exactly why **Option H keeps PR #110's engine as the fallback**: the engine
-*is* the general priority automaton, so the novel-tail keeps working instead of being
-rejected. Note that some classes *do* admit general sub-algorithms — boundary
-assertions, negated-char lookahead, and reserved-word exclusion are general, not
-template-bound — so the fallback only ever sees genuinely internal, length-changing,
-novel assertions, which the census suggests are vanishingly rare.
+This gap is what **Option H** would close by keeping PR #110's engine as a fallback:
+the engine *is* the general priority automaton, so the novel tail would keep working
+instead of being rejected. But note how narrow that tail is — some classes *do* admit
+general sub-algorithms (boundary assertions, negated-char lookahead, and reserved-word
+exclusion are general, not template-bound), so a fallback would only ever see
+genuinely internal, length-changing, novel assertions, which the census finds to be
+**none**. That is why the recommendation is to **reject** this tail (pure 1b) rather
+than carry an engine for it: you would be maintaining a CPython-`re`-parity automaton
+to serve the empty set.
 
-### The one tension Option H cannot dissolve
+### The one tension neither option dissolves
 
 Unbounded-width lookahead bodies (e.g. `(?![ ]*X)`) are accepted by Python `re`
 (itself backtracking, hence potentially non-linear there too), but a hard linear
-bound requires either rejecting them or accepting super-linear cost. So even Option H
-must choose, for that sub-case, between **C** (accept, match Python, risk O(n²)) and
-**L** (reject/limit). The memo recommends enforcing boundedness in the fallback (pick
-**L**) and rejecting unbounded lookahead with a clear message, because a guaranteed
-bound is the whole reason for leaving `fancy-regex`. This is a small, well-defined
+bound requires either rejecting them or accepting super-linear cost. So *every* option
+that keeps linearity (including Option H, were it adopted) must choose, for that
+sub-case, between **C** (accept, match Python, risk O(n²)) and **L** (reject/limit).
+The memo picks **L** — reject unbounded lookahead with a clear message — because a
+guaranteed bound is the whole reason for leaving `fancy-regex`. This is a small,
+well-defined
 slice of **C** to give up, and `strictdoc` (§7) is the only observed instance.
 
 ## 7. The unbounded-lookahead hazard (a standalone review note)
@@ -211,10 +228,11 @@ assertion boundedness, or document the guarantee as "linear for bounded assertio
   impossible once backreferences are admitted.
 - **Severity asymmetry:** an elimination reject is a **load-time, loud** error to the
   grammar author; an engine parity bug is a **parse-time, silent** divergence to a
-  downstream consumer. Load-loud ≪ parse-silent. But note this cuts both ways: the
-  reject is loud *and* it denies a valid grammar (§6), whereas the fallback engine
-  accepts it. Option H gets the loud-on-truly-unsupported behavior *and* keeps valid
-  grammars working.
+  downstream consumer. Load-loud ≪ parse-silent. The reject does deny a valid grammar
+  (§6) — but it denies it *visibly, at build time, with a fix-it message*, which is a
+  far better failure than a silent mis-parse from an under-tested engine. This is part
+  of why pure 1b (reject the empty tail) is preferred over carrying an engine to avoid
+  the reject.
 
 ## 9. Tiering the grammar population
 
@@ -228,9 +246,11 @@ assertion boundedness, or document the guarantee as "linear for bounded assertio
 | T4 | Backref / variable-width behind / unbounded-ahead | reject | reject (boundedness) | reject |
 
 The first draft hid **T2′** inside "reducible," implying the auto-rewriter covered
-it. It does not. T2′ + T3 are the compatibility cost of pure 1a/1b, and the reason
-Option H is recommended. T4 is rejected by Python `re` too (except unbounded-ahead;
-see §6/§7).
+it. It does not. T2′ + T3 are the compatibility cost of pure 1a/1b — a **loud reject**
+of the few patterns no template covers. The census (§10) finds T2′ + T3 empty, so the
+recommended choice is to accept that (empty) cost and reject, rather than carry the
+fallback engine (Option H) to avoid it. T4 is rejected by Python `re` too (except
+unbounded-ahead; see §6/§7).
 
 ## 10. Evidence: a two-corpus census
 
@@ -267,10 +287,12 @@ string terminals), Bryantad/Sona and acorderob/…prompt-postprocessor (`re.sub`
 code) — so true counts are below the raw numbers.
 
 So the at-risk tail (T2′/T3) is, in this sample, **empty**; everything is T1, a
-template class, or a false positive. That makes pure 1b's compatibility cost small in
-practice — but §6 explains why "small in a sample" is not "zero," which is what tips
-the recommendation to Option H (keep the fallback for ~free, since the engine already
-exists).
+template class, or a false positive. That makes pure 1b's compatibility cost zero in
+practice. §6 notes "empty in a sample" is not "impossible in principle" — but the
+right response to an empty population is to **reject it loudly and skip the engine**,
+not to build and maintain a CPython-`re`-parity automaton against the day someone
+might need it. If that day comes, the loud reject reports it and Option H is a clean
+additive follow-up.
 
 ## 11. Coverage and limitations
 
@@ -320,45 +342,50 @@ recommendation:
 7. **The census (§10) sizes that tail.** Across ~40 distinct real grammars,
    T2′/T3 = empty; the population is fork-inflated idioms. So the disputed cost is
    empirically tiny — but §6 shows it is not zero *in principle*.
-8. **Conclusion.** Do the fast-path regardless (free speed + faithfulness on T0–T2);
-   for the tiny T2′/T3 tail, keep PR #110's engine as a *bounded fallback* so those
-   grammars still parse (Option H) instead of rejecting valid input. The engine
-   already exists, so full compatibility is cheap; demoting it off the hot path fixes
-   the speed and shrinks — rather than removes — the parity surface.
+8. **Conclusion.** Do the fast-path regardless (free speed + faithfulness on T0–T2).
+   For the T2′/T3 tail, the census shows it is empirically empty — so **reject it with
+   a loud, actionable error and do not ship the engine** (Option 1b). Carrying a
+   CPython-`re`-parity engine to serve a population that does not exist is the
+   expensive mistake; a loud reject is humane and self-reporting, and the bounded
+   fallback (Option H) can be added later *if* a real case ever appears. YAGNI.
 
 ## 13. Recommendation and consequences
 
-**Recommend Option H, in two layers:**
+**Recommend pure elimination (Option 1b) — no runtime engine:**
 
-1. **Elimination fast-path (do regardless of the tail choice).** Rewrite the bundled
-   grammars and the general/template-able classes (boundary assertions, negated-char
-   lookahead, reserved-word exclusion → `unless`, fixed-width lookbehind, the
-   string/comment idioms) to lookaround-free form so they rejoin the combined-DFA
-   scan. Verify equivalence via the existing oracle matrix and, ideally, DFA
-   match-length equivalence. **Wins: speed (axis 5), and shrinks the engine's hot-path
-   role.**
-2. **Bounded fallback (keep PR #110's engine, demoted).** Route only the
-   non-template, bounded tail (T2′/T3) to the Pike-VM. **Enforce assertion
-   boundedness** (close the §7 hole) and **add a CPython differential fuzzer** to
-   bound the parity surface. Reject T4 (backref/var-width-behind/unbounded-ahead)
-   with a clear, actionable error.
+1. **Elimination fast-path (the whole solution).** Rewrite the bundled grammars and
+   the general/template-able classes (boundary assertions, negated-char lookahead,
+   reserved-word exclusion → `unless`, fixed-width lookbehind, the string/comment
+   idioms) to lookaround-free form so they rejoin the combined-DFA scan. Verify
+   equivalence via the existing oracle matrix and, ideally, DFA match-length
+   equivalence. **Wins: speed (axis 5), no parity surface (axis 4), linearity (axis
+   1), behavior parity on every grammar that exists (axis 2).**
+2. **Loud reject for everything else.** Any lookaround the fast-path can't lower
+   (the empirically empty T2′/T3, plus all of T4 — backref / variable-width behind /
+   unbounded-ahead) is a clear, actionable build-time error naming the terminal and
+   suggesting the fix (rewrite as X, use a rule, or import the stdlib terminal).
+   **Do not ship the Pike-VM.**
 
-**What we explicitly give up under Option H:** unbounded-width lookahead bodies are
-rejected for hard linearity (one observed grammar, strictdoc; the §6 tension). The
-parity-maintenance surface (axis 4) is retained, but minimized (off hot path,
-bounded, fuzzed).
+**What we explicitly give up:** any *novel, non-template, bounded* lookaround a user
+might write is rejected even though Python Lark accepts it (§6). The census says this
+set is empty today; the cost is a *potential future* "works in Python Lark, rejected
+here" report — which arrives as a loud build error, not a silent mis-parse, and tells
+us exactly when (if ever) to revisit. Unbounded-width lookahead (`strictdoc`'s
+`(?![ ]*X)`) is also rejected, trading that slice of compatibility for the hard linear
+guarantee that motivated leaving `fancy-regex`.
 
-**If axis 4 (zero parity surface) is valued above tail compatibility,** drop layer 2
-and loud-reject the tail (pure 1b). The cost is the §6 compatibility regression for
-novel valid bounded lookaround — empirically near-zero today, but a real divergence
-from Python Lark and a latent source of "works in Python Lark, rejected by lark-rs"
-reports. This memo does not recommend it, because the fallback engine already exists
-(PR #110) and keeping it bounded+fuzzed buys full compatibility cheaply.
+**Alternative — Option H, only if zero-rejection is a hard requirement.** Keep
+PR #110's engine as a bounded, fuzzed, off-the-hot-path fallback behind the
+fast-path: route the non-template bounded tail to it, enforce assertion boundedness
+(close the §7 hole), add a CPython differential fuzzer. This eliminates the reject at
+the cost of carrying the parity surface forever. Not recommended, because the evidence
+says it insures against nothing — but it is a clean, additive next step if a real
+T2′/T3 case ever materializes.
 
-**What PR #110 contributes either way:** removing `fancy-regex`, the deterministic
-linearity gate, and the Pike-VM itself are all reusable. The change requested is not
-"discard the engine" but "put an elimination fast-path in front of it, demote it to a
-bounded fallback, and close the unbounded-lookahead hole + add fuzzing."
+**What PR #110 contributes regardless:** removing `fancy-regex` and the deterministic
+linearity gate are keepers. The Pike-VM itself is not thrown away so much as *shelved*
+— if Option H is ever needed, the engine already exists and just needs the
+boundedness check + fuzzer before being wired in as the fallback.
 
 ## 14. Open questions / follow-ups
 
@@ -368,7 +395,9 @@ bounded fallback, and close the unbounded-lookahead hole + add fuzzing."
   the T4 estimate.
 - Decide the unbounded-lookahead policy (§6/§7): reject for **L**, or accept for
   **C** with a documented non-linear caveat.
-- Decide axis-4 weight: fallback engine (Option H) vs. loud-reject (pure 1b).
+- Decide axis-4 weight: loud-reject (pure 1b, recommended) vs. fallback engine
+  (Option H, only if zero-rejection becomes a hard requirement). The recommended
+  default is reject; revisit only if a real T2′/T3 report appears.
 
 ## Appendix: distinct grammars observed (de-forked)
 
