@@ -165,9 +165,15 @@ tests/
   test_indenter.rs    %declare + Indenter/postlex vs oracle (Phase 3) — INDENT/
                       DEDENT injection, nested blocks, dedent errors, paren suppression
   test_lookaround.rs  Lookaround lowering oracles (Lexer DFA / B1 plan, docs/LEXER_DFA_PLAN.md):
-                      the four boundary-assertion forms + the length-changing trailing
-                      lookahead + inline/global flag cases. Passes on today's fancy-regex
-                      lexer, so it locks the semantics the B1 rewrite must reproduce
+                      the assertion-shape grammars (length-changing trailing lookahead,
+                      pos/neg look ahead/behind, inline/global flags) replayed under the
+                      FULL cross-algorithm matrix — lalr×{contextual,basic},
+                      earley×{basic,dynamic,dynamic_complete}, cyk×basic — so all three
+                      lexer engines that route lookaround (Scanner, DynamicMatcher,
+                      unless) are pinned. The oracle records Python's actual per-combo
+                      result (e.g. dynamic_complete accepts the shorter tokenization
+                      where maximal-munch lexers reject). Passes on today's fancy-regex
+                      lexer, so it locks the semantics the M2/M3 rewrite must reproduce
   test_oracle_coverage.rs  Meta-test: every grammar needs an oracle or quarantine
   test_json_corpus.rs 293-file JSONTestSuite corpus test
   test_standalone.rs  Standalone parser gen (#42): `include!`s the committed
