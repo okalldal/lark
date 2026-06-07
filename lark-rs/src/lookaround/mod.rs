@@ -30,10 +30,12 @@
 //!      assertions are *internal*, so a position-blind "strip + peek at the token
 //!      edge" front-end would be wrong; this one records where each assertion lives.
 //!
-//! This module performs **no lowering** — it is purely the parse step. M2 consumes
-//! the tree it produces.
+//! This module performs **no lowering** — it is purely the parse step. The lowering
+//! engine ([`matcher`], milestone M2) consumes the tree it produces.
 
 use crate::error::GrammarError;
+
+pub mod matcher;
 
 /// Which direction a zero-width assertion looks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
