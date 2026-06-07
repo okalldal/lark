@@ -1,6 +1,7 @@
 pub mod error;
 pub mod grammar;
 pub mod lexer;
+pub mod lookaround;
 pub mod parsers;
 pub mod perf;
 pub mod postlex;

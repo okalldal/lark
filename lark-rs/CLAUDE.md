@@ -134,6 +134,10 @@ src/
     terminal.rs       TerminalDef, Pattern, PatternRe, PatternStr
   lexer.rs            Scanner (id-based), BasicLexer, ContextualLexer, LexerState,
                       DynamicMatcher (per-terminal regexes for Earley's dynamic lexer)
+  lookaround.rs       Lookaround-aware regex front-end (Lexer DFA / B1 plan, M1):
+                      parses a terminal pattern into a Node tree exposing its
+                      (?=)/(?!)/(?<=)/(?<!) assertions with position context, while
+                      round-tripping every other construct verbatim. M2 lowers them.
   parsers/
     mod.rs            ParsingFrontend — lowers grammar, wires lexer + parser
     lalr.rs           Dense ParseTable, LalrParser, build_lalr_table

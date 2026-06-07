@@ -297,12 +297,18 @@ against the Python oracle. The ordering front-loads the safety nets.
   scaling on a sparse-terminal workload (the python.lark STRING shape). This is both
   the migration safety net *and* the regression net PR #104's `\G` fix is currently
   missing. **Do this first.**
-- **M1 — Lookaround-aware front-end (§4.1).** The mini-parser that extracts *every*
-  bounded assertion from a pattern as an AST node tagged with its **position**
-  (`(offset/anchor, side, polarity, body)`) — boundary *and* internal alike, per the
-  §4 Amendment — leaving a `regex`-crate-clean skeleton. Unit-tested against all the
-  corpus assertions (`STRING`/`LONG_STRING`/`REGEXP`/`DEC_NUMBER`/`OP`), not just the
-  boundary pair.
+- **M1 — Lookaround-aware front-end (§4.1).** ✅ **Landed** (`src/lookaround.rs`).
+  A faithful recursive-descent regex parser produces a [`Node`] tree whose only
+  structural variants are concat / alt / group / **assertion**; every other
+  construct (literals, escapes, character classes, anchors, quantifiers) is kept
+  verbatim in `Node::Atom` runs, so `to_source()` round-trips byte-identically — the
+  property that lets M2 re-emit assertion-free fragments straight to
+  `regex-automata`. `Node::assertions()` enumerates every assertion left-to-right
+  tagged with its boundary context (`at_concat_start` / `at_concat_end`), boundary
+  *and* internal alike per the §4 Amendment. Unit-tested against all the corpus
+  assertions (`STRING`/`LONG_STRING`/`REGEXP`/`DEC_NUMBER`/`OP` + verilog
+  `MULTILINE_COMMENT`) — round-trip + correct internal-vs-boundary classification —
+  not just the boundary pair.
 - **M2 — General regular lowering + validation (§2 / §4 Amendment),** still alongside
   the existing scanner. Compile each assertion into the terminal's automaton via the
   intersection/complement construction (boundary assertions take the §4.2 peek
