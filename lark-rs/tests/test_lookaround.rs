@@ -386,4 +386,165 @@ mod matchlen {
             "expected the lookaround-free STRING rewrite to diverge (accept `\"\"\"\"`)"
         );
     }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Terminal-reduction diagnosis (follow-up to PR #112) — the three E2
+    // candidates the plan still lists as "to be verified": lark's `REGEXP` and
+    // `OP`, and python's `DEC_NUMBER` (`docs/TERMINAL_REDUCTION_DIAGNOSIS.md`).
+    //
+    // The point is to classify each at the *terminal* level (the decidable,
+    // oracle-free matched-prefix question) so the engine-scope decision rests on
+    // proof, not assertion:
+    //   * `REGEXP` is **regex-rewritable** (Type A) — the `(?!\/)` only forbade an
+    //     empty `//`, recovered by requiring a non-empty body. Full equivalence.
+    //   * `OP` and `DEC_NUMBER` are **boundary-as-failure** (Type C) at the
+    //     terminal level — like `STRING`, no lookaround-free regex reproduces the
+    //     matched-prefix function (the rewrite only ever *adds* an unwanted
+    //     match). Whether that terminal-level gap survives to an end-to-end
+    //     accept/reject divergence is a *grammar*-level question taken up in the
+    //     diagnosis doc; the harness pins only the decidable terminal fact.
+    // ───────────────────────────────────────────────────────────────────────
+
+    // lark's `REGEXP: /\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*/`. The candidate
+    // drops `(?!\/)` and requires a non-empty body (`+`): the body alternation
+    // can never start with a bare `/`, so `//` (the only empty-body case the
+    // guard blocked) still cannot match, and lazy `*?`/greedy `+` coincide once
+    // the body cannot eat the closing `/`.
+    const REGEXP_ORIG: &str = r#"^(?:\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*)"#;
+    const REGEXP_NEW: &str = r#"^(?:\/(\\\/|\\\\|[^\/])+\/[imslux]*)"#;
+
+    // lark's `OP: /[+*]|[?](?![a-z])/` and python's leading-zero `DEC_NUMBER`
+    // alternative `"0" ("_"? "0")* /(?![1-9])/`, paired with the naive
+    // guard-dropping rewrite (kept only to pin *why* each resists a regex form).
+    const OP_ORIG: &str = r#"^(?:[+*]|[?](?![a-z]))"#;
+    const OP_NEW: &str = r#"^(?:[+*]|[?])"#;
+    const DEC_ORIG: &str = r#"^(?:[1-9](_?[0-9])*|0(_?0)*(?![1-9]))"#;
+    const DEC_NEW: &str = r#"^(?:[1-9](_?[0-9])*|0(_?0)*)"#;
+
+    /// `REGEXP`: a clean Type-A equivalence — original and rewrite must agree on
+    /// the matched-prefix function for every corpus string (the `(?!\/)` is pure
+    /// redundancy once the body is required non-empty).
+    #[test]
+    fn regexp_match_length_equivalence() {
+        let orig = Fancy::new(REGEXP_ORIG).unwrap();
+        let new = Regex::new(REGEXP_NEW).unwrap();
+        // slash (open/close + the `//` boundary), backslash (escape pairing),
+        // `a` as body, `i` as a trailing flag.
+        let cases = corpus(&['/', '\\', 'a', 'i'], 6);
+        let mut matched = 0usize;
+        for s in &cases {
+            let (o, n) = (fancy_prefix(&orig, s), regex_prefix(&new, s));
+            assert_eq!(o, n, "REGEXP match-length differs on {s:?}");
+            matched += o.is_some() as usize;
+        }
+        assert!(matched > 0, "corpus must actually exercise some regexps");
+    }
+
+    /// `OP`: a Type-C negative result. `[?](?![a-z])` turns a *successful* `?`
+    /// match into a *failure* when a lowercase letter follows — a property a
+    /// regex match-length function (which cannot see past its own end) has no way
+    /// to express. The divergence is therefore real, and exactly one shape:
+    /// original matched nothing, the rewrite matched `?` at the head of `?[a-z]`.
+    /// One-directional — the rewrite never drops or changes an original match.
+    #[test]
+    fn op_lookaround_free_rewrite_is_not_equivalent() {
+        let orig = Fancy::new(OP_ORIG).unwrap();
+        let new = Regex::new(OP_NEW).unwrap();
+        // `+ * ?` are the operators; lowercase / non-lowercase decide the guard.
+        let cases = corpus(&['+', '*', '?', 'a', 'Z', '_'], 3);
+
+        let mut preserved = 0usize;
+        let mut divergences = 0usize;
+        let mut lost_or_changed = Vec::new();
+        for s in &cases {
+            let (o, n) = (fancy_prefix(&orig, s), regex_prefix(&new, s));
+            if o == n {
+                preserved += o.is_some() as usize;
+                continue;
+            }
+            match (o, n) {
+                (None, Some(1)) => {
+                    let next = s[1..].chars().next();
+                    assert!(
+                        s.starts_with('?') && next.is_some_and(|c| c.is_ascii_lowercase()),
+                        "OP divergence must be `?` before a lowercase letter; got {s:?}"
+                    );
+                    divergences += 1;
+                }
+                _ => lost_or_changed.push((s.clone(), o, n)),
+            }
+        }
+        assert!(
+            lost_or_changed.is_empty(),
+            "rewrite dropped or changed {} original OP match(es), e.g. {:?}",
+            lost_or_changed.len(),
+            &lost_or_changed[..lost_or_changed.len().min(8)]
+        );
+        assert!(preserved > 0, "corpus must exercise some real OP tokens");
+        assert!(
+            divergences > 0,
+            "expected the guard-free OP rewrite to diverge (match `?` before [a-z])"
+        );
+    }
+
+    /// `DEC_NUMBER`: a Type-C negative result, but a subtler shape than `STRING`.
+    /// `STRING`'s guard is all-or-nothing (`""""` matches *nothing*); here
+    /// `(?![1-9])` is **length-changing** — on `001` fancy-regex backtracks the
+    /// zero-run to `0` (len 1) so the guard sees a `0` next, while the guard-free
+    /// rewrite greedily takes `00` (len 2). That is the `a+(?!b)` trailing-
+    /// lookahead family, not a fixed boundary. The harness pins the two
+    /// invariants that make it Type-C all the same:
+    ///
+    ///   1. **One-directional** — the rewrite never matches *less* than the
+    ///      original (`new_len >= orig_len` everywhere). The guard only ever
+    ///      shortens or blocks, so dropping it only ever lengthens or adds.
+    ///   2. **Localized to the guarded alternative** — every divergence is over
+    ///      the leading-zero alternative (the original's matched prefix is empty
+    ///      or all `0`/`_`); the unguarded `[1-9]…` alternative is byte-identical
+    ///      in both. So no lookaround-free regex reproduces the matched-prefix
+    ///      function, exactly because the length depends on a *following* digit.
+    #[test]
+    fn dec_number_lookaround_free_rewrite_is_not_equivalent() {
+        let orig = Fancy::new(DEC_ORIG).unwrap();
+        let new = Regex::new(DEC_NEW).unwrap();
+        // digits across the 0 / 1-9 boundary plus the `_` group separator.
+        let cases = corpus(&['0', '1', '9', '_'], 4);
+
+        let mut preserved = 0usize;
+        let mut divergences = 0usize;
+        let mut shortened = Vec::new();
+        for s in &cases {
+            let (o, n) = (fancy_prefix(&orig, s), regex_prefix(&new, s));
+            let (o_len, n_len) = (o.unwrap_or(0), n.unwrap_or(0));
+            // Invariant 1: the rewrite is a superset matcher — never shorter.
+            if n_len < o_len {
+                shortened.push((s.clone(), o, n));
+                continue;
+            }
+            if o == n {
+                preserved += o.is_some() as usize;
+                continue;
+            }
+            // Invariant 2: divergence lives entirely in the leading-zero
+            // alternative — the original matched nothing or an all-`0`/`_` run.
+            let orig_prefix = &s[..o_len];
+            assert!(
+                orig_prefix.is_empty() || orig_prefix.bytes().all(|b| b == b'0' || b == b'_'),
+                "DEC_NUMBER divergence must be over the leading-zero alternative; \
+                 original matched {orig_prefix:?} of {s:?}"
+            );
+            divergences += 1;
+        }
+        assert!(
+            shortened.is_empty(),
+            "rewrite matched *less* than the original on {} case(s), e.g. {:?}",
+            shortened.len(),
+            &shortened[..shortened.len().min(8)]
+        );
+        assert!(preserved > 0, "corpus must exercise some real numbers");
+        assert!(
+            divergences > 0,
+            "expected the guard-free DEC_NUMBER rewrite to diverge (over-match a zero-run)"
+        );
+    }
 }
