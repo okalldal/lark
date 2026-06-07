@@ -48,21 +48,28 @@ is produced).
 
 ### E2 — Rewrite the bundled terminals
 
-> **E2a — landed.** `python.lark`'s `STRING`/`LONG_STRING` (and the block-comment
-> shape) are rewritten lookaround-free. Each is proven equivalent to its original by
-> `tests/test_lookaround.rs` (per-terminal **match-length equivalence**: original on
-> `fancy-regex` vs rewrite on `regex`, over a generated corpus) plus the stdlib oracle.
-> `LONG_STRING` took an explicit `.2` priority (the triple-quote disambiguation that
-> `STRING`'s `(?!"")` used to carry). The equivalence proof surfaced one **residual,
-> one-directional** divergence the plan's `(?!"")` candidate could not avoid: it is a
-> *trailing-context* boundary (the empty short string `""` vs the start of a `"""`
-> run) with no lookaround-free per-terminal form, so priority handles every *valid*
-> input but the rewrite additionally accepts a maximal run of adjacent identical
-> quotes that does not form a valid long string (e.g. `""""`). Upstream rejects these;
-> all are CPython SyntaxErrors, the rewrite is a strict superset, and the reverse
-> divergence never occurs — the conscious axis-3 trade, pinned by
-> `string_match_length_equivalence`. Still open in E2: `lark.OP`/`REGEXP`,
-> `common.DEC_NUMBER` (the `(?![1-9])` / `(?![a-z])` boundary-as-failure suspects).
+> **E2a — landed (with one terminal proven irreducible).** `python.lark`'s
+> `LONG_STRING` and the classic block-comment shape are rewritten lookaround-free and
+> proven **byte-for-byte equivalent** to their originals by `tests/test_lookaround.rs`
+> (per-terminal **match-length equivalence**: original on `fancy-regex` vs rewrite on
+> `regex`, full agreement over a generated corpus) plus the stdlib oracle. `LONG_STRING`
+> needs no priority change — its body has no boundary guard, so the lazy escaped form is
+> a clean equivalent.
+>
+> `STRING` **resists elimination** and is left verbatim on lookaround. The mandatory
+> equivalence proof is what surfaced this: `STRING`'s `(?!"")` opening guard is a
+> *trailing-context* boundary — it makes `""""` a lex error while `"" ""` (two empty
+> strings) is valid, a distinction that exists **only at lex time** (once `%ignore`
+> drops the whitespace, both are `STRING STRING` to the parser, so no grammar-level or
+> priority fix can recover it). Every lookaround-free rewrite therefore accepts `""""`,
+> diverging from the oracle — *not acceptable*. This is exactly the "bundled terminal
+> with no clean lookaround-free form … resists both regex rewrite and priority" risk
+> below; per that risk it is **surfaced, not worked around**. The negative result (the
+> standard rewrite is inequivalent) is pinned by
+> `string_lookaround_free_rewrite_is_not_equivalent`. `STRING` stays on `fancy-regex`
+> pending the E3/E4 decision on the irreducible set, which now contains a real member —
+> see Risks. Still open in E2: `lark.OP`/`REGEXP`, `common.DEC_NUMBER` (the
+> `(?![1-9])` / `(?![a-z])` boundary-as-failure suspects).
 
 Replace the lookaround in the bundled grammars (`src/grammars/python.lark`,
 `lark.lark`, `common.lark`, plus the `examples/` block-comment shape) with
@@ -76,8 +83,8 @@ Candidate rewrites (all **to be verified**, not asserted):
 
 | Terminal | Original (lookaround) | Candidate lookaround-free form | Notes |
 |---|---|---|---|
-| `STRING` (python) | `…("(?!"").*?(?<!\\)(\\\\)*?"\|'…')` | `…("(?:[^"\\\n]\|\\.)*"\|'(?:[^'\\\n]\|\\.)*')` | the standard escaped-string form; triple-quote disambiguation moves to `LONG_STRING` priority |
-| `LONG_STRING` (python) | `…""".*?(?<!\\)(\\\\)*?"""…` | `…"""(?:[^\\]\|\\.)*?"""…` (lazy, no newline exclusion) | DOTALL-style body; verify lazy vs greedy end |
+| `STRING` (python) | `…("(?!"").*?(?<!\\)(\\\\)*?"\|'…')` | ~~`…("(?:[^"\\\n]\|\\.)*"\|'…')`~~ **rejected** | E2a result: candidate disproven — accepts `""""` (oracle rejects). The `(?!"")` is an irreducible trailing-context boundary; **stays on lookaround**. See the E2a note above |
+| `LONG_STRING` (python) | `…""".*?(?<!\\)(\\\\)*?"""…` | `…"""(?:[^\\]\|\\.)*?"""…` (lazy, no newline exclusion) | ✅ E2a: landed, proven byte-for-byte equivalent (no priority change needed) |
 | `REGEXP` (lark) | `\/(?!\/)(\\\/\|\\\\\|[^\/])*?\/[imslux]*` | `/(?:\\.\|[^/\\])+/[imslux]*` | drop `(?!\/)` by requiring a non-empty body |
 | `OP` (lark) | `[+*]\|[?](?![a-z])` | fold into terminal **priority** vs the `?rule` modifier | likely *not* a regex rewrite — see below |
 | `DEC_NUMBER` (common) | `…(?![1-9])` leading-zero guard | verify; may need priority or a negated-char construction | the lookahead turns a short match into a *failure* — the awkward case |

@@ -975,9 +975,15 @@ STDLIB_GROUPS = [
     ]),
     # The `string` rule pulls in BOTH STRING and LONG_STRING, pinning the
     # single-vs-triple-quote disambiguation (the `(?!"")` opening guard + ordering).
+    # The `""""`/`"""a"` reject cases are the load-bearing ones: they are lex errors
+    # upstream (STRING's `(?!"")` refuses to open inside an over-long quote-run), so a
+    # lookaround-free STRING rewrite that accepted them would diverge here. lark-rs must
+    # reject them too — this gates the milestone-E2a decision to keep STRING verbatim.
     ("python_string_rule", "start: string\n%import python.string", [
         ('"x"', True), ('"""x"""', True), ("'y'", True), ("'''y'''", True),
         ('""', True), ('""""""', True),
+        ('""""', False), ("''''", False),  # over-long quote-runs: lex errors upstream
+        ('"""a"', False), ("'''a'", False),  # 3 quotes then content: lex error upstream
     ]),
     ("python_name", "start: NAME\n%import python.NAME", [
         ("foo", True), ("_bar", True), ("Hello", True), ("a1", True),

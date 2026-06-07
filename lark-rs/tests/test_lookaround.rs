@@ -182,15 +182,19 @@ fn test_lookaround_oracle() {
 // The behavioral oracle above (and the stdlib oracle in `test_stdlib.rs`) gate the
 // *grammar*. This module proves the individual rewrites at the *terminal* level: it
 // runs each ORIGINAL lookaround terminal on `fancy-regex` and its lookaround-free
-// REWRITE on the `regex` crate, then asserts the two anchored matched-prefix
+// REWRITE on the `regex` crate, then compares the two anchored matched-prefix
 // functions (the length of the prefix matched starting at offset 0, or "no match")
-// agree over a generated corpus. Both terminals are regular, so this is the decidable
+// over a generated corpus. Both terminals are regular, so this is the decidable
 // equivalence the plan calls for (docs/LOOKAROUND_ELIMINATION_PLAN.md §E2). The two
 // engines are leftmost-first/backtracking like Python `re`, and the Python-generated
 // oracles independently cross-check each side, so the proof is triangulated.
 //
-// The terminals proven here are exactly milestone E2a's scope: python `STRING` /
-// `LONG_STRING` and the classic block-comment shape.
+// Outcome for E2a's scope:
+//   * `LONG_STRING` and the classic block-comment shape are **cleanly equivalent** —
+//     the rewrites are what the grammar ships / what E2/E5 would emit.
+//   * `STRING` is a **negative result**: the standard lookaround-free rewrite is *not*
+//     equivalent (it accepts `""""`, which the oracle rejects), so `STRING` stays on
+//     its lookaround form. The test pins exactly why, so the conclusion can't rot.
 mod matchlen {
     use fancy_regex::Regex as Fancy;
     use regex::Regex;
@@ -203,8 +207,9 @@ mod matchlen {
         r#"(?is)^(?:([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?'''))"#;
     const COMMENT_ORIG: &str = r#"^(?:/\*(\*(?!/)|[^*])*\*/)"#;
 
-    // --- The lookaround-free rewrites (what the bundled grammar now ships, and what
-    //     E2/E5 would emit for the block-comment idiom). ---
+    // --- The lookaround-free rewrites. LONG_STRING / COMMENT are what the grammar
+    //     ships / what E2/E5 would emit; STRING_NEW is the *rejected* candidate kept
+    //     only to pin why STRING resists elimination. ---
     const STRING_NEW: &str =
         r#"(?i)^(?:([ubf]?r?|r[ubf])("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'))"#;
     const LONG_NEW: &str =
@@ -282,28 +287,32 @@ mod matchlen {
         assert!(matched > 0, "corpus must actually exercise some comments");
     }
 
-    /// `STRING` + `LONG_STRING` as the combined string scanner. `LONG_STRING` wins ties
-    /// (its `.2` priority), so it is tried first. The original disambiguates the same
-    /// pair with `STRING`'s `(?!"")` guard instead — a *trailing-context* boundary with
-    /// no lookaround-free per-terminal form. The proof pins two properties:
+    /// **Negative result: `STRING` cannot be eliminated.** This pins *why* `STRING`
+    /// keeps its lookaround form while `LONG_STRING` does not. Upstream disambiguates
+    /// the short/long pair with `STRING`'s `(?!"")` opening guard — a *trailing-context*
+    /// boundary: it makes `""""` a lex error but `"" ""` (two empty strings) valid, a
+    /// distinction that lives only at lex time (after `%ignore` drops the whitespace,
+    /// both are `STRING STRING` to the parser). The standard lookaround-free rewrite
+    /// `("(?:[^"\\\n]|\\.)*"|…)` has no way to express that, so it accepts `""""`, which
+    /// the oracle rejects. The test runs the combined short+long scanner both ways and
+    /// asserts the divergence is *exactly* that shape — present, and one-directional:
     ///
-    ///   1. **Nothing is lost or changed.** Wherever the original scanner matches, the
-    ///      rewrite matches the *same terminal* for the *same length*. (The guarantee
-    ///      that matters: no valid token is dropped or retyped.)
-    ///   2. **The only divergence is one-directional and tightly bounded.** The rewrite
-    ///      additionally accepts an empty short string `""`/`''` (optionally `r`/`b`-
-    ///      prefixed) sitting at the head of an over-long quote-run that does not form a
-    ///      valid long string (e.g. `""""`). The original rejects these; every one is a
-    ///      SyntaxError in CPython, so no valid program differs. The rewrite is a strict
-    ///      superset — the reverse divergence never occurs.
+    ///   1. **No original match is lost or changed** — wherever upstream matches, the
+    ///      rewrite matches the same terminal for the same length (the divergence only
+    ///      ever *adds* an unwanted match).
+    ///   2. **The added matches are all the `""""` shape** — an empty short string at
+    ///      the head of an over-long quote-run that is not a valid long string.
+    ///
+    /// Property 2 (the divergence is non-empty) is the load-bearing assertion: it is the
+    /// proof that the rewrite is unacceptable, so the bundled `STRING` is left verbatim.
     #[test]
-    fn string_match_length_equivalence() {
+    fn string_lookaround_free_rewrite_is_not_equivalent() {
         let s_orig = Fancy::new(STRING_ORIG).unwrap();
         let l_orig = Fancy::new(LONG_ORIG).unwrap();
         let s_new = Regex::new(STRING_NEW).unwrap();
         let l_new = Regex::new(LONG_NEW).unwrap();
 
-        // Combined scanner: LONG_STRING (higher priority) is tried first, then STRING.
+        // The combined string scanner, long-string first (as the grammar orders it).
         let scan_orig = |s: &str| -> Option<(&'static str, usize)> {
             fancy_prefix(&l_orig, s)
                 .map(|n| ("LONG", n))
@@ -336,8 +345,8 @@ mod matchlen {
                 continue;
             }
             match (o, n) {
-                // Property 2: the sole tolerated shape — original matched nothing, the
-                // rewrite matched an empty short string at the head of a quote-run.
+                // The sole divergence shape: original matched nothing, the rewrite
+                // matched an empty short string at the head of a quote-run (the `""""`).
                 (None, Some(("STRING", len))) => {
                     let matched = &s[..len];
                     let q = matched.chars().last().unwrap();
@@ -345,12 +354,13 @@ mod matchlen {
                     let at_quote_run = s[len..].chars().next() == Some(q);
                     assert!(
                         empty_short && at_quote_run,
-                        "tolerated STRING divergence must be an empty short string at an \
-                         over-long quote-run; got match {matched:?} of {s:?}"
+                        "STRING divergence must be an empty short string at an over-long \
+                         quote-run; got match {matched:?} of {s:?}"
                     );
                     divergences += 1;
                 }
-                // Property 1 violation: a real bug (a match was dropped or changed).
+                // A *changed/dropped* match would be a different, worse failure mode —
+                // the rewrite is at least a clean superset, never lossy.
                 _ => lost_or_changed.push((s.clone(), o, n)),
             }
         }
@@ -365,11 +375,12 @@ mod matchlen {
             preserved > 0,
             "corpus must exercise some real string tokens"
         );
-        // The boundary divergence is real and characterized — pin that it is present so
-        // a future "fix" that silently changes the carve-out can't pass unnoticed.
+        // The load-bearing assertion: the rewrite IS inequivalent (it accepts `""""`),
+        // which is exactly why the bundled STRING is not rewritten. If this ever stops
+        // holding, STRING has become eliminable and this decision should be revisited.
         assert!(
             divergences > 0,
-            "expected the (?!\"\") trailing-context boundary divergence to be present"
+            "expected the lookaround-free STRING rewrite to diverge (accept `\"\"\"\"`)"
         );
     }
 }

@@ -1324,6 +1324,34 @@
           ]
         },
         "error": null
+      },
+      {
+        "input": "\"\"\"\"",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "No terminal matches '\"' in the current parser context, at line 1 col 1\n\n\"\"\"\"\n^\nExpected one of: \n\t* python__LONG_STRING\n\t* python__STRING\n"
+      },
+      {
+        "input": "''''",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "No terminal matches ''' in the current parser context, at line 1 col 1\n\n''''\n^\nExpected one of: \n\t* python__LONG_STRING\n\t* python__STRING\n"
+      },
+      {
+        "input": "\"\"\"a\"",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "No terminal matches '\"' in the current parser context, at line 1 col 1\n\n\"\"\"a\"\n^\nExpected one of: \n\t* python__LONG_STRING\n\t* python__STRING\n"
+      },
+      {
+        "input": "'''a'",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "No terminal matches ''' in the current parser context, at line 1 col 1\n\n'''a'\n^\nExpected one of: \n\t* python__LONG_STRING\n\t* python__STRING\n"
       }
     ]
   },
