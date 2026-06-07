@@ -48,6 +48,22 @@ is produced).
 
 ### E2 — Rewrite the bundled terminals
 
+> **E2a — landed.** `python.lark`'s `STRING`/`LONG_STRING` (and the block-comment
+> shape) are rewritten lookaround-free. Each is proven equivalent to its original by
+> `tests/test_lookaround.rs` (per-terminal **match-length equivalence**: original on
+> `fancy-regex` vs rewrite on `regex`, over a generated corpus) plus the stdlib oracle.
+> `LONG_STRING` took an explicit `.2` priority (the triple-quote disambiguation that
+> `STRING`'s `(?!"")` used to carry). The equivalence proof surfaced one **residual,
+> one-directional** divergence the plan's `(?!"")` candidate could not avoid: it is a
+> *trailing-context* boundary (the empty short string `""` vs the start of a `"""`
+> run) with no lookaround-free per-terminal form, so priority handles every *valid*
+> input but the rewrite additionally accepts a maximal run of adjacent identical
+> quotes that does not form a valid long string (e.g. `""""`). Upstream rejects these;
+> all are CPython SyntaxErrors, the rewrite is a strict superset, and the reverse
+> divergence never occurs — the conscious axis-3 trade, pinned by
+> `string_match_length_equivalence`. Still open in E2: `lark.OP`/`REGEXP`,
+> `common.DEC_NUMBER` (the `(?![1-9])` / `(?![a-z])` boundary-as-failure suspects).
+
 Replace the lookaround in the bundled grammars (`src/grammars/python.lark`,
 `lark.lark`, `common.lark`, plus the `examples/` block-comment shape) with
 lookaround-free equivalents, so they rejoin the combined scanner. **Each rewrite must

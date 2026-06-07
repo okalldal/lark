@@ -952,15 +952,26 @@ STDLIB_GROUPS = [
         ('"hi"', True), ("'a'", True), ('""', True),
         (r'"a\"b"', True),       # escaped quote inside
         (r'"a\\"', True),        # ends with an escaped backslash, then the real quote
+        (r'"\\\\"', True),       # two escaped backslashes, then the real quote
+        (r'"a\nb"', True),       # escaped \n is a normal escape (NOT a raw newline)
+        (r"'\''", True),         # escaped single quote in a single-quoted string
         ('r"raw"', True), ('b"bytes"', True), ('f"f"', True), ('rb"x"', True),
+        ('BR"x"', True), ("U'z'", True),  # prefixes are case-insensitive (the /i flag)
         ('"x', False),           # unterminated
+        # The newline subtlety the rewrite must catch: `[^"\\]` would wrongly let a
+        # short string span lines, so the newline is excluded explicitly. A raw
+        # newline (even right after a backslash) terminates the attempt → reject.
         ('"a\nb"', False),       # raw newline not allowed in a short string
+        ('"a\\\nb"', False),     # backslash + raw newline: still no short string
     ]),
     ("python_long_string", "start: LONG_STRING\n%import python.LONG_STRING", [
         ('"""abc"""', True), ("'''x'''", True), ('""""""', True),
-        ('"""a\nb"""', True),    # newlines allowed in a long string
+        ('"""a\nb"""', True),    # newlines ARE allowed in a long string (DOTALL)
         ('"""he said "hi" """', True),
+        ('"""he said ""x"" done"""', True),  # embedded double-quotes, lazy end
+        (r'"""ends with an escaped backslash \\"""', True),
         ('"""x', False),         # unterminated
+        ('"""unterminated', False),
     ]),
     # The `string` rule pulls in BOTH STRING and LONG_STRING, pinning the
     # single-vs-triple-quote disambiguation (the `(?!"")` opening guard + ordering).
@@ -1085,6 +1096,27 @@ B: /[ab]+/
         ("AAAB", True),   # IGNORECASE reaches both a+ and (?!b): A="AA", B="AB"
         ("aAbB", True),   # A="a" ('A' next is not 'b'/'B'), B="AbB"
         ("aaa", False),
+    ]),
+    # The classic block-comment shape (the `MULTILINE_COMMENT` idiom; plan E2 table).
+    # Original lookaround form `/\*(\*(?!\/)|[^*])*\*\//` — a `*` only continues the
+    # body when NOT followed by `/`. This group locks the *original* semantics through
+    # lark-rs's real scanner matrix (it routes to fancy-regex today); the
+    # lookaround-free rewrite `/\*(?:[^*]|\*+[^*/])*\*+/` is proven equivalent to it by
+    # `block_comment_match_length_equivalence` in tests/test_lookaround.rs.
+    ("block_comment", r"""
+start: COMMENT
+COMMENT: /\/\*(\*(?!\/)|[^*])*\*\//
+""", [], [
+        ("/**/", True),            # empty comment
+        ("/* hi */", True),
+        ("/***/", True),           # leading/trailing stars hug the delimiters
+        ("/* a * b */", True),     # a lone star inside the body
+        ("/* ** */", True),        # a run of stars inside the body
+        ("/*\nmulti\nline\n*/", True),  # newlines are ordinary body chars
+        ("/*/", False),            # `/*` then `/` — never closed
+        ("/* unterminated", False),
+        ("/x*/", False),           # does not open with `/*`
+        ("", False),
     ]),
 ]
 

@@ -174,3 +174,202 @@ fn test_lookaround_oracle() {
         );
     }
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// Milestone E2a — per-terminal match-length equivalence
+// ───────────────────────────────────────────────────────────────────────────
+//
+// The behavioral oracle above (and the stdlib oracle in `test_stdlib.rs`) gate the
+// *grammar*. This module proves the individual rewrites at the *terminal* level: it
+// runs each ORIGINAL lookaround terminal on `fancy-regex` and its lookaround-free
+// REWRITE on the `regex` crate, then asserts the two anchored matched-prefix
+// functions (the length of the prefix matched starting at offset 0, or "no match")
+// agree over a generated corpus. Both terminals are regular, so this is the decidable
+// equivalence the plan calls for (docs/LOOKAROUND_ELIMINATION_PLAN.md §E2). The two
+// engines are leftmost-first/backtracking like Python `re`, and the Python-generated
+// oracles independently cross-check each side, so the proof is triangulated.
+//
+// The terminals proven here are exactly milestone E2a's scope: python `STRING` /
+// `LONG_STRING` and the classic block-comment shape.
+mod matchlen {
+    use fancy_regex::Regex as Fancy;
+    use regex::Regex;
+
+    // --- The originals (lookaround). Flags mirror the bundled `python.lark`:
+    //     STRING is `/…/i`, LONG_STRING is `/…/is`. `^` anchors the prefix match. ---
+    const STRING_ORIG: &str =
+        r#"(?i)^(?:([ubf]?r?|r[ubf])("(?!"").*?(?<!\\)(\\\\)*?"|'(?!'').*?(?<!\\)(\\\\)*?'))"#;
+    const LONG_ORIG: &str =
+        r#"(?is)^(?:([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?'''))"#;
+    const COMMENT_ORIG: &str = r#"^(?:/\*(\*(?!/)|[^*])*\*/)"#;
+
+    // --- The lookaround-free rewrites (what the bundled grammar now ships, and what
+    //     E2/E5 would emit for the block-comment idiom). ---
+    const STRING_NEW: &str =
+        r#"(?i)^(?:([ubf]?r?|r[ubf])("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'))"#;
+    const LONG_NEW: &str =
+        r#"(?is)^(?:([ubf]?r?|r[ubf])("""(?:[^\\]|\\.)*?"""|'''(?:[^\\]|\\.)*?'''))"#;
+    const COMMENT_NEW: &str = r#"^(?:/\*(?:[^*]|\*+[^*/])*\*+/)"#;
+
+    /// Anchored matched-prefix length of an original (lookaround) terminal at the
+    /// start of `s`, or `None`. `^` keeps it to offset 0.
+    fn fancy_prefix(re: &Fancy, s: &str) -> Option<usize> {
+        match re.find(s) {
+            Ok(Some(m)) if m.start() == 0 => Some(m.end()),
+            _ => None,
+        }
+    }
+
+    /// Same matched-prefix function for a lookaround-free rewrite on the `regex` crate.
+    fn regex_prefix(re: &Regex, s: &str) -> Option<usize> {
+        re.find(s).filter(|m| m.start() == 0).map(|m| m.end())
+    }
+
+    /// Every string over `alphabet` of length `0..=max_len`.
+    fn corpus(alphabet: &[char], max_len: usize) -> Vec<String> {
+        let mut all = vec![String::new()];
+        let mut frontier = vec![String::new()];
+        for _ in 0..max_len {
+            let mut next = Vec::with_capacity(frontier.len() * alphabet.len());
+            for s in &frontier {
+                for &c in alphabet {
+                    let mut t = s.clone();
+                    t.push(c);
+                    next.push(t);
+                }
+            }
+            all.extend_from_slice(&next);
+            frontier = next;
+        }
+        all
+    }
+
+    /// `LONG_STRING`: a clean equivalence — no boundary-as-failure, so the original and
+    /// the rewrite must agree on the matched-prefix function for *every* corpus string.
+    #[test]
+    fn long_string_match_length_equivalence() {
+        let orig = Fancy::new(LONG_ORIG).unwrap();
+        let new = Regex::new(LONG_NEW).unwrap();
+        // backslashes (escape pairing), both quote kinds, newlines (DOTALL body), the
+        // r/b prefix, and `a` as ordinary content — the axes the lazy escaped body and
+        // the even-backslash close turn on.
+        let cases = corpus(&['"', '\'', '\\', 'a', '\n', 'r'], 6);
+        let mut matched = 0usize;
+        for s in &cases {
+            let (o, n) = (fancy_prefix(&orig, s), regex_prefix(&new, s));
+            assert_eq!(o, n, "LONG_STRING match-length differs on {s:?}");
+            matched += o.is_some() as usize;
+        }
+        assert!(
+            matched > 0,
+            "corpus must actually exercise some long strings"
+        );
+    }
+
+    /// The classic block-comment shape (`MULTILINE_COMMENT` idiom). Also a clean
+    /// equivalence — full agreement required on every corpus string.
+    #[test]
+    fn block_comment_match_length_equivalence() {
+        let orig = Fancy::new(COMMENT_ORIG).unwrap();
+        let new = Regex::new(COMMENT_NEW).unwrap();
+        let cases = corpus(&['/', '*', 'a', '\n'], 8);
+        let mut matched = 0usize;
+        for s in &cases {
+            let (o, n) = (fancy_prefix(&orig, s), regex_prefix(&new, s));
+            assert_eq!(o, n, "block-comment match-length differs on {s:?}");
+            matched += o.is_some() as usize;
+        }
+        assert!(matched > 0, "corpus must actually exercise some comments");
+    }
+
+    /// `STRING` + `LONG_STRING` as the combined string scanner. `LONG_STRING` wins ties
+    /// (its `.2` priority), so it is tried first. The original disambiguates the same
+    /// pair with `STRING`'s `(?!"")` guard instead — a *trailing-context* boundary with
+    /// no lookaround-free per-terminal form. The proof pins two properties:
+    ///
+    ///   1. **Nothing is lost or changed.** Wherever the original scanner matches, the
+    ///      rewrite matches the *same terminal* for the *same length*. (The guarantee
+    ///      that matters: no valid token is dropped or retyped.)
+    ///   2. **The only divergence is one-directional and tightly bounded.** The rewrite
+    ///      additionally accepts an empty short string `""`/`''` (optionally `r`/`b`-
+    ///      prefixed) sitting at the head of an over-long quote-run that does not form a
+    ///      valid long string (e.g. `""""`). The original rejects these; every one is a
+    ///      SyntaxError in CPython, so no valid program differs. The rewrite is a strict
+    ///      superset — the reverse divergence never occurs.
+    #[test]
+    fn string_match_length_equivalence() {
+        let s_orig = Fancy::new(STRING_ORIG).unwrap();
+        let l_orig = Fancy::new(LONG_ORIG).unwrap();
+        let s_new = Regex::new(STRING_NEW).unwrap();
+        let l_new = Regex::new(LONG_NEW).unwrap();
+
+        // Combined scanner: LONG_STRING (higher priority) is tried first, then STRING.
+        let scan_orig = |s: &str| -> Option<(&'static str, usize)> {
+            fancy_prefix(&l_orig, s)
+                .map(|n| ("LONG", n))
+                .or_else(|| fancy_prefix(&s_orig, s).map(|n| ("STRING", n)))
+        };
+        let scan_new = |s: &str| -> Option<(&'static str, usize)> {
+            regex_prefix(&l_new, s)
+                .map(|n| ("LONG", n))
+                .or_else(|| regex_prefix(&s_new, s).map(|n| ("STRING", n)))
+        };
+
+        let mut cases = corpus(&['"', '\'', '\\', 'a', '\n', 'r', 'b'], 5);
+        // The (?!"") boundary lives in adjacent quote-runs; sample them well past the
+        // exhaustive length, both bare and with content + a closing quote.
+        for q in ['"', '\''] {
+            for k in 0..=14 {
+                let run: String = std::iter::repeat(q).take(k).collect();
+                cases.push(run.clone());
+                cases.push(format!("{run}a{q}"));
+            }
+        }
+
+        let mut preserved = 0usize;
+        let mut divergences = 0usize;
+        let mut lost_or_changed = Vec::new();
+        for s in &cases {
+            let (o, n) = (scan_orig(s), scan_new(s));
+            if o == n {
+                preserved += o.is_some() as usize;
+                continue;
+            }
+            match (o, n) {
+                // Property 2: the sole tolerated shape — original matched nothing, the
+                // rewrite matched an empty short string at the head of a quote-run.
+                (None, Some(("STRING", len))) => {
+                    let matched = &s[..len];
+                    let q = matched.chars().last().unwrap();
+                    let empty_short = matched.ends_with("\"\"") || matched.ends_with("''");
+                    let at_quote_run = s[len..].chars().next() == Some(q);
+                    assert!(
+                        empty_short && at_quote_run,
+                        "tolerated STRING divergence must be an empty short string at an \
+                         over-long quote-run; got match {matched:?} of {s:?}"
+                    );
+                    divergences += 1;
+                }
+                // Property 1 violation: a real bug (a match was dropped or changed).
+                _ => lost_or_changed.push((s.clone(), o, n)),
+            }
+        }
+
+        assert!(
+            lost_or_changed.is_empty(),
+            "rewrite dropped or changed {} original match(es), e.g. {:?}",
+            lost_or_changed.len(),
+            &lost_or_changed[..lost_or_changed.len().min(8)]
+        );
+        assert!(
+            preserved > 0,
+            "corpus must exercise some real string tokens"
+        );
+        // The boundary divergence is real and characterized — pin that it is present so
+        // a future "fix" that silently changes the carve-out can't pass unnoticed.
+        assert!(
+            divergences > 0,
+            "expected the (?!\"\") trailing-context boundary divergence to be present"
+        );
+    }
+}

@@ -869,6 +869,57 @@
         "error": null
       },
       {
+        "input": "\"\\\\\\\\\"",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "STRING",
+              "value": "\"\\\\\\\\\""
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "\"a\\nb\"",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "STRING",
+              "value": "\"a\\nb\""
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "'\\''",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "STRING",
+              "value": "'\\''"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
         "input": "r\"raw\"",
         "should_pass": true,
         "ok": true,
@@ -937,6 +988,40 @@
         "error": null
       },
       {
+        "input": "BR\"x\"",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "STRING",
+              "value": "BR\"x\""
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "U'z'",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "STRING",
+              "value": "U'z'"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
         "input": "\"x",
         "should_pass": false,
         "ok": false,
@@ -949,6 +1034,13 @@
         "ok": false,
         "tree": null,
         "error": "No terminal matches '\"' in the current parser context, at line 1 col 1\n\n\"a\n^\nExpected one of: \n\t* STRING\n"
+      },
+      {
+        "input": "\"a\\\nb\"",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "No terminal matches '\"' in the current parser context, at line 1 col 1\n\n\"a\\\n^\nExpected one of: \n\t* STRING\n"
       }
     ]
   },
@@ -1042,11 +1134,52 @@
         "error": null
       },
       {
+        "input": "\"\"\"he said \"\"x\"\" done\"\"\"",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "LONG_STRING",
+              "value": "\"\"\"he said \"\"x\"\" done\"\"\""
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "\"\"\"ends with an escaped backslash \\\\\"\"\"",
+        "should_pass": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "LONG_STRING",
+              "value": "\"\"\"ends with an escaped backslash \\\\\"\"\""
+            }
+          ]
+        },
+        "error": null
+      },
+      {
         "input": "\"\"\"x",
         "should_pass": false,
         "ok": false,
         "tree": null,
         "error": "No terminal matches '\"' in the current parser context, at line 1 col 1\n\n\"\"\"x\n^\nExpected one of: \n\t* LONG_STRING\n"
+      },
+      {
+        "input": "\"\"\"unterminated",
+        "should_pass": false,
+        "ok": false,
+        "tree": null,
+        "error": "No terminal matches '\"' in the current parser context, at line 1 col 1\n\n\"\"\"unterminated\n^\nExpected one of: \n\t* LONG_STRING\n"
       }
     ]
   },

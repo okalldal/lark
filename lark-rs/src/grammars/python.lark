@@ -281,8 +281,31 @@ _NEWLINE: ( /\r?\n[\t ]*/ | COMMENT )+
 NAME: /[^\W\d]\w*/
 COMMENT: /#[^\n]*/
 
-STRING: /([ubf]?r?|r[ubf])("(?!"").*?(?<!\\)(\\\\)*?"|'(?!'').*?(?<!\\)(\\\\)*?')/i
-LONG_STRING: /([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')/is
+// lark-rs divergence from upstream (lookaround elimination, milestone E2a — see
+// docs/LOOKAROUND_ELIMINATION_PLAN.md). Upstream uses lookaround:
+//   STRING: ...("(?!"").*?(?<!\\)(\\\\)*?"|'...')/i
+//   LONG_STRING: ...(""".*?(?<!\\)(\\\\)*?"""|'''...''')/is
+// Both are rewritten to the standard lookaround-free escaped-string forms so they
+// run on the linear `regex` engine and rejoin the combined scan. Proven equivalent
+// by tests/test_lookaround.rs (per-terminal match-length equivalence vs the
+// originals) + the stdlib oracle (tests/test_stdlib.rs, generated from upstream).
+//
+// Two subtleties the equivalence proof pins:
+//   * Newlines. Upstream's `.*?` (no DOTALL on STRING) excludes `\n`; `[^"\\]`
+//     would NOT, letting a short string span lines. So the newline is excluded
+//     explicitly (`[^"\\\n]`). LONG_STRING keeps DOTALL (`s`), so its body uses the
+//     plain `[^\\]` and a lazy end.
+//   * Triple-quote disambiguation moves from STRING's `(?!"")` guard to
+//     LONG_STRING priority (`.2`), so a `"""…"""` is taken whole by LONG_STRING
+//     rather than as an empty STRING `""` + the rest. The one residual divergence
+//     (the `(?!"")` is a trailing-context boundary with no lookaround-free
+//     per-terminal form): lark-rs accepts a maximal run of adjacent identical
+//     quotes that does not form a valid long string (e.g. `""""`), which upstream
+//     rejects. It is strictly one-directional (lark-rs is a superset) and every
+//     such run is a SyntaxError in CPython — no valid program differs. Pinned by
+//     `string_match_length_equivalence` in tests/test_lookaround.rs.
+STRING: /([ubf]?r?|r[ubf])("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')/i
+LONG_STRING.2: /([ubf]?r?|r[ubf])("""(?:[^\\]|\\.)*?"""|'''(?:[^\\]|\\.)*?''')/is
 
 _SPECIAL_DEC: "0".."9"        ("_"?  "0".."9"                       )*
 DEC_NUMBER:   "1".."9"        ("_"?  "0".."9"                       )*

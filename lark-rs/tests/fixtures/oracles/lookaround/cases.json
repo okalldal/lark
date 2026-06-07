@@ -2424,5 +2424,840 @@
         ]
       }
     ]
+  },
+  {
+    "name": "block_comment",
+    "grammar": "\nstart: COMMENT\nCOMMENT: /\\/\\*(\\*(?!\\/)|[^*])*\\*\\//\n",
+    "g_regex_flags": [],
+    "combos": [
+      {
+        "parser": "lalr",
+        "lexer": "contextual",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "/**/",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/**/"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/* hi */",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/* hi */"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/***/",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/***/"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/* a * b */",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/* a * b */"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/* ** */",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/* ** */"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/*\nmulti\nline\n*/",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/*\nmulti\nline\n*/"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/*/",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '/' in the current parser context, at line 1 col 1\n\n/*/\n^\nExpected one of: \n\t* COMMENT\n"
+          },
+          {
+            "input": "/* unterminated",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '/' in the current parser context, at line 1 col 1\n\n/* unterminated\n^\nExpected one of: \n\t* COMMENT\n"
+          },
+          {
+            "input": "/x*/",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '/' in the current parser context, at line 1 col 1\n\n/x*/\n^\nExpected one of: \n\t* COMMENT\n"
+          },
+          {
+            "input": "",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* COMMENT\n"
+          }
+        ]
+      },
+      {
+        "parser": "lalr",
+        "lexer": "basic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "/**/",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/**/"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/* hi */",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/* hi */"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/***/",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/***/"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/* a * b */",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/* a * b */"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/* ** */",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/* ** */"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/*\nmulti\nline\n*/",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/*\nmulti\nline\n*/"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/*/",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '/' in the current parser context, at line 1 col 1\n\n/*/\n^\nExpected one of: \n\t* COMMENT\n"
+          },
+          {
+            "input": "/* unterminated",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '/' in the current parser context, at line 1 col 1\n\n/* unterminated\n^\nExpected one of: \n\t* COMMENT\n"
+          },
+          {
+            "input": "/x*/",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '/' in the current parser context, at line 1 col 1\n\n/x*/\n^\nExpected one of: \n\t* COMMENT\n"
+          },
+          {
+            "input": "",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Unexpected token Token('$END', '') at line 1, column 1.\nExpected one of: \n\t* COMMENT\n"
+          }
+        ]
+      },
+      {
+        "parser": "earley",
+        "lexer": "basic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "/**/",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/**/"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/* hi */",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/* hi */"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/***/",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/***/"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/* a * b */",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/* a * b */"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/* ** */",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/* ** */"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/*\nmulti\nline\n*/",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/*\nmulti\nline\n*/"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/*/",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '/' in the current parser context, at line 1 col 1\n\n/*/\n^\nExpected one of: \n\t* COMMENT\n"
+          },
+          {
+            "input": "/* unterminated",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '/' in the current parser context, at line 1 col 1\n\n/* unterminated\n^\nExpected one of: \n\t* COMMENT\n"
+          },
+          {
+            "input": "/x*/",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '/' in the current parser context, at line 1 col 1\n\n/x*/\n^\nExpected one of: \n\t* COMMENT\n"
+          },
+          {
+            "input": "",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Unexpected end-of-input. Expected one of: \n\t* COMMENT\n"
+          }
+        ]
+      },
+      {
+        "parser": "earley",
+        "lexer": "dynamic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "/**/",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/**/"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/* hi */",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/* hi */"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/***/",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/***/"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/* a * b */",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/* a * b */"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/* ** */",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/* ** */"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/*\nmulti\nline\n*/",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/*\nmulti\nline\n*/"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/*/",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '/' in the current parser context, at line 1 col 1\n\n/*/\n^\nExpected one of: \n\t* COMMENT\n"
+          },
+          {
+            "input": "/* unterminated",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '/' in the current parser context, at line 1 col 1\n\n/* unterminated\n^\nExpected one of: \n\t* COMMENT\n"
+          },
+          {
+            "input": "/x*/",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '/' in the current parser context, at line 1 col 1\n\n/x*/\n^\nExpected one of: \n\t* COMMENT\n"
+          },
+          {
+            "input": "",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Unexpected end-of-input. Expected one of: \n\t* COMMENT\n"
+          }
+        ]
+      },
+      {
+        "parser": "earley",
+        "lexer": "dynamic_complete",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "/**/",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/**/"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/* hi */",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/* hi */"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/***/",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/***/"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/* a * b */",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/* a * b */"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/* ** */",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/* ** */"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/*\nmulti\nline\n*/",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/*\nmulti\nline\n*/"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/*/",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '/' in the current parser context, at line 1 col 1\n\n/*/\n^\nExpected one of: \n\t* COMMENT\n"
+          },
+          {
+            "input": "/* unterminated",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '/' in the current parser context, at line 1 col 1\n\n/* unterminated\n^\nExpected one of: \n\t* COMMENT\n"
+          },
+          {
+            "input": "/x*/",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '/' in the current parser context, at line 1 col 1\n\n/x*/\n^\nExpected one of: \n\t* COMMENT\n"
+          },
+          {
+            "input": "",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Unexpected end-of-input. Expected one of: \n\t* COMMENT\n"
+          }
+        ]
+      },
+      {
+        "parser": "cyk",
+        "lexer": "basic",
+        "available": true,
+        "build_error": null,
+        "cases": [
+          {
+            "input": "/**/",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/**/"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/* hi */",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/* hi */"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/***/",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/***/"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/* a * b */",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/* a * b */"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/* ** */",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/* ** */"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/*\nmulti\nline\n*/",
+            "should_pass": true,
+            "ok": true,
+            "tree": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "COMMENT",
+                  "value": "/*\nmulti\nline\n*/"
+                }
+              ]
+            },
+            "error": null
+          },
+          {
+            "input": "/*/",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '/' in the current parser context, at line 1 col 1\n\n/*/\n^\nExpected one of: \n\t* COMMENT\n"
+          },
+          {
+            "input": "/* unterminated",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '/' in the current parser context, at line 1 col 1\n\n/* unterminated\n^\nExpected one of: \n\t* COMMENT\n"
+          },
+          {
+            "input": "/x*/",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "No terminal matches '/' in the current parser context, at line 1 col 1\n\n/x*/\n^\nExpected one of: \n\t* COMMENT\n"
+          },
+          {
+            "input": "",
+            "should_pass": false,
+            "ok": false,
+            "tree": null,
+            "error": "Parsing failed."
+          }
+        ]
+      }
+    ]
   }
 ]
