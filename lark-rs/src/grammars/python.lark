@@ -281,31 +281,8 @@ _NEWLINE: ( /\r?\n[\t ]*/ | COMMENT )+
 NAME: /[^\W\d]\w*/
 COMMENT: /#[^\n]*/
 
-// lark-rs divergence from upstream (lookaround elimination, milestone E2a — see
-// docs/LOOKAROUND_ELIMINATION_PLAN.md).
-//
-// LONG_STRING is rewritten to the lookaround-free escaped-string form so it runs on
-// the linear `regex` engine and rejoins the combined scan. Upstream's body uses a
-// lookbehind even-backslash guard, `""".*?(?<!\\)(\\\\)*?"""`; the rewrite
-// `"""(?:[^\\]|\\.)*?"""` (DOTALL `s`, lazy end) pairs every backslash with the next
-// char, which is exactly the even-backslash close — no boundary, no priority change
-// needed, so it is byte-for-byte equivalent. Proven by
-// `long_string_match_length_equivalence` in tests/test_lookaround.rs (original on
-// fancy-regex vs rewrite on regex, full agreement over a generated corpus) + the
-// stdlib oracle (tests/test_stdlib.rs, generated from upstream).
-//
-// STRING is left VERBATIM on its lookaround form (still routed to fancy-regex). Its
-// `(?!"")` opening guard is a genuine *trailing-context* boundary with no
-// lookaround-free per-terminal form: it makes `""""` a lex error while `"" ""` (two
-// empty strings) is valid, a distinction that survives only at lex time — once `%ignore`
-// drops the whitespace, both collapse to `STRING STRING` at the parser. Any
-// lookaround-free rewrite therefore accepts `""""`, which diverges from the oracle.
-// This is the "boundary-as-failure" case the plan flags as resisting both regex
-// rewrite and priority; it stays on fancy-regex until the broader E3/E4 decision. The
-// negative result (the standard rewrite is NOT equivalent) is pinned by
-// `string_lookaround_free_rewrite_is_not_equivalent` in tests/test_lookaround.rs.
 STRING: /([ubf]?r?|r[ubf])("(?!"").*?(?<!\\)(\\\\)*?"|'(?!'').*?(?<!\\)(\\\\)*?')/i
-LONG_STRING: /([ubf]?r?|r[ubf])("""(?:[^\\]|\\.)*?"""|'''(?:[^\\]|\\.)*?''')/is
+LONG_STRING: /([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')/is
 
 _SPECIAL_DEC: "0".."9"        ("_"?  "0".."9"                       )*
 DEC_NUMBER:   "1".."9"        ("_"?  "0".."9"                       )*

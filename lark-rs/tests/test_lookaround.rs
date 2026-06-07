@@ -189,11 +189,14 @@ fn test_lookaround_oracle() {
 // engines are leftmost-first/backtracking like Python `re`, and the Python-generated
 // oracles independently cross-check each side, so the proof is triangulated.
 //
-// Outcome for E2a's scope:
+// E2a changes NO grammar — the bundled files stay verbatim upstream and every string
+// terminal stays on `fancy-regex`. This harness only *classifies* the candidates, so
+// the eventual E4 rewrite (and any future edit) is gated by a proof, not a guess:
 //   * `LONG_STRING` and the classic block-comment shape are **cleanly equivalent** —
-//     the rewrites are what the grammar ships / what E2/E5 would emit.
+//     the rewrites are proven ready (E4 deploys `LONG_STRING`; E2/E5 the block comment),
+//     but are not applied to the grammar in this milestone.
 //   * `STRING` is a **negative result**: the standard lookaround-free rewrite is *not*
-//     equivalent (it accepts `""""`, which the oracle rejects), so `STRING` stays on
+//     equivalent (it accepts `""""`, which the oracle rejects), so `STRING` must stay on
 //     its lookaround form. The test pins exactly why, so the conclusion can't rot.
 mod matchlen {
     use fancy_regex::Regex as Fancy;
@@ -207,9 +210,9 @@ mod matchlen {
         r#"(?is)^(?:([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?'''))"#;
     const COMMENT_ORIG: &str = r#"^(?:/\*(\*(?!/)|[^*])*\*/)"#;
 
-    // --- The lookaround-free rewrites. LONG_STRING / COMMENT are what the grammar
-    //     ships / what E2/E5 would emit; STRING_NEW is the *rejected* candidate kept
-    //     only to pin why STRING resists elimination. ---
+    // --- The lookaround-free rewrites. LONG_STRING / COMMENT are proven-equivalent and
+    //     E4-ready (not yet applied to any grammar); STRING_NEW is the *rejected*
+    //     candidate kept only to pin why STRING resists elimination. ---
     const STRING_NEW: &str =
         r#"(?i)^(?:([ubf]?r?|r[ubf])("(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'))"#;
     const LONG_NEW: &str =
