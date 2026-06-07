@@ -37,43 +37,77 @@ use regex_automata::{
 use crate::error::{GrammarError, ParseError};
 use crate::grammar::intern::SymbolId;
 use crate::grammar::terminal::{Pattern, TerminalDef};
+use crate::lookaround::{self, matcher::LoweredMatcher};
 use crate::tree::Token;
 
-// ─── AnyRegex: a per-terminal regex that may need lookaround ──────────────────
+// ─── AnyRegex: a per-terminal matcher that may need lookaround ────────────────
 //
 // The combined scanner is built on the linear-time `regex` crate, which has no
 // lookahead/lookbehind. A few bundled-grammar terminals (issue #40) use bounded
-// lookaround; those are compiled to `fancy-regex` instead and matched one terminal
+// lookaround; those are *lowered* to the linear Pike-VM engine in
+// `crate::lookaround::matcher` (Lexer DFA / B1 plan, M2) and matched one terminal
 // at a time. `AnyRegex` hides the choice behind a uniform anchored-match API so the
-// caller never branches on the engine. Because `regex`'s language is a subset of
-// `fancy-regex`'s, a pattern is only ever sent to `fancy-regex` when `regex`
-// rejects it — every ordinary terminal keeps the fast engine.
+// caller never branches on the engine. A terminal is lowered only when its pattern
+// actually contains a lookaround assertion (detected via the `lookaround` front-end,
+// `Node::has_assertion`); every ordinary terminal keeps the fast `regex` engine.
+// No backtracking engine remains on any path.
 
 enum AnyRegex {
     Plain(Regex),
-    Fancy(fancy_regex::Regex),
+    Lowered(LoweredMatcher),
 }
 
 impl AnyRegex {
-    /// Compile `src`, preferring the linear `regex` engine and only falling back to
-    /// `fancy-regex` for patterns `regex` cannot express (lookaround). An error from
-    /// *both* engines surfaces the `regex`-crate message (the familiar one).
-    fn compile(src: &str) -> Result<AnyRegex, GrammarError> {
-        match Regex::new(src) {
-            Ok(re) => Ok(AnyRegex::Plain(re)),
-            Err(plain_err) => match fancy_regex::Regex::new(src) {
-                Ok(re) => Ok(AnyRegex::Fancy(re)),
-                Err(_) => Err(GrammarError::InvalidRegex {
-                    pattern: src.to_string(),
-                    reason: plain_err.to_string(),
-                }),
-            },
+    /// A per-terminal matcher anchored at the query position: a lookaround terminal
+    /// lowers to the Pike-VM engine, everything else stays on the `regex` crate.
+    /// `global_flags` is Lark's `g_regex_flags`.
+    fn anchored(term: &TerminalDef, global_flags: u32) -> Result<AnyRegex, GrammarError> {
+        if let Pattern::Re(p) = &term.pattern {
+            if let Ok(node) = lookaround::parse(&p.pattern) {
+                if node.has_assertion() {
+                    return Ok(AnyRegex::Lowered(LoweredMatcher::compile(
+                        &node,
+                        global_flags | p.flags,
+                    )?));
+                }
+            }
         }
+        let src = format!(
+            "{}{}",
+            global_flag_prefix(global_flags),
+            term.pattern.to_inline_regex()
+        );
+        Regex::new(&src)
+            .map(AnyRegex::Plain)
+            .map_err(|e| GrammarError::InvalidRegex {
+                pattern: src,
+                reason: e.to_string(),
+            })
     }
 
-    /// Whether this pattern needed the backtracking engine (i.e. uses lookaround).
-    fn is_fancy(&self) -> bool {
-        matches!(self, AnyRegex::Fancy(_))
+    /// A whole-string (`^…$`) matcher for `unless` keyword retyping.
+    fn full(term: &TerminalDef, global_flags: u32) -> Result<AnyRegex, GrammarError> {
+        if let Pattern::Re(p) = &term.pattern {
+            if let Ok(node) = lookaround::parse(&p.pattern) {
+                if node.has_assertion() {
+                    return Ok(AnyRegex::Lowered(LoweredMatcher::compile_full(
+                        &node,
+                        global_flags | p.flags,
+                    )?));
+                }
+            }
+        }
+        let src = format!(
+            "{}^(?:{})$",
+            global_flag_prefix(global_flags),
+            term.pattern.to_inline_regex()
+        );
+        Regex::new(&src)
+            .map(AnyRegex::Plain)
+            .map_err(|e| GrammarError::InvalidRegex {
+                pattern: src,
+                reason: e.to_string(),
+            })
     }
 
     /// End offset of a non-empty match beginning *exactly* at `pos`, or `None`.
@@ -87,11 +121,13 @@ impl AnyRegex {
                 let m = m?;
                 (m.start() == pos && m.end() > pos).then_some(m.end())
             }
-            AnyRegex::Fancy(re) => {
-                let m = re.find_from_pos(text, pos).ok().flatten();
-                record_scan_skip(pos, m.as_ref().map(|m| m.start()));
-                let m = m?;
-                (m.start() == pos && m.end() > pos).then_some(m.end())
+            AnyRegex::Lowered(m) => {
+                // The lowered matcher is inherently anchored at `pos`, so a hit
+                // never skips forward (skip 0) and a miss is the flat per-attempt
+                // cost — keeping the M0 scan-scaling gate meaningful.
+                let end = m.match_at(text, pos);
+                record_scan_skip(pos, end.map(|_| pos));
+                end
             }
         }
     }
@@ -103,20 +139,31 @@ impl AnyRegex {
                 let m = re.find(sub)?;
                 (m.start() == 0 && m.end() > 0).then_some(m.end())
             }
-            AnyRegex::Fancy(re) => {
-                let m = re.find(sub).ok()??;
-                (m.start() == 0 && m.end() > 0).then_some(m.end())
-            }
+            AnyRegex::Lowered(m) => m.match_in(sub),
         }
     }
 
-    /// Whether the pattern matches `text` in full (used by `unless` retyping, where
-    /// `src` is already anchored with `^…$`).
+    /// Whether the pattern matches `text` in full (used by `unless` retyping). For a
+    /// `Plain` matcher the source is already anchored with `^…$`; a `Lowered` one was
+    /// built via [`AnyRegex::full`].
     fn is_full_match(&self, text: &str) -> bool {
         match self {
             AnyRegex::Plain(re) => re.is_match(text),
-            AnyRegex::Fancy(re) => re.is_match(text).unwrap_or(false),
+            AnyRegex::Lowered(m) => m.is_full_match(text),
         }
+    }
+}
+
+/// Whether `term` is a regex terminal whose pattern contains a lookaround assertion
+/// and so must be lowered to the Pike-VM engine rather than joining the combined
+/// `regex` alternation. A pattern the front-end cannot parse is left to the `regex`
+/// crate (which will compile it or report a precise error).
+fn terminal_is_lookaround(term: &TerminalDef) -> bool {
+    match &term.pattern {
+        Pattern::Re(p) => lookaround::parse(&p.pattern)
+            .map(|n| n.has_assertion())
+            .unwrap_or(false),
+        Pattern::Str(_) => false,
     }
 }
 
@@ -272,13 +319,14 @@ struct Scanner {
     re: Option<Regex>,
     /// (terminal id, capture-group index, rank), in alternation order. `rank` is the
     /// terminal's index in the fully-sorted candidate list, so a plain match can be
-    /// compared against a fancy match by who Python's combined alternation would
+    /// compared against a lowered match by who Python's combined alternation would
     /// reach first.
     groups: Vec<(SymbolId, usize, usize)>,
-    /// Lookaround terminals (`fancy-regex`), each matched individually. Stored in
-    /// ascending `rank` order, so the first one that matches is the lowest-rank
-    /// fancy candidate. Empty for the overwhelming common case (no lookaround).
-    fancy: Vec<(usize, SymbolId, AnyRegex)>,
+    /// Lookaround terminals, each lowered to the Pike-VM engine and matched
+    /// individually. Stored in ascending `rank` order, so the first one that matches
+    /// is the lowest-rank lookaround candidate. Empty for the overwhelming common
+    /// case (no lookaround).
+    lowered: Vec<(usize, SymbolId, AnyRegex)>,
     /// regex-terminal-id → (matched-text → keyword-terminal-id).
     unless: HashMap<SymbolId, HashMap<String, SymbolId>>,
     /// Reused match-location scratch, sized for `re`. `RefCell` because the hot
@@ -306,29 +354,27 @@ impl Scanner {
 
         // Split the plan's (rank-ordered) terminals into *plain* terminals — which
         // go into the single fast combined `regex` alternation — and *lookaround*
-        // terminals, which the `regex` crate cannot compile and so are matched
-        // individually via `fancy-regex` (issue #40). `rank` is the index in the
-        // plan's sorted order: Python builds the alternation in this order and takes
-        // the first branch that matches, so the lowest rank wins ties. We preserve it
-        // to merge the two engines' candidates at match time.
+        // terminals, which the `regex` crate cannot compile and so are lowered to the
+        // Pike-VM engine and matched individually (Lexer DFA / B1 plan, M2). `rank`
+        // is the index in the plan's sorted order: Python builds the alternation in
+        // this order and takes the first branch that matches, so the lowest rank wins
+        // ties. We preserve it to merge the two engines' candidates at match time.
+        let by_id: HashMap<SymbolId, &TerminalDef> =
+            terminals.iter().map(|(id, t)| (*id, *t)).collect();
         let mut parts = Vec::new();
         let mut group_names = Vec::new();
-        let mut fancy: Vec<(usize, SymbolId, AnyRegex)> = Vec::new();
+        let mut lowered: Vec<(usize, SymbolId, AnyRegex)> = Vec::new();
         for (rank, (id, inline)) in plan.groups.iter().enumerate() {
-            // `to_inline_regex` (used by `scanner_plan`) keeps per-terminal flags
-            // (e.g. `(?i:…)` for a case-insensitive terminal) scoped to this group.
-            let compiled = AnyRegex::compile(&format!("{prefix}{inline}"))?;
-            if compiled.is_fancy() {
-                // Anchor the per-position fancy match to `pos` with `\G` (start-of-
-                // search anchor). Without it, `fancy-regex`'s `find_from_pos` scans
-                // *forward* to the next match, so trying a sparse lookaround terminal
-                // (e.g. python.lark's `STRING`) at every position is O(n²) over the
-                // input. `\G` makes the search fail immediately when nothing matches
-                // at `pos`. Recompiled separately because the `regex` crate cannot
-                // parse `\G`, so this pattern stays on the `fancy-regex` engine.
-                let anchored = AnyRegex::compile(&format!("{prefix}\\G{inline}"))?;
-                fancy.push((rank, *id, anchored));
+            let term = by_id[id];
+            if terminal_is_lookaround(term) {
+                // The lowered Pike-VM matcher is inherently anchored at the query
+                // position, so it needs no `\G` overlay and cannot scan forward —
+                // the O(n²) sparse-terminal pathology PR #104 patched cannot recur.
+                lowered.push((rank, *id, AnyRegex::anchored(term, global_flags)?));
             } else {
+                // `to_inline_regex` (used by `scanner_plan`) keeps per-terminal flags
+                // (e.g. `(?i:…)` for a case-insensitive terminal) scoped to this
+                // group.
                 let group = format!("g{}", id.0);
                 parts.push(format!("(?P<{group}>{inline})"));
                 group_names.push((*id, group, rank));
@@ -365,7 +411,7 @@ impl Scanner {
         Ok(Scanner {
             re,
             groups,
-            fancy,
+            lowered,
             unless,
             locs,
         })
@@ -400,9 +446,9 @@ impl Scanner {
                 }
             }
         }
-        // Lowest-rank fancy candidate (the list is rank-sorted, so the first match
-        // wins); keep it only if it out-ranks the plain candidate.
-        for (rank, id, re) in &self.fancy {
+        // Lowest-rank lowered (lookaround) candidate (the list is rank-sorted, so the
+        // first match wins); keep it only if it out-ranks the plain candidate.
+        for (rank, id, re) in &self.lowered {
             if best.is_some_and(|(b, _, _)| *rank > b) {
                 break;
             }
@@ -444,14 +490,10 @@ fn compute_unless(
 
     let mut unless: HashMap<SymbolId, HashMap<String, SymbolId>> = HashMap::new();
     for (re_id, re_t) in &res {
-        let full_src = format!(
-            "{}^(?:{})$",
-            global_flag_prefix(global_flags),
-            re_t.pattern.to_inline_regex()
-        );
         // A lookaround terminal (issue #40) cannot compile under the `regex` crate;
-        // `AnyRegex` falls back to `fancy-regex` so keyword embedding still works.
-        let full = AnyRegex::compile(&full_src)?;
+        // `AnyRegex::full` lowers it to the Pike-VM engine so keyword embedding still
+        // works against an assertion-bearing terminal.
+        let full = AnyRegex::full(re_t, global_flags)?;
         for (s_id, s_t) in &strs {
             if s_t.priority != re_t.priority {
                 continue;
@@ -987,11 +1029,9 @@ impl DynamicMatcher {
     /// terminal (issue #40) compiles via `fancy-regex`, exactly as in the basic
     /// scanner, so the dynamic lexer matches the same language.
     pub fn new(conf: &LexerConf) -> Result<Self, GrammarError> {
-        let prefix = global_flag_prefix(conf.global_flags);
         let mut res = HashMap::new();
         for (id, term) in &conf.terminals {
-            let src = format!("{}{}", prefix, term.pattern.to_inline_regex());
-            res.insert(*id, AnyRegex::compile(&src)?);
+            res.insert(*id, AnyRegex::anchored(term, conf.global_flags)?);
         }
         Ok(DynamicMatcher {
             res,

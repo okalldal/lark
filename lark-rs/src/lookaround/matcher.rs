@@ -185,6 +185,20 @@ impl LoweredMatcher {
             _ => None,
         }
     }
+
+    /// Compile for a **whole-string** test (anchored both ends), used by the
+    /// `unless` keyword retyping: it asks whether a regex terminal matches a string
+    /// terminal's value in full. A trailing end-anchor is appended so only an
+    /// all-consuming path reaches `Match`.
+    pub fn compile_full(node: &Node, flags: u32) -> Result<Self, GrammarError> {
+        let prog = Program::compile_full(node, Flags::from_u32(flags))?;
+        Ok(LoweredMatcher { prog })
+    }
+
+    /// Whether the pattern matches the whole of `text` (for `compile_full` matchers).
+    pub fn is_full_match(&self, text: &str) -> bool {
+        self.prog.run(text, 0).is_some()
+    }
 }
 
 // ─── Compilation ──────────────────────────────────────────────────────────────
@@ -233,8 +247,21 @@ impl Builder {
 
 impl Program {
     fn compile(node: &Node, flags: Flags) -> Result<Program, GrammarError> {
+        Program::compile_inner(node, flags, false)
+    }
+
+    /// Like [`Program::compile`] but with a trailing end-of-text anchor, so the
+    /// program only matches when it consumes the entire input (the `unless` test).
+    fn compile_full(node: &Node, flags: Flags) -> Result<Program, GrammarError> {
+        Program::compile_inner(node, flags, true)
+    }
+
+    fn compile_inner(node: &Node, flags: Flags, anchor_end: bool) -> Result<Program, GrammarError> {
         let mut b = Builder::new();
         compile_node(&mut b, node, flags)?;
+        if anchor_end {
+            b.push(Inst::Anchor(AnchorKind::TextEnd));
+        }
         b.push(Inst::Match);
         Ok(Program {
             insts: b.insts,
