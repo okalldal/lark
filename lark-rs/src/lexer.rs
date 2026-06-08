@@ -31,7 +31,7 @@ use regex::{CaptureLocations, Regex};
 use regex_automata::{
     dfa::{dense, Automaton, StartKind},
     hybrid::dfa::DFA as LazyDfa,
-    meta::Regex as MetaRegex,
+    nfa::thompson,
     util::primitives::StateID,
     Anchored, Input, MatchKind,
 };
@@ -459,43 +459,53 @@ impl Scanner {
 
 // ─── DfaScanner: the combined scanner on a regex-automata multi-pattern DFA ────
 
-/// The L1 combined scanner (`docs/LEXER_DFA_PLAN.md`). Same contract and selection
+/// The combined scanner (`docs/LEXER_DFA_PLAN.md`). Same contract and selection
 /// rules as [`Scanner`] — leftmost-first ranking, `unless` retyping, `fancy-regex`
 /// side-probes — but the *plain* (lookaround-free) terminals are matched by one
-/// [`regex_automata::meta::Regex`] over all of them (`new_many`, returning a
-/// `PatternID`) instead of the `regex`-crate alternation-with-capture-groups trick.
+/// hand-built `regex-automata` **dense DFA** over all of them, returning a
+/// `PatternID`, instead of the `regex`-crate alternation-with-capture-groups trick.
+///
+/// **M0 re-platform (`docs/LEXER_DFA_PLAN.md`, "L2 re-platforms the engine").** L1's
+/// `DfaScanner` was a `meta::Regex::new_many`, whose only input is *pattern strings*
+/// and which categorically cannot host a lowered `(?!…)` fragment or expose the
+/// per-state accept-set the guarded-accept driver needs. So the engine is rebuilt on
+/// the lower layer: each plain terminal is compiled to a Thompson NFA, the terminals
+/// are **unioned into one multi-pattern NFA** (`build_many`, `PatternID == rank`),
+/// and that NFA is determinized to a `dense::DFA` we drive ourselves through the
+/// [`Automaton`] trait. This is the seam M1+ extend: hand-assembled lowered fragments
+/// join the same NFA, and the dense DFA exposes `match_pattern`/`match_len` for the
+/// accept-set accumulator.
 ///
 /// Why this is byte-identical to [`Scanner`]:
 ///
-///   * The plain patterns are handed to `new_many` **in rank order**, so `PatternID`
-///     *is* the rank. Configured `MatchKind::LeftmostFirst`, the meta engine resolves
-///     a same-start tie by **pattern order** (lowest `PatternID` wins) with that
-///     pattern's own greedy length — exactly Python-`re`'s leftmost-first, the same
-///     semantics the `regex`-crate alternation gives (verified: `[ab|abc]` at `"abc"`
-///     picks pattern 0, length 2, *not* the longest match).
-///   * The match is **anchored** at `pos` (`Anchored::Yes` over `pos..len`), so it
-///     can only begin exactly at `pos` and never forward-scans — strictly safer than
-///     the `regex`-crate `captures_read_at` (which is leftmost and relies on a
-///     `start() == pos` reject). A zero-width match is rejected, mirroring `Scanner`.
+///   * The plain patterns are unioned **in rank order**, so `PatternID` *is* the rank.
+///     Built with `MatchKind::LeftmostFirst`, the dense DFA resolves a same-start tie
+///     by **pattern order** (lowest `PatternID` wins) with that pattern's own greedy
+///     length — exactly Python-`re`'s leftmost-first, the same semantics the
+///     `regex`-crate alternation gives (verified: `[ab|abc]` at `"abc"` picks pattern
+///     0, length 2, *not* the longest match).
+///   * The search is **anchored** at `pos` (`Anchored::Yes` over `pos..len`), so it
+///     can only begin exactly at `pos` and never forward-scans. A zero-width match is
+///     rejected, mirroring `Scanner`.
 ///   * The `fancy` list, the rank-merge between the plain and fancy candidates, and
 ///     the `unless` retype are **copied verbatim** from `Scanner`: only the
 ///     plain-terminal engine changes.
 ///
 /// The `regex` crate's combined alternation came with a free literal prefilter; an
-/// *anchored* search makes the meta engine's own (forward-scanning) prefilter
-/// dormant, so we re-add an explicit **start-byte prefilter** (`start_bytes`): the
-/// set of bytes any plain terminal can begin with, computed once from a lazy DFA
-/// over the plain union. When the byte at `pos` isn't in it we skip the plain engine
-/// entirely. It is an over-approximation by construction (a possible start byte is
-/// never dropped), so it can only ever *save* an engine call, never change a match —
-/// the L0 differential oracle is the proof.
+/// *anchored* search runs no prefilter of its own, so we re-add an explicit
+/// **start-byte prefilter** (`start_bytes`): the set of bytes any plain terminal can
+/// begin with, **re-derived from the new union** (a lazy DFA over the plain union).
+/// When the byte at `pos` isn't in it we skip the plain engine entirely. It is an
+/// over-approximation by construction (a possible start byte is never dropped), so it
+/// can only ever *save* an engine call, never change a match — the L0 differential
+/// oracle is the proof.
 struct DfaScanner {
-    /// Multi-pattern leftmost-first engine over the plain terminals, or `None` when
+    /// Multi-pattern leftmost-first dense DFA over the plain terminals, or `None` when
     /// every candidate is a lookaround terminal. `PatternID i` indexes `plain[i]`.
-    re: Option<MetaRegex>,
-    /// `PatternID` → (terminal id, rank), parallel to the patterns given to
-    /// `new_many` (rank order), so a plain match's rank can be compared against a
-    /// fancy match's.
+    re: Option<dense::DFA<Vec<u32>>>,
+    /// `PatternID` → (terminal id, rank), parallel to the patterns unioned into the
+    /// NFA (rank order), so a plain match's rank can be compared against a fancy
+    /// match's.
     plain: Vec<(SymbolId, usize)>,
     /// Start-byte prefilter for the plain engine (see the struct docs). `None`
     /// disables it (always run the engine) — the safe default if it can't be built.
@@ -548,17 +558,34 @@ impl DfaScanner {
             // Each plain terminal is its own pattern; the global-flag prefix sits at
             // the front of every pattern (an inline `(?i)` covers the whole pattern),
             // mirroring the prefix the `regex`-crate alternation places once at the
-            // front of `(?i)(g0)|(g1)|…`.
-            let re = MetaRegex::builder()
-                .configure(MetaRegex::config().match_kind(MatchKind::LeftmostFirst))
+            // front of `(?i)(g0)|(g1)|…`. Compile every pattern to a Thompson NFA and
+            // **union them into one multi-pattern NFA** (`build_many`), `PatternID ==
+            // rank`. Captures are dropped — the DFA never needs them (the winning
+            // pattern is read from `PatternID`, not a capture group).
+            let nfa = thompson::NFA::compiler()
+                .configure(thompson::Config::new().which_captures(thompson::WhichCaptures::None))
                 .build_many(&patterns)
                 .map_err(|e| GrammarError::InvalidRegex {
                     pattern: patterns.join("|"),
                     reason: e.to_string(),
                 })?;
-            // Start-byte prefilter over the plain union `{prefix}(?:i0|i1|…)`.
+            // Determinize the union into one dense DFA, anchored, leftmost-first — the
+            // engine we drive ourselves through the `Automaton` trait.
+            let dfa = dense::Builder::new()
+                .configure(
+                    dense::Config::new()
+                        .match_kind(MatchKind::LeftmostFirst)
+                        .start_kind(StartKind::Anchored),
+                )
+                .build_from_nfa(&nfa)
+                .map_err(|e| GrammarError::InvalidRegex {
+                    pattern: patterns.join("|"),
+                    reason: e.to_string(),
+                })?;
+            // Start-byte prefilter over the plain union `{prefix}(?:i0|i1|…)`,
+            // re-derived from the new union (so the common path keeps its prefilter).
             let union = format!("{prefix}(?:{})", inlines.join("|"));
-            (Some(re), plain_start_bytes(&union))
+            (Some(dfa), plain_start_bytes(&union))
         };
 
         Ok(DfaScanner {
@@ -591,12 +618,14 @@ impl DfaScanner {
                 let input = Input::new(text)
                     .span(pos..text.len())
                     .anchored(Anchored::Yes);
-                if let Some(m) = re.find(input) {
+                // `try_search_fwd` drives the dense DFA leftmost-first via the
+                // `Automaton` trait; with no quit bytes configured it never errors.
+                if let Ok(Some(hm)) = re.try_search_fwd(&input) {
                     // Reject a zero-width match (no terminal is nullable, but keep the
                     // guard so the loop can never stall) — mirrors `Scanner`.
-                    if m.end() > pos {
-                        let (id, rank) = self.plain[m.pattern().as_usize()];
-                        best = Some((rank, id, &text[pos..m.end()]));
+                    if hm.offset() > pos {
+                        let (id, rank) = self.plain[hm.pattern().as_usize()];
+                        best = Some((rank, id, &text[pos..hm.offset()]));
                     }
                 }
             }
