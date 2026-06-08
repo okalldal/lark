@@ -17,9 +17,12 @@ it to answer the open scoping question:
 > *smallest* engine addition that covers them — in particular, can it be done
 > **without** the full Pike VM of the closed PR #110?
 
-**Answer: yes, comfortably.** The irreducible surface collapses to a single shape —
-a *fixed-width* boundary assertion — and, after grammar-level recovery, to a single
-*terminal* (`STRING`). None of it needs the general thread-list/ε-closure Pike VM.
+**Answer: yes, comfortably.** The irreducible surface collapses to a single *shape* —
+a *fixed-width* boundary assertion (three terminals: `STRING`, `OP`, `DEC_NUMBER`).
+None of it needs the general thread-list/ε-closure Pike VM. Grammar-level recovery
+would shrink the *bundled* need to `STRING` alone, but — the adversarial finding
+below — that recovery breaks under `%import`, so the primitive is needed for all three
+to stay faithful to Python Lark. It is still a narrow, fixed-width primitive.
 
 ## Method
 
@@ -32,16 +35,15 @@ Each terminal is classified at two levels:
    to `OP`/`REGEXP`/`DEC_NUMBER`. Both engines are leftmost-first/backtracking like
    CPython `re`, so the comparison is faithful and the result is a *proof*, not a
    sample.
-2. **Grammar level (confirmed end-to-end).** Even when a guard is terminal-level
-   irreducible, dropping it may not change the grammar's accept/reject — if the
-   alternative tokenization is itself a parse error or is resolved by maximal munch.
-   This is where `STRING` (genuinely irreducible) parts ways from `OP`/`DEC_NUMBER`
-   (recoverable). This is now **proven**, not just reasoned: building the grammar
-   with the guard removed yields byte-identical trees (or an identical reject) on
-   every witness. Confirmed two ways — on **lark-rs itself** (the `recovery` tests in
-   `tests/test_lookaround.rs`: guarded routes to `fancy-regex`, guard-free to
-   `regex`) and independently on the **Python Lark oracle** (language- and
-   tree-equivalence over the same witnesses) — so the result is triangulated.
+2. **Grammar level (confirmed end-to-end, *context-dependent*).** Even when a guard
+   is terminal-level irreducible, dropping it may not change a *particular grammar's*
+   accept/reject — if the alternative tokenization is itself a parse error or is
+   resolved by maximal munch. In the bundled grammars this holds for `OP`/`DEC_NUMBER`
+   (proven: guard removed → byte-identical trees, on both lark-rs and the oracle).
+   **But it is a property of the context, not the terminal**, and it breaks when the
+   terminal is `%import`ed into a non-recovering grammar (proven: the import witnesses
+   below diverge). `STRING` is irreducible in *every* context. So the honest grammar-
+   level conclusion is narrower than "recoverable" — see the recovery section.
 
 ## The complete bundled census
 
@@ -96,32 +98,45 @@ story:
   quantifier — more than a one-shot check, but still a narrow, fixed-width primitive,
   nowhere near the general Pike VM.
 
-## Grammar-level recovery — the irreducible set shrinks to `STRING`
+## Grammar-level recovery — real, but context-local (the adversarial caveat)
 
-Terminal-level irreducibility does not imply the *grammar* needs the guard. Dropping
-a Type-C guard only matters if it changes end-to-end accept/reject:
+Terminal-level irreducibility does not imply the *grammar* needs the guard. In the
+**bundled grammars' own context**, dropping a Type-C guard changes nothing:
 
-* **`STRING` — genuinely irreducible.** The alternative reading of `""""` is
-  `STRING STRING` (two empty strings), which is *valid* to the parser, so the guard
-  is the only thing that rejects `""""`. **Needs an engine primitive.** (Proven in
-  E2a.)
-* **`OP` — recoverable by maximal munch.** The guard exists so `?foo` lexes as the
-  `RULE` token `/!?[_?]?[a-z][_a-z0-9]*/` (length 4) rather than `OP "?"` (length 1).
-  Longest-match already prefers `RULE`, so the guard is redundant with the lexer's
-  existing ordering. Drop it and rely on priority/length. **No engine.** *(Confirmed:
-  guarded ≡ guard-free, byte-identical trees, on both lark-rs and the oracle —
-  `recovery::op_guard_is_grammar_recoverable`.)*
-* **`DEC_NUMBER` — recoverable as a parse error.** Without the guard, `0123` lexes as
-  `DEC_NUMBER("0") DEC_NUMBER("123")` — two adjacent number atoms, which the Python
-  grammar rejects at parse time. With the guard it is a *lex* error. The guard only
-  relocates a guaranteed rejection from lex-time to parse-time; it does not change
-  whether the input is accepted. **No engine.** *(Confirmed: `0123`/`007` rejected
-  both ways, every accepted input byte-identical, on both lark-rs and the oracle —
-  `recovery::dec_number_guard_is_grammar_recoverable`.)*
+* **`STRING` — genuinely irreducible, even in context.** The alternative reading of
+  `""""` is `STRING STRING` (two empty strings), which is *valid* to the parser, so
+  the guard is the only thing that rejects `""""`. **Needs the primitive.** (E2a.)
+* **`OP` — recovered by maximal munch.** `?foo` lexes as the longer `RULE` token, so
+  in `lark.lark` the guard is redundant. *(Confirmed: guarded ≡ guard-free, identical
+  trees, lark-rs + oracle — `recovery::op_guard_is_grammar_recoverable`.)*
+* **`DEC_NUMBER` — recovered as a parse error.** In `python.lark` no production
+  juxtaposes two numbers, so `0123` is a parse error with or without the guard.
+  *(Confirmed — `recovery::dec_number_guard_is_grammar_recoverable`.)*
 
-So after grammar-level recovery, **`STRING` is the sole bundled terminal that needs a
-new engine primitive**, and that primitive is the simplest of the three Type-C shapes:
-a fixed-position, fixed-width, all-or-nothing **leading** negative lookahead.
+**But recovery is a property of the importing context, not the terminal — and it
+breaks under `%import`.** These terminals are importable, and a user grammar can
+supply a context with no recovering layer. Proven (lark-rs *and* the oracle agree),
+`recovery::recovery_fails_under_adversarial_import`:
+
+| Import context | Witness | Guarded (Python/today) | Guard removed | Verdict |
+|---|---|---|---|---|
+| `start: NUMBER+` (numbers can juxtapose) | `0123`, `001`, `007` | **reject** | **accept** | diverges |
+| `OP` beside `NAME: /[a-z]+/` (nothing absorbs `?foo`) | `?a`, `?foo` | **reject** | **accept** | diverges |
+
+In `start: NUMBER+`, guard-free reads `0123` as `0`,`123` and accepts; with `OP`
+beside a plain `NAME`, guard-free reads `?foo` as `OP("?") NAME("foo")` and accepts —
+both diverging from Python Lark, which keeps the guard regardless of import context.
+
+**Consequence: the "drop the guard" shortcut is unsafe.** Deleting these guards from
+the bundled grammars would mis-parse any grammar that imports them into a
+non-recovering context. To stay oracle-faithful, lark-rs must **preserve** the
+guards' match functions for `OP` and `DEC_NUMBER` too — not just `STRING`. The
+recovery result is still useful (it explains why the bundled grammars work and bounds
+the blast radius), but it is **not** a substitute for the primitive.
+
+So the count is: all **three** Type-C terminals need the primitive for import-safety
+— but all three are still fixed-width boundary assertions, so the same narrow guard
+covers them. The Pike VM is still not needed.
 
 ## Engine scope — a fixed-width boundary guard, not the Pike VM
 
@@ -131,12 +146,15 @@ The diagnosis answers the scoping question directly:
   lookaround-free core on the `regex` crate as today; attach a small descriptor
   `{ side: Start | End, polarity: Pos | Neg, set/literal, width }` checked against the
   bytes adjacent to the candidate match in `O(width)`. This is linear, joins no
-  thread list, and re-enters no ε-closure. It covers `STRING` (the only bundled need)
+  thread list, and re-enters no ε-closure. It covers all three import-unsafe Type-C
+  terminals — `STRING` (leading, all-or-nothing), `OP` (trailing, all-or-nothing) —
   *and* the entire fixed-width-lookbehind class the census found in the wild (pep508
   `(?<====)`, ROS `(?<!_)\/`, the string idiom's `(?<!\\)`).
-* **Worst case (if E4 declines to grammar-recover `DEC_NUMBER`):** add bounded
-  backtracking of the immediately-preceding quantifier to satisfy a fixed-width
-  *trailing* assertion. Still a narrow, fixed-width primitive.
+* **`DEC_NUMBER`'s trailing guard** additionally needs **bounded backtracking of the
+  immediately-preceding quantifier** (its `(?![1-9])` is length-changing — see above),
+  so it matches the run, checks the assertion, and shrinks the run by one if it fails.
+  Still a single fixed-width trailing assertion on one quantifier — a narrow primitive,
+  not the Pike VM.
 * **What is *not* needed:** the general Pike VM of PR #110. Its thread-list machinery
   earns its keep only for **internal, variable-position, length-changing** assertions
   inside quantifiers — the `T3` tail of the strategy memo. Neither bundled grammar
@@ -148,29 +166,41 @@ This confirms the hypothesis the elimination plan already seeded ("the economica
 is likely one narrow lexer-level bounded-lookahead guard … not the general Pike-VM
 engine") and upgrades it from a guess to a proof for the entire bundled set.
 
+## Adversarial hardening (what was tried to break this)
+
+* **Type-A equivalences fuzzed.** Beyond the exhaustive short-string proofs, an
+  exploratory sweep ran the originals (`fancy-regex`) against the rewrites (`regex`)
+  over millions of randomized strings biased toward the seams (escaped delimiters,
+  odd backslash runs, `**/` tails, flag suffixes, lazy-vs-greedy ends). **No
+  counterexample** to `LONG_STRING`, `REGEXP`, or the block comment. (The fuzzer
+  itself is not committed — the committed exhaustive `matchlen` proofs are the gate.)
+* **Recovery attacked via `%import`.** The decisive negative result above:
+  grammar-level recovery is context-local and breaks when the terminal is imported
+  into a non-recovering grammar — committed as
+  `recovery::recovery_fails_under_adversarial_import`.
+
 ## Recommended E4 shape
 
 1. **Deploy the Type-A rewrites** (`LONG_STRING`, `REGEXP`, block-comment) — proven
-   equivalent, zero risk; they rejoin the combined-DFA scan.
-2. **Grammar-recover `OP` and `DEC_NUMBER`** — drop the guards. The recovery is
-   already proven (the `recovery` tests + the oracle), so E4's only remaining work is
-   to apply the edit to the bundled `lark.lark`/`python.lark` and fold the witnesses
-   into the generated stdlib oracle.
-3. **Add the fixed-width boundary guard for `STRING`** — a single leading
-   `{ Start, Neg, "\"\"", width 2 }` descriptor wrapping its (reduced) `regex` core.
-   Then `fancy-regex` can be removed (E4) and the bundled grammars become
-   standalone/WASM-bakeable, with no Pike VM in the tree.
+   equivalent (and fuzz-hardened), zero risk; they rejoin the combined-DFA scan.
+2. **Route `STRING`, `OP`, `DEC_NUMBER` through the fixed-width boundary guard** —
+   **do not delete** their guards (that breaks imports, per the table above).
+   `STRING` is a leading `{ Start, Neg, "\"\"", width 2 }`; `OP` a trailing
+   `{ End, Neg, [a-z], width 1 }`; `DEC_NUMBER` a trailing `{ End, Neg, [1-9], width 1 }`
+   with single-quantifier backtracking. Each wraps its (reduced) `regex` core.
+3. **Remove `fancy-regex`** once the primitive lands — the bundled `python`/`lark`
+   grammars then bake into standalone/WASM, with no Pike VM in the tree.
 
 ## Verification artifacts
 
 * `tests/test_lookaround.rs::matchlen` — the six per-terminal proofs (three Type-A
   equivalences, three Type-C negative results).
-* `tests/test_lookaround.rs::recovery` — the two grammar-level recovery proofs
-  (`OP`, `DEC_NUMBER`): guarded ≡ guard-free trees in lark-rs, with the
-  guard-sensitive witness exercised so the test is not vacuous. Independently
-  confirmed on the Python Lark oracle.
+* `tests/test_lookaround.rs::recovery` — the in-context recovery proofs (`OP`,
+  `DEC_NUMBER`: guarded ≡ guard-free trees, guard-sensitive witness exercised) **and**
+  `recovery_fails_under_adversarial_import`, which pins that recovery breaks under a
+  non-recovering import. All triangulated against the Python Lark oracle.
 * `tests/test_lookaround.rs::test_lookaround_oracle` — the cross-(parser×lexer)
   behavioral gate the eventual rewrites must keep green.
 * `tests/test_stdlib.rs` — `STRING`'s end-to-end `""""` reject (E2a); the `OP`/
-  `DEC_NUMBER` witnesses fold into the generated stdlib oracle when E4 applies the
-  edits.
+  `DEC_NUMBER` import witnesses fold into the generated stdlib oracle when E4 lands
+  the primitive.

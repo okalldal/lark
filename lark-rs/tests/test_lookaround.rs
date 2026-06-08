@@ -550,46 +550,64 @@ mod matchlen {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// Grammar-level recovery (the B-vs-C refinement of the diagnosis)
+// Grammar-level recovery (the B-vs-C refinement) — and its CONTEXT-DEPENDENCE
 // ───────────────────────────────────────────────────────────────────────────
 //
 // The `matchlen` module proves `OP` and `DEC_NUMBER` are *terminal-level*
-// irreducible (no lookaround-free regex reproduces their match function). This
-// module proves they are nonetheless **grammar-level recoverable**: building the
-// grammar with the guard *removed* accepts/rejects exactly the same inputs and
-// yields byte-identical trees, because another layer already does the guard's
-// job (maximal munch for `OP`; the parser's no-two-adjacent-numbers rule for
-// `DEC_NUMBER`). So the eventual E4 rewrite can simply drop these guards — no
-// engine primitive, unlike `STRING`.
+// irreducible (no lookaround-free regex reproduces their match function). In the
+// **bundled grammars' own context** they are nonetheless *grammar-level
+// recoverable*: dropping the guard accepts/rejects the same inputs with
+// byte-identical trees, because another layer already does the guard's job —
+// maximal munch (lark's `RULE` absorbs `?foo`), or the parser (python juxtaposes
+// no two numbers, so `0123` is a parse error either way). `recover_in_context`
+// pins that, triangulated against the Python Lark oracle.
 //
-// This is proven here on **lark-rs itself** (guarded routes to `fancy-regex`,
-// guard-free to `regex`); the same equivalence was independently confirmed on
-// the Python Lark oracle (language + tree equality over the same witnesses), so
-// the result is triangulated. `STRING` is the contrast: its guard *does* change
-// the language (`""""`), pinned by `test_stdlib.rs`'s end-to-end reject.
+// **But recovery is a property of the *context*, not the terminal.** These
+// terminals are `%import`-able, and a user grammar can supply a context with no
+// recovering layer — `start: NUMBER+` lets two numbers juxtapose; `OP` beside a
+// plain `NAME=/[a-z]+/` has nothing to absorb `?foo`. There the guard is
+// load-bearing again, and a guard-free copy DIVERGES from Python Lark.
+// `recovery_fails_under_adversarial_import` pins exactly that. The consequence
+// for E4: lark-rs cannot simply *delete* these guards (it would mis-parse
+// imports); it must *preserve* their match function — which, like `STRING`, is a
+// fixed-width boundary assertion, so the narrow boundary guard covers it. No
+// Pike VM, but the primitive is needed for all three, not `STRING` alone.
 mod recovery {
     use super::*;
 
-    /// Parse with both grammars and compare results as `Option<tree>` — `None`
-    /// for reject (so two rejects compare equal), `Some(tree)` for accept (so two
-    /// accepts must produce identical trees). Returns the per-input verdicts.
-    fn compare(guarded: &str, guardfree: &str, corpus: &[&str]) -> Vec<(String, bool, bool)> {
+    /// Build both grammars, parse each input, and return per-input verdicts as
+    /// `Option<tree-dump>` (`None` = reject). `assert_equal` selects whether the
+    /// two grammars must agree (recovery holds) or are merely compared (recovery
+    /// may fail). `ParseTree` is not `PartialEq`, so we compare Debug renderings.
+    fn run(
+        guarded: &str,
+        guardfree: &str,
+        corpus: &[&str],
+        assert_equal: bool,
+    ) -> Vec<(String, Option<String>, Option<String>)> {
         let g = Lark::new(guarded, LarkOptions::default()).expect("guarded grammar builds");
         let f = Lark::new(guardfree, LarkOptions::default()).expect("guard-free grammar builds");
-        // `ParseTree` is not `PartialEq`, so compare structural Debug renderings:
-        // `None` for reject (two rejects compare equal), `Some(dump)` for accept
-        // (two accepts must produce identical trees).
         let dump = |r: Result<lark_rs::ParseTree, _>| r.ok().map(|t| format!("{t:?}"));
         corpus
             .iter()
             .map(|&s| {
                 let (ga, fa) = (dump(g.parse(s)), dump(f.parse(s)));
-                assert_eq!(
-                    ga, fa,
-                    "guarded vs guard-free disagree on {s:?} — guard is NOT grammar-recoverable"
-                );
-                (s.to_string(), ga.is_some(), fa.is_some())
+                if assert_equal {
+                    assert_eq!(
+                        ga, fa,
+                        "guarded vs guard-free disagree on {s:?} — guard is NOT grammar-recoverable"
+                    );
+                }
+                (s.to_string(), ga, fa)
             })
+            .collect()
+    }
+
+    /// Recovery holds in the given (bundled-style) context: assert equality.
+    fn compare(guarded: &str, guardfree: &str, corpus: &[&str]) -> Vec<(String, bool, bool)> {
+        run(guarded, guardfree, corpus, true)
+            .into_iter()
+            .map(|(s, ga, fa)| (s, ga.is_some(), fa.is_some()))
             .collect()
     }
 
@@ -639,5 +657,50 @@ NUMBER: "1".."9" ("_"? "0".."9")* | "0" ("_"? "0")* /(?![1-9])/
             verdicts.iter().any(|(s, ga, _)| s == "0123" && !*ga),
             "corpus must exercise the leading-zero case `0123` (rejected both ways)"
         );
+    }
+
+    /// **The adversarial counter-result.** Recovery is context-local: imported
+    /// into a grammar without the recovering layer, dropping the guard CHANGES
+    /// the language (guarded rejects, guard-free accepts) — diverging from Python
+    /// Lark, which always keeps the guard. So E4 must preserve these guards'
+    /// match functions (via the boundary primitive), not delete them. Confirmed
+    /// against the oracle, which agrees the guarded form rejects each witness.
+    #[test]
+    fn recovery_fails_under_adversarial_import() {
+        // `DEC_NUMBER` where two numbers can juxtapose: guard-free reads `0123`
+        // as `0`,`123` and the `NUMBER+` start accepts it; guarded rejects.
+        let dec_guarded = concat!(
+            "start: NUMBER+\n",
+            "NUMBER: \"1\"..\"9\" (\"_\"? \"0\"..\"9\")* | \"0\" (\"_\"? \"0\")* /(?![1-9])/\n",
+            "%ignore \" \"\n"
+        );
+        let dec_guardfree = dec_guarded.replace(" /(?![1-9])/", "");
+        let dec = run(dec_guarded, &dec_guardfree, &["0123", "001", "007"], false);
+        for (s, ga, fa) in &dec {
+            assert!(
+                ga.is_none() && fa.is_some(),
+                "DEC_NUMBER import: expected guarded-reject / guard-free-accept on {s:?}, \
+                 got guarded={ga:?} guard-free={fa:?}"
+            );
+        }
+
+        // `OP` beside a plain `NAME` (nothing absorbs `?foo`): guard-free reads
+        // `?foo` as `OP("?")`,`NAME("foo")` and accepts; guarded rejects (the `?`
+        // is unlexable once `OP` declines it).
+        let op_guarded = concat!(
+            "start: (OP | NAME)+\n",
+            "OP: /[+*]|[?](?![a-z])/\n",
+            "NAME: /[a-z]+/\n",
+            "%ignore \" \"\n"
+        );
+        let op_guardfree = op_guarded.replace("[?](?![a-z])", "[?]");
+        let op = run(op_guarded, &op_guardfree, &["?a", "?foo"], false);
+        for (s, ga, fa) in &op {
+            assert!(
+                ga.is_none() && fa.is_some(),
+                "OP import: expected guarded-reject / guard-free-accept on {s:?}, \
+                 got guarded={ga:?} guard-free={fa:?}"
+            );
+        }
     }
 }
