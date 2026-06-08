@@ -231,8 +231,11 @@ impl Node {
 /// by the lexer, exactly as today).
 ///
 /// Errors only on structurally malformed input the regex engines would also
-/// reject (unbalanced `(`/`)`, an unterminated character class). Everything the
-/// `regex` crate or `fancy-regex` accepts parses here.
+/// reject (unbalanced `(`/`)`, an unterminated character class). Every pattern the
+/// `regex` crate or `fancy-regex` accepts parses here, **except** a *named*
+/// backreference (`(?P=name)` / `\k<name>`), which takes the named-group path and
+/// errors — the safe direction (reject), since a backref is not a regular language
+/// the lowering can accept anyway.
 ///
 /// [`PatternRe`]: crate::grammar::terminal::PatternRe
 pub fn parse(pattern: &str) -> Result<Node, GrammarError> {
@@ -401,6 +404,17 @@ impl Parser<'_> {
             });
         }
 
+        // Bodiless inline-flag group `(?imsx)` / `(?i-s)` — the `regex` crate accepts
+        // it; it sets flags for the rest of the *enclosing* group and has no body of
+        // its own. Keep it verbatim as a zero-width [`Node::Atom`] so the tree still
+        // round-trips and carries no assertion. (A flag-*scoped* `(?flags:…)` has a
+        // body and stays on the group path below.)
+        if self.at(1) == Some('?') {
+            if let Some(text) = self.try_bodiless_flag_group() {
+                return Ok(Node::Atom(text));
+            }
+        }
+
         // An ordinary group. Capture the exact opening delimiter so re-emission is
         // byte-identical: `(`, `(?:`, `(?P<name>`, `(?<name>`, `(?flags:`.
         let open = self.consume_group_open()?;
@@ -412,6 +426,33 @@ impl Parser<'_> {
             body: Box::new(body),
             quant,
         })
+    }
+
+    /// If the upcoming construct is a *bodiless* inline-flag group `(?<flags>)` —
+    /// flag letters (and `-`) followed immediately by `)`, no `:` and no body —
+    /// consume it and return its verbatim source. Otherwise consume nothing and
+    /// return `None` (so `(?:`, `(?flags:…)`, `(?P<name>`, `(?<name>`, the
+    /// assertions, and a named backref `(?P=name)` all stay on their own paths).
+    fn try_bodiless_flag_group(&mut self) -> Option<String> {
+        // self.peek() == '(' and self.at(1) == '?'
+        let start = self.pos;
+        let mut i = self.pos + 2; // past "(?"
+        let mut saw_flag = false;
+        while let Some(c) = self.chars.get(i).copied() {
+            if c.is_ascii_alphabetic() || c == '-' {
+                saw_flag = true;
+                i += 1;
+            } else {
+                break;
+            }
+        }
+        if saw_flag && self.chars.get(i).copied() == Some(')') {
+            let text: String = self.chars[start..=i].iter().collect();
+            self.pos = i + 1; // past the ')'
+            Some(text)
+        } else {
+            None
+        }
     }
 
     /// Consume and return a group's opening delimiter (everything from `(` up to and
@@ -435,33 +476,29 @@ impl Parser<'_> {
             Some('<') => {
                 self.consume_named_group_open(&mut open)?;
             }
-            // Non-capturing or flag-scoped: copy through the ':' (or the closing ')'
-            // of a bodiless inline-flag group, which `parse_paren`'s caller path does
-            // not reach — a `(?flags)` has no body, so handle it as an atom instead).
-            _ => {
-                // Copy flag letters / ':' until we hit ':' (scoped group) — a
-                // bodiless `(?flags)` was already routed to the atom path because it
-                // contains no ':' before ')'. Guard against that here.
-                loop {
-                    match self.peek() {
-                        Some(':') => {
-                            open.push(':');
-                            self.pos += 1;
-                            break;
-                        }
-                        Some(')') | None => {
-                            return Err(self.err(
-                                "unsupported or bodiless group construct '(?…)'; \
+            // Non-capturing or flag-scoped `(?flags:…)`: copy through the ':'. A
+            // *bodiless* `(?flags)` never reaches here — `parse_paren` routes it to
+            // the atom path via `try_bodiless_flag_group` first — so hitting `)`
+            // before a ':' is a genuinely malformed/unsupported group.
+            _ => loop {
+                match self.peek() {
+                    Some(':') => {
+                        open.push(':');
+                        self.pos += 1;
+                        break;
+                    }
+                    Some(')') | None => {
+                        return Err(self.err(
+                            "unsupported or bodiless group construct '(?…)'; \
                                  expected a ':' before ')'",
-                            ));
-                        }
-                        Some(c) => {
-                            open.push(c);
-                            self.pos += 1;
-                        }
+                        ));
+                    }
+                    Some(c) => {
+                        open.push(c);
+                        self.pos += 1;
                     }
                 }
-            }
+            },
         }
         Ok(open)
     }
@@ -593,6 +630,10 @@ mod tests {
             "(a|b)*c",
             "(?:ab)+",
             "(?i:foo)",
+            "(?i)abc",      // bodiless inline-flag group (regex-crate accepts it)
+            "(?ms)x",       // multiple flags, bodiless
+            "(?i-s)y",      // flag set + clear, bodiless
+            "a(?i)b(?-i)c", // flag toggles mid-pattern
             "(?P<x>ab)",
             "(?<name>ab)",
             "\\(\\)\\|\\[", // escaped metacharacters
@@ -702,5 +743,19 @@ mod tests {
         assert!(parse("(ab").is_err());
         assert!(parse("ab)").is_err());
         assert!(parse("(?=ab").is_err());
+    }
+
+    #[test]
+    fn bodiless_inline_flag_group_parses_and_has_no_assertion() {
+        // Regression for the front-end contract: a bodiless `(?flags)` is accepted by
+        // the `regex` crate, so it must parse here (not error like a malformed group)
+        // and round-trip — it carries no assertion, so it is a plain terminal.
+        for p in ["(?i)abc", "(?ms)x", "(?i-s)y", "a(?i)b(?-i)c"] {
+            let node = parse(p).unwrap_or_else(|e| panic!("parse {p:?} failed: {e:?}"));
+            assert_eq!(node.to_source(), p, "round-trip mismatch for {p:?}");
+            assert!(!node.has_assertion(), "{p:?} has no assertion");
+        }
+        // A flag-*scoped* group still has a body and is preserved as a group.
+        assert!(parse("(?i:abc)").unwrap().to_source() == "(?i:abc)");
     }
 }

@@ -85,6 +85,9 @@ pub enum Rejection {
     Nested,
     /// A lookbehind whose body has no finite maximum width — `(?<!a*)`.
     VariableWidthBehind,
+    /// The assertion itself carries a quantifier — `(?=a)?`, `(?!b){0}`. Degenerate
+    /// and priority-entangled; rejected rather than guessed (reject-when-unsure).
+    QuantifiedAssertion,
 }
 
 impl Rejection {
@@ -117,6 +120,10 @@ impl Rejection {
                  the history window it needs is unbounded. Use a fixed-width \
                  lookbehind."
             }
+            Rejection::QuantifiedAssertion => {
+                "the assertion carries a quantifier (e.g. `(?=…)?`), which is \
+                 degenerate and priority-entangled. Remove the quantifier."
+            }
         }
     }
 }
@@ -142,6 +149,8 @@ pub struct AssertionInfo {
     pub position: Position,
     pub has_backref: bool,
     pub has_nested: bool,
+    /// Whether the assertion node itself carries a trailing quantifier (`(?=a)?`).
+    pub has_quant: bool,
 }
 
 impl AssertionInfo {
@@ -154,6 +163,9 @@ impl AssertionInfo {
         }
         if self.has_nested {
             return Verdict::Rejected(Rejection::Nested);
+        }
+        if self.has_quant {
+            return Verdict::Rejected(Rejection::QuantifiedAssertion);
         }
         match (self.look, self.width) {
             // A bounded lookbehind is lowerable wherever it sits (carried in state).
@@ -319,7 +331,7 @@ fn assertion_source(neg: bool, look: Look, body: &Node) -> String {
     format!("{open}{})", body.to_source())
 }
 
-fn make_info(neg: bool, look: Look, body: &Node, position: Position) -> AssertionInfo {
+fn make_info(neg: bool, look: Look, body: &Node, quant: &str, position: Position) -> AssertionInfo {
     AssertionInfo {
         source: assertion_source(neg, look, body),
         neg,
@@ -328,6 +340,7 @@ fn make_info(neg: bool, look: Look, body: &Node, position: Position) -> Assertio
         position,
         has_backref: has_backref(body),
         has_nested: body.has_assertion(),
+        has_quant: !quant.is_empty(),
     }
 }
 
@@ -353,18 +366,24 @@ fn walk_branch(node: &Node, out: &mut Vec<AssertionInfo>) {
             let n = parts.len();
             for (idx, p) in parts.iter().enumerate() {
                 if let Node::Assertion {
-                    neg, look, body, ..
+                    neg,
+                    look,
+                    body,
+                    quant,
                 } = p
                 {
                     let position = boundary_position(*look, idx == 0, idx + 1 == n);
-                    out.push(make_info(*neg, *look, body, position));
+                    out.push(make_info(*neg, *look, body, quant, position));
                 } else {
                     walk_internal(p, out);
                 }
             }
         }
         Node::Assertion {
-            neg, look, body, ..
+            neg,
+            look,
+            body,
+            quant,
         } => {
             // A bare assertion is both ends; treat a bare lookahead as trailing
             // (the guarded-accept framing) and a bare lookbehind position-free.
@@ -372,6 +391,7 @@ fn walk_branch(node: &Node, out: &mut Vec<AssertionInfo>) {
                 *neg,
                 *look,
                 body,
+                quant,
                 boundary_position(*look, true, true),
             ));
         }
@@ -396,9 +416,12 @@ fn walk_internal(node: &Node, out: &mut Vec<AssertionInfo>) {
     match node {
         Node::Atom(_) => {}
         Node::Assertion {
-            neg, look, body, ..
+            neg,
+            look,
+            body,
+            quant,
         } => {
-            out.push(make_info(*neg, *look, body, Position::Internal));
+            out.push(make_info(*neg, *look, body, quant, Position::Internal));
         }
         Node::Concat(parts) | Node::Alt(parts) => {
             for p in parts {
@@ -577,7 +600,11 @@ fn parse_brace(chars: &[char], start: usize) -> Option<(Option<usize>, usize)> {
     }
 }
 
-/// Whether `node` contains a backreference (`\1` … `\9`) in any atom.
+/// Whether `node` contains a backreference in any atom. Covers the numeric form
+/// (`\1` … `\9`) and the named/indexed forms (`\k<name>`, `\k'name'`, `\g{1}`) — a
+/// backref is not a regular language, so the conservative gate must catch all of
+/// them, not just `\1`. (A *named* backref `(?P=name)` never reaches here: the
+/// front-end errors on it; this covers the escape-spelled variants.)
 fn has_backref(node: &Node) -> bool {
     match node {
         Node::Atom(s) => atom_has_backref(s),
@@ -592,10 +619,12 @@ fn atom_has_backref(atom: &str) -> bool {
     let mut i = 0;
     while i < chars.len() {
         if chars[i] == '\\' {
-            if let Some(&n) = chars.get(i + 1) {
-                if ('1'..='9').contains(&n) {
-                    return true;
-                }
+            match chars.get(i + 1) {
+                // Numeric backref `\1` … `\9`.
+                Some(n) if ('1'..='9').contains(n) => return true,
+                // Named / indexed backref `\k<name>`, `\k'name'`, `\g{1}`, `\g<1>`.
+                Some('k') | Some('g') => return true,
+                _ => {}
             }
             i += 2; // skip the escape pair
         } else {
@@ -731,8 +760,18 @@ mod tests {
 
     #[test]
     fn backref_rejected() {
+        // Numeric backref.
         assert_eq!(
             verdicts(r#"(a)(?=\1)b"#),
+            vec![Verdict::Rejected(Rejection::Backref)]
+        );
+        // Named / indexed escape-spelled backrefs must reject too (conservative gate).
+        assert_eq!(
+            verdicts(r#"(?<name>a)(?=\k<name>)b"#),
+            vec![Verdict::Rejected(Rejection::Backref)]
+        );
+        assert_eq!(
+            verdicts(r#"(a)(?=\g{1})b"#),
             vec![Verdict::Rejected(Rejection::Backref)]
         );
     }
@@ -743,6 +782,27 @@ mod tests {
             verdicts("(?=(?!a)b)c"),
             vec![Verdict::Rejected(Rejection::Nested)]
         );
+    }
+
+    #[test]
+    fn quantified_assertion_rejected() {
+        // A quantifier on the assertion itself is degenerate — reject when unsure.
+        assert_eq!(
+            verdicts("(?=a)?[a-z]+"),
+            vec![Verdict::Rejected(Rejection::QuantifiedAssertion)]
+        );
+        assert_eq!(
+            verdicts("[0-9]+(?![0-9]){2}"),
+            vec![Verdict::Rejected(Rejection::QuantifiedAssertion)]
+        );
+    }
+
+    /// A bodiless inline-flag group `(?i)` is a plain terminal (no lookaround) — the
+    /// front-end fix means `classify` no longer errors on it.
+    #[test]
+    fn bodiless_inline_flag_group_is_plain() {
+        assert!(classify("(?i)[a-z]+").unwrap().is_plain());
+        assert!(classify("(?ms)a(?-s)b").unwrap().is_plain());
     }
 
     #[test]

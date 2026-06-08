@@ -109,27 +109,52 @@ pub fn lowered_prefix(name: &str, _pattern: &str, _input: &str) -> Result<Option
 
 // ─── Supported-shape generators ────────────────────────────────────────────────
 
-/// A deterministic alphabet for a generated terminal: every literal-ish char that
-/// appears in the pattern, plus a couple of generic representatives, deduplicated
-/// and capped so the exhaustive corpus stays small. Order is fixed.
+/// Decode an escaped *literal* trigger char `\X` into the char it stands for, or
+/// `None` if `X` is a character *class* (`\d`, `\w`, `\b`, …) rather than a literal.
+/// This is what lets an escaped guard char (`\.`, `\\`, `\/`) enter the corpus —
+/// without it, a guard whose trigger is escaped is never exercised and a lowering
+/// that ignores the guard would pass vacuously (the `DEC_NUMBER`-length-change lesson
+/// the plan invokes, reappearing in the generator).
+fn decode_escape_literal(x: char) -> Option<char> {
+    match x {
+        'n' => Some('\n'),
+        't' => Some('\t'),
+        'r' => Some('\r'),
+        // Class / assertion escapes — *not* literals, no single trigger char.
+        c if c.is_ascii_alphanumeric() => None,
+        // Everything else (`.`, `\`, `/`, `"`, `'`, `(`, `-`, …) is a literal.
+        c => Some(c),
+    }
+}
+
+/// A deterministic alphabet for a generated terminal. **Trigger literals first**:
+/// the literal chars the pattern names — *including escaped ones* (`\.` → `.`,
+/// `\\` → `\`) — so a guard's trigger always enters the exhaustive corpus and a
+/// lowering that ignores the guard cannot pass vacuously. Then the generic
+/// representatives `['a','x','0']` (so a match and a miss are always reachable),
+/// deduplicated and capped. The trigger-first order is what keeps the cap from
+/// crowding out the load-bearing char.
 fn quotient_alphabet(pattern: &str) -> Vec<char> {
     let mut out: Vec<char> = Vec::new();
-    let push = |c: char, out: &mut Vec<char>| {
+    let mut push = |c: char, out: &mut Vec<char>| {
         if !out.contains(&c) {
             out.push(c);
         }
     };
-    // Generic representatives first so every corpus exercises a "match" and a "miss".
-    for c in ['a', 'x', '0'] {
-        push(c, &mut out);
-    }
-    // Literal characters from the pattern (skip regex metacharacters / escapes).
+
+    // Pass 1 — literal characters named in the pattern, decoding escapes, FIRST.
     let chars: Vec<char> = pattern.chars().collect();
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
         match c {
-            '\\' => i += 2, // skip the escape pair
+            '\\' => {
+                if let Some(x) = chars.get(i + 1).copied().and_then(decode_escape_literal) {
+                    push(x, &mut out);
+                }
+                i += 2; // skip the escape pair either way
+            }
+            // Regex metacharacters carry no literal trigger of their own.
             '(' | ')' | '[' | ']' | '{' | '}' | '?' | '!' | '=' | '<' | '>' | '|' | '*' | '+'
             | '.' | '^' | '$' | '-' | ':' => i += 1,
             _ => {
@@ -138,7 +163,13 @@ fn quotient_alphabet(pattern: &str) -> Vec<char> {
             }
         }
     }
-    out.truncate(4); // ≤4 distinct chars keeps the exhaustive corpus tractable
+    // Pass 2 — generic representatives so every corpus exercises a "match" and a
+    // "miss" even when the pattern names no plain literal.
+    for c in ['a', 'x', '0'] {
+        push(c, &mut out);
+    }
+
+    out.truncate(5); // small enough that the exhaustive corpus stays tractable
     out
 }
 
@@ -317,8 +348,14 @@ pub fn reject_cases() -> Vec<RejectCase> {
         mk(p.to_string(), Rejection::Internal, &mut out);
     }
 
-    // Backreference inside the assertion body.
-    let backref = [r"(a)(?=\1)b", r"(ab)(?!\1)c", r"(.)x(?=\1)"];
+    // Backreference inside the assertion body — numeric and named/indexed escapes.
+    let backref = [
+        r"(a)(?=\1)b",
+        r"(ab)(?!\1)c",
+        r"(.)x(?=\1)",
+        r"(?<n>a)(?=\k<n>)b",
+        r"(a)(?!\g{1})b",
+    ];
     for p in backref {
         mk(p.to_string(), Rejection::Backref, &mut out);
     }
@@ -340,6 +377,12 @@ pub fn reject_cases() -> Vec<RejectCase> {
         mk(p.to_string(), Rejection::VariableWidthBehind, &mut out);
     }
 
+    // Quantifier on the assertion itself — degenerate, reject-when-unsure.
+    let quantified = [r"(?=a)?[a-z]+", r"[0-9]+(?![0-9]){2}", r"(?!b)*x"];
+    for p in quantified {
+        mk(p.to_string(), Rejection::QuantifiedAssertion, &mut out);
+    }
+
     out
 }
 
@@ -357,6 +400,7 @@ fn force_supported(
     info.width = Some(1);
     info.has_backref = false;
     info.has_nested = false;
+    info.has_quant = false;
     debug_assert!(matches!(info.verdict(), Verdict::Supported(_)));
     info
 }
@@ -380,47 +424,16 @@ impl Classifier for AcceptEverything {
     }
 }
 
-/// A mutant that keeps the real verdicts *except* it turns an internal lookahead
-/// into a (false) trailing boundary — the subtle "priority-entangled is fine"
-/// mistake the plan warns about.
-struct InternalIsTrailing;
-impl Classifier for InternalIsTrailing {
+/// A mutant that keeps the real verdicts *except* it wrongly accepts one specific
+/// rejection reason (turning it into a false boundary). One subtle-mistake mutant
+/// per out-of-shape category, so the reject corpus must catch each category on its
+/// own — not only via the crude `AcceptEverything`.
+struct FlipReason(Rejection);
+impl Classifier for FlipReason {
     fn classify(&self, pattern: &str) -> Result<Classification, lark_rs::GrammarError> {
         let mut c = classify(pattern)?;
         for a in &mut c.assertions {
-            if matches!(a.verdict(), Verdict::Rejected(Rejection::Internal)) {
-                *a = force_supported(a.clone());
-            }
-        }
-        Ok(c)
-    }
-}
-
-/// A mutant that ignores unbounded width — treats an unbounded lookahead as a
-/// bounded boundary assertion.
-struct UnboundedIsFine;
-impl Classifier for UnboundedIsFine {
-    fn classify(&self, pattern: &str) -> Result<Classification, lark_rs::GrammarError> {
-        let mut c = classify(pattern)?;
-        for a in &mut c.assertions {
-            if matches!(a.verdict(), Verdict::Rejected(Rejection::Unbounded)) {
-                *a = force_supported(a.clone());
-            }
-        }
-        Ok(c)
-    }
-}
-
-/// A mutant that accepts variable-width lookbehind.
-struct VarBehindIsFine;
-impl Classifier for VarBehindIsFine {
-    fn classify(&self, pattern: &str) -> Result<Classification, lark_rs::GrammarError> {
-        let mut c = classify(pattern)?;
-        for a in &mut c.assertions {
-            if matches!(
-                a.verdict(),
-                Verdict::Rejected(Rejection::VariableWidthBehind)
-            ) {
+            if a.verdict() == Verdict::Rejected(self.0) {
                 *a = force_supported(a.clone());
             }
         }
@@ -429,8 +442,10 @@ impl Classifier for VarBehindIsFine {
 }
 
 /// The mutants that should be caught **by the reject corpus** (each wrongly accepts
-/// at least one out-of-shape assertion). Equivalence-layer mutants (forget the
-/// parity flip, off-by-one width, …) activate per shape in a later session.
+/// at least one out-of-shape assertion): the crude accept-everything plus one
+/// per-reason "this category is fine" mistake, so every rejection reason is
+/// independently defended. Equivalence-layer mutants (forget the parity flip,
+/// off-by-one width, …) activate per shape in a later session.
 pub fn reject_path_mutants() -> Vec<Mutant> {
     vec![
         Mutant {
@@ -438,16 +453,28 @@ pub fn reject_path_mutants() -> Vec<Mutant> {
             classifier: Box::new(AcceptEverything),
         },
         Mutant {
-            name: "internal-is-trailing",
-            classifier: Box::new(InternalIsTrailing),
+            name: "internal-is-fine",
+            classifier: Box::new(FlipReason(Rejection::Internal)),
         },
         Mutant {
             name: "unbounded-is-fine",
-            classifier: Box::new(UnboundedIsFine),
+            classifier: Box::new(FlipReason(Rejection::Unbounded)),
         },
         Mutant {
             name: "var-behind-is-fine",
-            classifier: Box::new(VarBehindIsFine),
+            classifier: Box::new(FlipReason(Rejection::VariableWidthBehind)),
+        },
+        Mutant {
+            name: "backref-is-fine",
+            classifier: Box::new(FlipReason(Rejection::Backref)),
+        },
+        Mutant {
+            name: "nested-is-fine",
+            classifier: Box::new(FlipReason(Rejection::Nested)),
+        },
+        Mutant {
+            name: "quantified-is-fine",
+            classifier: Box::new(FlipReason(Rejection::QuantifiedAssertion)),
         },
     ]
 }

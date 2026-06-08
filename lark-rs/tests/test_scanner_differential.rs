@@ -138,6 +138,12 @@ struct Differential {
     /// rather than compared. Each flips to a gated comparison the moment its shape's
     /// lowering lands and [`lower_terminal`] starts returning `Ok` for it.
     pending: usize,
+    /// Lookaround grammars actually *compared* (their lowering landed) — a
+    /// **dedicated** counter, separate from the shared `grammars`/`compared` the
+    /// bank/JSON/Python corpora bump, so the "population is wired in" guard measures
+    /// the lookaround population specifically (not "hundreds of bank grammars exist").
+    lookaround_compared_grammars: usize,
+    lookaround_compared_inputs: usize,
 }
 
 impl Differential {
@@ -147,6 +153,8 @@ impl Differential {
             compared: 0,
             grammars: 0,
             pending: 0,
+            lookaround_compared_grammars: 0,
+            lookaround_compared_inputs: 0,
         }
     }
 
@@ -364,9 +372,18 @@ fn run_python_files(d: &mut Differential) {
 /// A generated single-terminal lookaround grammar: `start: TOK+` over the
 /// generated terminal, plus the raw terminal pattern for the lowerability check.
 fn lookaround_grammar(t: &GenTerminal) -> (String, String) {
-    // Inside `/…/`, a literal `/` must be escaped; the generated patterns carry no
-    // pre-escaped slash, so a blanket replace is safe.
-    let escaped = t.pattern.replace('/', "\\/");
+    // Inside `/…/`, a literal `/` must be escaped as `\/`. Escape only an *unescaped*
+    // slash (one not already preceded by a backslash) so an already-`\/` pattern is
+    // not double-escaped into `\\/`.
+    let mut escaped = String::with_capacity(t.pattern.len());
+    let mut prev_backslash = false;
+    for ch in t.pattern.chars() {
+        if ch == '/' && !prev_backslash {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+        prev_backslash = ch == '\\' && !prev_backslash;
+    }
     let grammar = format!("start: {name}+\n{name}: /{escaped}/\n", name = t.name);
     (grammar, t.pattern.clone())
 }
@@ -394,9 +411,9 @@ fn run_lookaround_grammars(d: &mut Differential) {
                 // shape lands it returns Ok → the same grammar flips to a gated
                 // token-stream comparison automatically.
                 if lower_terminal(&t.name, &pattern).is_ok() {
-                    d.grammars += 1;
+                    d.lookaround_compared_grammars += 1;
                     for input in corpus(&t.alphabet, t.max_len) {
-                        d.compared += 1;
+                        d.lookaround_compared_inputs += 1;
                         let oa = lex_outcome(a, &input);
                         let ob = lex_outcome(b, &input);
                         if let Some(diff) = diff_outcomes(&oa, &ob) {
@@ -438,18 +455,21 @@ fn test_scanner_backends_lex_identically() {
 
     eprintln!(
         "scanner differential: {} input(s) across {} grammar(s) compared; \
-         {} lookaround grammar(s) pending lowering; {} divergence(s)",
+         lookaround: {} pending + {} grammar(s)/{} input(s) compared; {} divergence(s)",
         d.compared,
         d.grammars,
         d.pending,
+        d.lookaround_compared_grammars,
+        d.lookaround_compared_inputs,
         d.failures.len()
     );
 
-    // The pending bucket must be non-empty while the lowering is stubbed — otherwise
-    // the lookaround corpus silently dropped out of the differential. (It flips to a
-    // compared count, not zero, once shapes land.)
+    // The lookaround population must be *tracked* — either as pending (lowering
+    // stubbed, this session) or as gated comparisons (once shapes land). Both counters
+    // are lookaround-specific, so this can't be satisfied by the bank/JSON/Python
+    // grammars alone: a silently-dropped lookaround population fails here in either era.
     assert!(
-        d.pending > 0 || d.grammars > 4,
+        d.pending > 0 || d.lookaround_compared_grammars > 0,
         "no lookaround grammars were tracked — the generated population is missing"
     );
 

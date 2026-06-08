@@ -91,7 +91,14 @@ fn mutation_meta_test_catches_wrong_accepts_on_reject_path() {
 fn reject_corpus_covers_every_rejection_reason() {
     use lark_rs::Rejection::*;
     let cases = reject_cases();
-    for reason in [Unbounded, Internal, Backref, Nested, VariableWidthBehind] {
+    for reason in [
+        Unbounded,
+        Internal,
+        Backref,
+        Nested,
+        VariableWidthBehind,
+        QuantifiedAssertion,
+    ] {
         assert!(
             cases.iter().any(|c| c.expected == reason),
             "reject corpus is missing any {reason:?} case"
