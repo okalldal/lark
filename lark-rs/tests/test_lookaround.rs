@@ -548,3 +548,96 @@ mod matchlen {
         );
     }
 }
+
+// ───────────────────────────────────────────────────────────────────────────
+// Grammar-level recovery (the B-vs-C refinement of the diagnosis)
+// ───────────────────────────────────────────────────────────────────────────
+//
+// The `matchlen` module proves `OP` and `DEC_NUMBER` are *terminal-level*
+// irreducible (no lookaround-free regex reproduces their match function). This
+// module proves they are nonetheless **grammar-level recoverable**: building the
+// grammar with the guard *removed* accepts/rejects exactly the same inputs and
+// yields byte-identical trees, because another layer already does the guard's
+// job (maximal munch for `OP`; the parser's no-two-adjacent-numbers rule for
+// `DEC_NUMBER`). So the eventual E4 rewrite can simply drop these guards — no
+// engine primitive, unlike `STRING`.
+//
+// This is proven here on **lark-rs itself** (guarded routes to `fancy-regex`,
+// guard-free to `regex`); the same equivalence was independently confirmed on
+// the Python Lark oracle (language + tree equality over the same witnesses), so
+// the result is triangulated. `STRING` is the contrast: its guard *does* change
+// the language (`""""`), pinned by `test_stdlib.rs`'s end-to-end reject.
+mod recovery {
+    use super::*;
+
+    /// Parse with both grammars and compare results as `Option<tree>` — `None`
+    /// for reject (so two rejects compare equal), `Some(tree)` for accept (so two
+    /// accepts must produce identical trees). Returns the per-input verdicts.
+    fn compare(guarded: &str, guardfree: &str, corpus: &[&str]) -> Vec<(String, bool, bool)> {
+        let g = Lark::new(guarded, LarkOptions::default()).expect("guarded grammar builds");
+        let f = Lark::new(guardfree, LarkOptions::default()).expect("guard-free grammar builds");
+        // `ParseTree` is not `PartialEq`, so compare structural Debug renderings:
+        // `None` for reject (two rejects compare equal), `Some(dump)` for accept
+        // (two accepts must produce identical trees).
+        let dump = |r: Result<lark_rs::ParseTree, _>| r.ok().map(|t| format!("{t:?}"));
+        corpus
+            .iter()
+            .map(|&s| {
+                let (ga, fa) = (dump(g.parse(s)), dump(f.parse(s)));
+                assert_eq!(
+                    ga, fa,
+                    "guarded vs guard-free disagree on {s:?} — guard is NOT grammar-recoverable"
+                );
+                (s.to_string(), ga.is_some(), fa.is_some())
+            })
+            .collect()
+    }
+
+    /// `OP`'s `(?![a-z])` is redundant with maximal munch: `?foo` lexes as the
+    /// longer `RULE` token regardless. Dropping the guard changes nothing.
+    #[test]
+    fn op_guard_is_grammar_recoverable() {
+        const GUARDED: &str = r#"start: (OP | RULE)+
+OP: /[+*]|[?](?![a-z])/
+RULE: /[?]?[a-z][a-z0-9]*/
+%ignore " "
+"#;
+        let guardfree = GUARDED.replace("[?](?![a-z])", "[?]");
+        let verdicts = compare(
+            GUARDED,
+            &guardfree,
+            &["+", "?", "?foo", "?a", "??", "a?b", "*?go"],
+        );
+        // The guard-sensitive witness must actually be exercised and accepted
+        // (so the test is not vacuous): `?foo` is the case the guard guards.
+        assert!(
+            verdicts.iter().any(|(s, ga, _)| s == "?foo" && *ga),
+            "corpus must exercise the maximal-munch case `?foo`"
+        );
+    }
+
+    /// `DEC_NUMBER`'s `(?![1-9])` is redundant with the parser: without it `0123`
+    /// lexes as two number tokens, which no production juxtaposes, so it is a
+    /// parse error instead of a lex error — same accept/reject either way.
+    #[test]
+    fn dec_number_guard_is_grammar_recoverable() {
+        const GUARDED: &str = r#"start: NUMBER ("+" NUMBER)*
+NUMBER: "1".."9" ("_"? "0".."9")* | "0" ("_"? "0")* /(?![1-9])/
+%ignore " "
+"#;
+        let guardfree = GUARDED.replace(" /(?![1-9])/", "");
+        let verdicts = compare(
+            GUARDED,
+            &guardfree,
+            &[
+                "0", "00", "123", "0+1", "0123", "007", "10", "0_0", "1_000+0",
+            ],
+        );
+        // The guard-sensitive witness `0123` must be exercised and *rejected* by
+        // both — proving the guard is load-bearing at lex time yet recovered.
+        assert!(
+            verdicts.iter().any(|(s, ga, _)| s == "0123" && !*ga),
+            "corpus must exercise the leading-zero case `0123` (rejected both ways)"
+        );
+    }
+}

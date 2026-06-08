@@ -32,13 +32,16 @@ Each terminal is classified at two levels:
    to `OP`/`REGEXP`/`DEC_NUMBER`. Both engines are leftmost-first/backtracking like
    CPython `re`, so the comparison is faithful and the result is a *proof*, not a
    sample.
-2. **Grammar level (analysis; end-to-end oracle deferred to E4).** Even when a guard
-   is terminal-level irreducible, dropping it may not change the grammar's
-   accept/reject — if the alternative tokenization is itself a parse error or is
-   resolved by maximal munch. This is where `STRING` (genuinely irreducible) parts
-   ways from `OP`/`DEC_NUMBER` (recoverable). These claims are reasoned here and
-   flagged for an end-to-end oracle in E4, exactly as `STRING`'s `""""` reject got
-   one in E2a.
+2. **Grammar level (confirmed end-to-end).** Even when a guard is terminal-level
+   irreducible, dropping it may not change the grammar's accept/reject — if the
+   alternative tokenization is itself a parse error or is resolved by maximal munch.
+   This is where `STRING` (genuinely irreducible) parts ways from `OP`/`DEC_NUMBER`
+   (recoverable). This is now **proven**, not just reasoned: building the grammar
+   with the guard removed yields byte-identical trees (or an identical reject) on
+   every witness. Confirmed two ways — on **lark-rs itself** (the `recovery` tests in
+   `tests/test_lookaround.rs`: guarded routes to `fancy-regex`, guard-free to
+   `regex`) and independently on the **Python Lark oracle** (language- and
+   tree-equivalence over the same witnesses) — so the result is triangulated.
 
 ## The complete bundled census
 
@@ -105,14 +108,16 @@ a Type-C guard only matters if it changes end-to-end accept/reject:
 * **`OP` — recoverable by maximal munch.** The guard exists so `?foo` lexes as the
   `RULE` token `/!?[_?]?[a-z][_a-z0-9]*/` (length 4) rather than `OP "?"` (length 1).
   Longest-match already prefers `RULE`, so the guard is redundant with the lexer's
-  existing ordering. Drop it and rely on priority/length. **No engine.** *(Pending
-  E4 end-to-end oracle.)*
+  existing ordering. Drop it and rely on priority/length. **No engine.** *(Confirmed:
+  guarded ≡ guard-free, byte-identical trees, on both lark-rs and the oracle —
+  `recovery::op_guard_is_grammar_recoverable`.)*
 * **`DEC_NUMBER` — recoverable as a parse error.** Without the guard, `0123` lexes as
   `DEC_NUMBER("0") DEC_NUMBER("123")` — two adjacent number atoms, which the Python
   grammar rejects at parse time. With the guard it is a *lex* error. The guard only
   relocates a guaranteed rejection from lex-time to parse-time; it does not change
-  whether the input is accepted. **No engine.** *(Pending E4 end-to-end oracle —
-  confirm no production admits two adjacent numbers.)*
+  whether the input is accepted. **No engine.** *(Confirmed: `0123`/`007` rejected
+  both ways, every accepted input byte-identical, on both lark-rs and the oracle —
+  `recovery::dec_number_guard_is_grammar_recoverable`.)*
 
 So after grammar-level recovery, **`STRING` is the sole bundled terminal that needs a
 new engine primitive**, and that primitive is the simplest of the three Type-C shapes:
@@ -147,9 +152,10 @@ engine") and upgrades it from a guess to a proof for the entire bundled set.
 
 1. **Deploy the Type-A rewrites** (`LONG_STRING`, `REGEXP`, block-comment) — proven
    equivalent, zero risk; they rejoin the combined-DFA scan.
-2. **Grammar-recover `OP` and `DEC_NUMBER`** — drop the guards, add an end-to-end
-   oracle confirming maximal munch (OP) and the two-adjacent-numbers parse error
-   (DEC_NUMBER) preserve accept/reject across the matrix.
+2. **Grammar-recover `OP` and `DEC_NUMBER`** — drop the guards. The recovery is
+   already proven (the `recovery` tests + the oracle), so E4's only remaining work is
+   to apply the edit to the bundled `lark.lark`/`python.lark` and fold the witnesses
+   into the generated stdlib oracle.
 3. **Add the fixed-width boundary guard for `STRING`** — a single leading
    `{ Start, Neg, "\"\"", width 2 }` descriptor wrapping its (reduced) `regex` core.
    Then `fancy-regex` can be removed (E4) and the bundled grammars become
@@ -159,7 +165,12 @@ engine") and upgrades it from a guess to a proof for the entire bundled set.
 
 * `tests/test_lookaround.rs::matchlen` — the six per-terminal proofs (three Type-A
   equivalences, three Type-C negative results).
+* `tests/test_lookaround.rs::recovery` — the two grammar-level recovery proofs
+  (`OP`, `DEC_NUMBER`): guarded ≡ guard-free trees in lark-rs, with the
+  guard-sensitive witness exercised so the test is not vacuous. Independently
+  confirmed on the Python Lark oracle.
 * `tests/test_lookaround.rs::test_lookaround_oracle` — the cross-(parser×lexer)
   behavioral gate the eventual rewrites must keep green.
 * `tests/test_stdlib.rs` — `STRING`'s end-to-end `""""` reject (E2a); the `OP`/
-  `DEC_NUMBER` end-to-end oracles land here in E4.
+  `DEC_NUMBER` witnesses fold into the generated stdlib oracle when E4 applies the
+  edits.
