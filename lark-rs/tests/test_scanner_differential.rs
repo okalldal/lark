@@ -22,11 +22,10 @@
 //! `ContextualLexer` shares the same `match_at` seam, so the engine swap is covered
 //! by construction.
 //!
-//! Until the L1 `DfaScanner` lands, both backends build the same `Scanner`, so this
-//! is trivially green — it validates the harness (token-stream equality, error-
-//! position equality, corpus plumbing) before the real engine swap, so a later
-//! divergence localizes cleanly to the new code. It runs as part of
-//! `cargo test --all` (the `scripts/check.sh` gate).
+//! The L1 `DfaScanner` is live behind [`LexerBackend::Dfa`], so this drives the
+//! real engine swap: every divergence here is a genuine `regex` vs `regex-automata`
+//! difference, localized to `match_at`. It runs as part of `cargo test --all` (the
+//! `scripts/check.sh` gate).
 
 mod common;
 

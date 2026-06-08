@@ -30,8 +30,10 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use regex::{CaptureLocations, Regex};
 use regex_automata::{
     dfa::{dense, Automaton, StartKind},
+    hybrid::dfa::DFA as LazyDfa,
+    meta::Regex as MetaRegex,
     util::primitives::StateID,
-    Anchored, Input,
+    Anchored, Input, MatchKind,
 };
 
 use crate::error::{GrammarError, ParseError};
@@ -455,6 +457,194 @@ impl Scanner {
     }
 }
 
+// ─── DfaScanner: the combined scanner on a regex-automata multi-pattern DFA ────
+
+/// The L1 combined scanner (`docs/LEXER_DFA_PLAN.md`). Same contract and selection
+/// rules as [`Scanner`] — leftmost-first ranking, `unless` retyping, `fancy-regex`
+/// side-probes — but the *plain* (lookaround-free) terminals are matched by one
+/// [`regex_automata::meta::Regex`] over all of them (`new_many`, returning a
+/// `PatternID`) instead of the `regex`-crate alternation-with-capture-groups trick.
+///
+/// Why this is byte-identical to [`Scanner`]:
+///
+///   * The plain patterns are handed to `new_many` **in rank order**, so `PatternID`
+///     *is* the rank. Configured `MatchKind::LeftmostFirst`, the meta engine resolves
+///     a same-start tie by **pattern order** (lowest `PatternID` wins) with that
+///     pattern's own greedy length — exactly Python-`re`'s leftmost-first, the same
+///     semantics the `regex`-crate alternation gives (verified: `[ab|abc]` at `"abc"`
+///     picks pattern 0, length 2, *not* the longest match).
+///   * The match is **anchored** at `pos` (`Anchored::Yes` over `pos..len`), so it
+///     can only begin exactly at `pos` and never forward-scans — strictly safer than
+///     the `regex`-crate `captures_read_at` (which is leftmost and relies on a
+///     `start() == pos` reject). A zero-width match is rejected, mirroring `Scanner`.
+///   * The `fancy` list, the rank-merge between the plain and fancy candidates, and
+///     the `unless` retype are **copied verbatim** from `Scanner`: only the
+///     plain-terminal engine changes.
+///
+/// The `regex` crate's combined alternation came with a free literal prefilter; an
+/// *anchored* search makes the meta engine's own (forward-scanning) prefilter
+/// dormant, so we re-add an explicit **start-byte prefilter** (`start_bytes`): the
+/// set of bytes any plain terminal can begin with, computed once from a lazy DFA
+/// over the plain union. When the byte at `pos` isn't in it we skip the plain engine
+/// entirely. It is an over-approximation by construction (a possible start byte is
+/// never dropped), so it can only ever *save* an engine call, never change a match —
+/// the L0 differential oracle is the proof.
+struct DfaScanner {
+    /// Multi-pattern leftmost-first engine over the plain terminals, or `None` when
+    /// every candidate is a lookaround terminal. `PatternID i` indexes `plain[i]`.
+    re: Option<MetaRegex>,
+    /// `PatternID` → (terminal id, rank), parallel to the patterns given to
+    /// `new_many` (rank order), so a plain match's rank can be compared against a
+    /// fancy match's.
+    plain: Vec<(SymbolId, usize)>,
+    /// Start-byte prefilter for the plain engine (see the struct docs). `None`
+    /// disables it (always run the engine) — the safe default if it can't be built.
+    start_bytes: Option<Box<[bool; 256]>>,
+    /// Lookaround terminals (`fancy-regex`), rank-sorted — identical to [`Scanner`].
+    fancy: Vec<(usize, SymbolId, AnyRegex)>,
+    /// regex-terminal-id → (matched-text → keyword-terminal-id) — identical retype.
+    unless: HashMap<SymbolId, HashMap<String, SymbolId>>,
+}
+
+impl DfaScanner {
+    /// Build a DFA scanner from candidate terminals (deduplicated by id). Consumes
+    /// the same [`ScannerPlan`] as [`Scanner::build`], so selection / ordering /
+    /// `unless` are shared by construction — only the plain engine differs.
+    fn build(
+        terminals: &[(SymbolId, &TerminalDef)],
+        global_flags: u32,
+    ) -> Result<DfaScanner, GrammarError> {
+        let plan = scanner_plan(terminals, global_flags)?;
+        let unless = plan.unless;
+        let prefix = plan.global_prefix;
+
+        // Split the rank-ordered plan into plain terminals (one combined meta DFA)
+        // and lookaround terminals (per-position `fancy-regex` probes), exactly as
+        // `Scanner::build` does. `rank` is the index in the plan's sorted order.
+        let mut patterns: Vec<String> = Vec::new();
+        let mut inlines: Vec<&str> = Vec::new();
+        let mut plain: Vec<(SymbolId, usize)> = Vec::new();
+        let mut fancy: Vec<(usize, SymbolId, AnyRegex)> = Vec::new();
+        for (rank, (id, inline)) in plan.groups.iter().enumerate() {
+            let src = format!("{prefix}{inline}");
+            // Same fancy-detection as `Scanner`: a pattern is fancy iff the `regex`
+            // crate (a subset of `fancy-regex`) rejects it.
+            let compiled = AnyRegex::compile(&src)?;
+            if compiled.is_fancy() {
+                // Anchor the per-position fancy probe with `\G` — identical to
+                // `Scanner::build` (see the comment there).
+                let anchored = AnyRegex::compile(&format!("{prefix}\\G{inline}"))?;
+                fancy.push((rank, *id, anchored));
+            } else {
+                plain.push((*id, rank));
+                inlines.push(inline);
+                patterns.push(src);
+            }
+        }
+
+        let (re, start_bytes) = if patterns.is_empty() {
+            (None, None)
+        } else {
+            // Each plain terminal is its own pattern; the global-flag prefix sits at
+            // the front of every pattern (an inline `(?i)` covers the whole pattern),
+            // mirroring the prefix the `regex`-crate alternation places once at the
+            // front of `(?i)(g0)|(g1)|…`.
+            let re = MetaRegex::builder()
+                .configure(MetaRegex::config().match_kind(MatchKind::LeftmostFirst))
+                .build_many(&patterns)
+                .map_err(|e| GrammarError::InvalidRegex {
+                    pattern: patterns.join("|"),
+                    reason: e.to_string(),
+                })?;
+            // Start-byte prefilter over the plain union `{prefix}(?:i0|i1|…)`.
+            let union = format!("{prefix}(?:{})", inlines.join("|"));
+            (Some(re), plain_start_bytes(&union))
+        };
+
+        Ok(DfaScanner {
+            re,
+            plain,
+            start_bytes,
+            fancy,
+            unless,
+        })
+    }
+
+    /// Match a single token starting exactly at `pos` — the same contract as
+    /// [`Scanner::match_at`], so the two are byte-for-byte interchangeable.
+    fn match_at<'t>(&self, text: &'t str, pos: usize) -> Option<(SymbolId, &'t str)> {
+        // Lowest-rank plain candidate, from the anchored multi-pattern search.
+        let mut best: Option<(usize, SymbolId, &'t str)> = None;
+        if let Some(re) = &self.re {
+            // Start-byte prefilter: skip the engine when no plain terminal can begin
+            // with the byte at `pos`. Over-approximated, so this never hides a match.
+            let runnable = match &self.start_bytes {
+                Some(set) => text.as_bytes().get(pos).is_some_and(|b| set[*b as usize]),
+                None => true,
+            };
+            if runnable {
+                // Anchored at `pos`: the match (if any) begins exactly here and the
+                // search never scans forward — so the per-position cost is bounded by
+                // the matched token's length (charged as a flat 1 to the scan
+                // counter, like an anchored probe).
+                record_scan_skip(pos, Some(pos));
+                let input = Input::new(text)
+                    .span(pos..text.len())
+                    .anchored(Anchored::Yes);
+                if let Some(m) = re.find(input) {
+                    // Reject a zero-width match (no terminal is nullable, but keep the
+                    // guard so the loop can never stall) — mirrors `Scanner`.
+                    if m.end() > pos {
+                        let (id, rank) = self.plain[m.pattern().as_usize()];
+                        best = Some((rank, id, &text[pos..m.end()]));
+                    }
+                }
+            }
+        }
+        // Lowest-rank fancy candidate — verbatim from `Scanner::match_at`.
+        for (rank, id, re) in &self.fancy {
+            if best.is_some_and(|(b, _, _)| *rank > b) {
+                break;
+            }
+            if let Some(end) = re.match_end_at(text, pos) {
+                best = Some((*rank, *id, &text[pos..end]));
+                break;
+            }
+        }
+
+        let (_, id, value) = best?;
+        let ty = self
+            .unless
+            .get(&id)
+            .and_then(|m| m.get(value))
+            .copied()
+            .unwrap_or(id);
+        Some((ty, value))
+    }
+}
+
+/// The set of bytes any branch of the plain union `src` can begin a match with, or
+/// `None` if it cannot be computed (so the prefilter is disabled — always run the
+/// engine). Built from a **lazy** (hybrid) DFA so only the start state and its 256
+/// transitions are realized — no full determinization, hence no blow-up on a large
+/// terminal set. A byte is "possible" iff the anchored start state does not go dead
+/// on it; non-accepting live transitions are kept too, so the set is an
+/// over-approximation (the safe direction: it never drops a real start byte).
+fn plain_start_bytes(src: &str) -> Option<Box<[bool; 256]>> {
+    let dfa = LazyDfa::new(src).ok()?;
+    let mut cache = dfa.create_cache();
+    let anchored = Input::new("").anchored(Anchored::Yes);
+    let start = dfa.start_state_forward(&mut cache, &anchored).ok()?;
+    let mut set = Box::new([false; 256]);
+    for b in 0u8..=255 {
+        let next = dfa.next_state(&mut cache, start, b).ok()?;
+        if !next.is_dead() && !next.is_quit() {
+            set[b as usize] = true;
+        }
+    }
+    Some(set)
+}
+
 // ─── ScannerBackend: the match_at seam over the two combined-scanner engines ───
 
 /// The single insertion point both [`BasicLexer`] and the per-state
@@ -468,22 +658,25 @@ impl Scanner {
 enum ScannerBackend {
     /// The `regex`-crate combined-alternation scanner (today's engine).
     Regex(Scanner),
+    /// The `regex-automata` multi-pattern DFA scanner (phase L1).
+    Dfa(DfaScanner),
 }
 
 impl ScannerBackend {
-    /// Build the backend named by `backend` over the candidate terminals.
-    ///
-    /// Until the L1 [`DfaScanner`](LexerBackend::Dfa) lands, both selectors build
-    /// the `regex`-crate [`Scanner`] — so the differential oracle
-    /// (`tests/test_scanner_differential.rs`) is trivially green while the seam is
-    /// validated independently of the engine swap.
+    /// Build the backend named by `backend` over the candidate terminals. Both
+    /// engines reproduce Lark's selection byte-for-byte (the L0 differential oracle,
+    /// `tests/test_scanner_differential.rs`, is the contract).
     fn build(
         terminals: &[(SymbolId, &TerminalDef)],
         global_flags: u32,
         backend: LexerBackend,
     ) -> Result<ScannerBackend, GrammarError> {
         match backend {
-            LexerBackend::Regex | LexerBackend::Dfa => Ok(ScannerBackend::Regex(Scanner::build(
+            LexerBackend::Regex => Ok(ScannerBackend::Regex(Scanner::build(
+                terminals,
+                global_flags,
+            )?)),
+            LexerBackend::Dfa => Ok(ScannerBackend::Dfa(DfaScanner::build(
                 terminals,
                 global_flags,
             )?)),
@@ -495,6 +688,7 @@ impl ScannerBackend {
     fn match_at<'t>(&self, text: &'t str, pos: usize) -> Option<(SymbolId, &'t str)> {
         match self {
             ScannerBackend::Regex(s) => s.match_at(text, pos),
+            ScannerBackend::Dfa(s) => s.match_at(text, pos),
         }
     }
 }
@@ -1142,5 +1336,128 @@ impl<'a> LexerState<'a> {
             }
         }
         self.pos += n;
+    }
+}
+
+// ─── DfaScanner ≡ Scanner: focused parity unit tests (L1) ─────────────────────
+//
+// The L0 differential oracle (tests/test_scanner_differential.rs) is the broad
+// contract. These pin the load-bearing edge cases directly, in-crate, so a
+// regression localizes to `match_at` without a corpus run — chiefly the
+// multi-pattern leftmost-first **tie-break** the plan flags as the one real risk.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grammar::terminal::{PatternRe, PatternStr};
+
+    fn re_term(id: u32, name: &str, pat: &str, prio: i32) -> (SymbolId, TerminalDef) {
+        let p = Pattern::Re(PatternRe::new(pat, 0).unwrap());
+        (SymbolId(id), TerminalDef::new(name, p, prio))
+    }
+    fn str_term(id: u32, name: &str, val: &str, prio: i32) -> (SymbolId, TerminalDef) {
+        let p = Pattern::Str(PatternStr::new(val));
+        (
+            SymbolId(id),
+            TerminalDef::new(name, p, prio).with_string_type(true),
+        )
+    }
+
+    fn both(terms: &[(SymbolId, TerminalDef)]) -> (Scanner, DfaScanner) {
+        let refs: Vec<(SymbolId, &TerminalDef)> = terms.iter().map(|(i, t)| (*i, t)).collect();
+        (
+            Scanner::build(&refs, 0).unwrap(),
+            DfaScanner::build(&refs, 0).unwrap(),
+        )
+    }
+
+    /// Assert the two engines pick the byte-identical `(id, value)` at **every**
+    /// position of each input — the L1 contract, in miniature.
+    fn assert_agree(terms: &[(SymbolId, TerminalDef)], inputs: &[&str]) {
+        let (s, d) = both(terms);
+        for inp in inputs {
+            for pos in 0..=inp.len() {
+                assert_eq!(
+                    s.match_at(inp, pos),
+                    d.match_at(inp, pos),
+                    "engines diverged on {inp:?} at pos {pos}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dfa_tiebreak_same_start_picks_lowest_rank_not_longest() {
+        // Two regex terminals matching at the same start with different lengths.
+        // `sort_terminals` orders by (priority, max_width, pattern-len, name); both
+        // are unbounded-width regexes of the same priority, so the longer *source*
+        // (`abc`) ranks first. Leftmost-first then takes that branch's own greedy
+        // length — and crucially, where only the shorter (`ab`) ranks first, it must
+        // win with length 2 even though `abc` would match longer. Both engines agree.
+        assert_agree(
+            &[re_term(1, "AB", "ab", 0), re_term(2, "ABC", "abc", 0)],
+            &["abc", "ab", "abz", "a", "abcd", "x", ""],
+        );
+        // The decisive direction: make the *shorter* pattern rank first by source
+        // length (`a.` is 2 chars, `abc` is 3 → `abc` first; use `ab?` vs `abcd`).
+        let (_, d) = both(&[re_term(1, "SHORT", "ab", 5), re_term(2, "LONG", "abcd", 0)]);
+        // SHORT has higher priority, so it ranks first and wins at "abcd" with len 2,
+        // NOT the longest match (len 4). This is the Python-re leftmost-first tie-break.
+        assert_eq!(d.match_at("abcd", 0), Some((SymbolId(1), "ab")));
+    }
+
+    #[test]
+    fn dfa_keyword_unless_retype_matches_regex_scanner() {
+        let terms = [str_term(1, "IF", "if", 0), re_term(2, "NAME", "[a-z]+", 0)];
+        assert_agree(&terms, &["if", "iffy", "if x", "i", "z", "if2"]);
+        // Pin the engine-independent outcome too: the keyword retypes to IF (id 1),
+        // a longer identifier stays NAME (id 2).
+        let (_, d) = both(&terms);
+        assert_eq!(d.match_at("if", 0), Some((SymbolId(1), "if")));
+        assert_eq!(d.match_at("iffy", 0), Some((SymbolId(2), "iffy")));
+    }
+
+    #[test]
+    fn dfa_priority_and_width_ordering_matches_regex_scanner() {
+        // OCT (priority 2) must beat INT at "0o777"; agreement across the boundary
+        // and over a punctuation terminal that shares no start byte.
+        assert_agree(
+            &[
+                re_term(1, "OCT", "0[oO][0-7]+", 2),
+                re_term(2, "INT", "[0-9]+", 0),
+                str_term(3, "PLUS", "+", 0),
+            ],
+            &["0o777", "0777", "123", "0", "+", "0o", "12+34", "0o+1"],
+        );
+    }
+
+    #[test]
+    fn dfa_start_byte_prefilter_never_hides_a_match() {
+        // Scan every position of a mixed string: the start-byte prefilter must skip
+        // the engine only where no terminal could match, never where one does.
+        assert_agree(
+            &[
+                re_term(1, "WORD", "[a-z]+", 0),
+                re_term(2, "NUM", "[0-9]+", 0),
+            ],
+            &["abc123 def", "   x", "9z9z", "...."],
+        );
+    }
+
+    #[test]
+    fn dfa_all_lookaround_terminals_has_no_plain_engine() {
+        // A scanner whose only terminal is a lookaround pattern builds with `re ==
+        // None` (no plain engine) and still matches via the fancy side-probe,
+        // identically to `Scanner`.
+        let terms = [re_term(1, "STR", "\"(?!\")[^\"]*\"", 0)];
+        let (s, d) = both(&terms);
+        assert!(d.re.is_none(), "all-lookaround scanner has no plain engine");
+        for inp in ["\"ab\"", "\"\"", "\"\"\"\"", "x"] {
+            assert_eq!(
+                s.match_at(inp, 0),
+                d.match_at(inp, 0),
+                "diverged on {inp:?}"
+            );
+        }
     }
 }
