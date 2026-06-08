@@ -388,10 +388,16 @@ over-report conflicts, so accurate `GrammarError::Conflict` reporting requires i
 
 **`regex` crate has no lookahead or backreferences.** Some Python Lark grammars rely
 on lookaround (the bundled `python.lark`/`lark.lark` do: `STRING`'s
-`(?!"")…(?<!\\)(\\\\)*?` guards, `DEC_NUMBER`'s `(?![1-9])`, `lark.OP`/`REGEXP`). The
-plan to retire these is **lookaround elimination at load time**
-(docs/LOOKAROUND_ELIMINATION_PLAN.md); milestone **E2a** built the equivalence-proof
-harness and recorded which terminals are reducible, but **changed no grammar** —
+`(?!"")…(?<!\\)(\\\\)*?` guards, `DEC_NUMBER`'s `(?![1-9])`, `lark.OP`/`REGEXP`).
+**Direction (2026-06-08): [`docs/LEXER_DFA_PLAN.md`](docs/LEXER_DFA_PLAN.md)** is the
+active umbrella — build the combined scanner on a `regex-automata` DFA and **lower** the
+bounded lookaround into it (a DFA, *not* PR #110's Pike-VM), so every terminal lexes
+single-pass and the `python`/`lark` grammars become bakeable. Load-time **elimination**
+(`docs/LOOKAROUND_ELIMINATION_PLAN.md`) is now **Phase 1** of that (the reducible Tier-E
+terminals); the irreducible G-tier (`STRING`/`OP`/`DEC_NUMBER` — see
+`docs/TERMINAL_REDUCTION_DIAGNOSIS.md`) is lowered into the DFA rather than rejected.
+Milestone **E2a** built the equivalence-proof harness and recorded which terminals are
+reducible, but **changed no grammar** —
 `python.lark`'s `LONG_STRING` is *provably* rewritable lookaround-free yet the rewrite
 is deferred to E4, and `STRING` is **proven irreducible** (its `(?!"")` is a
 trailing-context boundary — any rewrite accepts `""""`, diverging from the oracle — the
@@ -428,10 +434,12 @@ parser — Rust variant), #40 (grammar stdlib), #32 (Earley XFAIL burndown), and
 (error recovery) are ✅ done. Phase 3 is feature-complete; remaining work is the
 follow-ups below.
 
-Follow-ups: a Python standalone emitter (#42); and `fancy-regex` routing in the
-standalone runtime — it emits a pure-`regex` parser, so a grammar with lookaround
-terminals (the bundled `python`/`lark`) is not yet standalone-able, since that
-routing lives only in the in-process lexer.
+Follow-ups: a Python standalone emitter (#42); and the lookaround/throughput rework in
+**[`docs/LEXER_DFA_PLAN.md`](docs/LEXER_DFA_PLAN.md)** (active). Today the standalone
+runtime emits a pure-`regex` parser, so a grammar with lookaround terminals (the bundled
+`python`/`lark`) is not yet standalone-able — that bakeability is the explicit payoff of
+the DFA plan's final phase (a serialized `regex-automata` DFA replaces the baked
+`ScannerPlan` alternation).
 
 Deferred until specialist work is available: #33 (de-recurse forest walk,
 profiler-gated).

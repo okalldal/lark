@@ -142,6 +142,16 @@ covers them. The Pike VM is still not needed.
 
 ## Engine scope — a fixed-width boundary guard, not the Pike VM
 
+> **Update (2026-06-08) — superseded by the DFA-lexer direction.** This section scopes
+> the *minimal-correctness* primitive: keep the `regex`-crate match and bolt a
+> fixed-width guard on top, leaving the G-tier on a per-terminal probe. The active plan
+> ([`LEXER_DFA_PLAN.md`](LEXER_DFA_PLAN.md)) instead **lowers these same bounded
+> assertions into one combined DFA** so the G-tier also lexes single-pass and bakes.
+> Both agree on the load-bearing conclusion — **fixed-width, regular, not the Pike VM**
+> — and differ only in *where* the lowered assertion lives (a post-match guard vs.
+> ordinary DFA states). Read the boundary-guard framing below as the lower bound on what
+> the assertions require; the DFA plan is the throughput-optimal realization.
+
 The diagnosis answers the scoping question directly:
 
 * **Sufficient primitive:** a **fixed-width boundary-assertion guard**. Match the
@@ -192,13 +202,16 @@ Match-length equality is decidable (both sides are regular). Two complete routes
    the front-end the closed PR #110 built). (b) Compile both sides to match-DFAs that
    emit the anchored leftmost-match end under Perl greedy/lazy semantics. (c) Decide
    equality by product construction; unequal ⇒ it *yields the shortest counterexample*.
-2. **Alphabet quotient + sufficiency bound** (lighter, avoids the lowering). Each
-   pattern distinguishes only a few byte classes — `LONG_STRING` {`"`,`'`,`\`,other}
-   (DOTALL makes newline ordinary), `REGEXP` {`/`,`\`,`[imslux]`,other}, block-comment
-   {`/`,`*`,other}. By Myhill–Nerode, if the two match-DFAs are equivalent they agree
-   everywhere; if not, a counterexample exists of length < |Q₁|·|Q₂|. Bound the (small)
-   state counts to get a concrete L, then **exhaustive enumeration over the quotient
-   alphabet up to L is finite and complete**.
+2. **Alphabet quotient + sufficiency bound** (substitutes brute enumeration for the
+   *symbolic* equivalence decision, but still needs the lowering to count `|Q|` of the
+   original — earlier drafts wrongly called this "lowering-free"; only the alphabet
+   quotient is). Each pattern distinguishes only a few byte classes — `LONG_STRING`
+   {`"`,`'`,`\`,other} (DOTALL makes newline ordinary), `REGEXP` {`/`,`\`,`[imslux]`,other},
+   block-comment {`/`,`*`,other}. By Myhill–Nerode, if the two match-DFAs are equivalent
+   they agree everywhere; if not, a counterexample exists of length < |Q₁|·|Q₂|. Bound
+   the (small) state counts to get a concrete L, then **exhaustive enumeration over the
+   quotient alphabet up to L is finite and complete**. (Both routes share the
+   bounded-lookaround lowering — the same construction the DFA-lexer plan needs anyway.)
 
 The committed `matchlen` corpora are exhaustive but only to a *fixed* length (≤6–8)
 with no sufficiency argument — strong evidence, not a proof. Closing the gap means
@@ -261,18 +274,26 @@ suffices for an existence claim) is the **negative** one:
   non-recovering grammar — committed as
   `recovery::recovery_fails_under_adversarial_import`, confirmed on the oracle.
 
-## Recommended E4 shape
+## Recommended shape
+
+> **Reframed (2026-06-08).** These steps are now the terminal-level content of the
+> phased [`LEXER_DFA_PLAN.md`](LEXER_DFA_PLAN.md): step 1 ≈ **L2** (Tier-E rewrites join
+> the combined DFA), step 2's assertions are **L3** (lowered into the DFA rather than
+> kept as post-match guards on a side-probe), step 3 ≈ **L4/L5** (drop `fancy-regex`,
+> bake the DFA). The "fixed-width boundary guard" descriptors below remain the precise
+> spec of *what each assertion checks*; the DFA plan is *where it runs*.
 
 1. **Deploy the Type-A rewrites** (`LONG_STRING`, `REGEXP`, block-comment) — *once
    their equivalence is proven* (route 1 or 2 above), they rejoin the combined-DFA
-   scan at zero behavioral risk.
-2. **Route `STRING`, `OP`, `DEC_NUMBER` through the fixed-width boundary guard** —
-   **do not delete** their guards (that breaks imports, per the table above).
-   `STRING` is a leading `{ Start, Neg, "\"\"", width 2 }`; `OP` a trailing
-   `{ End, Neg, [a-z], width 1 }`; `DEC_NUMBER` a trailing `{ End, Neg, [1-9], width 1 }`
-   with single-quantifier backtracking. Each wraps its (reduced) `regex` core.
-3. **Remove `fancy-regex`** once the primitive lands — the bundled `python`/`lark`
-   grammars then bake into standalone/WASM, with no Pike VM in the tree.
+   scan at zero behavioral risk. *(Umbrella L2.)*
+2. **Preserve `STRING`/`OP`/`DEC_NUMBER`'s guards** — **do not delete** them (that
+   breaks imports, per the table above). Each is a fixed-width assertion: `STRING`
+   leading `{ Start, Neg, "\"\"", width 2 }`; `OP` trailing `{ End, Neg, [a-z], width 1 }`;
+   `DEC_NUMBER` trailing `{ End, Neg, [1-9], width 1 }` with single-quantifier
+   backtracking. Lower each into the combined DFA. *(Umbrella L3.)*
+3. **Remove `fancy-regex`** once every terminal is on the DFA — the bundled
+   `python`/`lark` grammars then bake into standalone/WASM, with no Pike VM in the
+   tree. *(Umbrella L4/L5.)*
 
 ## Verification artifacts
 

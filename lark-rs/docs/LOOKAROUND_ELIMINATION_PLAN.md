@@ -1,25 +1,27 @@
-# Lookaround elimination plan
+# Lookaround elimination plan — *Phase 1 of [`LEXER_DFA_PLAN.md`](LEXER_DFA_PLAN.md)*
 
-*Status: implementation roadmap. Rationale and decision in
-[`LOOKAROUND_STRATEGY_ANALYSIS.md`](LOOKAROUND_STRATEGY_ANALYSIS.md).*
-*Supersedes the former `LEXER_DFA_PLAN.md` (the Pike-VM lowering strategy), removed
-in this PR — it remains in git history and on the closed
-[PR #110](https://github.com/okalldal/lark/pull/110) branch as the spec for the
-shelved fallback engine (Option H).*
+*Status: **active, but now scoped as Phase 1** of the umbrella
+[`LEXER_DFA_PLAN.md`](LEXER_DFA_PLAN.md) (2026-06-08). The elimination work below is
+retained verbatim — it is the reducible-terminal (Tier-E) half. What changed: this
+plan's framing of "**no runtime engine**, reject the rest" is superseded — the G-tier
+terminals are **lowered into a combined DFA** rather than left on `fancy-regex` or
+rejected. See the umbrella plan and the
+[strategy-memo revision](LOOKAROUND_STRATEGY_ANALYSIS.md).*
+*Rationale: [`LOOKAROUND_STRATEGY_ANALYSIS.md`](LOOKAROUND_STRATEGY_ANALYSIS.md).*
 *Date: 2026-06-07.*
 
 ## Goal
 
-Retire `fancy-regex` from lark-rs with **no runtime lookaround engine**. Every bounded
-lookaround terminal is **eliminated at grammar-load time** — rewritten to an
-equivalent lookaround-free regex that runs on the `regex` crate and rejoins the fast
-combined-DFA scan. Anything that cannot be eliminated is **rejected at build time**
-with a clear, actionable error.
+*(Phase-1 goal — superseded framing; see the note above.)* Rewrite every **reducible**
+bounded lookaround terminal at grammar-load time to an equivalent lookaround-free regex
+that runs on the `regex` crate and rejoins the fast combined-DFA scan (Tier E in the
+diagnosis). Under the umbrella plan these rejoin a `regex-automata` multi-pattern DFA
+(L2). The **irreducible G-tier** is *not* rejected (as this plan originally proposed) —
+it is **lowered into the combined DFA** (umbrella L3).
 
-This is "Option 1b" from the strategy memo. The Pike-VM engine explored in the closed
-PR #110 is **not** part of this plan; it is shelved as the Option-H fallback, to be
-revisited only if a real, irreducible-but-valid bounded lookaround grammar ever
-surfaces (none exists in the two-corpus census; see the memo §10).
+This was "Option 1b" from the strategy memo. The runtime **Pike-VM** of closed PR #110
+remains **not** part of the plan — the umbrella engine is a **DFA**, not a Pike-VM (see
+the memo revision for why the distinction matters).
 
 ### Why (one paragraph)
 
