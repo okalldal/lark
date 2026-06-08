@@ -1,4 +1,9 @@
 /// Shared test utilities: oracle loading, tree comparison, parser helpers.
+
+/// L2 bounded-lookaround lowering harness infrastructure (generators, the
+/// `fancy-regex` oracle, the mutation framework). See `tests/common/lowering.rs`.
+pub mod lowering;
+
 use lark_rs::{
     basic_lexer_conf, load_grammar, lower, Ambiguity, BasicLexer, Child, EarleyParser, Lark,
     LarkError, LarkOptions, Lexer, LexerType, ParseTree, ParserAlgorithm, Token, Tree,

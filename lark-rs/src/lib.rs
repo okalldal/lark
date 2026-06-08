@@ -1,6 +1,7 @@
 pub mod error;
 pub mod grammar;
 pub mod lexer;
+pub mod lookaround;
 pub mod parsers;
 pub mod perf;
 pub mod postlex;
@@ -16,6 +17,10 @@ pub use grammar::{
     CompiledGrammar, CompiledRule, Grammar, SymbolId, SymbolKind, SymbolTable,
 };
 pub use lexer::{BasicLexer, ContextualLexer, DynamicMatcher, Lexer, LexerBackend, LexerConf};
+pub use lookaround::classify::{
+    classify, lower_terminal, Classification, Classifier, DefaultClassifier, Lowered, Rejection,
+    ShapeClass, Verdict,
+};
 pub use parsers::{
     basic_lexer_conf, lalr, EarleyParser, LexFailure, ParseTable, ParserConf, TokenSource,
 };

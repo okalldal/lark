@@ -83,6 +83,27 @@ maximal-munch driver, and the differential oracle `tests/test_scanner_differenti
 
 ### L2 — The bounded-lookaround lowering feature *(the meat)*
 
+> **Status — the verification harness landed (harness-first phase complete).** The
+> safety net the lowering is gated by exists *before* any lowering, with the lowering
+> stubbed to reject every lookaround terminal:
+> * **Front-end** resurrected from closed #110 (without its Pike-VM `matcher.rs`):
+>   `src/lookaround/mod.rs` (assertion parser) + `src/lookaround/classify.rs` (the
+>   shape classifier + `lower_terminal` entry point, which rejects all — supported
+>   shapes as "pending", out-of-shape permanently).
+> * **Harness layers**: the scanner differential (`tests/test_scanner_differential.rs`)
+>   now iterates a generated lookaround-grammar population, tracking each as a
+>   **pending** skip until its shape lands; generative equivalence vs `fancy-regex`
+>   (`tests/test_lowering_equivalence.rs`, `#[ignore]`'d pending shapes); the Route-1
+>   proof skeleton (`tests/test_lowering_proof.rs`, `#[ignore]`'d); the **active**
+>   reject corpus + mutation meta-test (`tests/test_lowering_reject.rs`); and the
+>   seam/edge fixtures (`tests/test_lowering_fixtures.rs`). Generators + the oracle +
+>   the mutation framework live in `tests/common/lowering.rs`.
+>
+> The first-shape session implements a shape's lowering, points the `lowered_prefix`
+> hook (and the Dfa backend) at the real lowered `DfaScanner`, then drops that shape's
+> `#[ignore]`s — the harness flips it from pending to gated automatically. **No real
+> lowering, no `DfaScanner` engine change, was done in the harness session.**
+
 A **general** lowering keyed on the assertion's **shape**, not on the six bundled
 terminals. Lower each supported bounded assertion into lookaround-free DFA states
 ("How the lowering works"), fold all terminals into one `regex-automata` multi-pattern

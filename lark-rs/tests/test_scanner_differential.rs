@@ -32,8 +32,12 @@ mod common;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 
+use common::lowering::{corpus, supported_terminals, GenTerminal};
 use lark_rs::grammar::terminal::flags;
-use lark_rs::{basic_lexer_conf, load_grammar, lower, BasicLexer, Lexer, LexerBackend, ParseError};
+use lark_rs::{
+    basic_lexer_conf, load_grammar, lower, lower_terminal, BasicLexer, Lexer, LexerBackend,
+    ParseError,
+};
 use serde_json::Value;
 
 fn manifest_dir() -> PathBuf {
@@ -128,6 +132,18 @@ struct Differential {
     failures: Vec<String>,
     compared: usize,
     grammars: usize,
+    /// Lookaround grammars whose lowering is still stubbed-out (every one, this
+    /// session): the Regex backend builds them on `fancy-regex`, but the Dfa backend
+    /// has no real lowering yet, so they are recorded as a tracked **pending** skip
+    /// rather than compared. Each flips to a gated comparison the moment its shape's
+    /// lowering lands and [`lower_terminal`] starts returning `Ok` for it.
+    pending: usize,
+    /// Lookaround grammars actually *compared* (their lowering landed) — a
+    /// **dedicated** counter, separate from the shared `grammars`/`compared` the
+    /// bank/JSON/Python corpora bump, so the "population is wired in" guard measures
+    /// the lookaround population specifically (not "hundreds of bank grammars exist").
+    lookaround_compared_grammars: usize,
+    lookaround_compared_inputs: usize,
 }
 
 impl Differential {
@@ -136,6 +152,9 @@ impl Differential {
             failures: Vec::new(),
             compared: 0,
             grammars: 0,
+            pending: 0,
+            lookaround_compared_grammars: 0,
+            lookaround_compared_inputs: 0,
         }
     }
 
@@ -350,6 +369,75 @@ fn run_python_files(d: &mut Differential) {
     );
 }
 
+/// A generated single-terminal lookaround grammar: `start: TOK+` over the
+/// generated terminal, plus the raw terminal pattern for the lowerability check.
+fn lookaround_grammar(t: &GenTerminal) -> (String, String) {
+    // Inside `/…/`, a literal `/` must be escaped as `\/`. Escape only an *unescaped*
+    // slash (one not already preceded by a backslash) so an already-`\/` pattern is
+    // not double-escaped into `\\/`.
+    let mut escaped = String::with_capacity(t.pattern.len());
+    let mut prev_backslash = false;
+    for ch in t.pattern.chars() {
+        if ch == '/' && !prev_backslash {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+        prev_backslash = ch == '\\' && !prev_backslash;
+    }
+    let grammar = format!("start: {name}+\n{name}: /{escaped}/\n", name = t.name);
+    (grammar, t.pattern.clone())
+}
+
+/// The **generated lookaround-grammar population** (the master differential's
+/// fourth corpus, `docs/LEXER_DFA_PLAN.md` layer 1). For each generated supported
+/// terminal: build both backends (build parity is enforced), then either compare
+/// token streams over the terminal's exhaustive corpus — *iff* the terminal actually
+/// lowers ([`lower_terminal`] returns `Ok`) — or record it as a **pending** skip
+/// while the lowering for its shape is still stubbed out. With the stub rejecting
+/// everything, every lookaround grammar is pending this session; lookaround-free
+/// grammars (the bank/JSON/Python corpora) stay fully gated, so there is no
+/// regression.
+fn run_lookaround_grammars(d: &mut Differential) {
+    for t in supported_terminals() {
+        let (grammar, pattern) = lookaround_grammar(&t);
+        let start = ["start".to_string()];
+        let mk = |backend| build_lexer(&grammar, &start, false, false, 0, backend);
+        let (lex_a, lex_b) = (mk(LexerBackend::Regex), mk(LexerBackend::Dfa));
+
+        match (&lex_a, &lex_b) {
+            (Some(a), Some(b)) => {
+                // Does this terminal's shape actually lower yet? While the lowering
+                // is stubbed to reject, this is always false → pending. When the
+                // shape lands it returns Ok → the same grammar flips to a gated
+                // token-stream comparison automatically.
+                if lower_terminal(&t.name, &pattern).is_ok() {
+                    d.lookaround_compared_grammars += 1;
+                    for input in corpus(&t.alphabet, t.max_len) {
+                        d.lookaround_compared_inputs += 1;
+                        let oa = lex_outcome(a, &input);
+                        let ob = lex_outcome(b, &input);
+                        if let Some(diff) = diff_outcomes(&oa, &ob) {
+                            d.failures
+                                .push(format!("lookaround/{} [{input:?}]: {diff}", t.name));
+                        }
+                    }
+                } else {
+                    d.pending += 1;
+                }
+            }
+            (None, None) => {}
+            (Some(_), None) => d.failures.push(format!(
+                "lookaround/{}: Regex backend built but Dfa did not",
+                t.name
+            )),
+            (None, Some(_)) => d.failures.push(format!(
+                "lookaround/{}: Dfa backend built but Regex did not",
+                t.name
+            )),
+        }
+    }
+}
+
 #[test]
 fn test_scanner_backends_lex_identically() {
     // The loader emits panic backtraces for the many bank grammars that exercise
@@ -361,14 +449,28 @@ fn test_scanner_backends_lex_identically() {
     run_compliance_bank(&mut d);
     run_json_corpus(&mut d);
     run_python_files(&mut d);
+    run_lookaround_grammars(&mut d);
 
     let _ = std::panic::take_hook();
 
     eprintln!(
-        "scanner differential: {} input(s) across {} grammar(s) compared; {} divergence(s)",
+        "scanner differential: {} input(s) across {} grammar(s) compared; \
+         lookaround: {} pending + {} grammar(s)/{} input(s) compared; {} divergence(s)",
         d.compared,
         d.grammars,
+        d.pending,
+        d.lookaround_compared_grammars,
+        d.lookaround_compared_inputs,
         d.failures.len()
+    );
+
+    // The lookaround population must be *tracked* — either as pending (lowering
+    // stubbed, this session) or as gated comparisons (once shapes land). Both counters
+    // are lookaround-specific, so this can't be satisfied by the bank/JSON/Python
+    // grammars alone: a silently-dropped lookaround population fails here in either era.
+    assert!(
+        d.pending > 0 || d.lookaround_compared_grammars > 0,
+        "no lookaround grammars were tracked — the generated population is missing"
     );
 
     assert!(
