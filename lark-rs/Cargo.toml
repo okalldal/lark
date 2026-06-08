@@ -75,6 +75,15 @@ name = "vs_python_lark"
 path = "benches/vs_python_lark.rs"
 harness = false
 
+# Lexing throughput: the regex-crate Scanner vs the regex-automata DfaScanner
+# (docs/LEXER_DFA_PLAN.md, phase L1). Times the lexer in isolation under each
+# backend over JSON / expr / Python workloads and prints the dfa/regex ratio.
+# Recorded trend, not a CI gate — see BENCH.md.
+[[bench]]
+name = "lex_backends"
+path = "benches/lex_backends.rs"
+harness = false
+
 # Two-tier ReDoS cost of the lookaround terminals routed to `fancy-regex` (#40):
 # the benign linear `python.STRING` vs the pathological super-linear `lark.REGEXP`.
 # The artifact for the lookaround-rewrite follow-up. Recorded trend, not a CI gate.
