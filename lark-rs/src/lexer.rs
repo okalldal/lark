@@ -540,25 +540,28 @@ enum PlainDfa {
 }
 
 /// One lowered sub-pattern fed to the combined NFA. A plain terminal contributes one
-/// unguarded sub-pattern; a trailing-boundary terminal contributes one per top-level
-/// alternation branch (some carrying a guard, some not — `lark.OP`).
+/// unguarded sub-pattern; a boundary terminal contributes one per top-level
+/// alternation branch (some carrying a leading and/or trailing guard — `lark.OP`).
 struct SubPattern {
     id: SymbolId,
     /// The terminal's rank in the sorted plan — cross-terminal leftmost-first.
     rank: usize,
     /// The branch's index within its terminal — within-terminal leftmost-first.
     branch_order: usize,
-    /// The branch's trailing guard, if any.
-    guard: Option<Guard>,
+    /// A guard checked at the match **start** (`pos`) — a leading boundary `(?!S)X`.
+    leading: Option<Guard>,
+    /// A guard checked at the match **end** — a trailing boundary `X(?!S)`.
+    trailing: Option<Guard>,
 }
 
-/// A compiled trailing-boundary guard. The driver records an accept of the guarded
-/// sub-pattern only when this holds at the accept position — so the lookahead char,
-/// which belongs to the *next* token, is consulted but never consumed.
+/// A compiled boundary guard. The driver records an accept of the guarded
+/// sub-pattern only when this holds at its position (start for leading, end for
+/// trailing) — so the peeked char, which belongs to a neighbouring token, is
+/// consulted but never consumed.
 struct Guard {
-    /// `true` for `(?!S)` (next must **not** match `S`), `false` for `(?=S)`.
+    /// `true` for `(?!S)` (must **not** match `S`), `false` for `(?=S)`.
     neg: bool,
-    /// Anchored DFA for the assertion body `S`, matched at the accept position.
+    /// Anchored DFA for the assertion body `S`, matched at the guard position.
     dfa: dense::DFA<Vec<u32>>,
 }
 
@@ -651,7 +654,8 @@ impl DfaScanner {
                         id: *id,
                         rank,
                         branch_order: 0,
-                        guard: None,
+                        leading: None,
+                        trailing: None,
                     },
                     inline.clone(),
                     &mut subs,
@@ -671,19 +675,28 @@ impl DfaScanner {
                 // be safe and route it to fancy rather than panicking.
                 Pattern::Str(_) => ("", 0),
             };
+            // Compile a boundary guard body `S` into an anchored DFA with the
+            // terminal's flags + the global prefix applied.
+            let mut compile_guard = |g: &crate::lookaround::lower::GuardSpec,
+                                     any_guard: &mut bool|
+             -> Result<Guard, GrammarError> {
+                *any_guard = true;
+                let gsrc = format!("{prefix}{}", wrap_flags(flags, &g.set));
+                Ok(Guard {
+                    neg: g.neg,
+                    dfa: build_anchored_dfa(&gsrc)?,
+                })
+            };
             match crate::lookaround::classify::lower_terminal(&def.name, raw) {
-                Ok(crate::lookaround::classify::Lowered::Trailing(branches)) => {
+                Ok(crate::lookaround::classify::Lowered::Branches(branches)) => {
                     for (bo, br) in branches.iter().enumerate() {
-                        let guard = match &br.guard {
+                        let leading = match &br.leading {
                             None => None,
-                            Some(g) => {
-                                any_guard = true;
-                                let gsrc = format!("{prefix}{}", wrap_flags(flags, &g.set));
-                                Some(Guard {
-                                    neg: g.neg,
-                                    dfa: build_anchored_dfa(&gsrc)?,
-                                })
-                            }
+                            Some(g) => Some(compile_guard(g, &mut any_guard)?),
+                        };
+                        let trailing = match &br.trailing {
+                            None => None,
+                            Some(g) => Some(compile_guard(g, &mut any_guard)?),
                         };
                         let inline_br = wrap_flags(flags, &br.regex);
                         push_sub(
@@ -691,7 +704,8 @@ impl DfaScanner {
                                 id: *id,
                                 rank,
                                 branch_order: bo,
-                                guard,
+                                leading,
+                                trailing,
                             },
                             inline_br,
                             &mut subs,
@@ -846,7 +860,18 @@ fn guarded_best<'t>(
         .span(pos..text.len())
         .anchored(Anchored::Yes);
 
-    // Longest accept end (exclusive) per sub-pattern where the guard held.
+    // A leading guard is a precondition on the match start (`pos`), identical for
+    // every accept of that sub-pattern — evaluate it once. `None` = no leading guard
+    // (always passes); `Some(false)` = the guard failed, so the sub-pattern is out.
+    let leading_ok: Vec<bool> = subs
+        .iter()
+        .map(|s| match &s.leading {
+            None => true,
+            Some(g) => g.holds(text, pos),
+        })
+        .collect();
+
+    // Longest accept end (exclusive) per sub-pattern where both guards held.
     let mut longest: Vec<Option<usize>> = vec![None; subs.len()];
     let mut state = OverlappingState::start();
     loop {
@@ -857,11 +882,14 @@ fn guarded_best<'t>(
         if end <= pos {
             continue; // reject a zero-width accept
         }
-        let holds = match &subs[pid].guard {
+        if !leading_ok[pid] {
+            continue; // leading precondition failed → this sub-pattern can't match
+        }
+        let trailing_ok = match &subs[pid].trailing {
             None => true,
             Some(g) => g.holds(text, end),
         };
-        if holds && longest[pid].is_none_or(|cur| end > cur) {
+        if trailing_ok && longest[pid].is_none_or(|cur| end > cur) {
             longest[pid] = Some(end);
         }
     }
@@ -1319,6 +1347,16 @@ impl BasicLexer {
             names: conf.names(),
             ignore: conf.ignore.iter().copied().collect(),
         })
+    }
+
+    /// The single token the combined scanner matches starting **exactly** at byte
+    /// `pos` — the terminal id (after `unless` retyping) and the matched slice — or
+    /// `None` if nothing matches there. This is the raw `match_at` seam without the
+    /// streaming loop or `%ignore` handling; it lets the L2 lowering harness probe a
+    /// terminal's anchored match at a position without lexing the whole input
+    /// (`tests/common/lowering.rs`).
+    pub fn match_at<'t>(&self, text: &'t str, pos: usize) -> Option<(SymbolId, &'t str)> {
+        self.scanner.match_at(text, pos)
     }
 }
 

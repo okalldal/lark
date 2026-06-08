@@ -22,7 +22,7 @@ mod common;
 use std::collections::HashSet;
 
 use common::lowering::{corpus, fancy_matcher, fancy_prefix, lowered_prefix};
-use lark_rs::lookaround::lower::lower_trailing;
+use lark_rs::lookaround::lower::lower_boundary;
 use lark_rs::{classify, ShapeClass, Verdict};
 use regex_automata::dfa::{dense, Automaton};
 
@@ -52,10 +52,16 @@ fn obligations() -> Vec<ProofObligation> {
             pattern: r"0(?![1-9])",
             shape: ShapeClass::TrailingBoundary,
         },
-        // Leading boundary — reserved-word exclusion + the STRING-style opening guard.
+        // Leading boundary — a reserved-word-style exclusion + the STRING-style
+        // opening guard. The exclusion guard is kept **narrow** (`aa`, overlapping the
+        // `[a-z]+` body so it is decisive) so the Route-1 enumeration over byte
+        // equivalence classes stays tractable; a wide multi-literal guard like
+        // `(?!if|else)` distinguishes every literal byte and blows the alphabet up
+        // exponentially against the length bound — that variant is covered exhaustively
+        // by the generative-equivalence layer instead (`test_lowering_equivalence`).
         ProofObligation {
             name: "RESERVED",
-            pattern: r"(?!if|else)[a-z]+",
+            pattern: r"(?!aa)[a-z]+",
             shape: ShapeClass::LeadingBoundary,
         },
         ProofObligation {
@@ -99,7 +105,7 @@ fn prove_route1(name: &str, pattern: &str) -> Result<(), String> {
         pattern.is_ascii(),
         "Route-1 proof assumes ASCII representatives; {pattern:?} is not ASCII"
     );
-    let branches = lower_trailing(pattern).map_err(|e| format!("lowering failed: {e:?}"))?;
+    let branches = lower_boundary(pattern).map_err(|e| format!("lowering failed: {e:?}"))?;
 
     // Combined lookaround-free regex over every base branch ∪ every guard body — its
     // dense DFA gives the byte equivalence classes (the sound enumeration alphabet).
@@ -108,7 +114,7 @@ fn prove_route1(name: &str, pattern: &str) -> Result<(), String> {
     for b in &branches {
         parts.push(format!("(?:{})", b.regex));
         base_parts.push(format!("(?:{})", b.regex));
-        if let Some(g) = &b.guard {
+        for g in [&b.leading, &b.trailing].into_iter().flatten() {
             parts.push(format!("(?:{})", g.set));
         }
     }
@@ -140,6 +146,19 @@ fn prove_route1(name: &str, pattern: &str) -> Result<(), String> {
         .max()
         .unwrap_or(0);
     let bound = n + w + 2;
+
+    // The enumeration is `|alphabet|^bound` strings — complete, but exponential. A
+    // representative whose guard distinguishes many byte classes (a wide multi-literal
+    // guard) blows this up; such a rep belongs in the generative-equivalence layer, not
+    // here. Fail loudly with guidance rather than OOM.
+    let space = (alphabet.len() as u128).checked_pow(bound as u32 + 1);
+    assert!(
+        space.is_some_and(|s| s <= 2_000_000),
+        "Route-1 enumeration for {pattern:?} is intractable \
+         (|alphabet|={} ^ bound={bound} too large) — choose a narrower-guard \
+         representative; the wide-guard variant is covered by the generative layer",
+        alphabet.len(),
+    );
 
     let oracle = fancy_matcher(pattern).ok_or_else(|| format!("fancy rejected {pattern:?}"))?;
     for input in corpus(&alphabet, bound) {
@@ -198,7 +217,6 @@ fn route1_proof_trailing_boundary() {
 }
 
 #[test]
-#[ignore = "pending first shape — Route-1 proof needs the lowered automaton"]
 fn route1_proof_leading_boundary() {
     discharge(ShapeClass::LeadingBoundary);
 }

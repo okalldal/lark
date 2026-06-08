@@ -176,19 +176,19 @@ fn lowering_entry_point_lowers_landed_shapes_and_rejects_the_rest() {
 
     for t in supported_terminals() {
         match t.shape {
-            // M1: trailing-boundary lowers for real now.
-            ShapeClass::TrailingBoundary => {
+            // M1 trailing + M2 leading: boundary shapes lower for real now.
+            ShapeClass::TrailingBoundary | ShapeClass::LeadingBoundary => {
                 let lowered = lower_terminal(&t.name, &t.pattern).unwrap_or_else(|e| {
-                    panic!("trailing terminal {:?} must lower now, got: {e}", t.pattern)
+                    panic!("boundary terminal {:?} must lower now, got: {e}", t.pattern)
                 });
                 assert!(
-                    matches!(lowered, Lowered::Trailing(ref b) if !b.is_empty()),
-                    "trailing terminal {:?} must lower to branches, got {lowered:?}",
+                    matches!(lowered, Lowered::Branches(ref b) if !b.is_empty()),
+                    "boundary terminal {:?} must lower to branches, got {lowered:?}",
                     t.pattern
                 );
             }
-            // M2/M3: still pending — and the message must name the terminal.
-            ShapeClass::LeadingBoundary | ShapeClass::BoundedLookbehind => {
+            // M3: bounded-lookbehind still pending — message must name the terminal.
+            ShapeClass::BoundedLookbehind => {
                 let err = lower_terminal(&t.name, &t.pattern)
                     .err()
                     .unwrap_or_else(|| panic!("entry point unexpectedly lowered {:?}", t.pattern));

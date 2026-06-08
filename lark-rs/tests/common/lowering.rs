@@ -15,10 +15,11 @@
 //!     ([`reject_path_mutants`]) and the reusable reject-corpus check
 //!     ([`wrongly_accepted_rejects`]) the mutation meta-test drives, validated now
 //!     on the reject path.
-//!   * **The lowered-matcher hook** — [`lowered_prefix`], stubbed to the *pending*
-//!     state so the #[ignore]'d equivalence layers compile and fail loudly if
-//!     un-ignored before a shape lands. The first-shape session points it at the
-//!     real lowered `DfaScanner`.
+//!   * **The lowered-matcher hook** — [`lowered_prefix`], which drives the real
+//!     lowered `DfaScanner` (a one-terminal grammar under `LexerBackend::Dfa`, probed
+//!     at offset 0) for the shapes that have landed, and returns `Err` for a shape
+//!     still pending — so an equivalence layer un-ignored before its shape lands fails
+//!     loudly rather than passing for the wrong reason.
 #![allow(dead_code)]
 
 use lark_rs::{classify, Classification, Classifier, Rejection, ShapeClass, Verdict};
@@ -100,34 +101,23 @@ pub fn fancy_prefix(re: &fancy_regex::Regex, input: &str) -> Option<usize> {
 /// Anchored matched-prefix length (in **characters**) of the *lowered* terminal at
 /// the start of `input`, or `Ok(None)` for no match — the real lowered `DfaScanner`,
 /// driven through the public lexer API so the harness stays at the `match_at`
-/// boundary (engine-agnostic). The terminal is built into a one-terminal grammar
-/// under [`LexerBackend::Dfa`]; a high-priority `TOK` is the lowered terminal and a
-/// catch-all `ANY` (any single char) absorbs the rest, so the **first** token is
-/// exactly the lowered terminal's anchored match at offset 0 (or `ANY` when it does
-/// not match there → `None`).
+/// boundary (engine-agnostic). The terminal is built into a **one-terminal** grammar
+/// under [`LexerBackend::Dfa`] and probed with `BasicLexer::match_at(input, 0)`: the
+/// scanner's anchored match at offset 0 *is* the lowered prefix (or `None`). Matching
+/// only at offset 0 — rather than lexing the whole input — keeps the exhaustive
+/// generative corpus tractable.
 ///
-/// Returns `Err` only when the lowering *rejects* the terminal (a shape M1 does not
-/// lower yet, or genuinely unsupported), so the per-shape equivalence layers fail
+/// Returns `Err` only when the lowering *rejects* the terminal (a shape not yet
+/// lowered, or genuinely unsupported), so the per-shape equivalence layers fail
 /// loudly if run against a pending shape rather than passing for the wrong reason.
 pub fn lowered_prefix(_name: &str, pattern: &str, input: &str) -> Result<Option<usize>, String> {
-    use lark_rs::{BasicLexer, Lexer};
-
-    // The lexer for a terminal is built once and reused across its whole corpus —
-    // rebuilding the dense DFA per input is what makes the generative layer crawl.
     let lexer = lowered_lexer(pattern)?;
-    let lexer: &BasicLexer = &lexer;
-
     if input.is_empty() {
         return Ok(None);
     }
-    let tokens = lexer
-        .lex(input)
-        .map_err(|e| format!("lex failed (ANY should make this total): {e:?}"))?;
-    match tokens.first() {
-        // The first token is the lowered terminal iff its anchored match begins at 0.
-        Some(t) if t.type_ == "TOK" => Ok(Some(t.value.chars().count())),
-        _ => Ok(None),
-    }
+    // The single-terminal scanner matches only `TOK`, so any anchored match at 0 is
+    // the lowered terminal's; its char length is the lowered prefix.
+    Ok(lexer.match_at(input, 0).map(|(_, v)| v.chars().count()))
 }
 
 thread_local! {
@@ -139,8 +129,8 @@ thread_local! {
 }
 
 /// Build (or fetch from the thread-local cache) the one-terminal `LexerBackend::Dfa`
-/// lexer for `pattern`: a high-priority `TOK` (the lowered terminal) over a catch-all
-/// `ANY`, so the first token is `TOK`'s anchored match at offset 0.
+/// lexer for `pattern` — a single terminal `TOK` over the lowered pattern, probed at
+/// offset 0.
 fn lowered_lexer(pattern: &str) -> Result<std::rc::Rc<lark_rs::BasicLexer>, String> {
     use lark_rs::{
         basic_lexer_conf, load_grammar, lower, lower_terminal, BasicLexer, LexerBackend,
@@ -164,7 +154,7 @@ fn lowered_lexer(pattern: &str) -> Result<std::rc::Rc<lark_rs::BasicLexer>, Stri
         escaped.push(ch);
         prev_backslash = ch == '\\' && !prev_backslash;
     }
-    let grammar = format!("start: item+\nitem: TOK | ANY\nTOK.10: /{escaped}/\nANY: /[\\s\\S]/\n");
+    let grammar = format!("start: TOK\nTOK: /{escaped}/\n");
 
     let g = load_grammar(&grammar, &["start".to_string()], false, false)
         .map_err(|e| format!("load_grammar failed: {e:?}"))?;
@@ -378,29 +368,30 @@ pub fn supported_terminals() -> Vec<GenTerminal> {
 
 // ─── Lowering mutants (the equivalence-layer mutation meta-test) ────────────────
 
-/// A deliberately-wrong way to lower a **trailing-boundary** guard. The mutation
-/// meta-test asserts each one is *caught* — i.e. it produces a match-length that
-/// diverges from `fancy-regex` somewhere on the trailing population, so a real
+/// A deliberately-wrong way to lower a **boundary** guard (leading or trailing). The
+/// mutation meta-test asserts each one is *caught* — i.e. it produces a match-length
+/// that diverges from `fancy-regex` somewhere on the boundary population, so a real
 /// lowering that made the same mistake would turn the generative-equivalence layer
 /// red. Each mirrors a concrete coding error the plan calls out
 /// (`docs/LEXER_DFA_PLAN.md`, "Validate the harness itself — mutation meta-test").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrailingMutation {
+pub enum BoundaryMutation {
     /// Forget the guard entirely — accept the base wherever it matches.
     ForgetGuard,
     /// Invert the guard's polarity — treat `(?!S)` as `(?=S)` and vice-versa.
     FlipPolarity,
-    /// Drop the end-of-input case — require a following char, so a token that runs to
-    /// EOF is wrongly rejected (a negative guard must hold at EOF).
-    DropEof,
+    /// Drop the end-of-input case — require a following char on a *trailing* guard, so
+    /// a token that runs to EOF is wrongly rejected (a negative trailing guard must
+    /// hold at EOF). A no-op on a leading guard.
+    DropTrailingEof,
 }
 
-/// Every trailing-lowering mutant the meta-test must catch.
-pub fn trailing_mutations() -> [TrailingMutation; 3] {
+/// Every boundary-lowering mutant the meta-test must catch.
+pub fn boundary_mutations() -> [BoundaryMutation; 3] {
     [
-        TrailingMutation::ForgetGuard,
-        TrailingMutation::FlipPolarity,
-        TrailingMutation::DropEof,
+        BoundaryMutation::ForgetGuard,
+        BoundaryMutation::FlipPolarity,
+        BoundaryMutation::DropTrailingEof,
     ]
 }
 
@@ -414,45 +405,55 @@ fn render_guard(neg: bool, set: &str) -> String {
 
 /// Rebuild a (lookaround-bearing) reference pattern from the lowered branches with
 /// `mutation` applied to each guard — the *wrong* lowering, expressed so the
-/// independent `fancy-regex` engine can run it.
-fn mutant_pattern(pattern: &str, mutation: TrailingMutation) -> Option<String> {
-    let branches = lark_rs::lookaround::lower::lower_trailing(pattern).ok()?;
+/// independent `fancy-regex` engine can run it. The leading guard is re-emitted at the
+/// branch front, the trailing guard at the branch end.
+fn mutant_pattern(pattern: &str, mutation: BoundaryMutation) -> Option<String> {
+    let branches = lark_rs::lookaround::lower::lower_boundary(pattern).ok()?;
     let arms: Vec<String> = branches
         .iter()
         .map(|b| {
-            let g = match &b.guard {
+            let lead = match &b.leading {
                 None => String::new(),
                 Some(g) => match mutation {
-                    TrailingMutation::ForgetGuard => String::new(),
-                    TrailingMutation::FlipPolarity => render_guard(!g.neg, &g.set),
-                    TrailingMutation::DropEof => {
+                    BoundaryMutation::ForgetGuard => String::new(),
+                    BoundaryMutation::FlipPolarity => render_guard(!g.neg, &g.set),
+                    // EOF-at-start is meaningless; leave the leading guard intact.
+                    BoundaryMutation::DropTrailingEof => render_guard(g.neg, &g.set),
+                },
+            };
+            let trail = match &b.trailing {
+                None => String::new(),
+                Some(g) => match mutation {
+                    BoundaryMutation::ForgetGuard => String::new(),
+                    BoundaryMutation::FlipPolarity => render_guard(!g.neg, &g.set),
+                    BoundaryMutation::DropTrailingEof => {
                         format!("{}(?=[\\s\\S])", render_guard(g.neg, &g.set))
                     }
                 },
             };
-            format!("(?:{}{})", b.regex, g)
+            format!("(?:{}{}{})", lead, b.regex, trail)
         })
         .collect();
     Some(arms.join("|"))
 }
 
-/// The anchored matched-prefix length of the **mutant** (wrongly-lowered) terminal at
-/// the start of `input`, via `fancy-regex` — or `None`. Returns `None` when the
-/// terminal has no guard (the mutation is then a no-op and uninteresting).
-pub fn mutant_trailing_prefix(
-    pattern: &str,
-    input: &str,
-    mutation: TrailingMutation,
-) -> Option<usize> {
+/// The compiled `fancy-regex` matcher for the **mutant** (wrongly-lowered) terminal,
+/// or `None` if it does not compile. Built **once** per `(pattern, mutation)` and
+/// reused across the corpus via [`fancy_prefix`] — compiling it per input is what
+/// makes the mutation meta-test crawl.
+pub fn mutant_matcher(pattern: &str, mutation: BoundaryMutation) -> Option<fancy_regex::Regex> {
     let mutated = mutant_pattern(pattern, mutation)?;
-    let re = fancy_matcher(&mutated)?;
-    fancy_prefix(&re, input)
+    fancy_matcher(&mutated)
 }
 
-/// Whether `pattern` carries at least one guard (so a mutation is observable).
+/// Whether `pattern` carries at least one boundary guard (so a mutation is
+/// observable).
 pub fn has_guard(pattern: &str) -> bool {
-    lark_rs::lookaround::lower::lower_trailing(pattern)
-        .map(|bs| bs.iter().any(|b| b.guard.is_some()))
+    lark_rs::lookaround::lower::lower_boundary(pattern)
+        .map(|bs| {
+            bs.iter()
+                .any(|b| b.leading.is_some() || b.trailing.is_some())
+        })
         .unwrap_or(false)
 }
 
