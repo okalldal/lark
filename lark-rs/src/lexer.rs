@@ -147,6 +147,25 @@ fn record_scan_skip(pos: usize, match_start: Option<usize>) {
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
+/// Which engine backs the per-position match (`Scanner::match_at`). Selects between
+/// the two combined-scanner implementations behind the single [`ScannerBackend`]
+/// seam, with no behavioral difference — both reproduce Lark's leftmost-first
+/// selection, `unless` retyping, and lookaround side-probes byte-for-byte (the L0
+/// differential oracle in `tests/test_scanner_differential.rs` is the contract).
+///
+///   * [`Regex`](LexerBackend::Regex) — the original `regex`-crate combined
+///     alternation with capture groups (the default; see [`Scanner`]).
+///   * [`Dfa`](LexerBackend::Dfa) — a `regex-automata` multi-pattern DFA
+///     (`docs/LEXER_DFA_PLAN.md`, phase L1; see [`DfaScanner`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LexerBackend {
+    /// The `regex`-crate combined-alternation scanner (today's engine).
+    #[default]
+    Regex,
+    /// The `regex-automata` multi-pattern DFA scanner (phase L1).
+    Dfa,
+}
+
 #[derive(Debug, Clone)]
 pub struct LexerConf {
     /// Terminal id paired with its definition.
@@ -156,6 +175,9 @@ pub struct LexerConf {
     /// Global regex flags (Lark's `g_regex_flags`) applied to every terminal in
     /// the combined scanner regex. Zero leaves each terminal's own flags as-is.
     pub global_flags: u32,
+    /// Which combined-scanner engine to build (see [`LexerBackend`]). Defaults to
+    /// the original `regex`-crate [`Scanner`]; the DFA backend is opt-in.
+    pub backend: LexerBackend,
 }
 
 impl LexerConf {
@@ -164,12 +186,22 @@ impl LexerConf {
             terminals,
             ignore,
             global_flags: 0,
+            backend: LexerBackend::default(),
         }
     }
 
     /// Set the global regex flags (builder-style) for `g_regex_flags` support.
     pub fn with_global_flags(mut self, flags: u32) -> Self {
         self.global_flags = flags;
+        self
+    }
+
+    /// Select the combined-scanner backend (builder-style). The default is the
+    /// `regex`-crate [`Scanner`]; choosing [`LexerBackend::Dfa`] swaps in the
+    /// `regex-automata` engine for the lookaround-free terminals without changing
+    /// any lexing semantics.
+    pub fn with_backend(mut self, backend: LexerBackend) -> Self {
+        self.backend = backend;
         self
     }
 
@@ -420,6 +452,50 @@ impl Scanner {
             .copied()
             .unwrap_or(id);
         Some((ty, value))
+    }
+}
+
+// ─── ScannerBackend: the match_at seam over the two combined-scanner engines ───
+
+/// The single insertion point both [`BasicLexer`] and the per-state
+/// [`ContextualLexer`] funnel every token through: `match_at(text, pos) ->
+/// Option<(SymbolId, &str)>`. It wraps whichever combined-scanner engine
+/// [`LexerConf::backend`] selected, so the lexers never branch on the engine and a
+/// new backend lands behind this one seam (`docs/LEXER_DFA_PLAN.md`).
+///
+/// Static dispatch (an enum, not a trait object) keeps the hot per-position call a
+/// direct branch — this runs once per token on the contextual lexer's pull path.
+enum ScannerBackend {
+    /// The `regex`-crate combined-alternation scanner (today's engine).
+    Regex(Scanner),
+}
+
+impl ScannerBackend {
+    /// Build the backend named by `backend` over the candidate terminals.
+    ///
+    /// Until the L1 [`DfaScanner`](LexerBackend::Dfa) lands, both selectors build
+    /// the `regex`-crate [`Scanner`] — so the differential oracle
+    /// (`tests/test_scanner_differential.rs`) is trivially green while the seam is
+    /// validated independently of the engine swap.
+    fn build(
+        terminals: &[(SymbolId, &TerminalDef)],
+        global_flags: u32,
+        backend: LexerBackend,
+    ) -> Result<ScannerBackend, GrammarError> {
+        match backend {
+            LexerBackend::Regex | LexerBackend::Dfa => Ok(ScannerBackend::Regex(Scanner::build(
+                terminals,
+                global_flags,
+            )?)),
+        }
+    }
+
+    /// Match a single token starting exactly at `pos` — the seam every lexer uses.
+    #[inline]
+    fn match_at<'t>(&self, text: &'t str, pos: usize) -> Option<(SymbolId, &'t str)> {
+        match self {
+            ScannerBackend::Regex(s) => s.match_at(text, pos),
+        }
     }
 }
 
@@ -776,7 +852,7 @@ fn sort_terminals(terms: &mut [(SymbolId, &TerminalDef)]) {
 
 /// Scans the whole input with a single combined regex over all terminals.
 pub struct BasicLexer {
-    scanner: Scanner,
+    scanner: ScannerBackend,
     names: HashMap<SymbolId, String>,
     ignore: HashSet<SymbolId>,
 }
@@ -785,7 +861,7 @@ impl BasicLexer {
     pub fn new(conf: &LexerConf) -> Result<Self, GrammarError> {
         let refs: Vec<(SymbolId, &TerminalDef)> =
             conf.terminals.iter().map(|(id, t)| (*id, t)).collect();
-        let scanner = Scanner::build(&refs, conf.global_flags)?;
+        let scanner = ScannerBackend::build(&refs, conf.global_flags, conf.backend)?;
         Ok(BasicLexer {
             scanner,
             names: conf.names(),
@@ -858,7 +934,7 @@ impl Lexer for BasicLexer {
 /// Python Lark builds one `TraditionalLexer` per parser state.
 pub struct ContextualLexer {
     /// Per-state scanner. State 0 is the root (fallback) scanner.
-    state_scanners: HashMap<usize, Scanner>,
+    state_scanners: HashMap<usize, ScannerBackend>,
     names: HashMap<SymbolId, String>,
     ignore: HashSet<SymbolId>,
 }
@@ -886,7 +962,10 @@ impl ContextualLexer {
             if terms.is_empty() {
                 continue;
             }
-            state_scanners.insert(*state_id, Scanner::build(&terms, conf.global_flags)?);
+            state_scanners.insert(
+                *state_id,
+                ScannerBackend::build(&terms, conf.global_flags, conf.backend)?,
+            );
         }
 
         Ok(ContextualLexer {

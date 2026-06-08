@@ -224,7 +224,8 @@ pub fn build_frontend(
             let table = build_lalr_table(&cg, options.strict)?;
             let parser = LalrParser::new(table);
 
-            let lexer_conf = basic_lexer_conf(&cg, options.g_regex_flags);
+            let lexer_conf =
+                basic_lexer_conf(&cg, options.g_regex_flags).with_backend(options.lexer_backend);
 
             // Lexer-build validation, mirroring Python Lark's `BasicLexer`
             // sanitization order: reject zero-width terminals (always), then — under
@@ -319,7 +320,8 @@ pub fn build_frontend(
             // basic lexer (Sprints 1–4; `Auto`/`Basic`/`Contextual` resolve here)
             // and the dynamic lexer (Sprint 5; `Dynamic` / `DynamicComplete`).
             let cg = crate::grammar::lower(grammar);
-            let lexer_conf = basic_lexer_conf(&cg, options.g_regex_flags);
+            let lexer_conf =
+                basic_lexer_conf(&cg, options.g_regex_flags).with_backend(options.lexer_backend);
             let resolve = match options.ambiguity {
                 crate::Ambiguity::Resolve => true,
                 crate::Ambiguity::Explicit => false,
@@ -372,7 +374,8 @@ pub fn build_frontend(
             // (e.g. one with ε-rules) is rejected here as a build error, exactly as
             // Python Lark rejects it while constructing the CYK frontend.
             let cg = crate::grammar::lower(grammar);
-            let lexer_conf = basic_lexer_conf(&cg, options.g_regex_flags);
+            let lexer_conf =
+                basic_lexer_conf(&cg, options.g_regex_flags).with_backend(options.lexer_backend);
             check_zero_width_terminals(&lexer_conf)?;
             check_regex_collisions(&lexer_conf, options.strict, None)?;
             let lexer = BasicLexer::new(&lexer_conf)?;

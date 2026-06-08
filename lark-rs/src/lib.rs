@@ -15,7 +15,7 @@ pub use grammar::{
     terminal::TerminalDef,
     CompiledGrammar, CompiledRule, Grammar, SymbolId, SymbolKind, SymbolTable,
 };
-pub use lexer::{BasicLexer, ContextualLexer, DynamicMatcher, Lexer, LexerConf};
+pub use lexer::{BasicLexer, ContextualLexer, DynamicMatcher, Lexer, LexerBackend, LexerConf};
 pub use parsers::{
     basic_lexer_conf, lalr, EarleyParser, LexFailure, ParseTable, ParserConf, TokenSource,
 };
@@ -125,6 +125,12 @@ pub struct LarkOptions {
     /// Lark's `postlex` option. Only the LALR backend honours it. `None` (the
     /// default) leaves the token stream untouched.
     pub postlex: Option<postlex::Indenter>,
+    /// Which combined-scanner engine the lexer builds (see [`LexerBackend`]). This
+    /// has **no** Lark equivalent — it selects between byte-for-byte equivalent
+    /// scanner implementations (`docs/LEXER_DFA_PLAN.md`) and exists so the L0
+    /// differential oracle can build the same grammar under both engines. Defaults
+    /// to the original `regex`-crate scanner.
+    pub lexer_backend: LexerBackend,
 }
 
 impl Default for LarkOptions {
@@ -144,6 +150,7 @@ impl Default for LarkOptions {
             g_regex_flags: 0,
             base_path: None,
             postlex: None,
+            lexer_backend: LexerBackend::default(),
         }
     }
 }
