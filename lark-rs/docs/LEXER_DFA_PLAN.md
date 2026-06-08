@@ -93,6 +93,25 @@ at build time** with a clear, actionable error. Grammars stay verbatim. This is 
 feature — built **harness-first, one shape at a time**, gated by the verification
 harness (see Process).
 
+**L2 re-platforms the `DfaScanner` engine — it is *not* additive over L1.** L1's
+`DfaScanner` is `meta::Regex::new_many`, whose only input is **pattern strings**, and
+`regex-automata` categorically cannot represent `(?!…)` (the reason `fancy-regex`
+exists). The lowered G-tier cannot ride `new_many` even in principle: `STRING`'s leading
+guard has *no* plain-string form (the definition of G-tier), and a guarded accept is a
+driver/automaton-level construct, not a pattern. So L2 must drop below the meta engine —
+**hand-assemble the lowered fragments with `thompson::Builder`, compile the plain
+terminals' HIR, union them into one NFA, and determinize a `dense`/`hybrid` DFA we drive
+through the `Automaton` trait** (the same lower layer the #35 collision check already
+uses). *(Tier-E lowerings are plain strings and could stay on `new_many`, but the
+G-tier forces the re-platform, so everything moves to the hand-built construction.)*
+Two fallouts to carry forward, both gated by the differential oracle:
+
+* **Re-validate the leftmost-first tie-break** on the new construction — the
+  `dfa_tiebreak_*` / `dfa_priority_and_width_ordering` tests were written against the
+  meta union and must be re-established against the hand-built DFA.
+* **Re-derive the start-byte prefilter** — `plain_start_bytes` is computed off the meta
+  union today; it must be recomputed from the new union (or the common path regresses).
+
 ### L3 — Flip the Dfa backend to default
 
 Once L2's lowering is green across the full differential bank, make `LexerBackend::Dfa`
@@ -130,8 +149,21 @@ finite window. Three shapes, three moves:
   accept.** The lookahead char belongs to the *next* token, and the maximal-munch
   driver is already about to read it, so tag the accept "valid only if the next byte ∉
   S" and have the driver record the accept only when that holds. The length-changing
-  case (`DEC_NUMBER`: `0001`→`00`) falls out for free — maximal munch just remembers the
-  *last accept where the guard held.* No backtracking engine.
+  case (`DEC_NUMBER`: `0001`→`00`) follows from maximal munch remembering the *last
+  accept where the guard held* — no backtracking engine.
+
+  **Caveat — guarded accept × multi-pattern priority is an up-front design item, not
+  "free."** "Falls out for free" holds only for a terminal *in isolation*. In the
+  combined automaton, one state accepts for several patterns with **different** guards
+  (`[a-z]` for `OP`, `[1-9]` for `DEC_NUMBER`), and a failing guard can invalidate the
+  engine's leftmost-first winner — at which point the correct token is a **runner-up**
+  that a single-`Match` API never surfaces. So the driver needs a **per-pattern
+  guarded-longest accumulator** over the **accept-set** at each state, then a post-hoc
+  Lark `(priority, length)` selection across the survivors — an `Automaton`-level view
+  of the accepting pattern set, *not* a single `PatternID`. (This is a second,
+  independent reason `meta::Regex::new_many` can't host the lowering — it couples to the
+  L2 re-platform above.) Tractable, and the differential oracle catches regressions, but
+  it must be designed in from the start.
 
 **General backstop.** For anything the three moves don't cover directly, the rigorous
 fallback is closure theory: a bounded assertion is a regular constraint, and finite
@@ -245,8 +277,14 @@ priority surviving the union.
   unsure, **reject**.
 * **UTF-8 / byte-vs-char** — `regex-automata` DFAs are byte-level; the lowering and the
   maximal-munch driver must respect char boundaries. Explicit seam-checklist coverage.
-* **Determinization blow-up** from lowering assertions + case-insensitive prefixes —
-  mitigate with the **lazy (hybrid) DFA** (states built on demand).
+* **Determinization blow-up** from lowering assertions (parity duplication + spliced
+  branches) on top of python.lark's many per-state contextual scanners. The **lazy
+  (hybrid) DFA** mitigates this at *runtime* (states built on demand) — but **L5 bakes
+  via `to_bytes`, which needs a fully-determinized `dense` DFA**, so the bake target
+  pays the determinization the lazy path never does. The lazy mitigation therefore does
+  **not** cover the bake. Gate it: a `perf-counters` **dense build-cost gate** (a
+  codegen-time cost, paid at standalone generation, not every runtime load), matching
+  the Earley/CYK scaling gates, so a determinization regression is caught deterministically.
 * **Tie-break fidelity** — Lark's (priority, length, …) selection + `unless` on top of
   raw `PatternID`. The differential oracle is the net.
 * **Lost free optimizations** — the regex crate's auto-prefilters; must be re-added
@@ -258,7 +296,7 @@ priority surviving the union.
 
 | Artifact | Disposition |
 |---|---|
-| `src/lookaround/mod.rs` (assertion front-end) | **Reuse** as the L2 lowering/classifier pass |
+| `src/lookaround/mod.rs` (assertion front-end) | **Resurrect** from the closed #110 branch / git history — it is **not** on `master`, so retrieving + re-landing it is a real first task — then repurpose as the L2 lowering/classifier pass |
 | `src/lookaround/matcher.rs` (Pike-VM) | **Not used** — a DFA replaces it |
 | `tests/test_lookaround.rs` + `fixtures/oracles/lookaround/` | **Reuse** as the lookaround behavioral gate |
 | `fancy-regex` (runtime routing) | **Drop at L4 — retain as the test oracle** (Verification) |
