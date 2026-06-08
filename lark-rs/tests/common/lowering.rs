@@ -12,13 +12,15 @@
 //!     match-length reference the lowering is verified against (kept forever as a
 //!     dev/test dependency, per the plan).
 //!   * **The mutation framework** — deliberately-wrong [`Classifier`]s
-//!     ([`reject_path_mutants`]) and the reusable reject-corpus check
-//!     ([`wrongly_accepted_rejects`]) the mutation meta-test drives, validated now
-//!     on the reject path.
-//!   * **The lowered-matcher hook** — [`lowered_prefix`], stubbed to the *pending*
-//!     state so the #[ignore]'d equivalence layers compile and fail loudly if
-//!     un-ignored before a shape lands. The first-shape session points it at the
-//!     real lowered `DfaScanner`.
+//!     ([`reject_path_mutants`]) for the reject path, plus the per-shape
+//!     equivalence-layer mutants ([`trailing_mutants`] / [`trailing_mutant_survives`])
+//!     that corrupt the *lowering itself* and must each be caught by the now-active
+//!     terminal-level equivalence layer.
+//!   * **The lowered-matcher hook** — [`lowered_prefix`], which delegates to the real
+//!     `regex-automata` lowering ([`lark_rs::lowered_match_prefix`]) for landed shapes
+//!     and returns `Err` for shapes whose lowering has not landed yet, so an
+//!     un-ignored equivalence layer fails loudly rather than comparing the oracle
+//!     against itself.
 #![allow(dead_code)]
 
 use lark_rs::{classify, Classification, Classifier, Rejection, ShapeClass, Verdict};
@@ -90,21 +92,16 @@ pub fn fancy_prefix(re: &fancy_regex::Regex, input: &str) -> Option<usize> {
 
 // ─── The lowered-matcher hook (stubbed: pending) ───────────────────────────────
 
-/// **Pending hook.** Anchored matched-prefix length of the *lowered* terminal at the
-/// start of `input`, or `Ok(None)` for no match. Until a shape lands this returns
-/// `Err` for every lookaround terminal, mirroring [`lark_rs::lower_terminal`]. The
-/// generative-equivalence layer (`tests/test_lowering_equivalence.rs`) is
-/// `#[ignore]`'d on this, and `.expect()`s it, so un-ignoring before the lowering
-/// exists fails loudly rather than passing for the wrong reason.
-///
-/// The first-shape session replaces this body with the real lowered `DfaScanner`
-/// (build a one-terminal grammar under `LexerBackend::Dfa`, match at offset 0) —
-/// keeping the harness at the `match_at` boundary, engine-agnostic.
-pub fn lowered_prefix(name: &str, _pattern: &str, _input: &str) -> Result<Option<usize>, String> {
-    Err(format!(
-        "lowered matcher for `{name}` is not implemented — pending first shape \
-         (docs/LEXER_DFA_PLAN.md L2)"
-    ))
+/// Anchored matched-prefix length (in **characters**) of the *lowered* terminal at
+/// the start of `input`, or `Ok(None)` for no match — the lowered-path counterpart of
+/// [`fancy_prefix`]. Delegates to [`lark_rs::lowered_match_prefix`], which builds the
+/// terminal under the `regex-automata` lowering (no `fancy-regex`) and matches at
+/// offset 0, returning the **raw** prefix length (zero-width included, exactly as
+/// `fancy_prefix` does). It returns `Err` for any terminal whose shape has not landed,
+/// so an un-ignored equivalence layer fails loudly rather than passing for the wrong
+/// reason (it can never compare `fancy-regex` against itself).
+pub fn lowered_prefix(name: &str, pattern: &str, input: &str) -> Result<Option<usize>, String> {
+    lark_rs::lowered_match_prefix(name, pattern, input).map_err(|e| e.to_string())
 }
 
 // ─── Supported-shape generators ────────────────────────────────────────────────
@@ -495,4 +492,179 @@ pub fn wrongly_accepted_rejects(classifier: &dyn Classifier, cases: &[RejectCase
         }
     }
     bad
+}
+
+// ─── Equivalence-layer mutants (per-shape: trailing boundary) ───────────────────
+//
+// The reject-path mutants above attack the *classifier* (false-accept). These attack
+// the *lowering itself*: a deliberately-wrong lowered matcher must be caught by the
+// now-active terminal-level equivalence layer (it diverges from `fancy-regex`). They
+// are realised on the lowering's own `(body, guard)` decomposition (from
+// `lower_terminal`) and matched with the `fancy-regex` oracle, so each mutant *is* a
+// concrete buggy lowering — not a hand-faked number. The list is exactly the plan's:
+// invert the guard set, off-by-one width, drop the EOF case, accept zero-width, and
+// forget the guard entirely.
+
+/// One deliberately-wrong trailing lowering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrailMutation {
+    /// The correct lowering (the control — must *not* diverge).
+    None,
+    /// Ignore the trailing guard entirely — take the body's greedy match.
+    ForgetGuard,
+    /// Flip the guard polarity (`(?!S)` ↔ `(?=S)`).
+    InvertGuard,
+    /// Wrongly accept a zero-width prefix.
+    AcceptZeroWidth,
+    /// Mishandle end-of-input: drop an otherwise-valid match that ends at EOF under a
+    /// negative guard (as if "no next char" meant the guard could not be confirmed).
+    DropEof,
+    /// Check the guard one position too far (off-by-one window width).
+    OffByOneWidth,
+}
+
+/// The names + variants of every trailing equivalence-layer mutant the meta-test runs
+/// (excluding the `None` control).
+pub fn trailing_mutants() -> Vec<(&'static str, TrailMutation)> {
+    vec![
+        ("forget-the-guard", TrailMutation::ForgetGuard),
+        ("invert-the-guard-set", TrailMutation::InvertGuard),
+        ("accept-zero-width", TrailMutation::AcceptZeroWidth),
+        ("drop-the-eof-case", TrailMutation::DropEof),
+        ("off-by-one-width", TrailMutation::OffByOneWidth),
+    ]
+}
+
+/// A trailing terminal's branch decomposition, with the `fancy-regex` matchers it
+/// needs **precompiled** (compiling per corpus input would make the meta-test O(many
+/// thousands) of regex builds — pathologically slow).
+struct CompiledBranch {
+    /// `^(?:body)$` — tests whether a prefix is an *exact* body match.
+    body_exact: fancy_regex::Regex,
+    /// `(neg, \A(?:guard))` for a guarded branch.
+    guard: Option<(bool, fancy_regex::Regex)>,
+}
+
+/// Compile the branch matchers for a trailing terminal once, from `lower_terminal`'s
+/// own decomposition (so the mutant is a faithful corruption of the real lowering).
+fn compile_branches(pattern: &str) -> Option<Vec<CompiledBranch>> {
+    let branches = match lark_rs::lower_terminal("M", pattern) {
+        Ok(lark_rs::Lowered::Trailing(b)) => b,
+        _ => return None,
+    };
+    let mut out = Vec::new();
+    for br in &branches {
+        let body_exact = fancy_regex::Regex::new(&format!("^(?:{})$", br.body)).ok()?;
+        let guard = match &br.guard {
+            Some(g) => Some((
+                g.neg,
+                fancy_regex::Regex::new(&format!(r"\A(?:{})", g.guard)).ok()?,
+            )),
+            None => None,
+        };
+        out.push(CompiledBranch { body_exact, guard });
+    }
+    Some(out)
+}
+
+/// Byte lengths `l` (char boundaries, `0..=len`) at which `body_exact` matches
+/// `input[..l]` exactly — the body's accept set.
+fn body_accept_lengths(body_exact: &fancy_regex::Regex, input: &str) -> Vec<usize> {
+    let mut out = Vec::new();
+    for l in 0..=input.len() {
+        if input.is_char_boundary(l) && body_exact.is_match(&input[..l]).unwrap_or(false) {
+            out.push(l);
+        }
+    }
+    out
+}
+
+/// Whether the (precompiled) guard holds at byte offset `e`, under `mutation`.
+fn guard_holds(
+    neg: bool,
+    guard_re: &fancy_regex::Regex,
+    input: &str,
+    e: usize,
+    mutation: TrailMutation,
+) -> bool {
+    if mutation == TrailMutation::DropEof && e == input.len() && neg {
+        return false; // EOF mishandling: drop the match that ends at end-of-input
+    }
+    let probe = match mutation {
+        TrailMutation::OffByOneWidth => e + 1, // one position too far
+        _ => e,
+    };
+    let matched = probe <= input.len()
+        && input.is_char_boundary(probe)
+        && guard_re
+            .find(&input[probe..])
+            .ok()
+            .flatten()
+            .is_some_and(|m| m.start() == 0);
+    let neg = if mutation == TrailMutation::InvertGuard {
+        !neg
+    } else {
+        neg
+    };
+    if neg {
+        !matched
+    } else {
+        matched
+    }
+}
+
+/// The match-prefix length (in **bytes**) a (possibly-mutated) trailing lowering
+/// computes for `input`, or `None`. `TrailMutation::None` is the correct lowering.
+fn mutant_match(
+    branches: &[CompiledBranch],
+    input: &str,
+    mutation: TrailMutation,
+) -> Option<usize> {
+    // Ordered alternation: first branch that matches wins.
+    for br in branches {
+        let accepts = body_accept_lengths(&br.body_exact, input);
+        let m = match &br.guard {
+            None => accepts.iter().max().copied(),
+            Some((neg, guard_re)) => match mutation {
+                TrailMutation::ForgetGuard => accepts.iter().max().copied(),
+                TrailMutation::AcceptZeroWidth => Some(0),
+                _ => accepts
+                    .iter()
+                    .rev()
+                    .copied()
+                    .find(|&e| guard_holds(*neg, guard_re, input, e, mutation)),
+            },
+        };
+        if let Some(end) = m {
+            return Some(end);
+        }
+    }
+    None
+}
+
+/// Whether `mutation` **survives** the trailing population's terminal-level
+/// equivalence layer — i.e. it never diverges from `fancy-regex` over any generated
+/// trailing terminal's exhaustive corpus. The correct lowering survives (returns
+/// `true`); every real mutant must be *caught* (diverge somewhere → `false`), so a
+/// surviving mutant is a hole in the net.
+pub fn trailing_mutant_survives(mutation: TrailMutation) -> bool {
+    for t in supported_terminals()
+        .into_iter()
+        .filter(|t| t.shape == ShapeClass::TrailingBoundary)
+    {
+        let (Some(oracle_re), Some(branches)) =
+            (fancy_matcher(&t.pattern), compile_branches(&t.pattern))
+        else {
+            continue;
+        };
+        for input in corpus(&t.alphabet, t.max_len) {
+            let oracle = fancy_prefix(&oracle_re, &input); // chars
+            let mutant =
+                mutant_match(&branches, &input, mutation).map(|end| input[..end].chars().count());
+            if mutant != oracle {
+                return false; // caught: diverges here
+            }
+        }
+    }
+    true // survived everywhere
 }

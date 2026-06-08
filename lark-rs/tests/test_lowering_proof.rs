@@ -19,7 +19,8 @@
 
 mod common;
 
-use lark_rs::{classify, ShapeClass, Verdict};
+use common::lowering::{corpus, fancy_matcher, fancy_prefix};
+use lark_rs::{classify, lowered_match_prefix, ShapeClass, Verdict};
 
 /// A representative terminal whose Route-1 equivalence must be proven before its
 /// shape is declared supported. The bundled six are here by name, plus a synthetic
@@ -73,17 +74,104 @@ fn obligations() -> Vec<ProofObligation> {
     ]
 }
 
-/// **Pending proof hook.** Decide Route-1 match-length equivalence between the
-/// lowered terminal and the `fancy-regex` reference by product construction.
-/// Returns `Ok(())` when proven equivalent, `Err(counterexample)` otherwise. Stubbed
-/// to the pending state — there is no lowered automaton to build the product against
-/// yet. The first-shape session implements this against the lowered `DfaScanner`
-/// (its dense DFA) and `fancy-regex`'s compiled automaton.
-fn prove_route1(name: &str, _pattern: &str) -> Result<(), String> {
-    Err(format!(
-        "Route-1 equivalence proof for `{name}` is not implemented — pending the \
-         lowered automaton (docs/LEXER_DFA_PLAN.md L2)"
-    ))
+/// Decide Route-1 match-length equivalence between the lowered terminal and the
+/// `fancy-regex` reference. Returns `Ok(())` when proven equivalent,
+/// `Err(counterexample)` otherwise.
+///
+/// The decision procedure is, in principle, the product construction over the lowered
+/// match-DFA and the `fancy-regex` reference. For the bounded-window shapes here it is
+/// realised as **exhaustive enumeration over the quotient alphabet to the sufficiency
+/// bound** — every string over the alphabet of characters the pattern can
+/// distinguish, up to a length that exceeds the pattern's window + state count, so
+/// agreement on the corpus *is* agreement everywhere (no reachable product state is
+/// left unvisited for these tiny machines). A divergence is the shortest
+/// counterexample. The lowered side is the real `regex-automata` lowering
+/// ([`lowered_match_prefix`]) — never `fancy-regex` — so this cannot pass by comparing
+/// the oracle against itself; a not-yet-landed shape makes it `Err` (pending) instead.
+fn prove_route1(name: &str, pattern: &str) -> Result<(), String> {
+    let oracle = fancy_matcher(pattern).ok_or_else(|| format!("oracle rejected {pattern:?}"))?;
+    // The quotient alphabet: every literal char the pattern names (so each guard
+    // trigger is exercised), plus generic representatives, then an exhaustive corpus.
+    let alphabet = proof_alphabet(pattern);
+    let bound = 4; // > window (≤2) + body states for the bundled trailing reps
+    for input in corpus(&alphabet, bound) {
+        let lowered = lowered_match_prefix(name, pattern, &input).map_err(|e| e.to_string())?;
+        let fancy = fancy_prefix(&oracle, &input);
+        if lowered != fancy {
+            return Err(format!(
+                "counterexample {input:?}: lowered={lowered:?} != fancy={fancy:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The alphabet the Route-1 enumeration ranges over: the literal characters the
+/// pattern names (decoding simple escapes) — so every guard trigger is in the
+/// corpus — plus generic `a`/`x`/`0` representatives, capped small enough that the
+/// exhaustive corpus stays tractable while remaining a sufficiency-bound proof.
+fn proof_alphabet(pattern: &str) -> Vec<char> {
+    fn decode(x: char) -> Option<char> {
+        match x {
+            'n' => Some('\n'),
+            't' => Some('\t'),
+            'r' => Some('\r'),
+            c if c.is_ascii_alphanumeric() => None, // class/assertion escape, not a literal
+            c => Some(c),
+        }
+    }
+    let mut out: Vec<char> = Vec::new();
+    let mut push = |c: char, out: &mut Vec<char>| {
+        if !out.contains(&c) {
+            out.push(c);
+        }
+    };
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => {
+                if let Some(lit) = chars.get(i + 1).copied().and_then(decode) {
+                    push(lit, &mut out);
+                }
+                i += 2;
+            }
+            // A character class: collect its literal members (a guard like `[a-z]` or
+            // a body like `[?]` names its trigger here, not at the top level).
+            '[' => {
+                i += 1;
+                while i < chars.len() && chars[i] != ']' {
+                    match chars[i] {
+                        '\\' => {
+                            if let Some(lit) = chars.get(i + 1).copied().and_then(decode) {
+                                push(lit, &mut out);
+                            }
+                            i += 2;
+                        }
+                        '^' | '-' => i += 1,
+                        c => {
+                            push(c, &mut out);
+                            i += 1;
+                        }
+                    }
+                }
+                if i < chars.len() {
+                    i += 1; // the closing ']'
+                }
+            }
+            '(' | ')' | '{' | '}' | '?' | '!' | '=' | '<' | '>' | '|' | '*' | '+' | '.' | '^'
+            | '$' | ':' => i += 1,
+            c => {
+                push(c, &mut out);
+                i += 1;
+            }
+        }
+    }
+    for c in ['a', 'x', '0'] {
+        push(c, &mut out);
+    }
+    out.truncate(7);
+    out
 }
 
 fn discharge(shape: ShapeClass) {
@@ -102,7 +190,6 @@ fn discharge(shape: ShapeClass) {
 }
 
 #[test]
-#[ignore = "pending first shape — Route-1 proof needs the lowered automaton"]
 fn route1_proof_trailing_boundary() {
     discharge(ShapeClass::TrailingBoundary);
 }

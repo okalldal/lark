@@ -38,7 +38,9 @@ use regex_automata::{
 
 use crate::error::{GrammarError, ParseError};
 use crate::grammar::intern::SymbolId;
-use crate::grammar::terminal::{Pattern, TerminalDef};
+use crate::grammar::terminal::{Pattern, PatternRe, TerminalDef};
+use crate::lookaround::classify::{lower_terminal, Lowered};
+use crate::lookaround::lower::LoweredMatcher;
 use crate::tree::Token;
 
 // ─── AnyRegex: a per-terminal regex that may need lookaround ──────────────────
@@ -495,15 +497,50 @@ struct DfaScanner {
     re: Option<MetaRegex>,
     /// `PatternID` → (terminal id, rank), parallel to the patterns given to
     /// `new_many` (rank order), so a plain match's rank can be compared against a
-    /// fancy match's.
+    /// per-terminal probe's.
     plain: Vec<(SymbolId, usize)>,
     /// Start-byte prefilter for the plain engine (see the struct docs). `None`
     /// disables it (always run the engine) — the safe default if it can't be built.
     start_bytes: Option<Box<[bool; 256]>>,
-    /// Lookaround terminals (`fancy-regex`), rank-sorted — identical to [`Scanner`].
-    fancy: Vec<(usize, SymbolId, AnyRegex)>,
+    /// Per-terminal probes for the lookaround terminals, **rank-sorted** so the first
+    /// one that matches is the lowest-rank lookaround candidate. Each is either a
+    /// **lowered** matcher (a landed L2 shape — `regex-automata` only, no
+    /// `fancy-regex`) or a `fancy-regex` side-probe (a shape whose lowering has not
+    /// landed, or an unsupported assertion the grammar still uses). The split is keyed
+    /// on [`lower_terminal`], so a terminal flips from `Fancy` to `Lowered` the moment
+    /// its shape lands — the same gate the differential oracle reads.
+    probes: Vec<(usize, SymbolId, Probe)>,
     /// regex-terminal-id → (matched-text → keyword-terminal-id) — identical retype.
     unless: HashMap<SymbolId, HashMap<String, SymbolId>>,
+}
+
+/// One per-terminal lookaround probe: a lowered (landed-shape) matcher or a
+/// `fancy-regex` side-probe. Both answer "non-empty match ending at, exactly
+/// beginning at, `pos`", so the rank-merge in [`DfaScanner::match_at`] treats them
+/// uniformly.
+enum Probe {
+    /// A landed L2 shape, lowered to lookaround-free `regex-automata` matching.
+    Lowered(LoweredMatcher),
+    /// A not-yet-lowered (or unsupported) lookaround terminal on `fancy-regex`,
+    /// anchored with `\G` exactly as [`Scanner`] does.
+    Fancy(AnyRegex),
+}
+
+impl Probe {
+    /// End offset of a non-empty match beginning exactly at `pos`, or `None`. The
+    /// lexer rejects a zero-width match (mirroring [`AnyRegex::match_end_at`]), so a
+    /// lowered matcher's raw zero-width prefix is dropped here too.
+    fn match_end_at(&self, text: &str, pos: usize) -> Option<usize> {
+        match self {
+            Probe::Lowered(m) => {
+                // An anchored probe: bounded by the matched token, charged a flat 1
+                // to the scan counter like `record_scan_skip(pos, Some(pos))`.
+                crate::perf::add_lexer_scan_steps(1);
+                m.match_prefix(text, pos).filter(|&end| end > pos)
+            }
+            Probe::Fancy(re) => re.match_end_at(text, pos),
+        }
+    }
 }
 
 impl DfaScanner {
@@ -518,29 +555,60 @@ impl DfaScanner {
         let unless = plan.unless;
         let prefix = plan.global_prefix;
 
+        // id → terminal definition, so a lookaround terminal can be classified and
+        // lowered from its *own* (un-prefixed) regex source — the same string the
+        // differential oracle gates `lower_terminal` on.
+        let by_id: HashMap<SymbolId, &TerminalDef> =
+            terminals.iter().map(|(id, t)| (*id, *t)).collect();
+
         // Split the rank-ordered plan into plain terminals (one combined meta DFA)
-        // and lookaround terminals (per-position `fancy-regex` probes), exactly as
-        // `Scanner::build` does. `rank` is the index in the plan's sorted order.
+        // and lookaround terminals (per-terminal probes), exactly as `Scanner::build`
+        // does. `rank` is the index in the plan's sorted order. A lookaround terminal
+        // whose shape has **landed** lowers to a `regex-automata`-only `Probe::Lowered`
+        // (no `fancy-regex`); the rest stay on the `fancy-regex` side-probe.
         let mut patterns: Vec<String> = Vec::new();
         let mut inlines: Vec<&str> = Vec::new();
         let mut plain: Vec<(SymbolId, usize)> = Vec::new();
-        let mut fancy: Vec<(usize, SymbolId, AnyRegex)> = Vec::new();
+        let mut probes: Vec<(usize, SymbolId, Probe)> = Vec::new();
         for (rank, (id, inline)) in plan.groups.iter().enumerate() {
             let src = format!("{prefix}{inline}");
             // Same fancy-detection as `Scanner`: a pattern is fancy iff the `regex`
             // crate (a subset of `fancy-regex`) rejects it.
             let compiled = AnyRegex::compile(&src)?;
             if compiled.is_fancy() {
-                // Anchor the per-position fancy probe with `\G` — identical to
-                // `Scanner::build` (see the comment there).
-                let anchored = AnyRegex::compile(&format!("{prefix}\\G{inline}"))?;
-                fancy.push((rank, *id, anchored));
+                // A lookaround terminal. If its shape has landed (and no global flags
+                // are in play — the lowered fragments do not carry them yet), lower it
+                // to a `regex-automata`-only matcher; otherwise fall back to the
+                // `\G`-anchored `fancy-regex` side-probe, exactly as today.
+                let name = by_id.get(id).map(|t| t.name.as_str()).unwrap_or("");
+                let raw = by_id
+                    .get(id)
+                    .map(|t| t.pattern.to_inline_regex())
+                    .unwrap_or_else(|| inline.to_string());
+                let lowered = if global_flags == 0 {
+                    match lower_terminal(name, &raw) {
+                        Ok(low @ Lowered::Trailing(_)) => Some(LoweredMatcher::build(&low)?),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                match lowered {
+                    Some(m) => probes.push((rank, *id, Probe::Lowered(m))),
+                    None => {
+                        let anchored = AnyRegex::compile(&format!("{prefix}\\G{inline}"))?;
+                        probes.push((rank, *id, Probe::Fancy(anchored)));
+                    }
+                }
             } else {
                 plain.push((*id, rank));
                 inlines.push(inline);
                 patterns.push(src);
             }
         }
+        // Rank-sort the probes so the first match is the lowest-rank lookaround
+        // candidate (mixing lowered and fancy probes, which can interleave by rank).
+        probes.sort_by_key(|(rank, _, _)| *rank);
 
         let (re, start_bytes) = if patterns.is_empty() {
             (None, None)
@@ -565,7 +633,7 @@ impl DfaScanner {
             re,
             plain,
             start_bytes,
-            fancy,
+            probes,
             unless,
         })
     }
@@ -601,12 +669,14 @@ impl DfaScanner {
                 }
             }
         }
-        // Lowest-rank fancy candidate — verbatim from `Scanner::match_at`.
-        for (rank, id, re) in &self.fancy {
+        // Lowest-rank lookaround candidate (lowered or fancy), rank-sorted so the
+        // first match wins; keep it only if it out-ranks the plain candidate. Same
+        // shape as `Scanner::match_at`'s fancy loop.
+        for (rank, id, probe) in &self.probes {
             if best.is_some_and(|(b, _, _)| *rank > b) {
                 break;
             }
-            if let Some(end) = re.match_end_at(text, pos) {
+            if let Some(end) = probe.match_end_at(text, pos) {
                 best = Some((*rank, *id, &text[pos..end]));
                 break;
             }
@@ -621,6 +691,54 @@ impl DfaScanner {
             .unwrap_or(id);
         Some((ty, value))
     }
+}
+
+/// Match the single terminal `pattern` (named `name`) at the **start** of `input`
+/// under the L2 lowering, returning the **raw** matched-prefix length in *characters*
+/// (a zero-width match returns `Some(0)`, mirroring `fancy-regex`'s anchored `find`),
+/// or `None` if it does not match at offset 0. `Err` if the terminal does not lower
+/// to a landed shape — so the terminal-level equivalence/proof harness can never pass
+/// by silently comparing `fancy-regex` against itself.
+///
+/// This is the lowered-matcher hook `tests/common/lowering.rs::lowered_prefix` calls:
+/// it keeps the comparison at the engine boundary, lowered-path only.
+pub fn lowered_match_prefix(
+    name: &str,
+    pattern: &str,
+    input: &str,
+) -> Result<Option<usize>, GrammarError> {
+    use std::rc::Rc;
+
+    thread_local! {
+        // Compile once per pattern, reuse across inputs — the equivalence/proof
+        // harness calls this for every string in an exhaustive corpus, so rebuilding
+        // the matcher (a dense DFA + regexes) per call would be quadratically slow.
+        static CACHE: RefCell<HashMap<String, Rc<LoweredMatcher>>> = RefCell::new(HashMap::new());
+    }
+
+    let cached = CACHE.with(|c| c.borrow().get(pattern).cloned());
+    let matcher = match cached {
+        Some(m) => m,
+        None => {
+            // Only a genuinely-lowered (landed) shape; a plain or pending/unsupported
+            // pattern is an error (the harness must not measure a non-lowered term).
+            let lowered = lower_terminal(name, pattern)?;
+            if !matches!(lowered, Lowered::Trailing(_)) {
+                return Err(GrammarError::Other {
+                    msg: format!("terminal `{name}`: {pattern:?} is not a lowered shape"),
+                });
+            }
+            // Validate the pattern compiles as a terminal too (parity with the build
+            // path; surfaces a malformed pattern as an error, not a panic).
+            PatternRe::new(pattern, 0)?;
+            let m = Rc::new(LoweredMatcher::build(&lowered)?);
+            CACHE.with(|c| c.borrow_mut().insert(pattern.to_string(), m.clone()));
+            m
+        }
+    };
+    Ok(matcher
+        .match_prefix(input, 0)
+        .map(|end| input[..end].chars().count()))
 }
 
 /// The set of bytes any branch of the plain union `src` can begin a match with, or

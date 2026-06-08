@@ -103,6 +103,31 @@ maximal-munch driver, and the differential oracle `tests/test_scanner_differenti
 > hook (and the Dfa backend) at the real lowered `DfaScanner`, then drops that shape's
 > `#[ignore]`s — the harness flips it from pending to gated automatically. **No real
 > lowering, no `DfaScanner` engine change, was done in the harness session.**
+>
+> **Status update — shape 1 (trailing boundary) has landed.** `X(?!S)` / `X(?=S)`
+> lowers to a **guarded accept** with **no `fancy-regex` at runtime**: the body `X` is
+> matched with `regex-automata` and the guard `S` is checked one position past the
+> match. The driver enumerates the body's accept set through the `Automaton` trait's
+> overlapping search (`MatchKind::All`) and walks it longest-first, returning the first
+> accept at which the guard holds — so the length-changing case (`DEC_NUMBER`
+> `0001`→`00`) falls straight out, and ordered alternation (`lark`'s `OP` =
+> `[+*]|[?](?![a-z])`) is honoured branch-by-branch. The matcher lives in
+> `src/lookaround/lower.rs` (`LoweredMatcher`); `lower_terminal` now returns
+> `Ok(Lowered::Trailing(..))` for it; `DfaScanner` routes a landed-shape terminal to a
+> `Probe::Lowered` (the rest stay on the `fancy-regex` side-probe), and
+> `lexer::lowered_match_prefix` is the `lowered_prefix` hook. All five gates are green
+> for trailing — generative equivalence, the Route-1 proof, the reject corpus, the
+> scanner differential (the ~116 generated trailing grammars flipped from *pending* to
+> *compared*, 0 divergences; the 288 leading/lookbehind/unsupported grammars stay
+> pending), and the equivalence-layer mutation meta-test (invert-the-guard,
+> off-by-one-width, drop-the-EOF-case, accept-zero-width, forget-the-guard — each
+> caught). **Implementation note (re-platform scope):** to honour the hard "no
+> regression on the lookaround-free bank" constraint, the *plain* terminals stay on the
+> proven `meta::Regex` leftmost-first engine (L1); the re-platform's substance — the
+> hand-driven `Automaton`-trait accept-set accumulator + the guarded accept that
+> `meta::Regex` cannot host — lives on the lowered path, alongside it. Folding the
+> plain union into the same hand-built DFA (and the bake target) is the L5 concern it
+> was raised for. Shapes 2 (leading) and 3 (lookbehind) remain pending.
 
 A **general** lowering keyed on the assertion's **shape**, not on the six bundled
 terminals. Lower each supported bounded assertion into lookaround-free DFA states

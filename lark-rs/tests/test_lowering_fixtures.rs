@@ -180,7 +180,6 @@ fn outcome(lexer: &BasicLexer, input: &str) -> Result<Vec<(String, String)>, usi
 /// the Regex/`fancy` reference. This is the per-fixture restriction of the master
 /// differential; un-ignore it as each shape lands.
 #[test]
-#[ignore = "pending first shape — the Dfa backend still routes lookaround to fancy-regex, not the lowering"]
 fn seam_fixtures_lowered_lex_equals_fancy() {
     for f in fixtures() {
         let regex = build(&f, LexerBackend::Regex)

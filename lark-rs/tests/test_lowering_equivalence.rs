@@ -73,7 +73,6 @@ fn run_shape(shape: ShapeClass) {
 }
 
 #[test]
-#[ignore = "pending first shape — trailing-boundary lowering not yet implemented"]
 fn trailing_boundary_lowered_equals_fancy() {
     run_shape(ShapeClass::TrailingBoundary);
 }
