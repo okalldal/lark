@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use regex::{CaptureLocations, Regex};
 use regex_automata::{
-    dfa::{dense, Automaton, StartKind},
+    dfa::{dense, Automaton, OverlappingState, StartKind},
     hybrid::dfa::DFA as LazyDfa,
     nfa::thompson,
     util::primitives::StateID,
@@ -500,20 +500,109 @@ impl Scanner {
 /// can only ever *save* an engine call, never change a match — the L0 differential
 /// oracle is the proof.
 struct DfaScanner {
-    /// Multi-pattern leftmost-first dense DFA over the plain terminals, or `None` when
-    /// every candidate is a lookaround terminal. `PatternID i` indexes `plain[i]`.
-    re: Option<dense::DFA<Vec<u32>>>,
-    /// `PatternID` → (terminal id, rank), parallel to the patterns unioned into the
-    /// NFA (rank order), so a plain match's rank can be compared against a fancy
-    /// match's.
-    plain: Vec<(SymbolId, usize)>,
+    /// The plain-terminal engine, or `None` when every candidate is a (still-fancy)
+    /// lookaround terminal.
+    re: Option<PlainDfa>,
     /// Start-byte prefilter for the plain engine (see the struct docs). `None`
     /// disables it (always run the engine) — the safe default if it can't be built.
     start_bytes: Option<Box<[bool; 256]>>,
-    /// Lookaround terminals (`fancy-regex`), rank-sorted — identical to [`Scanner`].
+    /// Lookaround terminals still routed to `fancy-regex` (those whose shape M1 does
+    /// not yet lower — leading-boundary / bounded-lookbehind / unsupported),
+    /// rank-sorted — identical to [`Scanner`].
     fancy: Vec<(usize, SymbolId, AnyRegex)>,
     /// regex-terminal-id → (matched-text → keyword-terminal-id) — identical retype.
     unless: HashMap<SymbolId, HashMap<String, SymbolId>>,
+}
+
+/// The plain-terminal engine behind a [`DfaScanner`]. Without any guarded
+/// sub-pattern it is the M0 leftmost-first single-winner DFA — byte-identical to M0,
+/// so every lookaround-free grammar takes this path and cannot regress. With at least
+/// one **trailing guard** it is an all-matches DFA driven by the guarded-accept
+/// accumulator (`docs/LEXER_DFA_PLAN.md`, "guarded accept × multi-pattern priority").
+enum PlainDfa {
+    /// No guarded sub-pattern: `PatternID == rank`, one pattern per terminal, driven
+    /// leftmost-first via the `Automaton` trait.
+    Leftmost {
+        dfa: dense::DFA<Vec<u32>>,
+        /// `PatternID` → (terminal id, rank).
+        map: Vec<(SymbolId, usize)>,
+    },
+    /// At least one guarded sub-pattern: an `MatchKind::All` DFA over per-branch
+    /// sub-patterns. The driver accumulates, per sub-pattern, the **longest accept
+    /// where its guard holds**, then selects Lark's leftmost-first winner across the
+    /// survivors by `(rank, branch_order)` — so a failing guard correctly falls back
+    /// to a runner-up the single-winner search would have pruned.
+    Guarded {
+        dfa: dense::DFA<Vec<u32>>,
+        /// Indexed by `PatternID`.
+        subs: Vec<SubPattern>,
+    },
+}
+
+/// One lowered sub-pattern fed to the combined NFA. A plain terminal contributes one
+/// unguarded sub-pattern; a trailing-boundary terminal contributes one per top-level
+/// alternation branch (some carrying a guard, some not — `lark.OP`).
+struct SubPattern {
+    id: SymbolId,
+    /// The terminal's rank in the sorted plan — cross-terminal leftmost-first.
+    rank: usize,
+    /// The branch's index within its terminal — within-terminal leftmost-first.
+    branch_order: usize,
+    /// The branch's trailing guard, if any.
+    guard: Option<Guard>,
+}
+
+/// A compiled trailing-boundary guard. The driver records an accept of the guarded
+/// sub-pattern only when this holds at the accept position — so the lookahead char,
+/// which belongs to the *next* token, is consulted but never consumed.
+struct Guard {
+    /// `true` for `(?!S)` (next must **not** match `S`), `false` for `(?=S)`.
+    neg: bool,
+    /// Anchored DFA for the assertion body `S`, matched at the accept position.
+    dfa: dense::DFA<Vec<u32>>,
+}
+
+impl Guard {
+    /// Whether the guard is satisfied at byte offset `at` in `text`. At end-of-input
+    /// (`at == text.len()`) `S` cannot match (no chars follow), so a negative guard
+    /// `(?!S)` holds and a positive guard `(?=S)` fails — exactly Python's
+    /// trailing-assertion-at-EOF semantics.
+    fn holds(&self, text: &str, at: usize) -> bool {
+        let input = Input::new(text)
+            .span(at..text.len())
+            .anchored(Anchored::Yes);
+        let s_matches = matches!(self.dfa.try_search_fwd(&input), Ok(Some(_)));
+        if self.neg {
+            !s_matches
+        } else {
+            s_matches
+        }
+    }
+}
+
+/// Wrap `src` in a flag-scoped group `(?flags:src)` for a terminal's own regex flags,
+/// or return it unchanged when the terminal has none. Mirrors
+/// [`Pattern::to_inline_regex`](crate::grammar::terminal::Pattern::to_inline_regex)
+/// so a lowered branch's flags scope exactly as the un-split terminal's did.
+fn wrap_flags(flags: u32, src: &str) -> String {
+    let letters = crate::grammar::terminal::flag_letters(flags);
+    if letters.is_empty() {
+        src.to_string()
+    } else {
+        format!("(?{letters}:{src})")
+    }
+}
+
+/// Build an anchored dense DFA for a guard body `src` (leftmost-first; we only need a
+/// yes/no "does `S` match here").
+fn build_anchored_dfa(src: &str) -> Result<dense::DFA<Vec<u32>>, GrammarError> {
+    dense::Builder::new()
+        .configure(dense::Config::new().start_kind(StartKind::Anchored))
+        .build(src)
+        .map_err(|e| GrammarError::InvalidRegex {
+            pattern: src.to_string(),
+            reason: e.to_string(),
+        })
 }
 
 impl DfaScanner {
@@ -527,70 +616,154 @@ impl DfaScanner {
         let plan = scanner_plan(terminals, global_flags)?;
         let unless = plan.unless;
         let prefix = plan.global_prefix;
+        let by_id: HashMap<SymbolId, &TerminalDef> =
+            terminals.iter().map(|(id, t)| (*id, *t)).collect();
 
-        // Split the rank-ordered plan into plain terminals (one combined meta DFA)
-        // and lookaround terminals (per-position `fancy-regex` probes), exactly as
-        // `Scanner::build` does. `rank` is the index in the plan's sorted order.
-        let mut patterns: Vec<String> = Vec::new();
-        let mut inlines: Vec<&str> = Vec::new();
-        let mut plain: Vec<(SymbolId, usize)> = Vec::new();
+        // Walk the rank-ordered plan, building per-branch sub-patterns for the
+        // combined DFA. A plain terminal → one unguarded sub-pattern. A lookaround
+        // terminal whose shape M1 lowers (pure trailing-boundary) → one sub-pattern
+        // per top-level branch (some guarded). A lookaround terminal whose shape is
+        // still pending (leading / lookbehind / unsupported) stays on `fancy-regex`.
+        let mut subs: Vec<SubPattern> = Vec::new();
+        let mut sub_srcs: Vec<String> = Vec::new(); // NFA pattern sources (prefix applied)
+        let mut sub_inlines: Vec<String> = Vec::new(); // for the start-byte union
         let mut fancy: Vec<(usize, SymbolId, AnyRegex)> = Vec::new();
+        let mut any_guard = false;
+
+        let push_sub = |sub: SubPattern,
+                        inline: String,
+                        subs: &mut Vec<SubPattern>,
+                        srcs: &mut Vec<String>,
+                        ins: &mut Vec<String>| {
+            srcs.push(format!("{prefix}{inline}"));
+            ins.push(inline);
+            subs.push(sub);
+        };
+
         for (rank, (id, inline)) in plan.groups.iter().enumerate() {
             let src = format!("{prefix}{inline}");
             // Same fancy-detection as `Scanner`: a pattern is fancy iff the `regex`
             // crate (a subset of `fancy-regex`) rejects it.
             let compiled = AnyRegex::compile(&src)?;
-            if compiled.is_fancy() {
-                // Anchor the per-position fancy probe with `\G` — identical to
-                // `Scanner::build` (see the comment there).
-                let anchored = AnyRegex::compile(&format!("{prefix}\\G{inline}"))?;
-                fancy.push((rank, *id, anchored));
-            } else {
-                plain.push((*id, rank));
-                inlines.push(inline);
-                patterns.push(src);
+            if !compiled.is_fancy() {
+                push_sub(
+                    SubPattern {
+                        id: *id,
+                        rank,
+                        branch_order: 0,
+                        guard: None,
+                    },
+                    inline.clone(),
+                    &mut subs,
+                    &mut sub_srcs,
+                    &mut sub_inlines,
+                );
+                continue;
+            }
+
+            // A lookaround terminal — try to lower it. Lowering runs on the *raw*
+            // pattern (no flag wrapper), so a top-level assertion is seen at the top
+            // level, not nested in a `(?flags:…)` group.
+            let def = by_id[id];
+            let (raw, flags) = match &def.pattern {
+                Pattern::Re(p) => (p.pattern.as_str(), p.flags),
+                // A string terminal never compiles to fancy, so this is unreachable;
+                // be safe and route it to fancy rather than panicking.
+                Pattern::Str(_) => ("", 0),
+            };
+            match crate::lookaround::classify::lower_terminal(&def.name, raw) {
+                Ok(crate::lookaround::classify::Lowered::Trailing(branches)) => {
+                    for (bo, br) in branches.iter().enumerate() {
+                        let guard = match &br.guard {
+                            None => None,
+                            Some(g) => {
+                                any_guard = true;
+                                let gsrc = format!("{prefix}{}", wrap_flags(flags, &g.set));
+                                Some(Guard {
+                                    neg: g.neg,
+                                    dfa: build_anchored_dfa(&gsrc)?,
+                                })
+                            }
+                        };
+                        let inline_br = wrap_flags(flags, &br.regex);
+                        push_sub(
+                            SubPattern {
+                                id: *id,
+                                rank,
+                                branch_order: bo,
+                                guard,
+                            },
+                            inline_br,
+                            &mut subs,
+                            &mut sub_srcs,
+                            &mut sub_inlines,
+                        );
+                    }
+                }
+                // Pending (leading / lookbehind) or genuinely unsupported → keep it on
+                // the `fancy-regex` side-probe, anchored at `pos` with `\G`, exactly as
+                // `Scanner::build` does.
+                _ => {
+                    let anchored = AnyRegex::compile(&format!("{prefix}\\G{inline}"))?;
+                    fancy.push((rank, *id, anchored));
+                }
             }
         }
 
-        let (re, start_bytes) = if patterns.is_empty() {
+        let (re, start_bytes) = if sub_srcs.is_empty() {
             (None, None)
         } else {
-            // Each plain terminal is its own pattern; the global-flag prefix sits at
-            // the front of every pattern (an inline `(?i)` covers the whole pattern),
-            // mirroring the prefix the `regex`-crate alternation places once at the
-            // front of `(?i)(g0)|(g1)|…`. Compile every pattern to a Thompson NFA and
-            // **union them into one multi-pattern NFA** (`build_many`), `PatternID ==
-            // rank`. Captures are dropped — the DFA never needs them (the winning
-            // pattern is read from `PatternID`, not a capture group).
+            // With at least one guard the engine must surface the whole accept-set
+            // (`MatchKind::All`), since a failing guard can invalidate the
+            // leftmost-first winner; without guards leftmost-first is exact and
+            // byte-identical to M0.
+            let match_kind = if any_guard {
+                MatchKind::All
+            } else {
+                MatchKind::LeftmostFirst
+            };
+            // Compile every sub-pattern to a Thompson NFA, union into ONE multi-pattern
+            // NFA (`PatternID` indexes `subs`), and determinize a dense DFA driven via
+            // the `Automaton` trait. Captures are dropped — the winning sub-pattern is
+            // read from `PatternID`.
+            // The NFA is match-kind-agnostic — `MatchKind` lives on the dense
+            // determinizer (it decides whether to keep the leftmost-first priority
+            // baked in the NFA's alternation order, or surface all overlapping
+            // matches). One NFA serves both engines.
             let nfa = thompson::NFA::compiler()
                 .configure(thompson::Config::new().which_captures(thompson::WhichCaptures::None))
-                .build_many(&patterns)
+                .build_many(&sub_srcs)
                 .map_err(|e| GrammarError::InvalidRegex {
-                    pattern: patterns.join("|"),
+                    pattern: sub_srcs.join("|"),
                     reason: e.to_string(),
                 })?;
-            // Determinize the union into one dense DFA, anchored, leftmost-first — the
-            // engine we drive ourselves through the `Automaton` trait.
             let dfa = dense::Builder::new()
                 .configure(
                     dense::Config::new()
-                        .match_kind(MatchKind::LeftmostFirst)
+                        .match_kind(match_kind)
                         .start_kind(StartKind::Anchored),
                 )
                 .build_from_nfa(&nfa)
                 .map_err(|e| GrammarError::InvalidRegex {
-                    pattern: patterns.join("|"),
+                    pattern: sub_srcs.join("|"),
                     reason: e.to_string(),
                 })?;
-            // Start-byte prefilter over the plain union `{prefix}(?:i0|i1|…)`,
-            // re-derived from the new union (so the common path keeps its prefilter).
-            let union = format!("{prefix}(?:{})", inlines.join("|"));
-            (Some(dfa), plain_start_bytes(&union))
+            // Start-byte prefilter over the plain/base union `{prefix}(?:i0|i1|…)`,
+            // re-derived from the new union (the lowered bases over-approximate the
+            // guarded languages, so it never drops a real start byte).
+            let union = format!("{prefix}(?:{})", sub_inlines.join("|"));
+            let sb = plain_start_bytes(&union);
+            let engine = if any_guard {
+                PlainDfa::Guarded { dfa, subs }
+            } else {
+                let map = subs.iter().map(|s| (s.id, s.rank)).collect();
+                PlainDfa::Leftmost { dfa, map }
+            };
+            (Some(engine), sb)
         };
 
         Ok(DfaScanner {
             re,
-            plain,
             start_bytes,
             fancy,
             unless,
@@ -600,9 +773,9 @@ impl DfaScanner {
     /// Match a single token starting exactly at `pos` — the same contract as
     /// [`Scanner::match_at`], so the two are byte-for-byte interchangeable.
     fn match_at<'t>(&self, text: &'t str, pos: usize) -> Option<(SymbolId, &'t str)> {
-        // Lowest-rank plain candidate, from the anchored multi-pattern search.
-        let mut best: Option<(usize, SymbolId, &'t str)> = None;
-        if let Some(re) = &self.re {
+        // Lowest-`(rank, branch_order)` plain candidate.
+        let mut best: Option<(usize, usize, SymbolId, &'t str)> = None;
+        if let Some(engine) = &self.re {
             // Start-byte prefilter: skip the engine when no plain terminal can begin
             // with the byte at `pos`. Over-approximated, so this never hides a match.
             let runnable = match &self.start_bytes {
@@ -610,38 +783,38 @@ impl DfaScanner {
                 None => true,
             };
             if runnable {
-                // Anchored at `pos`: the match (if any) begins exactly here and the
-                // search never scans forward — so the per-position cost is bounded by
-                // the matched token's length (charged as a flat 1 to the scan
-                // counter, like an anchored probe).
                 record_scan_skip(pos, Some(pos));
-                let input = Input::new(text)
-                    .span(pos..text.len())
-                    .anchored(Anchored::Yes);
-                // `try_search_fwd` drives the dense DFA leftmost-first via the
-                // `Automaton` trait; with no quit bytes configured it never errors.
-                if let Ok(Some(hm)) = re.try_search_fwd(&input) {
-                    // Reject a zero-width match (no terminal is nullable, but keep the
-                    // guard so the loop can never stall) — mirrors `Scanner`.
-                    if hm.offset() > pos {
-                        let (id, rank) = self.plain[hm.pattern().as_usize()];
-                        best = Some((rank, id, &text[pos..hm.offset()]));
+                match engine {
+                    PlainDfa::Leftmost { dfa, map } => {
+                        let input = Input::new(text)
+                            .span(pos..text.len())
+                            .anchored(Anchored::Yes);
+                        if let Ok(Some(hm)) = dfa.try_search_fwd(&input) {
+                            if hm.offset() > pos {
+                                let (id, rank) = map[hm.pattern().as_usize()];
+                                best = Some((rank, 0, id, &text[pos..hm.offset()]));
+                            }
+                        }
+                    }
+                    PlainDfa::Guarded { dfa, subs } => {
+                        best = guarded_best(dfa, subs, text, pos);
                     }
                 }
             }
         }
-        // Lowest-rank fancy candidate — verbatim from `Scanner::match_at`.
+        // Lowest-rank fancy candidate — a fancy terminal's rank is disjoint from every
+        // plain terminal's, so a rank comparison alone settles it.
         for (rank, id, re) in &self.fancy {
-            if best.is_some_and(|(b, _, _)| *rank > b) {
+            if best.is_some_and(|(b, _, _, _)| *rank > b) {
                 break;
             }
             if let Some(end) = re.match_end_at(text, pos) {
-                best = Some((*rank, *id, &text[pos..end]));
+                best = Some((*rank, 0, *id, &text[pos..end]));
                 break;
             }
         }
 
-        let (_, id, value) = best?;
+        let (_, _, id, value) = best?;
         let ty = self
             .unless
             .get(&id)
@@ -650,6 +823,62 @@ impl DfaScanner {
             .unwrap_or(id);
         Some((ty, value))
     }
+}
+
+/// Drive the guarded all-matches DFA over `text` from `pos`: enumerate every
+/// `(sub-pattern, end)` accept via an **overlapping** anchored search, keep per
+/// sub-pattern the **longest accept where its guard holds**, then select Lark's
+/// leftmost-first winner across the survivors by `(rank, branch_order)`. Returns the
+/// winning `(rank, branch_order, terminal id, matched slice)`, or `None`.
+///
+/// The overlapping search is the `regex-automata`-blessed way to read the full
+/// accept-set out of a `MatchKind::All` DFA (it reports each distinct `(pattern,
+/// end)` once, including multiple ends for one pattern — `[0-9]+` accepting at every
+/// length). It is anchored at `pos` and stops when the DFA dies, so it is linear in
+/// the matched token's length, never forward-scanning.
+fn guarded_best<'t>(
+    dfa: &dense::DFA<Vec<u32>>,
+    subs: &[SubPattern],
+    text: &'t str,
+    pos: usize,
+) -> Option<(usize, usize, SymbolId, &'t str)> {
+    let input = Input::new(text)
+        .span(pos..text.len())
+        .anchored(Anchored::Yes);
+
+    // Longest accept end (exclusive) per sub-pattern where the guard held.
+    let mut longest: Vec<Option<usize>> = vec![None; subs.len()];
+    let mut state = OverlappingState::start();
+    loop {
+        dfa.try_search_overlapping_fwd(&input, &mut state).ok()?;
+        let Some(hm) = state.get_match() else { break };
+        let pid = hm.pattern().as_usize();
+        let end = hm.offset();
+        if end <= pos {
+            continue; // reject a zero-width accept
+        }
+        let holds = match &subs[pid].guard {
+            None => true,
+            Some(g) => g.holds(text, end),
+        };
+        if holds && longest[pid].is_none_or(|cur| end > cur) {
+            longest[pid] = Some(end);
+        }
+    }
+
+    // Lark's leftmost-first selection across the survivors: lowest terminal rank,
+    // then lowest branch order within a terminal; the winner keeps its own longest
+    // guard-held length.
+    let mut best: Option<(usize, usize, SymbolId, usize)> = None;
+    for (pid, end_opt) in longest.iter().enumerate() {
+        let Some(end) = *end_opt else { continue };
+        let s = &subs[pid];
+        let key = (s.rank, s.branch_order);
+        if best.is_none_or(|(r, b, _, _)| key < (r, b)) {
+            best = Some((s.rank, s.branch_order, s.id, end));
+        }
+    }
+    best.map(|(rank, bo, id, end)| (rank, bo, id, &text[pos..end]))
 }
 
 /// The set of bytes any branch of the plain union `src` can begin a match with, or

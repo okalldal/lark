@@ -369,6 +369,48 @@ fn run_python_files(d: &mut Differential) {
     );
 }
 
+/// Real `.lark` grammar files lexed under the bundled `lark.lark` (which is
+/// self-hosting). This drives the **real `lark.OP`** terminal — `/[+*]|[?](?![a-z])/`,
+/// a trailing-boundary guard M1 lowers — under the Dfa backend over genuine grammar
+/// text full of `+`/`*`/`?` EBNF operators, alongside its (still-fancy) `STRING` /
+/// `REGEXP`. Both backends must lex identically.
+fn run_lark_files(d: &mut Differential) {
+    let grammar = std::fs::read_to_string(manifest_dir().join("src/grammars/lark.lark")).ok();
+    let Some(grammar) = grammar else {
+        eprintln!("lark.lark not found — skipping that corpus");
+        return;
+    };
+
+    let candidates = [
+        "tests/grammars/arithmetic.lark",
+        "tests/grammars/json.lark",
+        "tests/grammars/csv.lark",
+        "src/grammars/common.lark",
+    ];
+    let inputs: Vec<(String, String)> = candidates
+        .iter()
+        .filter_map(|rel| {
+            std::fs::read_to_string(manifest_dir().join(rel))
+                .ok()
+                .map(|t| (rel.to_string(), t))
+        })
+        .collect();
+    if inputs.is_empty() {
+        eprintln!("no .lark source files found — skipping that corpus");
+        return;
+    }
+
+    d.run(
+        "lark.lark",
+        &grammar,
+        &["start".to_string()],
+        false,
+        false,
+        0,
+        inputs,
+    );
+}
+
 /// A generated single-terminal lookaround grammar: `start: TOK+` over the
 /// generated terminal, plus the raw terminal pattern for the lowerability check.
 fn lookaround_grammar(t: &GenTerminal) -> (String, String) {
@@ -449,6 +491,7 @@ fn test_scanner_backends_lex_identically() {
     run_compliance_bank(&mut d);
     run_json_corpus(&mut d);
     run_python_files(&mut d);
+    run_lark_files(&mut d);
     run_lookaround_grammars(&mut d);
 
     let _ = std::panic::take_hook();

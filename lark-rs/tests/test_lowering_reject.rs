@@ -21,7 +21,7 @@ mod common;
 use common::lowering::{
     reject_cases, reject_path_mutants, supported_terminals, wrongly_accepted_rejects,
 };
-use lark_rs::{classify, lower_terminal, DefaultClassifier, ShapeClass, Verdict};
+use lark_rs::{classify, lower_terminal, DefaultClassifier, Lowered, ShapeClass, Verdict};
 
 /// Layer 4: the reject corpus is fully active. Every adversarial pattern is rejected
 /// with the *expected* reason — no out-of-shape assertion is ever accepted.
@@ -155,29 +155,54 @@ fn generated_supported_terminals_match_their_declared_shape() {
     );
 }
 
-/// The stubbed entry point rejects *every* lookaround terminal (both the
-/// supported-but-pending and the unsupported), and lowers a plain terminal. This is
-/// the "lowering stubbed to reject everything" invariant the harness-first phase
-/// depends on.
+/// The entry point lowers exactly the shapes implemented so far, leaves the rest
+/// *pending*, and rejects out-of-shape assertions permanently. This is the harness's
+/// per-shape progress gate: as each milestone lands, its shape flips from pending to
+/// `Ok(Lowered::…)`. M1 has landed **trailing-boundary**, so:
+///
+///   * a plain terminal lowers (`Lowered::Plain`);
+///   * a generated **trailing** terminal lowers (`Lowered::Trailing`) — *not* pending;
+///   * a generated **leading** / **lookbehind** terminal is still pending (M2/M3);
+///   * every adversarial out-of-shape terminal is rejected permanently.
 #[test]
-fn lowering_entry_point_rejects_every_lookaround_terminal() {
-    // Plain terminal: lowers (no lookaround).
-    assert!(lower_terminal("PLAIN", r"[A-Za-z_][A-Za-z0-9_]*").is_ok());
+fn lowering_entry_point_lowers_landed_shapes_and_rejects_the_rest() {
+    use lark_rs::lookaround::classify::is_pending_shape_error;
 
-    // Every generated supported terminal is rejected as pending.
+    // Plain terminal: lowers (no lookaround).
+    assert!(matches!(
+        lower_terminal("PLAIN", r"[A-Za-z_][A-Za-z0-9_]*"),
+        Ok(Lowered::Plain)
+    ));
+
     for t in supported_terminals() {
-        let err = lower_terminal(&t.name, &t.pattern)
-            .err()
-            .unwrap_or_else(|| panic!("entry point unexpectedly lowered {:?}", t.pattern));
-        let msg = format!("{err}");
-        assert!(
-            msg.contains(&t.name),
-            "message must name the terminal: {msg}"
-        );
-        assert!(
-            lark_rs::lookaround::classify::is_pending_shape_error(&err),
-            "a supported shape must reject as pending, got: {msg}"
-        );
+        match t.shape {
+            // M1: trailing-boundary lowers for real now.
+            ShapeClass::TrailingBoundary => {
+                let lowered = lower_terminal(&t.name, &t.pattern).unwrap_or_else(|e| {
+                    panic!("trailing terminal {:?} must lower now, got: {e}", t.pattern)
+                });
+                assert!(
+                    matches!(lowered, Lowered::Trailing(ref b) if !b.is_empty()),
+                    "trailing terminal {:?} must lower to branches, got {lowered:?}",
+                    t.pattern
+                );
+            }
+            // M2/M3: still pending — and the message must name the terminal.
+            ShapeClass::LeadingBoundary | ShapeClass::BoundedLookbehind => {
+                let err = lower_terminal(&t.name, &t.pattern)
+                    .err()
+                    .unwrap_or_else(|| panic!("entry point unexpectedly lowered {:?}", t.pattern));
+                let msg = format!("{err}");
+                assert!(
+                    msg.contains(&t.name),
+                    "message must name the terminal: {msg}"
+                );
+                assert!(
+                    is_pending_shape_error(&err),
+                    "a not-yet-landed shape must reject as pending, got: {msg}"
+                );
+            }
+        }
     }
 
     // Every adversarial terminal is rejected (permanently, not pending).
@@ -186,7 +211,7 @@ fn lowering_entry_point_rejects_every_lookaround_terminal() {
             .err()
             .unwrap_or_else(|| panic!("entry point unexpectedly lowered {:?}", case.pattern));
         assert!(
-            !lark_rs::lookaround::classify::is_pending_shape_error(&err),
+            !is_pending_shape_error(&err),
             "an out-of-shape assertion must reject permanently, not as pending: {err}"
         );
     }

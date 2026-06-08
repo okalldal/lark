@@ -16,7 +16,8 @@
 mod common;
 
 use common::lowering::{
-    corpus, fancy_matcher, fancy_prefix, lowered_prefix, supported_terminals, GenTerminal,
+    corpus, fancy_matcher, fancy_prefix, has_guard, lowered_prefix, mutant_trailing_prefix,
+    supported_terminals, trailing_mutations, GenTerminal,
 };
 use lark_rs::ShapeClass;
 
@@ -73,9 +74,49 @@ fn run_shape(shape: ShapeClass) {
 }
 
 #[test]
-#[ignore = "pending first shape — trailing-boundary lowering not yet implemented"]
 fn trailing_boundary_lowered_equals_fancy() {
     run_shape(ShapeClass::TrailingBoundary);
+}
+
+/// The mutation meta-test for the **trailing** lowering: each deliberately-wrong way
+/// to lower a guard (forget it, flip its polarity, drop the EOF case) must be
+/// *caught* — it must diverge from the `fancy-regex` oracle somewhere on the trailing
+/// population, so a real lowering that made the same mistake would turn
+/// [`trailing_boundary_lowered_equals_fancy`] red. A surviving mutant is a hole in
+/// the net (`docs/LEXER_DFA_PLAN.md`, "Validate the harness itself").
+#[test]
+fn trailing_lowering_mutants_are_caught() {
+    let terms: Vec<GenTerminal> = supported_terminals()
+        .into_iter()
+        .filter(|t| t.shape == ShapeClass::TrailingBoundary && has_guard(&t.pattern))
+        .collect();
+    assert!(!terms.is_empty(), "no guarded trailing terminals to mutate");
+
+    for mutation in trailing_mutations() {
+        let mut caught: Option<String> = None;
+        'search: for t in &terms {
+            let Some(oracle) = fancy_matcher(&t.pattern) else {
+                continue;
+            };
+            for input in corpus(&t.alphabet, t.max_len) {
+                let mutant = mutant_trailing_prefix(&t.pattern, &input, mutation);
+                let correct = fancy_prefix(&oracle, &input);
+                if mutant != correct {
+                    caught = Some(format!(
+                        "{} {:?} on {input:?}: mutant={mutant:?} != correct={correct:?}",
+                        t.name, t.pattern
+                    ));
+                    break 'search;
+                }
+            }
+        }
+        assert!(
+            caught.is_some(),
+            "mutant {mutation:?} survived the trailing population — the \
+             generative-equivalence layer would NOT catch this wrong lowering. \
+             This is a hole in the net."
+        );
+    }
 }
 
 #[test]

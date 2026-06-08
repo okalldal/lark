@@ -175,12 +175,13 @@ fn outcome(lexer: &BasicLexer, input: &str) -> Result<Vec<(String, String)>, usi
     }
 }
 
-/// Pending: once the Dfa backend *lowers* its lookaround terminals (instead of
-/// routing them to `fancy-regex`), it must lex each seam fixture byte-identically to
-/// the Regex/`fancy` reference. This is the per-fixture restriction of the master
-/// differential; un-ignore it as each shape lands.
+/// The Dfa backend must lex each seam fixture byte-identically to the Regex/`fancy`
+/// reference — the per-fixture restriction of the master differential. For a fixture
+/// whose shape has *landed* (M1: trailing-boundary) the Dfa side genuinely **lowers**
+/// the terminal; for a still-pending shape (leading / lookbehind) both sides route to
+/// `fancy-regex`, so they agree trivially. Either way the contract is the same:
+/// swapping the engine changes nothing. Active since M1.
 #[test]
-#[ignore = "pending first shape — the Dfa backend still routes lookaround to fancy-regex, not the lowering"]
 fn seam_fixtures_lowered_lex_equals_fancy() {
     for f in fixtures() {
         let regex = build(&f, LexerBackend::Regex)
