@@ -276,24 +276,29 @@ suffices for an existence claim) is the **negative** one:
 
 ## Recommended shape
 
-> **Reframed (2026-06-08).** These steps are now the terminal-level content of the
-> phased [`LEXER_DFA_PLAN.md`](LEXER_DFA_PLAN.md): step 1 ≈ **L2** (Tier-E rewrites join
-> the combined DFA), step 2's assertions are **L3** (lowered into the DFA rather than
-> kept as post-match guards on a side-probe), step 3 ≈ **L4/L5** (drop `fancy-regex`,
-> bake the DFA). The "fixed-width boundary guard" descriptors below remain the precise
-> spec of *what each assertion checks*; the DFA plan is *where it runs*.
+> **Reframed (2026-06-08).** These terminal-level findings are now realized by
+> [`LEXER_DFA_PLAN.md`](LEXER_DFA_PLAN.md) as **one mechanism**: all of these assertions
+> (both tiers) are **lowered into the combined DFA** (umbrella **L2**), so the bundled
+> grammars stay **byte-verbatim** — there are no grammar edits. The Tier-E/Tier-G split
+> below is only about whether an equivalent *regex string* exists; at the automaton
+> level it dissolves. The "fixed-width boundary guard" descriptors remain the precise
+> spec of *what each assertion checks*; the plan's lowering is *how it becomes DFA
+> states.*
 
-1. **Deploy the Type-A rewrites** (`LONG_STRING`, `REGEXP`, block-comment) — *once
-   their equivalence is proven* (route 1 or 2 above), they rejoin the combined-DFA
-   scan at zero behavioral risk. *(Umbrella L2.)*
-2. **Preserve `STRING`/`OP`/`DEC_NUMBER`'s guards** — **do not delete** them (that
-   breaks imports, per the table above). Each is a fixed-width assertion: `STRING`
-   leading `{ Start, Neg, "\"\"", width 2 }`; `OP` trailing `{ End, Neg, [a-z], width 1 }`;
-   `DEC_NUMBER` trailing `{ End, Neg, [1-9], width 1 }` with single-quantifier
-   backtracking. Lower each into the combined DFA. *(Umbrella L3.)*
-3. **Remove `fancy-regex`** once every terminal is on the DFA — the bundled
-   `python`/`lark` grammars then bake into standalone/WASM, with no Pike VM in the
-   tree. *(Umbrella L4/L5.)*
+1. **Lower the reducible assertions** (`LONG_STRING` lookbehind, `REGEXP`'s `(?!\/)`,
+   block-comment) into the DFA — no grammar rewrite needed. Their lookaround-free form
+   is *verified* (red-team + `matchlen`); the route-1/2 proof upgrades it to *proven*.
+   *(Umbrella L2.)*
+2. **Lower `STRING`/`OP`/`DEC_NUMBER`'s guards** (do **not** delete — that breaks
+   imports, per the table above). Each is a fixed-width assertion: `STRING` leading
+   `{ Start, Neg, "\"\"", width 2 }` → splice states; `OP` trailing
+   `{ End, Neg, [a-z], width 1 }` and `DEC_NUMBER` trailing `{ End, Neg, [1-9], width 1 }`
+   → a **guarded accept** (the maximal-munch driver records the accept only when the
+   next byte is allowed; `DEC_NUMBER`'s length-change falls out of "last accept where
+   the guard held" — no backtracking engine). *(Umbrella L2.)*
+3. **Remove `fancy-regex` from the runtime** once every terminal is on the DFA (keep it
+   as the test oracle), then bake the DFA static — the bundled `python`/`lark` grammars
+   become standalone/WASM-able, with no Pike VM in the tree. *(Umbrella L4/L5.)*
 
 ## Verification artifacts
 
