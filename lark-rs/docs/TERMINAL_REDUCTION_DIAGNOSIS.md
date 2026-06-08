@@ -33,8 +33,9 @@ Each terminal is classified at two levels:
    compare the two anchored matched-prefix functions over an exhaustive corpus. This
    is the existing E2a `matchlen` harness (`tests/test_lookaround.rs`), now extended
    to `OP`/`REGEXP`/`DEC_NUMBER`. Both engines are leftmost-first/backtracking like
-   CPython `re`, so the comparison is faithful and the result is a *proof*, not a
-   sample.
+   CPython `re`, so the comparison is faithful. The corpus is *exhaustive over all
+   strings up to a bounded length* — complete for that length, but not yet a full
+   proof (see "What a proof of equivalence would require").
 2. **Grammar level (confirmed end-to-end, *context-dependent*).** Even when a guard
    is terminal-level irreducible, dropping it may not change a *particular grammar's*
    accept/reject — if the alternative tokenization is itself a parse error or is
@@ -49,9 +50,9 @@ Each terminal is classified at two levels:
 
 | Terminal | Grammar | Assertion | Terminal-level class | Pinned by |
 |---|---|---|---|---|
-| `LONG_STRING` | python | `(?<!\\)(\\\\)*?` lookbehind | **A — regex-rewritable** (proven equiv) | `long_string_match_length_equivalence` |
-| `REGEXP` | lark | `(?!\/)` leading | **A — regex-rewritable** (proven equiv) | `regexp_match_length_equivalence` |
-| block-comment | examples | `\*(?!\/)` | **A — regex-rewritable** (proven equiv) | `block_comment_match_length_equivalence` |
+| `LONG_STRING` | python | `(?<!\\)(\\\\)*?` lookbehind | **A — regex-rewritable** (verified, bounded) | `long_string_match_length_equivalence` |
+| `REGEXP` | lark | `(?!\/)` leading | **A — regex-rewritable** (verified, bounded) | `regexp_match_length_equivalence` |
+| block-comment | examples | `\*(?!\/)` | **A — regex-rewritable** (verified, bounded) | `block_comment_match_length_equivalence` |
 | `STRING` | python | `(?!"")` leading | **C — boundary-as-failure** (all-or-nothing, w=2) | `string_lookaround_free_rewrite_is_not_equivalent` |
 | `OP` | lark | `(?![a-z])` trailing | **C — boundary-as-failure** (all-or-nothing, w=1) | `op_lookaround_free_rewrite_is_not_equivalent` |
 | `DEC_NUMBER` | python | `(?![1-9])` trailing | **C — length-changing trailing** (w=1) | `dec_number_lookaround_free_rewrite_is_not_equivalent` |
@@ -68,10 +69,11 @@ plain `regex` pattern with a *byte-for-byte identical* matched-prefix function:
 * **`REGEXP`** `\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*` → `\/(\\\/|\\\\|[^\/])+\/[imslux]*`.
   The `(?!\/)` only ever forbade the empty regex `//`; requiring a non-empty body
   (`+`) reproduces that, and the body alternation can never start with a bare `/`, so
-  lazy `*?` and greedy `+` coincide. **Proven equivalent.**
-* **`LONG_STRING`**, **block-comment** — proven in E2a.
+  lazy `*?` and greedy `+` coincide. **Verified** (exhaustive to bounded length).
+* **`LONG_STRING`**, **block-comment** — verified in E2a (same caveat).
 
-These are ready to deploy in E4 with zero behavioral risk.
+These are the deployment candidates — pending the equivalence proof (or a cleared
+red-team), not yet "zero risk."
 
 ### Type C — the irreducible shapes (and how they differ)
 
@@ -164,25 +166,82 @@ The diagnosis answers the scoping question directly:
 
 This confirms the hypothesis the elimination plan already seeded ("the economical fix
 is likely one narrow lexer-level bounded-lookahead guard … not the general Pike-VM
-engine") and upgrades it from a guess to a proof for the entire bundled set.
+engine") and backs it with exhaustive bounded-length checks and adversarial review
+for the entire bundled set.
 
-## Adversarial hardening (what was tried to break this)
+## What a proof of equivalence would require
 
-* **Type-A equivalences fuzzed.** Beyond the exhaustive short-string proofs, an
-  exploratory sweep ran the originals (`fancy-regex`) against the rewrites (`regex`)
-  over millions of randomized strings biased toward the seams (escaped delimiters,
-  odd backslash runs, `**/` tails, flag suffixes, lazy-vs-greedy ends). **No
-  counterexample** to `LONG_STRING`, `REGEXP`, or the block comment. (The fuzzer
-  itself is not committed — the committed exhaustive `matchlen` proofs are the gate.)
-* **Recovery attacked via `%import`.** The decisive negative result above:
-  grammar-level recovery is context-local and breaks when the terminal is imported
-  into a non-recovering grammar — committed as
-  `recovery::recovery_fails_under_adversarial_import`.
+The Type-A rewrites are **verified, not proven**, and the distinction matters. The
+property is not language equality but **anchored match-length equality**: at a fixed
+position, the original (lookaround) terminal and the rewrite must consume the same
+number of bytes, or both fail. That is strictly stronger than "same language," and
+the gap is live here:
+
+* The terminals are **not prefix-free** — `/a/` and `/a/i` are both regex literals
+  (one a prefix of the other); `"""x"""` is a prefix of `"""x""""""`. So two patterns
+  can accept the same language yet pick *different lengths*.
+* The priority structure differs across the rewrites: `LONG_STRING` is lazy↔lazy, but
+  `REGEXP` pairs a **lazy** body with a **greedy** `+`, so greedy/lazy resolution must
+  be modelled, not assumed away.
+
+Match-length equality is decidable (both sides are regular). Two complete routes:
+
+1. **Decision procedure.** (a) Lower the original's bounded lookaround to a
+   lookaround-free automaton — a bounded assertion is regular, so `(?!"")`,
+   `(?<!\\)`, `\*(?!/)` compile away via a product/intersection construction (this is
+   the front-end the closed PR #110 built). (b) Compile both sides to match-DFAs that
+   emit the anchored leftmost-match end under Perl greedy/lazy semantics. (c) Decide
+   equality by product construction; unequal ⇒ it *yields the shortest counterexample*.
+2. **Alphabet quotient + sufficiency bound** (lighter, avoids the lowering). Each
+   pattern distinguishes only a few byte classes — `LONG_STRING` {`"`,`'`,`\`,other}
+   (DOTALL makes newline ordinary), `REGEXP` {`/`,`\`,`[imslux]`,other}, block-comment
+   {`/`,`*`,other}. By Myhill–Nerode, if the two match-DFAs are equivalent they agree
+   everywhere; if not, a counterexample exists of length < |Q₁|·|Q₂|. Bound the (small)
+   state counts to get a concrete L, then **exhaustive enumeration over the quotient
+   alphabet up to L is finite and complete**.
+
+The committed `matchlen` corpora are exhaustive but only to a *fixed* length (≤6–8)
+with no sufficiency argument — strong evidence, not a proof. Closing the gap means
+running route 1, or establishing L for route 2.
+
+## Red-team: adversarial counterexample search
+
+Rather than rely on random search, the rewrites are attacked two ways, both via a
+differential harness that reports where the original and the rewrite take different
+anchored match lengths:
+
+1. **Hand-constructed adversarial inputs** targeting each rewrite's specific seam —
+   `LONG_STRING`'s even-backslash-count (`(?<!\\)(\\\\)*?`) vs every-backslash-paired
+   (`\\.`); `REGEXP`'s lazy body + `(?!\/)` vs greedy `+`; the block comment's
+   star-run-before-close. Cases probed odd/even backslash runs, a lone backslash
+   before the close, escaped-delimiter chains, multiple candidate close positions,
+   empty content, newlines, and the `r`/`b`/`u`/`f` prefixes. **No divergence.**
+2. **Independent blind review.** The two patterns of each pair were handed to
+   separate agents with no indication they were a rewrite or were believed
+   equivalent — framed only as "two regexes that should behave identically; find an
+   input that distinguishes them" — plus the harness and an exhaustive enumerator
+   over each pattern's small distinguishing alphabet. *(Verdicts appended below.)*
+
+A counterexample from either route is a real semantic bug (re ≡ the original's
+oracle); any hit is re-confirmed in the deployment engines (`fancy-regex` vs the
+Rust `regex` crate) before being acted on. Absence of a counterexample here is strong
+evidence, **not** the proof described above.
+
+## The decisive proven result
+
+The one equivalence-class result that *is* fully established (a single witness
+suffices for an existence claim) is the **negative** one:
+
+* **Recovery breaks under `%import`.** Grammar-level recovery is context-local; the
+  guarded and guard-free grammars diverge once the terminal is imported into a
+  non-recovering grammar — committed as
+  `recovery::recovery_fails_under_adversarial_import`, confirmed on the oracle.
 
 ## Recommended E4 shape
 
-1. **Deploy the Type-A rewrites** (`LONG_STRING`, `REGEXP`, block-comment) — proven
-   equivalent (and fuzz-hardened), zero risk; they rejoin the combined-DFA scan.
+1. **Deploy the Type-A rewrites** (`LONG_STRING`, `REGEXP`, block-comment) — *once
+   their equivalence is proven* (route 1 or 2 above), they rejoin the combined-DFA
+   scan at zero behavioral risk.
 2. **Route `STRING`, `OP`, `DEC_NUMBER` through the fixed-width boundary guard** —
    **do not delete** their guards (that breaks imports, per the table above).
    `STRING` is a leading `{ Start, Neg, "\"\"", width 2 }`; `OP` a trailing
@@ -193,8 +252,8 @@ engine") and upgrades it from a guess to a proof for the entire bundled set.
 
 ## Verification artifacts
 
-* `tests/test_lookaround.rs::matchlen` — the six per-terminal proofs (three Type-A
-  equivalences, three Type-C negative results).
+* `tests/test_lookaround.rs::matchlen` — the six per-terminal checks (three Type-A
+  bounded-exhaustive equivalences, three Type-C negative results).
 * `tests/test_lookaround.rs::recovery` — the in-context recovery proofs (`OP`,
   `DEC_NUMBER`: guarded ≡ guard-free trees, guard-sensitive witness exercised) **and**
   `recovery_fails_under_adversarial_import`, which pins that recovery breaks under a
