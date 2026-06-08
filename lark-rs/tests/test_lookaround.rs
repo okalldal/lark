@@ -386,4 +386,321 @@ mod matchlen {
             "expected the lookaround-free STRING rewrite to diverge (accept `\"\"\"\"`)"
         );
     }
+
+    // ───────────────────────────────────────────────────────────────────────
+    // Terminal-reduction diagnosis (follow-up to PR #112) — the three E2
+    // candidates the plan still lists as "to be verified": lark's `REGEXP` and
+    // `OP`, and python's `DEC_NUMBER` (`docs/TERMINAL_REDUCTION_DIAGNOSIS.md`).
+    //
+    // The point is to classify each at the *terminal* level (the decidable,
+    // oracle-free matched-prefix question) so the engine-scope decision rests on
+    // proof, not assertion:
+    //   * `REGEXP` is **regex-rewritable** (Type A) — the `(?!\/)` only forbade an
+    //     empty `//`, recovered by requiring a non-empty body. Full equivalence.
+    //   * `OP` and `DEC_NUMBER` are **boundary-as-failure** (Type C) at the
+    //     terminal level — like `STRING`, no lookaround-free regex reproduces the
+    //     matched-prefix function (the rewrite only ever *adds* an unwanted
+    //     match). Whether that terminal-level gap survives to an end-to-end
+    //     accept/reject divergence is a *grammar*-level question taken up in the
+    //     diagnosis doc; the harness pins only the decidable terminal fact.
+    // ───────────────────────────────────────────────────────────────────────
+
+    // lark's `REGEXP: /\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*/`. The candidate
+    // drops `(?!\/)` and requires a non-empty body (`+`): the body alternation
+    // can never start with a bare `/`, so `//` (the only empty-body case the
+    // guard blocked) still cannot match, and lazy `*?`/greedy `+` coincide once
+    // the body cannot eat the closing `/`.
+    const REGEXP_ORIG: &str = r#"^(?:\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*)"#;
+    const REGEXP_NEW: &str = r#"^(?:\/(\\\/|\\\\|[^\/])+\/[imslux]*)"#;
+
+    // lark's `OP: /[+*]|[?](?![a-z])/` and python's leading-zero `DEC_NUMBER`
+    // alternative `"0" ("_"? "0")* /(?![1-9])/`, paired with the naive
+    // guard-dropping rewrite (kept only to pin *why* each resists a regex form).
+    const OP_ORIG: &str = r#"^(?:[+*]|[?](?![a-z]))"#;
+    const OP_NEW: &str = r#"^(?:[+*]|[?])"#;
+    const DEC_ORIG: &str = r#"^(?:[1-9](_?[0-9])*|0(_?0)*(?![1-9]))"#;
+    const DEC_NEW: &str = r#"^(?:[1-9](_?[0-9])*|0(_?0)*)"#;
+
+    /// `REGEXP`: a clean Type-A equivalence — original and rewrite must agree on
+    /// the matched-prefix function for every corpus string (the `(?!\/)` is pure
+    /// redundancy once the body is required non-empty).
+    #[test]
+    fn regexp_match_length_equivalence() {
+        let orig = Fancy::new(REGEXP_ORIG).unwrap();
+        let new = Regex::new(REGEXP_NEW).unwrap();
+        // slash (open/close + the `//` boundary), backslash (escape pairing),
+        // `a` as body, `i` as a trailing flag.
+        let cases = corpus(&['/', '\\', 'a', 'i'], 6);
+        let mut matched = 0usize;
+        for s in &cases {
+            let (o, n) = (fancy_prefix(&orig, s), regex_prefix(&new, s));
+            assert_eq!(o, n, "REGEXP match-length differs on {s:?}");
+            matched += o.is_some() as usize;
+        }
+        assert!(matched > 0, "corpus must actually exercise some regexps");
+    }
+
+    /// `OP`: a Type-C negative result. `[?](?![a-z])` turns a *successful* `?`
+    /// match into a *failure* when a lowercase letter follows — a property a
+    /// regex match-length function (which cannot see past its own end) has no way
+    /// to express. The divergence is therefore real, and exactly one shape:
+    /// original matched nothing, the rewrite matched `?` at the head of `?[a-z]`.
+    /// One-directional — the rewrite never drops or changes an original match.
+    #[test]
+    fn op_lookaround_free_rewrite_is_not_equivalent() {
+        let orig = Fancy::new(OP_ORIG).unwrap();
+        let new = Regex::new(OP_NEW).unwrap();
+        // `+ * ?` are the operators; lowercase / non-lowercase decide the guard.
+        let cases = corpus(&['+', '*', '?', 'a', 'Z', '_'], 3);
+
+        let mut preserved = 0usize;
+        let mut divergences = 0usize;
+        let mut lost_or_changed = Vec::new();
+        for s in &cases {
+            let (o, n) = (fancy_prefix(&orig, s), regex_prefix(&new, s));
+            if o == n {
+                preserved += o.is_some() as usize;
+                continue;
+            }
+            match (o, n) {
+                (None, Some(1)) => {
+                    let next = s[1..].chars().next();
+                    assert!(
+                        s.starts_with('?') && next.is_some_and(|c| c.is_ascii_lowercase()),
+                        "OP divergence must be `?` before a lowercase letter; got {s:?}"
+                    );
+                    divergences += 1;
+                }
+                _ => lost_or_changed.push((s.clone(), o, n)),
+            }
+        }
+        assert!(
+            lost_or_changed.is_empty(),
+            "rewrite dropped or changed {} original OP match(es), e.g. {:?}",
+            lost_or_changed.len(),
+            &lost_or_changed[..lost_or_changed.len().min(8)]
+        );
+        assert!(preserved > 0, "corpus must exercise some real OP tokens");
+        assert!(
+            divergences > 0,
+            "expected the guard-free OP rewrite to diverge (match `?` before [a-z])"
+        );
+    }
+
+    /// `DEC_NUMBER`: a Type-C negative result, but a subtler shape than `STRING`.
+    /// `STRING`'s guard is all-or-nothing (`""""` matches *nothing*); here
+    /// `(?![1-9])` is **length-changing** — on `001` fancy-regex backtracks the
+    /// zero-run to `0` (len 1) so the guard sees a `0` next, while the guard-free
+    /// rewrite greedily takes `00` (len 2). That is the `a+(?!b)` trailing-
+    /// lookahead family, not a fixed boundary. The harness pins the two
+    /// invariants that make it Type-C all the same:
+    ///
+    ///   1. **One-directional** — the rewrite never matches *less* than the
+    ///      original (`new_len >= orig_len` everywhere). The guard only ever
+    ///      shortens or blocks, so dropping it only ever lengthens or adds.
+    ///   2. **Localized to the guarded alternative** — every divergence is over
+    ///      the leading-zero alternative (the original's matched prefix is empty
+    ///      or all `0`/`_`); the unguarded `[1-9]…` alternative is byte-identical
+    ///      in both. So no lookaround-free regex reproduces the matched-prefix
+    ///      function, exactly because the length depends on a *following* digit.
+    #[test]
+    fn dec_number_lookaround_free_rewrite_is_not_equivalent() {
+        let orig = Fancy::new(DEC_ORIG).unwrap();
+        let new = Regex::new(DEC_NEW).unwrap();
+        // digits across the 0 / 1-9 boundary plus the `_` group separator.
+        let cases = corpus(&['0', '1', '9', '_'], 4);
+
+        let mut preserved = 0usize;
+        let mut divergences = 0usize;
+        let mut shortened = Vec::new();
+        for s in &cases {
+            let (o, n) = (fancy_prefix(&orig, s), regex_prefix(&new, s));
+            let (o_len, n_len) = (o.unwrap_or(0), n.unwrap_or(0));
+            // Invariant 1: the rewrite is a superset matcher — never shorter.
+            if n_len < o_len {
+                shortened.push((s.clone(), o, n));
+                continue;
+            }
+            if o == n {
+                preserved += o.is_some() as usize;
+                continue;
+            }
+            // Invariant 2: divergence lives entirely in the leading-zero
+            // alternative — the original matched nothing or an all-`0`/`_` run.
+            let orig_prefix = &s[..o_len];
+            assert!(
+                orig_prefix.is_empty() || orig_prefix.bytes().all(|b| b == b'0' || b == b'_'),
+                "DEC_NUMBER divergence must be over the leading-zero alternative; \
+                 original matched {orig_prefix:?} of {s:?}"
+            );
+            divergences += 1;
+        }
+        assert!(
+            shortened.is_empty(),
+            "rewrite matched *less* than the original on {} case(s), e.g. {:?}",
+            shortened.len(),
+            &shortened[..shortened.len().min(8)]
+        );
+        assert!(preserved > 0, "corpus must exercise some real numbers");
+        assert!(
+            divergences > 0,
+            "expected the guard-free DEC_NUMBER rewrite to diverge (over-match a zero-run)"
+        );
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Grammar-level recovery (the B-vs-C refinement) — and its CONTEXT-DEPENDENCE
+// ───────────────────────────────────────────────────────────────────────────
+//
+// The `matchlen` module proves `OP` and `DEC_NUMBER` are *terminal-level*
+// irreducible (no lookaround-free regex reproduces their match function). In the
+// **bundled grammars' own context** they are nonetheless *grammar-level
+// recoverable*: dropping the guard accepts/rejects the same inputs with
+// byte-identical trees, because another layer already does the guard's job —
+// maximal munch (lark's `RULE` absorbs `?foo`), or the parser (python juxtaposes
+// no two numbers, so `0123` is a parse error either way). `recover_in_context`
+// pins that, triangulated against the Python Lark oracle.
+//
+// **But recovery is a property of the *context*, not the terminal.** These
+// terminals are `%import`-able, and a user grammar can supply a context with no
+// recovering layer — `start: NUMBER+` lets two numbers juxtapose; `OP` beside a
+// plain `NAME=/[a-z]+/` has nothing to absorb `?foo`. There the guard is
+// load-bearing again, and a guard-free copy DIVERGES from Python Lark.
+// `recovery_fails_under_adversarial_import` pins exactly that. The consequence
+// for E4: lark-rs cannot simply *delete* these guards (it would mis-parse
+// imports); it must *preserve* their match function — which, like `STRING`, is a
+// fixed-width boundary assertion, so the narrow boundary guard covers it. No
+// Pike VM, but the primitive is needed for all three, not `STRING` alone.
+mod recovery {
+    use super::*;
+
+    /// Build both grammars, parse each input, and return per-input verdicts as
+    /// `Option<tree-dump>` (`None` = reject). `assert_equal` selects whether the
+    /// two grammars must agree (recovery holds) or are merely compared (recovery
+    /// may fail). `ParseTree` is not `PartialEq`, so we compare Debug renderings.
+    fn run(
+        guarded: &str,
+        guardfree: &str,
+        corpus: &[&str],
+        assert_equal: bool,
+    ) -> Vec<(String, Option<String>, Option<String>)> {
+        let g = Lark::new(guarded, LarkOptions::default()).expect("guarded grammar builds");
+        let f = Lark::new(guardfree, LarkOptions::default()).expect("guard-free grammar builds");
+        let dump = |r: Result<lark_rs::ParseTree, _>| r.ok().map(|t| format!("{t:?}"));
+        corpus
+            .iter()
+            .map(|&s| {
+                let (ga, fa) = (dump(g.parse(s)), dump(f.parse(s)));
+                if assert_equal {
+                    assert_eq!(
+                        ga, fa,
+                        "guarded vs guard-free disagree on {s:?} — guard is NOT grammar-recoverable"
+                    );
+                }
+                (s.to_string(), ga, fa)
+            })
+            .collect()
+    }
+
+    /// Recovery holds in the given (bundled-style) context: assert equality.
+    fn compare(guarded: &str, guardfree: &str, corpus: &[&str]) -> Vec<(String, bool, bool)> {
+        run(guarded, guardfree, corpus, true)
+            .into_iter()
+            .map(|(s, ga, fa)| (s, ga.is_some(), fa.is_some()))
+            .collect()
+    }
+
+    /// `OP`'s `(?![a-z])` is redundant with maximal munch: `?foo` lexes as the
+    /// longer `RULE` token regardless. Dropping the guard changes nothing.
+    #[test]
+    fn op_guard_is_grammar_recoverable() {
+        const GUARDED: &str = r#"start: (OP | RULE)+
+OP: /[+*]|[?](?![a-z])/
+RULE: /[?]?[a-z][a-z0-9]*/
+%ignore " "
+"#;
+        let guardfree = GUARDED.replace("[?](?![a-z])", "[?]");
+        let verdicts = compare(
+            GUARDED,
+            &guardfree,
+            &["+", "?", "?foo", "?a", "??", "a?b", "*?go"],
+        );
+        // The guard-sensitive witness must actually be exercised and accepted
+        // (so the test is not vacuous): `?foo` is the case the guard guards.
+        assert!(
+            verdicts.iter().any(|(s, ga, _)| s == "?foo" && *ga),
+            "corpus must exercise the maximal-munch case `?foo`"
+        );
+    }
+
+    /// `DEC_NUMBER`'s `(?![1-9])` is redundant with the parser: without it `0123`
+    /// lexes as two number tokens, which no production juxtaposes, so it is a
+    /// parse error instead of a lex error — same accept/reject either way.
+    #[test]
+    fn dec_number_guard_is_grammar_recoverable() {
+        const GUARDED: &str = r#"start: NUMBER ("+" NUMBER)*
+NUMBER: "1".."9" ("_"? "0".."9")* | "0" ("_"? "0")* /(?![1-9])/
+%ignore " "
+"#;
+        let guardfree = GUARDED.replace(" /(?![1-9])/", "");
+        let verdicts = compare(
+            GUARDED,
+            &guardfree,
+            &[
+                "0", "00", "123", "0+1", "0123", "007", "10", "0_0", "1_000+0",
+            ],
+        );
+        // The guard-sensitive witness `0123` must be exercised and *rejected* by
+        // both — proving the guard is load-bearing at lex time yet recovered.
+        assert!(
+            verdicts.iter().any(|(s, ga, _)| s == "0123" && !*ga),
+            "corpus must exercise the leading-zero case `0123` (rejected both ways)"
+        );
+    }
+
+    /// **The adversarial counter-result.** Recovery is context-local: imported
+    /// into a grammar without the recovering layer, dropping the guard CHANGES
+    /// the language (guarded rejects, guard-free accepts) — diverging from Python
+    /// Lark, which always keeps the guard. So E4 must preserve these guards'
+    /// match functions (via the boundary primitive), not delete them. Confirmed
+    /// against the oracle, which agrees the guarded form rejects each witness.
+    #[test]
+    fn recovery_fails_under_adversarial_import() {
+        // `DEC_NUMBER` where two numbers can juxtapose: guard-free reads `0123`
+        // as `0`,`123` and the `NUMBER+` start accepts it; guarded rejects.
+        let dec_guarded = concat!(
+            "start: NUMBER+\n",
+            "NUMBER: \"1\"..\"9\" (\"_\"? \"0\"..\"9\")* | \"0\" (\"_\"? \"0\")* /(?![1-9])/\n",
+            "%ignore \" \"\n"
+        );
+        let dec_guardfree = dec_guarded.replace(" /(?![1-9])/", "");
+        let dec = run(dec_guarded, &dec_guardfree, &["0123", "001", "007"], false);
+        for (s, ga, fa) in &dec {
+            assert!(
+                ga.is_none() && fa.is_some(),
+                "DEC_NUMBER import: expected guarded-reject / guard-free-accept on {s:?}, \
+                 got guarded={ga:?} guard-free={fa:?}"
+            );
+        }
+
+        // `OP` beside a plain `NAME` (nothing absorbs `?foo`): guard-free reads
+        // `?foo` as `OP("?")`,`NAME("foo")` and accepts; guarded rejects (the `?`
+        // is unlexable once `OP` declines it).
+        let op_guarded = concat!(
+            "start: (OP | NAME)+\n",
+            "OP: /[+*]|[?](?![a-z])/\n",
+            "NAME: /[a-z]+/\n",
+            "%ignore \" \"\n"
+        );
+        let op_guardfree = op_guarded.replace("[?](?![a-z])", "[?]");
+        let op = run(op_guarded, &op_guardfree, &["?a", "?foo"], false);
+        for (s, ga, fa) in &op {
+            assert!(
+                ga.is_none() && fa.is_some(),
+                "OP import: expected guarded-reject / guard-free-accept on {s:?}, \
+                 got guarded={ga:?} guard-free={fa:?}"
+            );
+        }
+    }
 }

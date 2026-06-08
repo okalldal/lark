@@ -1,10 +1,40 @@
 # Lookaround in lark-rs: decision memo
 
-*Status: **decided** — pure elimination (Option 1b). Implementation is tracked in
-[`LOOKAROUND_ELIMINATION_PLAN.md`](LOOKAROUND_ELIMINATION_PLAN.md).*
+*Status: **superseded in part** — see the revision below. Original decision: pure
+elimination (Option 1b). Active plan is now
+[`LEXER_DFA_PLAN.md`](LEXER_DFA_PLAN.md).*
 *Date: 2026-06-07.*
 
-> **Outcome.** This memo evaluated [PR #110](https://github.com/okalldal/lark/pull/110)
+> ## Revision (2026-06-08) — a DFA lexer engine *is* warranted, for speed + bakeability
+>
+> This memo concluded "ship **no** runtime engine" (Option 1b). That conclusion was
+> right **for correctness** and stands: a bounded assertion is regular, so no engine is
+> needed to *parse* correctly. It is now **reversed on a different axis** — throughput
+> and bakeability — after the
+> [terminal-reduction diagnosis](TERMINAL_REDUCTION_DIAGNOSIS.md) and the architecture
+> analysis that followed it. The reasoning:
+>
+> * Elimination alone leaves the **G-tier** terminals (`STRING`, `OP`, `DEC_NUMBER` —
+>   provably not rewritable to a plain `regex` string) on the slow `fancy-regex`
+>   per-terminal side-probe **forever**. To give them single-pass speed *and* make the
+>   `python`/`lark` grammars bakeable, they must join one combined automaton.
+> * Their assertions are **bounded** ⇒ regular ⇒ **lowerable** into ordinary DFA
+>   states. So the engine that includes them is a **DFA** (built on `regex-automata`),
+>   **not** the runtime Pike-VM this memo rejected.
+> * **The anti-engine arguments here do not apply to a DFA.** §3's triangle and §4's
+>   "don't maintain a CPython-`re`-parity automaton" target an engine that *executes*
+>   lookaround at match time. A DFA over **lowered, lookaround-free** terminals executes
+>   no lookaround and has **no parity surface** — it is a plain regular automaton,
+>   machine-checkable against the `regex` crate (the L0 differential oracle). And a DFA
+>   is *faster* than the Pike-VM (one lookup/byte), so §4's speed objection also
+>   inverts.
+>
+> Net: the elimination work (below) is retained as **Phase 1** of `LEXER_DFA_PLAN.md`;
+> the new phases build the combined DFA, lower the G-tier into it, and bake it. What is
+> *not* revived is PR #110's Pike-VM `matcher.rs`. The memo's analysis below remains the
+> correctness record; read it together with this revision.
+
+> **Outcome (original, 2026-06-07).** This memo evaluated [PR #110](https://github.com/okalldal/lark/pull/110)
 > ("Lexer DFA M1–M3 — lower lookaround to a linear Pike-VM engine, remove
 > fancy-regex"). The conclusion was to **not** ship the runtime Pike-VM and instead
 > eliminate lookaround at grammar-load time. **PR #110 was closed** (not merged); its
@@ -12,7 +42,7 @@
 > fallback engine, to revisit only if a real irreducible-but-valid bounded lookaround
 > grammar ever appears. The former `LEXER_DFA_PLAN.md` (the lowering strategy) was
 > removed and superseded by `LOOKAROUND_ELIMINATION_PLAN.md`; it remains in git history
-> and on the closed-PR branch.
+> and on the closed-PR branch. *(Revived 2026-06-08 — see revision above.)*
 
 ## TL;DR
 
