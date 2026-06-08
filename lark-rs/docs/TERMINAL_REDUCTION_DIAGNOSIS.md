@@ -216,16 +216,40 @@ anchored match lengths:
    star-run-before-close. Cases probed odd/even backslash runs, a lone backslash
    before the close, escaped-delimiter chains, multiple candidate close positions,
    empty content, newlines, and the `r`/`b`/`u`/`f` prefixes. **No divergence.**
-2. **Independent blind review.** The two patterns of each pair were handed to
+2. **Independent blind review.** The two patterns of each pair were handed to four
    separate agents with no indication they were a rewrite or were believed
    equivalent — framed only as "two regexes that should behave identically; find an
    input that distinguishes them" — plus the harness and an exhaustive enumerator
-   over each pattern's small distinguishing alphabet. *(Verdicts appended below.)*
+   over each pattern's small distinguishing alphabet. One agent per pair, plus a
+   regex-theory generalist on all three.
 
-A counterexample from either route is a real semantic bug (re ≡ the original's
-oracle); any hit is re-confirmed in the deployment engines (`fancy-regex` vs the
-Rust `regex` crate) before being acted on. Absence of a counterexample here is strong
-evidence, **not** the proof described above.
+**Verdict: no counterexample, on any pair.** Coverage (exhaustive = all strings up to
+that length over that alphabet; the alphabet is each pattern's distinguishing byte
+classes):
+
+| Pair | Deepest exhaustive coverage (Python `re`, agents) | Verdict |
+|---|---|---|
+| `LONG_STRING` | len 16 over {`"`,`\`}; len 13 over {`"`,`'`,`\`}; len 11 over {`"`,`\`,`r`,`b`} | no diff |
+| `REGEXP` | len 13 over {`/`,`\`,`i`,`a`} (~67M); len 8 over the full {`/`,`\`,`imsluxab`} | no diff |
+| block comment | len 17 over {`/`,`*`,`a`}; len 13 over {`/`,`*`,`a`,`\n`} | no diff |
+
+All four agents independently reconstructed the same structural reason each difference
+is inert: `LONG_STRING`'s even-backslash-parity (`(?<!\\)(\\\\)*?`) and escape-pairing
+(`\\.`) accept the same close; `REGEXP`'s body cannot cross a bare `/`, so lazy and
+greedy stop at the same slash and `(?!\/)` ⇔ non-empty `+`; the block comment closes
+at the first `*/` either way.
+
+**Deployment-engine cross-check.** The agents tested Python `re` (a faithful proxy:
+`re` ≡ the original's oracle, and greedy/lazy match the Rust crate on these
+constructs). To close that gap, the *actual* deployment engines — `fancy-regex` for
+the original, the Rust `regex` crate for the rewrite — were run head-to-head
+exhaustively over the same quotient alphabets (~76M strings: `REGEXP` to len 12,
+block comment to len 15, `LONG_STRING` to len 11–13, millions matching, not just
+rejecting). **Zero divergences.**
+
+This is strong, multi-engine, independently-reviewed evidence — but it is still
+bounded-length enumeration with no sufficiency argument, so the honest status remains
+**"not refuted; not proven."** The proof routes above are what would close it.
 
 ## The decisive proven result
 
