@@ -260,14 +260,26 @@ pub struct LoweredBranch {
     pub guard: Option<TrailingGuard>,
 }
 
-/// A trailing-boundary guard: the character(s) immediately *after* the match must
-/// (`neg == false`, `(?=S)`) or must not (`neg == true`, `(?!S)`) begin a match of
-/// the plain regex `guard`. The guarded char belongs to the next token and is never
-/// consumed (`docs/LEXER_DFA_PLAN.md`, "How the lowering works").
+/// A boundary guard: the character(s) at the guarded position must (`neg == false`,
+/// `(?=S)`) or must not (`neg == true`, `(?!S)`) begin a match of the plain regex
+/// `guard`. For a **trailing** boundary the guarded position is one past the match
+/// (the next token's first char, never consumed); for a **leading** boundary it is
+/// the match start (`docs/LEXER_DFA_PLAN.md`, "How the lowering works"). The struct is
+/// shared by both — only *where* it is checked differs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrailingGuard {
     pub neg: bool,
     pub guard: String,
+}
+
+/// One ordered alternation branch of a **leading-boundary** terminal: the branch with
+/// its leading `(?=S)` / `(?!S)` stripped is the plain body, and the stripped
+/// assertion is a [`TrailingGuard`] checked at the **match start** (a zero-width gate
+/// over the whole branch — the lookahead chars are shared with the body, not skipped).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeadingBranch {
+    pub body: String,
+    pub guard: Option<TrailingGuard>,
 }
 
 /// The outcome of lowering one terminal into lookaround-free form. A plain terminal
@@ -283,6 +295,10 @@ pub enum Lowered {
     /// accept: an ordered list of alternation branches, each a plain body plus an
     /// optional trailing guard.
     Trailing(Vec<LoweredBranch>),
+    /// A **leading-boundary** terminal (`(?!S)X` / `(?=S)X`), lowered to a start-gated
+    /// accept: each branch's body matches with its own preference, gated by a
+    /// zero-width guard checked at the match start.
+    Leading(Vec<LeadingBranch>),
 }
 
 /// **THE LOWERING ENTRY POINT.** A plain terminal returns [`Lowered::Plain`]; a
@@ -315,12 +331,17 @@ pub fn lower_terminal_with(
     }
     // Every assertion is a supported shape. Lower the shapes that have landed; the
     // rest reject as pending so the harness keeps tracking them.
-    if classification
-        .assertions
-        .iter()
-        .all(|a| a.verdict() == Verdict::Supported(ShapeClass::TrailingBoundary))
-    {
+    let all = |shape| {
+        classification
+            .assertions
+            .iter()
+            .all(|a| a.verdict() == Verdict::Supported(shape))
+    };
+    if all(ShapeClass::TrailingBoundary) {
         return lower_trailing(name, pattern);
+    }
+    if all(ShapeClass::LeadingBoundary) {
+        return lower_leading(name, pattern);
     }
     let (info, shape) = classification
         .first_supported()
@@ -417,6 +438,74 @@ fn branch_of(node: &Node) -> LoweredBranch {
             }),
         },
         other => LoweredBranch {
+            body: other.to_source(),
+            guard: None,
+        },
+    }
+}
+
+/// Lower a pure leading-boundary terminal into its ordered branches. Each top-level
+/// alternation branch becomes a [`LeadingBranch`]: the branch with its leading
+/// `(?=S)` / `(?!S)` stripped is the plain body, and the stripped assertion is the
+/// start guard. A branch with no leading assertion is a plain body with no guard.
+fn lower_leading(name: &str, pattern: &str) -> Result<Lowered, GrammarError> {
+    let node = super::parse(pattern).map_err(|e| GrammarError::Other {
+        msg: format!("terminal `{name}`: {e}"),
+    })?;
+    let mut branches = Vec::new();
+    match &node {
+        Node::Alt(bs) => {
+            for b in bs {
+                branches.push(branch_of_leading(b));
+            }
+        }
+        other => branches.push(branch_of_leading(other)),
+    }
+    Ok(Lowered::Leading(branches))
+}
+
+/// Split one top-level alternation branch into its plain body and optional leading
+/// guard. The leading guard is a bare `(?=S)` / `(?!S)` (no quantifier) as the
+/// branch's *first* element.
+fn branch_of_leading(node: &Node) -> LeadingBranch {
+    match node {
+        Node::Concat(parts) => {
+            if let Some(Node::Assertion {
+                neg,
+                look: Look::Ahead,
+                body,
+                quant,
+            }) = parts.first()
+            {
+                if quant.is_empty() {
+                    let tail = Node::Concat(parts[1..].to_vec());
+                    return LeadingBranch {
+                        body: tail.to_source(),
+                        guard: Some(TrailingGuard {
+                            neg: *neg,
+                            guard: body.to_source(),
+                        }),
+                    };
+                }
+            }
+            LeadingBranch {
+                body: node.to_source(),
+                guard: None,
+            }
+        }
+        Node::Assertion {
+            neg,
+            look: Look::Ahead,
+            body,
+            quant,
+        } if quant.is_empty() => LeadingBranch {
+            body: String::new(),
+            guard: Some(TrailingGuard {
+                neg: *neg,
+                guard: body.to_source(),
+            }),
+        },
+        other => LeadingBranch {
             body: other.to_source(),
             guard: None,
         },
@@ -919,23 +1008,26 @@ mod tests {
     }
 
     #[test]
-    fn lower_terminal_lowers_trailing_and_rejects_the_rest() {
+    fn lower_terminal_lowers_landed_shapes_and_rejects_the_rest() {
         // Plain terminals lower trivially.
         assert!(matches!(
             lower_terminal("NAME", r#"[^\W\d]\w*"#),
             Ok(Lowered::Plain)
         ));
 
-        // Trailing boundary (shape 1) now lowers for real.
+        // Trailing (shape 1) and leading (shape 2) boundaries now lower for real.
         assert!(matches!(
             lower_terminal("TRAIL", "[0-9]+(?![0-9])"),
             Ok(Lowered::Trailing(_))
         ));
+        assert!(matches!(
+            lower_terminal("LEAD", "(?!--)[a-z]+"),
+            Ok(Lowered::Leading(_))
+        ));
 
         // The other lookaround terminals are still rejected — the not-yet-landed
-        // shapes as "pending", the unsupported ones permanently. Either way `Err`.
+        // shape (lookbehind) as "pending", the unsupported ones permanently.
         for (name, pat) in [
-            ("LEAD", "(?!--)[a-z]+"),
             ("BEHIND", "(?<!_)/"),
             ("UNB", "(?![ ]*X)Y"),
             ("INT", "a(?=b)c"),
@@ -950,8 +1042,8 @@ mod tests {
 
     #[test]
     fn pending_vs_permanent_rejection_is_distinguishable() {
-        // Leading boundary is supported but its lowering has not landed → pending.
-        let pending = lower_terminal("T", "(?!--)[a-z]+").unwrap_err();
+        // Bounded lookbehind is supported but its lowering has not landed → pending.
+        let pending = lower_terminal("T", "(?<!_)/").unwrap_err();
         assert!(is_pending_shape_error(&pending), "{pending}");
 
         let permanent = lower_terminal("T", "a(?=b)c").unwrap_err();

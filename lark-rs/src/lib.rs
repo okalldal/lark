@@ -21,8 +21,8 @@ pub use lexer::{
     LexerConf,
 };
 pub use lookaround::classify::{
-    classify, lower_terminal, Classification, Classifier, DefaultClassifier, Lowered,
-    LoweredBranch, Rejection, ShapeClass, TrailingGuard, Verdict,
+    classify, lower_terminal, Classification, Classifier, DefaultClassifier, LeadingBranch,
+    Lowered, LoweredBranch, Rejection, ShapeClass, TrailingGuard, Verdict,
 };
 pub use parsers::{
     basic_lexer_conf, lalr, EarleyParser, LexFailure, ParseTable, ParserConf, TokenSource,

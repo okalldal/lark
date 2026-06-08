@@ -668,3 +668,132 @@ pub fn trailing_mutant_survives(mutation: TrailMutation) -> bool {
     }
     true // survived everywhere
 }
+
+// ─── Equivalence-layer mutants (per-shape: leading boundary) ────────────────────
+
+/// One deliberately-wrong leading lowering. The leading guard is a zero-width gate at
+/// the match start, so the mutants are: ignore the gate, flip its polarity, or wrongly
+/// accept the empty prefix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeadMutation {
+    None,
+    /// Ignore the leading guard — always match the body.
+    ForgetGuard,
+    /// Flip the guard polarity (`(?!S)` <-> `(?=S)`).
+    InvertGuard,
+    /// Wrongly accept a zero-width prefix.
+    AcceptZeroWidth,
+}
+
+/// The names + variants of every leading equivalence-layer mutant (sans the control).
+pub fn leading_mutants() -> Vec<(&'static str, LeadMutation)> {
+    vec![
+        ("forget-the-guard", LeadMutation::ForgetGuard),
+        ("invert-the-guard-set", LeadMutation::InvertGuard),
+        ("accept-zero-width", LeadMutation::AcceptZeroWidth),
+    ]
+}
+
+/// A leading terminal's branch decomposition with `fancy-regex` matchers precompiled.
+struct CompiledLeadBranch {
+    /// `\A(?:body)` — the body's leftmost-first (greedy) match from the start.
+    body: fancy_regex::Regex,
+    /// `(neg, \A(?:guard))` for a guarded branch.
+    guard: Option<(bool, fancy_regex::Regex)>,
+}
+
+fn compile_lead_branches(pattern: &str) -> Option<Vec<CompiledLeadBranch>> {
+    let branches = match lark_rs::lower_terminal("M", pattern) {
+        Ok(lark_rs::Lowered::Leading(b)) => b,
+        _ => return None,
+    };
+    let mut out = Vec::new();
+    for br in &branches {
+        let body = fancy_regex::Regex::new(&format!(r"\A(?:{})", br.body)).ok()?;
+        let guard = match &br.guard {
+            Some(g) => Some((
+                g.neg,
+                fancy_regex::Regex::new(&format!(r"\A(?:{})", g.guard)).ok()?,
+            )),
+            None => None,
+        };
+        out.push(CompiledLeadBranch { body, guard });
+    }
+    Some(out)
+}
+
+/// The (possibly-mutated) leading match-prefix byte length for `input`, or `None`.
+fn mutant_lead_match(
+    branches: &[CompiledLeadBranch],
+    input: &str,
+    mutation: LeadMutation,
+) -> Option<usize> {
+    for br in branches {
+        // The start guard (zero-width) gates the branch.
+        let gated_out = match &br.guard {
+            None => false,
+            Some((neg, guard_re)) => {
+                if mutation == LeadMutation::ForgetGuard {
+                    false // ignore the guard entirely
+                } else {
+                    let matched = guard_re
+                        .find(input)
+                        .ok()
+                        .flatten()
+                        .is_some_and(|m| m.start() == 0);
+                    let neg = if mutation == LeadMutation::InvertGuard {
+                        !neg
+                    } else {
+                        *neg
+                    };
+                    // Branch is gated out iff the guard does not hold.
+                    if neg {
+                        matched
+                    } else {
+                        !matched
+                    }
+                }
+            }
+        };
+        if gated_out {
+            continue;
+        }
+        if mutation == LeadMutation::AcceptZeroWidth && br.guard.is_some() {
+            return Some(0);
+        }
+        if let Some(m) = br
+            .body
+            .find(input)
+            .ok()
+            .flatten()
+            .filter(|m| m.start() == 0)
+        {
+            return Some(m.end());
+        }
+    }
+    None
+}
+
+/// Whether `mutation` **survives** the leading population's equivalence layer (never
+/// diverges from `fancy-regex`). The control survives; every real mutant is caught.
+pub fn leading_mutant_survives(mutation: LeadMutation) -> bool {
+    for t in supported_terminals()
+        .into_iter()
+        .filter(|t| t.shape == ShapeClass::LeadingBoundary)
+    {
+        let (Some(oracle_re), Some(branches)) =
+            (fancy_matcher(&t.pattern), compile_lead_branches(&t.pattern))
+        else {
+            continue;
+        };
+        for input in corpus(&t.alphabet, t.max_len) {
+            let oracle = fancy_prefix(&oracle_re, &input);
+            let mutant = mutant_lead_match(&branches, &input, mutation)
+                .map(|end| input[..end].chars().count());
+            if mutant != oracle {
+                return false;
+            }
+        }
+    }
+    true
+}

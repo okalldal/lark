@@ -195,7 +195,6 @@ fn route1_proof_trailing_boundary() {
 }
 
 #[test]
-#[ignore = "pending first shape — Route-1 proof needs the lowered automaton"]
 fn route1_proof_leading_boundary() {
     discharge(ShapeClass::LeadingBoundary);
 }

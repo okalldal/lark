@@ -19,8 +19,9 @@
 mod common;
 
 use common::lowering::{
-    reject_cases, reject_path_mutants, supported_terminals, trailing_mutant_survives,
-    trailing_mutants, wrongly_accepted_rejects, TrailMutation,
+    leading_mutant_survives, leading_mutants, reject_cases, reject_path_mutants,
+    supported_terminals, trailing_mutant_survives, trailing_mutants, wrongly_accepted_rejects,
+    LeadMutation, TrailMutation,
 };
 use lark_rs::{classify, lower_terminal, DefaultClassifier, ShapeClass, Verdict};
 
@@ -108,6 +109,25 @@ fn equivalence_layer_catches_wrong_trailing_lowerings() {
     }
 }
 
+/// Deliverable 4, the equivalence-layer half for **leading boundary** (now landed):
+/// every deliberately-wrong leading lowering — forget the guard, invert the guard set,
+/// accept zero-width — must be caught by the now-active equivalence layer. The correct
+/// lowering is the control.
+#[test]
+fn equivalence_layer_catches_wrong_leading_lowerings() {
+    assert!(
+        leading_mutant_survives(LeadMutation::None),
+        "the correct leading lowering diverged from fancy-regex — the control failed"
+    );
+    for (name, mutation) in leading_mutants() {
+        assert!(
+            !leading_mutant_survives(mutation),
+            "leading equivalence mutant `{name}` survived the equivalence layer — \
+             a wrong lowering went undetected. This is a hole in the net."
+        );
+    }
+}
+
 /// The reject corpus only earns trust if it is *not* vacuous: the real classifier
 /// must genuinely reject each case (so "every mutant is caught" isn't because the
 /// corpus is empty or trivially-rejected). Cross-check that the corpus exercises all
@@ -181,8 +201,8 @@ fn generated_supported_terminals_match_their_declared_shape() {
 }
 
 /// The entry point lowers a plain terminal and every **landed** supported shape
-/// (trailing boundary), rejects a **pending** shape as pending, and rejects every
-/// out-of-shape assertion permanently. As each shape lands, its arm flips from
+/// (trailing + leading boundary), rejects a **pending** shape as pending, and rejects
+/// every out-of-shape assertion permanently. As each shape lands, its arm flips from
 /// pending-reject to lowered-`Ok` here — the auto-flip the differential reads.
 #[test]
 fn lowering_entry_point_lowers_landed_shapes_and_rejects_the_rest() {
@@ -197,16 +217,19 @@ fn lowering_entry_point_lowers_landed_shapes_and_rejects_the_rest() {
     for t in supported_terminals() {
         let res = lower_terminal(&t.name, &t.pattern);
         match t.shape {
-            // Trailing boundary has landed → it lowers for real.
-            ShapeClass::TrailingBoundary => {
-                assert!(
-                    matches!(res, Ok(Lowered::Trailing(_))),
-                    "trailing terminal {:?} must lower, got {res:?}",
-                    t.pattern
-                );
-            }
-            // Not-yet-landed shapes still reject as pending (named, distinguishable).
-            ShapeClass::LeadingBoundary | ShapeClass::BoundedLookbehind => {
+            // Trailing (shape 1) and leading (shape 2) boundaries have landed → real.
+            ShapeClass::TrailingBoundary => assert!(
+                matches!(res, Ok(Lowered::Trailing(_))),
+                "trailing terminal {:?} must lower, got {res:?}",
+                t.pattern
+            ),
+            ShapeClass::LeadingBoundary => assert!(
+                matches!(res, Ok(Lowered::Leading(_))),
+                "leading terminal {:?} must lower, got {res:?}",
+                t.pattern
+            ),
+            // The not-yet-landed shape still rejects as pending (named, distinguishable).
+            ShapeClass::BoundedLookbehind => {
                 let err = res
                     .err()
                     .unwrap_or_else(|| panic!("entry point unexpectedly lowered {:?}", t.pattern));

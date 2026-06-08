@@ -587,7 +587,9 @@ impl DfaScanner {
                     .unwrap_or_else(|| inline.to_string());
                 let lowered = if global_flags == 0 {
                     match lower_terminal(name, &raw) {
-                        Ok(low @ Lowered::Trailing(_)) => Some(LoweredMatcher::build(&low)?),
+                        Ok(low @ (Lowered::Trailing(_) | Lowered::Leading(_))) => {
+                            Some(LoweredMatcher::build(&low)?)
+                        }
                         _ => None,
                     }
                 } else {
@@ -723,7 +725,7 @@ pub fn lowered_match_prefix(
             // Only a genuinely-lowered (landed) shape; a plain or pending/unsupported
             // pattern is an error (the harness must not measure a non-lowered term).
             let lowered = lower_terminal(name, pattern)?;
-            if !matches!(lowered, Lowered::Trailing(_)) {
+            if matches!(lowered, Lowered::Plain) {
                 return Err(GrammarError::Other {
                     msg: format!("terminal `{name}`: {pattern:?} is not a lowered shape"),
                 });

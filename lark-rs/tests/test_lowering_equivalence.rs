@@ -78,7 +78,6 @@ fn trailing_boundary_lowered_equals_fancy() {
 }
 
 #[test]
-#[ignore = "pending first shape — leading-boundary lowering not yet implemented"]
 fn leading_boundary_lowered_equals_fancy() {
     run_shape(ShapeClass::LeadingBoundary);
 }

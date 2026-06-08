@@ -127,7 +127,25 @@ maximal-munch driver, and the differential oracle `tests/test_scanner_differenti
 > hand-driven `Automaton`-trait accept-set accumulator + the guarded accept that
 > `meta::Regex` cannot host — lives on the lowered path, alongside it. Folding the
 > plain union into the same hand-built DFA (and the bake target) is the L5 concern it
-> was raised for. Shapes 2 (leading) and 3 (lookbehind) remain pending.
+> was raised for.
+>
+> **Status update — shape 2 (leading boundary) has landed.** `(?!S)X` / `(?=S)X`
+> lowers to a **start-gated accept**: the leading lookahead is a single zero-width gate
+> checked at the match start (does `S` match a prefix here?), and the body `X` then
+> matches with its own leftmost-first preference — so a reserved-word exclusion
+> (`(?!if)[a-z]+`) rejects the whole token when it starts with the forbidden prefix,
+> exactly as `fancy-regex` does. `Lowered::Leading` + `lower_leading` (per branch, like
+> trailing), `Kind::Leading` in the matcher; `DfaScanner` routes it the same way. All
+> leading gates are green (the differential's generated leading grammars flipped from
+> pending to compared: ~209 lookaround grammars now compared, 195 still pending; the
+> leading equivalence-layer mutants — forget/invert/accept-zero-width — each caught).
+> **Scope note:** this covers the **top-level** leading boundary (the whole generated
+> leading population and the `RESERVED` / `STRING_OPEN` proof reps). The classifier
+> refinement that promotes a guard sitting after a *variable-width* prefix inside a
+> sub-group (`python.STRING`'s `(?!"")`, still `Internal` —
+> `string_nested_leading_guard_is_currently_internal`) needs the run-time-positioned
+> peek the NFA-splice provides, and lands with the bundled-six work alongside shape 3.
+> Shape 3 (bounded lookbehind) remains pending.
 
 A **general** lowering keyed on the assertion's **shape**, not on the six bundled
 terminals. Lower each supported bounded assertion into lookaround-free DFA states

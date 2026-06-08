@@ -32,7 +32,7 @@ use regex_automata::{
     Anchored, Input, MatchKind,
 };
 
-use super::classify::{Lowered, LoweredBranch, TrailingGuard};
+use super::classify::{LeadingBranch, Lowered, LoweredBranch, TrailingGuard};
 use crate::error::GrammarError;
 
 /// A compiled, lookaround-free matcher for one lowered terminal. Built from a
@@ -45,6 +45,9 @@ pub struct LoweredMatcher {
 enum Kind {
     /// A trailing-boundary terminal: ordered branches, tried in source order.
     Trailing(Vec<BranchMatcher>),
+    /// A leading-boundary terminal: ordered branches whose body match is gated by a
+    /// zero-width guard at the match start.
+    Leading(Vec<LeadingBranchMatcher>),
 }
 
 struct BranchMatcher {
@@ -56,6 +59,14 @@ struct BranchMatcher {
     /// for an unguarded branch.
     body_accepts: Option<dense::DFA<Vec<u32>>>,
     /// The trailing guard, if any.
+    guard: Option<GuardMatcher>,
+}
+
+struct LeadingBranchMatcher {
+    /// Leftmost-first matcher for the branch body (the guard is zero-width, so the
+    /// body matches with its own preference once the guard passes).
+    body_leftmost: MetaRegex,
+    /// The start guard, if any.
     guard: Option<GuardMatcher>,
 }
 
@@ -88,6 +99,15 @@ impl LoweredMatcher {
                     kind: Kind::Trailing(out),
                 })
             }
+            Lowered::Leading(branches) => {
+                let mut out = Vec::with_capacity(branches.len());
+                for b in branches {
+                    out.push(LeadingBranchMatcher::build(b)?);
+                }
+                Ok(LoweredMatcher {
+                    kind: Kind::Leading(out),
+                })
+            }
         }
     }
 
@@ -98,18 +118,46 @@ impl LoweredMatcher {
     /// terminal-level equivalence oracle compares this against `fancy-regex` and so
     /// needs the raw length (zero-width included).
     pub fn match_prefix(&self, text: &str, pos: usize) -> Option<usize> {
+        // Ordered alternation: the first branch (in source order) that matches at
+        // `pos` wins, exactly as the regex engine's `|` resolves.
         match &self.kind {
-            Kind::Trailing(branches) => {
-                // Ordered alternation: the first branch (in source order) that
-                // matches at `pos` wins, exactly as the regex engine's `|` resolves.
-                for b in branches {
-                    if let Some(end) = b.match_at(text, pos) {
-                        return Some(end);
-                    }
-                }
-                None
+            Kind::Trailing(branches) => branches.iter().find_map(|b| b.match_at(text, pos)),
+            Kind::Leading(branches) => branches.iter().find_map(|b| b.match_at(text, pos)),
+        }
+    }
+}
+
+impl LeadingBranchMatcher {
+    fn build(branch: &LeadingBranch) -> Result<LeadingBranchMatcher, GrammarError> {
+        let guard = match &branch.guard {
+            Some(g) => Some(GuardMatcher::build(g)?),
+            None => None,
+        };
+        let body_leftmost = MetaRegex::new(&branch.body).map_err(|e| {
+            other(format!(
+                "lowered body {:?} failed to compile: {e}",
+                branch.body
+            ))
+        })?;
+        Ok(LeadingBranchMatcher {
+            body_leftmost,
+            guard,
+        })
+    }
+
+    /// Match this branch at `pos`: a zero-width start guard gates the body, then the
+    /// body matches with its own leftmost-first preference. Returns the matched byte
+    /// end (possibly `pos` for a zero-width body match), or `None`.
+    fn match_at(&self, text: &str, pos: usize) -> Option<usize> {
+        if let Some(guard) = &self.guard {
+            if !guard.holds(text, pos) {
+                return None;
             }
         }
+        let input = Input::new(text)
+            .span(pos..text.len())
+            .anchored(Anchored::Yes);
+        self.body_leftmost.find(input).map(|m| m.end())
     }
 }
 
@@ -290,5 +338,27 @@ mod tests {
         assert_eq!(m.match_prefix("?", 0), Some(1)); // branch 1, guard at EOF holds
         assert_eq!(m.match_prefix("?a", 0), None); // branch 1, guard fails
         assert_eq!(m.match_prefix("?1", 0), Some(1)); // '1' not [a-z]: holds
+    }
+
+    /// `(?!if)[a-z]+` — reserved-word exclusion (leading boundary). The whole token is
+    /// rejected when it starts with the forbidden prefix (`fancy-regex` semantics).
+    #[test]
+    fn leading_negative_guard_excludes_prefix() {
+        let lo = lower_terminal("KW", "(?!if)[a-z]+").unwrap();
+        let m = LoweredMatcher::build(&lo).unwrap();
+        assert_eq!(m.match_prefix("abc", 0), Some(3)); // not "if": body greedy
+        assert_eq!(m.match_prefix("iffy", 0), None); // starts "if": guard fails
+        assert_eq!(m.match_prefix("if", 0), None);
+        assert_eq!(m.match_prefix("i", 0), Some(1)); // "i" is not "if"
+    }
+
+    /// `(?=[A-Z])[a-z]+` — a positive leading guard that can never co-occur with the
+    /// body, so it never matches; and `(?=x)x` which does.
+    #[test]
+    fn leading_positive_guard_gates_the_body() {
+        let lo = lower_terminal("T", "(?=x)x").unwrap();
+        let m = LoweredMatcher::build(&lo).unwrap();
+        assert_eq!(m.match_prefix("x", 0), Some(1));
+        assert_eq!(m.match_prefix("y", 0), None);
     }
 }
