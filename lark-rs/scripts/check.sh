@@ -29,7 +29,12 @@ fail() { printf '\n\033[1;31m❌ %s\033[0m\n' "$1" >&2; exit 1; }
 note "Rust format: cargo fmt --check --all"
 ( cd "$LARK_RS_DIR" && cargo fmt --check --all ) || fail "cargo fmt --check failed — run 'cargo fmt --all' in lark-rs/"
 
-# 2. Rust test suite — identical to the CI "cargo test --all" step.
+# 2. Rust test suite — identical to the CI "cargo test --all" step. This also runs
+#    the L0 lexer differential oracle (tests/test_scanner_differential.rs), which
+#    asserts the regex-crate Scanner and the regex-automata DFA backend lex the
+#    compliance bank + JSON corpus + Python files byte-identically
+#    (docs/LEXER_DFA_PLAN.md). It needs the JSONTestSuite submodule for full
+#    coverage (it skips that corpus gracefully if absent).
 note "Rust tests: cargo test --all"
 ( cd "$LARK_RS_DIR" && cargo test --all ) || fail "cargo test --all failed"
 

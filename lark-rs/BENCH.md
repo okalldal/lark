@@ -57,6 +57,7 @@ cd lark-rs
 cargo bench --bench parse           # Rust LALR/Earley internal numbers + scaling
 python3 tools/bench_compare.py      # Python Lark on parse.rs's JSON/arith grammars
 cargo bench --bench vs_python_lark  # cross-engine JSON/Python/SQL/NL-CYK, prints the speedup
+cargo bench --bench lex_backends    # lexer: regex Scanner vs regex-automata DfaScanner (L1)
 ```
 
 `vs_python_lark` is the **cross-engine end-to-end comparison** (issue #50, the
@@ -312,6 +313,53 @@ Machine-specific — **only ratios travel**; capture fresh numbers on your own b
 
 This bench turns that remaining LALR headroom into a tracked delta: **re-run it
 after each significant engine change and update the table.**
+
+## Lexer backends: regex Scanner vs regex-automata DfaScanner (L1)
+
+`cargo bench --bench lex_backends` times the **lexer in isolation** (`BasicLexer::lex`)
+under each of the two combined-scanner engines behind the `ScannerBackend` seam
+(`src/lexer.rs`): the original `regex`-crate `Scanner` (combined alternation +
+capture groups) and the L1 `DfaScanner` (a `regex-automata` multi-pattern DFA over
+the plain terminals, `docs/LEXER_DFA_PLAN.md`). The two are *correctness*-identical —
+the L0 differential oracle (`tests/test_scanner_differential.rs`) is the gate — so
+this is purely the throughput comparison the plan calls for, isolating the scanner
+from parsing. It prints each backend's MB/s and the `dfa / regex` ratio (<1.0 = DFA
+faster).
+
+The DFA wins on the all-plain path for two structural reasons: it returns a bare
+`PatternID` (no capture-group tracking — the per-token cost the 2026-06-04 profiling
+spike below localized), and it searches **anchored at `pos`** (never forward-scans).
+The plan's "re-add a literal prefilter so the common path doesn't regress" worry is
+addressed by an explicit start-byte prefilter on `DfaScanner` (and the measured
+common path *improves*, it does not regress). On a grammar dominated by the
+`fancy-regex` lookaround side-probe (`python.lark`'s `STRING`/`LONG_STRING`), both
+backends share that probe, so the ratio is ~1.0 — the swap neither helps nor hurts
+the part it doesn't touch.
+
+### Reference run
+
+Machine-specific — **only ratios travel**; capture fresh numbers on your own box.
+
+- `Linux x86_64`, release + LTO (the `bench` profile). Measured 2026-06-08.
+
+| workload | bytes | regex MB/s | dfa MB/s | dfa/regex |
+|----------|------:|-----------:|---------:|----------:|
+| json_small  |   390 |  ~8.2 | ~22.5 | **~0.36×** |
+| json_medium | ~8.7K |  ~8.7 | ~23.9 | **~0.36×** |
+| json_large  |  ~92K |  ~9.7 | ~20.6 | **~0.47×** |
+| expr_small  |   385 |  ~8.0 | ~12.1 | **~0.66×** |
+| expr_large  |  ~28K |  ~9.6 | ~14.6 | **~0.66×** |
+| python_8k   | ~8.0K |  ~0.5 |  ~0.5 | **~0.97×** |
+
+**Reading.** On all-plain grammars the DFA scanner is ~1.5–2.8× faster (JSON ~2.1–2.8×,
+the identifier/number/operator stream ~1.5×) — the lexer is ~55% of LALR parse time
+(profiling spike below), so this is a real end-to-end lever, not a micro-win. On
+`python.lark` the shared `fancy-regex` `STRING` probe dominates both backends
+(~0.5 MB/s either way), so the plain-engine swap is a wash there — exactly as
+expected, and the throughput-and-bakeability payoff for *those* terminals is what
+later phases (L3 lowering, L5 baking) deliver. The DFA backend is opt-in
+(`LarkOptions.lexer_backend = LexerBackend::Dfa` / `LexerConf::with_backend`); the
+default stays the `regex` Scanner until the rest of the plan lands.
 
 ## Profiling findings (spike, 2026-06-04)
 
