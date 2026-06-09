@@ -393,18 +393,33 @@ fn is_guard_realizable(base: &str, dotall: bool) -> bool {
 ///     `false`) instead of blowing up the dense build, the L5 bake target.
 ///
 /// A build/representation failure returns `false` (the conservative, decline-to-fancy
-/// direction). `dotall` wraps the base so `.` matches a newline exactly as the engine's
-/// flag-wrap would, keeping the decided language identical to the lowered one.
+/// direction).
+///
+/// **Flags.** The engine wraps each lowered branch in the terminal's flags, so the
+/// decided language must reflect them or the gate could false-accept:
+///   * `dotall` wraps `(?s:…)` exactly (the actual flag) so `.` matches a newline as the
+///     engine's wrap would.
+///   * `(?i)` is applied **unconditionally** — case-folding can introduce a *new* prefix
+///     relation among alternation arms (`(a|Add)dd` is prefix-free case-sensitively but
+///     not under `/i`), and a guarded base lowered without seeing that would mis-pick its
+///     length. Wrapping `(?i)` is sound for *both* a case-sensitive and a case-insensitive
+///     terminal: case-folding only *enlarges* the language, and a subset of a prefix-free
+///     language is prefix-free, so this never false-accepts (at worst it over-declines a
+///     case-sensitive letter-alternation base to `fancy-regex` — the safe direction). The
+///     check is built with the same `regex-automata` engine the lexer uses, so whatever
+///     case-folding the runtime applies (length-preserving simple folding today, or any
+///     future change) is reflected exactly.
 fn is_prefix_free(base: &str, dotall: bool) -> bool {
     use regex_automata::dfa::{dense, Automaton, StartKind};
     use regex_automata::util::primitives::StateID;
     use regex_automata::{Anchored, Input, MatchKind};
 
-    // Decide the base under the same DOTALL flag the engine wraps each branch in.
+    // Decide the base under the engine's flag-wrap: DOTALL exactly, IGNORECASE
+    // conservatively (see the doc above).
     let wrapped = if dotall {
-        format!("(?s:{base})")
+        format!("(?si:{base})")
     } else {
-        base.to_string()
+        format!("(?i:{base})")
     };
     // ~10 MiB determinization budget: ample for any real terminal base, but a
     // pathological one errors out → decline rather than blow up the bake target.

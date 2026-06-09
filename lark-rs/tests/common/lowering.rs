@@ -409,10 +409,14 @@ pub fn supported_terminals() -> Vec<GenTerminal> {
 pub fn string_idiom_terminals() -> Vec<GenTerminal> {
     let dq = r#""(?!"").*?(?<!\\)(\\\\)*?""#;
     let sq = r#"'(?!'').*?(?<!\\)(\\\\)*?'"#;
+    // A non-quote literal delimiter (`/`) — the splice construction is delimiter-agnostic,
+    // so exercising a `/`-delimited idiom guards that generality (not just `"`/`'`).
+    let slash = r#"/(?!//).*?(?<!\\)(\\\\)*?/"#;
     let both = format!("{dq}|{sq}");
-    let arms: [(&str, &str, &[char]); 3] = [
+    let arms: [(&str, &str, &[char]); 4] = [
         ("dq", dq, &['"', '\\', 'a']),
         ("sq", sq, &['\'', '\\', 'a']),
+        ("slash", slash, &['/', '\\', 'a']),
         ("both", &both, &['"', '\'', '\\', 'a']),
     ];
     let prefixes: [(&str, &[char]); 3] = [
