@@ -18,8 +18,8 @@ pub use grammar::{
 };
 pub use lexer::{BasicLexer, ContextualLexer, DynamicMatcher, Lexer, LexerBackend, LexerConf};
 pub use lookaround::classify::{
-    classify, lower_terminal, Classification, Classifier, DefaultClassifier, Lowered, Rejection,
-    ShapeClass, Verdict,
+    classify, lower_terminal, lower_terminal_dotall, Classification, Classifier, DefaultClassifier,
+    Lowered, Rejection, ShapeClass, Verdict,
 };
 pub use lookaround::lower::{GuardSpec, LookbehindGuard, LoweredBranch};
 pub use parsers::{

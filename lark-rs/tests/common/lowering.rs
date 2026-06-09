@@ -392,6 +392,60 @@ pub fn supported_terminals() -> Vec<GenTerminal> {
     out
 }
 
+/// The **string-literal opening-guard idiom** population (python.STRING's *actual*
+/// nested/prefixed shape — `docs/LEXER_DFA_PLAN.md`, the marquee L2 splice). Unlike the
+/// bare `(?!S)X` leading cousins in [`supported_terminals`], these carry the guard
+/// **after a variable-width prefix + the opening quote**, with the lazy escaped body and
+/// the `(?<!\\)` lookbehind — the genuinely-new shape. Each varies the prefix (none /
+/// bounded / the bundled alternation), the quote kind, and the arm count, so the splice
+/// is exercised across the composition surface (prefix × body × lookbehind). A bespoke
+/// alphabet ensures the corpus exercises the `""""` boundary, escaped quotes, and escaped
+/// backslashes — the cases a forgotten guard or a wrong body normalization gets wrong.
+///
+/// The shape carries *both* a leading-boundary guard (the `(?!"")`) and bounded
+/// lookbehinds, so its `shape` field is the headline [`ShapeClass::LeadingBoundary`];
+/// these are kept out of [`supported_terminals`] (whose per-shape gates assume a single
+/// shape per terminal) and driven by their own dedicated equivalence + mutation gates.
+pub fn string_idiom_terminals() -> Vec<GenTerminal> {
+    let dq = r#""(?!"").*?(?<!\\)(\\\\)*?""#;
+    let sq = r#"'(?!'').*?(?<!\\)(\\\\)*?'"#;
+    let both = format!("{dq}|{sq}");
+    let arms: [(&str, &str, &[char]); 3] = [
+        ("dq", dq, &['"', '\\', 'a']),
+        ("sq", sq, &['\'', '\\', 'a']),
+        ("both", &both, &['"', '\'', '\\', 'a']),
+    ];
+    let prefixes: [(&str, &[char]); 3] = [
+        ("", &[]),
+        ("(r?)", &['r']),
+        ("([ubf]?r?|r[ubf])", &['r', 'b']),
+    ];
+    let mut out = Vec::new();
+    let mut n = 0usize;
+    for (plabel, pchars) in prefixes {
+        for (alabel, arm_src, achars) in &arms {
+            let pattern = format!("{plabel}({arm_src})");
+            // Alphabet: the arm's distinguishing chars + the prefix letters, capped.
+            let mut alphabet: Vec<char> = achars.to_vec();
+            for &c in pchars {
+                if !alphabet.contains(&c) {
+                    alphabet.push(c);
+                }
+            }
+            alphabet.truncate(5);
+            out.push(GenTerminal {
+                name: format!("STR_{plabel}_{alabel}_{n}"),
+                pattern,
+                shape: ShapeClass::LeadingBoundary,
+                alphabet,
+                max_len: 5,
+            });
+            n += 1;
+        }
+    }
+    out
+}
+
 // ─── Lowering mutants (the equivalence-layer mutation meta-test) ────────────────
 
 /// A deliberately-wrong way to lower a **boundary** guard (leading or trailing). The

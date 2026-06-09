@@ -229,6 +229,23 @@ pub fn classify(pattern: &str) -> Result<Classification, GrammarError> {
     let node = super::parse(pattern)?;
     let mut assertions = Vec::new();
     walk_top_level(&node, &mut assertions);
+    // String-literal opening-guard idiom refinement (python.STRING): a leading
+    // `(?!"")` after a variable-width prefix + the opening quote is seen by the
+    // top-level walk as `Internal` (it is nested inside the arms group, after a
+    // bounded prefix). It is, however, a *supported* leading boundary the
+    // [`super::lower::recognize_string_idiom`] splice lowers. So **only when the whole
+    // terminal is a recognized, lowerable idiom**, re-tag its interior `(?=)/(?!)`
+    // lookaheads as `Leading`. Outside a recognized idiom the verdict is unchanged, so
+    // a genuinely-internal lookahead (`a(?=b)c`, the verilog `(?!/)` inside a `*`) stays
+    // `Internal` (rejected) — the recognizer is the single gate, never a position
+    // heuristic that could false-accept.
+    if super::lower::recognize_string_idiom(&node).is_some() {
+        for a in &mut assertions {
+            if a.look == Look::Ahead && a.position == Position::Internal {
+                a.position = Position::Leading;
+            }
+        }
+    }
     Ok(Classification { assertions })
 }
 
@@ -273,7 +290,19 @@ pub enum Lowered {
 /// `fancy-regex`. A terminal with an out-of-shape assertion is rejected permanently
 /// (`Err`). Either error names the terminal and the offending assertion.
 pub fn lower_terminal(name: &str, pattern: &str) -> Result<Lowered, GrammarError> {
-    lower_terminal_with(&DefaultClassifier, name, pattern)
+    lower_terminal_dotall(name, pattern, false)
+}
+
+/// [`lower_terminal`] aware of whether the terminal's flags include `DOTALL` (`s`) — the
+/// engine passes the real flag so the string-idiom body normalization admits a newline
+/// exactly when the terminal's `.` would (`docs/LEXER_DFA_PLAN.md`). `dotall` is inert
+/// for every shape other than the string idiom.
+pub fn lower_terminal_dotall(
+    name: &str,
+    pattern: &str,
+    dotall: bool,
+) -> Result<Lowered, GrammarError> {
+    lower_terminal_with(&DefaultClassifier, name, pattern, dotall)
 }
 
 /// [`lower_terminal`] over an explicit classifier — the mutation meta-test drives a
@@ -282,6 +311,7 @@ pub fn lower_terminal_with(
     classifier: &dyn Classifier,
     name: &str,
     pattern: &str,
+    dotall: bool,
 ) -> Result<Lowered, GrammarError> {
     let classification = classifier.classify(pattern)?;
     if classification.is_plain() {
@@ -305,7 +335,7 @@ pub fn lower_terminal_with(
     // guarded base, or a lookbehind after a variable-width prefix) by returning `Err`;
     // the caller then routes that terminal to `fancy-regex` — correct, never
     // mis-lowered.
-    let branches = super::lower::lower_boundary(pattern)?;
+    let branches = super::lower::lower_boundary_dotall(pattern, dotall)?;
     Ok(Lowered::Branches(branches))
 }
 
@@ -698,21 +728,50 @@ mod tests {
         assert!(!is_pending_shape_error(&permanent), "{permanent}");
     }
 
-    /// Documents the conservative skeleton boundary: `python.STRING`'s `(?!"")` is a
-    /// *leading boundary of the string body sub-group*, but this skeleton only sees
-    /// the terminal's top level, where the guard is internal — so it currently
-    /// classifies as unsupported. Extending leading-boundary detection past a
-    /// fixed-width prefix is a documented first-shape refinement.
+    /// `python.STRING`'s nested opening guard is now a **supported** leading boundary.
+    /// `(?!"")` / `(?!'')` sit after the variable-width prefix + the opening quote — an
+    /// internal/variable-position leading boundary the
+    /// [`super::lower::recognize_string_idiom`] splice lowers (the marquee L2 piece). So
+    /// the classifier, recognizing the whole terminal as the lowerable string idiom,
+    /// re-tags those `(?!…)` lookaheads as [`ShapeClass::LeadingBoundary`]; the `(?<!\\)`
+    /// lookbehinds stay [`ShapeClass::BoundedLookbehind`] (absorbed by the body
+    /// normalization, not lowered as a fixed-offset guard). Every assertion is supported,
+    /// so STRING fully lowers — gated end-to-end by the `""""`/`"" ""` adversarial test,
+    /// the Route-1 proof, and the python.lark differential.
     #[test]
-    fn string_nested_leading_guard_is_currently_internal() {
+    fn string_nested_leading_guard_is_supported_via_idiom_splice() {
         let string = r#"([ubf]?r?|r[ubf])("(?!"").*?(?<!\\)(\\\\)*?"|'(?!'').*?(?<!\\)(\\\\)*?')"#;
         let c = classify(string).unwrap();
-        // The `(?!"")` / `(?!'')` lookaheads are seen as internal (reject); the
-        // `(?<!\\)` lookbehinds are bounded and supported.
         assert!(
+            c.first_rejection().is_none(),
+            "STRING must have no rejected assertion now: {:?}",
             c.first_rejection()
+        );
+        assert!(
+            c.is_fully_supported(),
+            "every STRING assertion must be a supported shape"
+        );
+        // Exactly the four assertions, with the expected shapes in source order:
+        // (?!""), (?<!\\), (?!''), (?<!\\).
+        let shapes: Vec<Verdict> = c.assertions.iter().map(AssertionInfo::verdict).collect();
+        assert_eq!(
+            shapes,
+            vec![
+                Verdict::Supported(ShapeClass::LeadingBoundary),
+                Verdict::Supported(ShapeClass::BoundedLookbehind),
+                Verdict::Supported(ShapeClass::LeadingBoundary),
+                Verdict::Supported(ShapeClass::BoundedLookbehind),
+            ]
+        );
+
+        // A genuinely-internal lookahead OUTSIDE a recognized idiom is still rejected —
+        // the recognizer is the single gate, not a position heuristic.
+        assert!(
+            classify("a(?=b)c")
+                .unwrap()
+                .first_rejection()
                 .is_some_and(|(_, r)| r == Rejection::Internal),
-            "STRING's interior lookahead should currently reject as Internal"
+            "a bare internal lookahead must still reject as Internal"
         );
     }
 

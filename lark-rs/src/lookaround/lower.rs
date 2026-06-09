@@ -100,7 +100,31 @@ pub struct LookbehindGuard {
 /// [`LeadingBoundary`]: super::classify::ShapeClass::LeadingBoundary
 /// [`TrailingBoundary`]: super::classify::ShapeClass::TrailingBoundary
 pub fn lower_boundary(pattern: &str) -> Result<Vec<LoweredBranch>, GrammarError> {
+    lower_boundary_dotall(pattern, false)
+}
+
+/// [`lower_boundary`] aware of whether the terminal's flags include `DOTALL` (`s`).
+/// `dotall` only affects the **string-idiom** body normalization (whether `.` — and so
+/// the normalized content class — admits a newline); the boundary/lookbehind shapes are
+/// flag-agnostic at this layer (the engine wraps each branch in the terminal's flags).
+///
+/// The first move is the **string-literal opening-guard idiom splice** (`python.STRING`):
+/// a leading `(?!"")` after a variable-width prefix + the opening quote is not a
+/// fixed-offset guard, so it is not lowerable by the generic [`lower_branch`] boundary
+/// path. [`recognize_string_idiom`] matches that exact shape and lowers it by normalizing
+/// the lazy escaped body to its proven greedy character-class equivalent (the Type-A
+/// rewrite `tests/test_lookaround.rs::matchlen` justifies) and reducing the `(?!"")`
+/// splice to an empty/non-empty arm split with a trailing `(?!")` guard on the empty arm
+/// (the only place the assertion's window over-reaches the matched token). Anything that
+/// is not exactly that idiom falls through to the generic boundary lowering.
+pub fn lower_boundary_dotall(
+    pattern: &str,
+    dotall: bool,
+) -> Result<Vec<LoweredBranch>, GrammarError> {
     let node = super::parse(pattern)?;
+    if let Some(idiom) = recognize_string_idiom(&node) {
+        return idiom.lower(pattern, dotall);
+    }
     let mut branches = Vec::new();
     match &node {
         Node::Alt(arms) => {
@@ -247,13 +271,13 @@ fn lower_branch(pattern: &str, branch: &Node) -> Result<LoweredBranch, GrammarEr
     // guard is a uniform precondition independent of the match length, but the base it
     // rides must still be greedy-monotone for the accumulator to pick Python's length.)
     let guarded = leading.is_some() || trailing.is_some() || !lookbehind.is_empty();
-    if guarded && !is_greedy_monotone(&base) {
+    if guarded && !is_guard_realizable(&regex) {
         return Err(GrammarError::Other {
             msg: format!(
                 "terminal pattern `{pattern}`: a guarded branch's base is not \
-                 greedy-monotone (it has an order-sensitive alternation or a lazy/\
-                 possessive quantifier), so its match-length under the guard is not \
-                 reproducible by the longest-accept accumulator."
+                 guard-realizable (it has an order-sensitive alternation or a lazy/\
+                 possessive quantifier and is not prefix-free), so its match-length \
+                 under the guard is not reproducible by the longest-accept accumulator."
             ),
         });
     }
@@ -321,6 +345,119 @@ fn atom_has_lazy(atom: &str) -> bool {
     lazy.iter()
         .chain(possessive.iter())
         .any(|m| atom.contains(m))
+}
+
+/// Whether a guarded branch's base regex is **guard-realizable** — its leftmost-first
+/// match priority is descending by length, so the driver's "longest accept where the
+/// guard holds" accumulator coincides with Python's backtracking leftmost-first result.
+/// Two independently-sufficient conditions, both decidable:
+///
+///   * **Greedy-monotone** ([`is_greedy_monotone`]) — no alternation, no lazy/possessive
+///     quantifier, so the (single) greedy match is the longest and is tried first. Covers
+///     `[0-9]+(?![0-9])`-style bases.
+///   * **Prefix-free** ([`is_prefix_free`]) — at most one match length at any start
+///     position, so there is a single candidate and "longest where guard holds" is
+///     trivially that candidate. Covers a base with a bounded alternation prefix over a
+///     fixed literal (`python.STRING`'s empty-arm base `([ubf]?r?|r[ubf])""`), which is
+///     *not* greedy-monotone (it has alternation) yet is unambiguous in length because the
+///     fixed `""` suffix immediately following pins the prefix length.
+///
+/// Conservative: a base meeting neither is declined (routed to `fancy-regex`).
+fn is_guard_realizable(base: &str) -> bool {
+    // The greedy-monotone test works on the parsed tree (it predates this routine), so
+    // re-parse the base; on a parse failure fall back to "not realizable" (decline).
+    match super::parse(base) {
+        Ok(node) if is_greedy_monotone(&node) => true,
+        _ => is_prefix_free(base),
+    }
+}
+
+/// Whether the anchored language of `base` is **prefix-free**: no string it matches is a
+/// proper prefix of another string it matches. Equivalently, at most one match length at
+/// each start position. Decided over the anchored all-matches dense DFA: from every match
+/// state, no match state may be reachable on a non-empty path (a reachable match state
+/// would witness a string in `L` that extends a shorter one in `L`). Bytes are explored
+/// one representative per equivalence class plus the EOI transition — sound because bytes
+/// in one class are indistinguishable to the automaton. A build/representation failure
+/// returns `false` (the conservative, decline-to-fancy direction).
+fn is_prefix_free(base: &str) -> bool {
+    use regex_automata::dfa::{dense, Automaton, StartKind};
+    use regex_automata::util::primitives::StateID;
+    use regex_automata::{Anchored, Input, MatchKind};
+
+    let Ok(dfa) = dense::Builder::new()
+        .configure(
+            dense::Config::new()
+                .match_kind(MatchKind::All)
+                .start_kind(StartKind::Anchored),
+        )
+        .build(base)
+    else {
+        return false;
+    };
+    let classes = dfa.byte_classes();
+    let reps: Vec<u8> = {
+        let mut seen = std::collections::HashSet::new();
+        let mut v = Vec::new();
+        for byte in 0u8..=0xFF {
+            if seen.insert(classes.get(byte)) {
+                v.push(byte);
+            }
+        }
+        v
+    };
+    let Ok(start) = dfa.start_state_forward(&Input::new("").anchored(Anchored::Yes)) else {
+        return false;
+    };
+
+    // Successor states of `s` over every byte-class representative + the EOI transition.
+    let succ = |s: StateID| -> Vec<StateID> {
+        let mut out: Vec<StateID> = reps.iter().map(|&b| dfa.next_state(s, b)).collect();
+        out.push(dfa.next_eoi_state(s));
+        out
+    };
+    // From `from`, is any match state reachable in >= 1 transition?
+    let reaches_match = |from: StateID| -> bool {
+        let mut seen = std::collections::HashSet::new();
+        let mut stack: Vec<StateID> = Vec::new();
+        for ns in succ(from) {
+            if seen.insert(ns) {
+                stack.push(ns);
+            }
+        }
+        while let Some(s) = stack.pop() {
+            if dfa.is_match_state(s) {
+                return true;
+            }
+            if dfa.is_dead_state(s) {
+                continue;
+            }
+            for ns in succ(s) {
+                if seen.insert(ns) {
+                    stack.push(ns);
+                }
+            }
+        }
+        false
+    };
+
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![start];
+    seen.insert(start);
+    while let Some(s) = stack.pop() {
+        if dfa.is_match_state(s) && reaches_match(s) {
+            return false; // a match extends another match → not prefix-free
+        }
+        if dfa.is_dead_state(s) {
+            continue;
+        }
+        for ns in succ(s) {
+            if seen.insert(ns) {
+                stack.push(ns);
+            }
+        }
+    }
+    true
 }
 
 /// Fixed char width of `node` — `Some(w)` iff its min and max match widths are equal,
@@ -537,6 +674,227 @@ fn parse_brace(chars: &[char], start: usize) -> Option<(usize, Option<usize>, us
         Some((min, max, i + 1 - start))
     } else {
         None
+    }
+}
+
+// ─── The string-literal opening-guard idiom (python.STRING family) ──────────────
+//
+// `python.STRING` is `([ubf]?r?|r[ubf])("(?!"").*?(?<!\\)(\\\\)*?"|'(?!'').*?(?<!\\)(\\\\)*?')`.
+// Its `(?!"")` sits **after a variable-width prefix + the opening quote** — an
+// internal/variable-position leading boundary the generic boundary path cannot lower
+// (it is not at a fixed offset). `docs/LEXER_DFA_PLAN.md` calls for an NFA-state splice:
+// "peek-branch states where the forbidden continuation ("" after the opening quote)
+// leads to a DEAD (non-accepting) state." We realize that splice by case analysis,
+// composing with the variable-width prefix, the lazy body, and the `(?<!\\)` lookbehind:
+//
+//   * **Lazy body + escape lookbehind → greedy character class.** The arm body
+//     `.*?(?<!\\)(\\\\)*?<q>` is normalized *internally* (no grammar edit) to its proven
+//     greedy equivalent `(?:[^<q>\\<nl>]|\\.)*<q>` — the Type-A rewrite
+//     `tests/test_lookaround.rs::matchlen` (`string_lookaround_free_rewrite_is_not_equivalent`)
+//     pins as match-length-identical to fancy **except** for the `(?!"")` divergence.
+//     `<nl>` (the `\n` exclusion) is present iff the terminal is *not* DOTALL — under
+//     DOTALL the body may span newlines, exactly as `LONG_STRING`'s `(?is)` body does.
+//   * **The `(?!"")` splice.** Given that normalized body can never *begin* with the
+//     delimiter (`[^<q>…]` excludes it, `\\.` starts with a backslash), the forbidden
+//     continuation `<q><q>` right after the opening quote can only arise when the body is
+//     **empty** — i.e. the token is the empty string `<q><q>` and the assertion's second
+//     character lies *past* the matched token. So the splice reduces, exactly, to:
+//       - a **non-empty** arm `<prefix><q>(?:[^<q>\\<nl>]|\\.)+<q>` — unguarded (the
+//         `(?!"")` is vacuous, the body's first char is never the delimiter); and
+//       - an **empty** arm `<prefix><q><q>` carrying a trailing guard `(?!<q>)` — the
+//         empty string is valid only when the next input char is not another delimiter
+//         (`""""` is a lex error; `"" ""` is two empty strings).
+//     The two arms are mutually exclusive at any position (the char after the opening
+//     quote is the delimiter in exactly one of them), so their relative priority never
+//     bites. The empty arm's base `<prefix><q><q>` is *prefix-free* (the fixed `<q><q>`
+//     pins the variable prefix's length), so the guarded longest-accept accumulator
+//     reproduces fancy's match (see [`is_prefix_free`]).
+//
+// The recognizer matches **only** this exact shape; anything else returns `None` and the
+// caller falls back to the generic boundary lowering (which rejects/declines it) — the
+// reject-when-unsure direction. Newly-accepted instances are gated by the Route-1 proof
+// (`tests/test_lowering_proof.rs`, the real nested STRING representative), the generative
+// equivalence layer, and the python.lark differential.
+
+/// A recognized string-literal opening-guard idiom: an optional bounded-width,
+/// assertion-free prefix followed by an alternation of quote-delimited arms, each
+/// `<q>(?!<q><q>).*?(?<!\\)(\\\\)*?<q>` for a single-character delimiter `<q>`.
+pub struct StringIdiom {
+    /// The prefix regex source (e.g. `([ubf]?r?|r[ubf])`), or empty when there is none.
+    prefix: String,
+    /// The delimiter source of each arm (e.g. `"` then `'`), in source order.
+    delims: Vec<String>,
+}
+
+impl StringIdiom {
+    /// Lower the idiom into its per-arm branches (two per arm: a non-empty plain branch
+    /// and an empty trailing-guarded branch). `dotall` controls whether the body class
+    /// admits a newline (excluded iff not DOTALL). Declines (the conservative direction)
+    /// if an empty arm's base is not guard-realizable.
+    fn lower(&self, pattern: &str, dotall: bool) -> Result<Vec<LoweredBranch>, GrammarError> {
+        let nl = if dotall { "" } else { r"\n" };
+        let mut branches = Vec::new();
+        for d in &self.delims {
+            // Inside a character class the delimiter needs no escaping for the bundled
+            // quotes (`"`, `'`); if a future delimiter would be class-special, decline.
+            if matches!(d.as_str(), "]" | "\\" | "^" | "-") {
+                return Err(decline(
+                    pattern,
+                    "the string delimiter is character-class-special",
+                ));
+            }
+            // Non-empty arm: unguarded greedy escaped body. The `(?!<q><q>)` is vacuous
+            // here (the body never begins with the delimiter).
+            let non_empty = format!("{p}{d}(?:[^{d}\\\\{nl}]|\\\\.)+{d}", p = self.prefix);
+            branches.push(LoweredBranch {
+                regex: non_empty,
+                leading: None,
+                trailing: None,
+                lookbehind: Vec::new(),
+            });
+            // Empty arm: `<prefix><q><q>` with a trailing `(?!<q>)` guard — the spliced
+            // residual of `(?!"")` once the in-token part is shown vacuous.
+            let empty = format!("{p}{d}{d}", p = self.prefix);
+            if !is_guard_realizable(&empty) {
+                return Err(decline(
+                    pattern,
+                    "the empty-string arm's base is not guard-realizable (prefix not \
+                     length-deterministic), so the trailing-guard accumulator cannot \
+                     reproduce fancy's match",
+                ));
+            }
+            branches.push(LoweredBranch {
+                regex: empty,
+                leading: None,
+                trailing: Some(GuardSpec {
+                    neg: true,
+                    set: d.clone(),
+                }),
+                lookbehind: Vec::new(),
+            });
+        }
+        Ok(branches)
+    }
+}
+
+/// Recognize the [`StringIdiom`] in a parsed terminal `node`, or `None`. Structural and
+/// exact: the only newly-supported shape is `python.STRING`'s `(?!"")`-after-prefix
+/// opening guard, so the matcher pins the precise arm shape and declines everything else.
+pub fn recognize_string_idiom(node: &Node) -> Option<StringIdiom> {
+    let (prefix, arms_node) = split_prefix_and_arms(node)?;
+    let arm_nodes: Vec<&Node> = match arms_node {
+        Node::Alt(branches) => branches.iter().collect(),
+        other => vec![other],
+    };
+    let mut delims = Vec::new();
+    for arm in arm_nodes {
+        delims.push(match_string_arm(arm)?);
+    }
+    if delims.is_empty() {
+        return None;
+    }
+    Some(StringIdiom { prefix, delims })
+}
+
+/// Split `node` into `(prefix_source, arms_node)`: an optional leading bounded-width,
+/// assertion-free prefix and the alternation-of-arms that follows it. The arms may sit
+/// directly at top level, or (as in `python.STRING`) inside a single trailing group.
+fn split_prefix_and_arms(node: &Node) -> Option<(String, &Node)> {
+    match node {
+        // `PREFIX (arm|arm|…)` — the bundled shape: a concat of [prefix-group, arms-group].
+        Node::Concat(parts) if parts.len() == 2 => {
+            let prefix = &parts[0];
+            if prefix.has_assertion() || width_range(prefix).1.is_none() {
+                return None; // prefix must be assertion-free and bounded-width
+            }
+            let arms = unwrap_arms(&parts[1])?;
+            Some((prefix.to_source(), arms))
+        }
+        // No prefix: the arms alternation (optionally wrapped in one group) at top level.
+        other => unwrap_arms(other).map(|arms| (String::new(), arms)),
+    }
+}
+
+/// Peel a single capturing/non-capturing group wrapper to reach the arms `Alt` (or a
+/// bare single arm). Returns the inner node iff it is an `Alt` or a `Concat` (one arm).
+fn unwrap_arms(node: &Node) -> Option<&Node> {
+    match node {
+        Node::Group { body, quant, .. } if quant.is_empty() => match body.as_ref() {
+            inner @ (Node::Alt(_) | Node::Concat(_)) => Some(inner),
+            _ => None,
+        },
+        inner @ (Node::Alt(_) | Node::Concat(_)) => Some(inner),
+        _ => None,
+    }
+}
+
+/// Match one arm `<q>(?!<q><q>).*?(?<!\\)(\\\\)*?<q>`, returning the delimiter source
+/// `<q>`, or `None` if the arm is not exactly that shape.
+fn match_string_arm(arm: &Node) -> Option<String> {
+    let parts = match arm {
+        Node::Concat(parts) => parts.as_slice(),
+        _ => return None,
+    };
+    if parts.len() != 6 {
+        return None;
+    }
+    let delim = single_char_source(&parts[0])?;
+
+    // parts[1]: (?!<delim><delim>)
+    match &parts[1] {
+        Node::Assertion {
+            neg: true,
+            look: Look::Ahead,
+            body,
+            quant,
+        } if quant.is_empty() && body.to_source() == format!("{delim}{delim}") => {}
+        _ => return None,
+    }
+
+    // parts[2]: the lazy any-body `.*?`
+    if !matches!(&parts[2], Node::Atom(s) if s == ".*?") {
+        return None;
+    }
+
+    // parts[3]: (?<!\\)
+    match &parts[3] {
+        Node::Assertion {
+            neg: true,
+            look: Look::Behind,
+            body,
+            quant,
+        } if quant.is_empty() && body.to_source() == r"\\" => {}
+        _ => return None,
+    }
+
+    // parts[4]: (\\\\)*? — the even-backslash run
+    match &parts[4] {
+        Node::Group { open, body, quant }
+            if open == "("
+                && quant == "*?"
+                && matches!(body.as_ref(), Node::Atom(s) if s == r"\\\\") => {}
+        _ => return None,
+    }
+
+    // parts[5]: the closing delimiter, identical to the opening one.
+    if single_char_source(&parts[5])? != delim {
+        return None;
+    }
+    Some(delim)
+}
+
+/// The source of a single-character atom — a bare char (`"`) or an escaped char (`\.`),
+/// or `None` if the atom is not exactly one regex character unit.
+fn single_char_source(node: &Node) -> Option<String> {
+    let s = match node {
+        Node::Atom(s) => s.as_str(),
+        _ => return None,
+    };
+    let chars: Vec<char> = s.chars().collect();
+    match chars.as_slice() {
+        [c] if *c != '\\' => Some(c.to_string()),
+        ['\\', c] => Some(format!("\\{c}")),
+        _ => None,
     }
 }
 

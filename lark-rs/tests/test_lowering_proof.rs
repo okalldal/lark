@@ -240,6 +240,155 @@ fn route1_proof_bounded_lookbehind() {
     discharge(ShapeClass::BoundedLookbehind);
 }
 
+// ─── The STRING opening-guard splice — real nested shape ────────────────────────
+//
+// `python.STRING`'s `(?!"")` after the variable-width prefix + the opening quote is the
+// marquee L2 splice. Its representative is the **real nested shape** (prefix + `(?!"")` +
+// lazy body + `(?<!\\)` lookbehind), not the simplified top-level `(?!"")[^"]*` cousin.
+//
+// Why a different proof *method*: the brute Route-1 enumeration above is
+// `|alphabet|^(n+W+2)` strings, which a content-bearing body (STRING's `.*?`) blows up
+// (n≈13 base states, ~25 byte-class reps ⇒ ~10^25). The decision procedure is realized
+// **state-pruned** instead — the same Myhill-Nerode basis `prove_route1` documents:
+// every divergence between two bounded-lookahead matchers manifests at a *distinguishing
+// base-DFA state* followed by ≤ W lookahead chars. So testing one shortest witness per
+// reachable base state, extended by every lookahead suffix of length ≤ W+1, is a complete
+// decision procedure — `n · |reps|^(W+1)` (~200k for STRING), tractable, with
+// `fancy-regex` the independent oracle. It is gated additionally by the generative
+// equivalence layer and the python.lark differential.
+
+/// The real nested STRING representatives (double-quote, single-quote, and the bundled
+/// both-arms shape — raw, no `/i`, which `lowered_prefix`'s one-terminal grammar applies
+/// only via inline flags). Each is the genuine `prefix + (?!"") + .*? + (?<!\\)(\\\\)*?`
+/// nested form the splice must reproduce.
+fn string_proof_representatives() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "STRING_NESTED_DQ",
+            r#"([ubf]?r?|r[ubf])("(?!"").*?(?<!\\)(\\\\)*?")"#,
+        ),
+        (
+            "STRING_NESTED_BOTH",
+            r#"([ubf]?r?|r[ubf])("(?!"").*?(?<!\\)(\\\\)*?"|'(?!'').*?(?<!\\)(\\\\)*?')"#,
+        ),
+    ]
+}
+
+/// Decide Route-1 match-length equivalence via the **state-pruned** Myhill-Nerode
+/// decision procedure (see the section header). Complete and tractable for the
+/// content-bearing string idiom; `Err(cex)` carries a counterexample.
+fn prove_route1_pruned(name: &str, pattern: &str) -> Result<(), String> {
+    use regex_automata::util::primitives::StateID;
+    use regex_automata::{Anchored, Input};
+
+    assert!(
+        pattern.is_ascii(),
+        "Route-1 proof assumes ASCII representatives; {pattern:?} is not ASCII"
+    );
+    let branches = lower_boundary(pattern).map_err(|e| format!("lowering failed: {e:?}"))?;
+
+    // Base recognizer = the union of every lowered branch base (no guards). Its byte
+    // equivalence classes are the sound enumeration alphabet; its reachable states are
+    // the Myhill-Nerode partition we cover one witness apiece.
+    let base_src = branches
+        .iter()
+        .map(|b| format!("(?:{})", b.regex))
+        .collect::<Vec<_>>()
+        .join("|");
+    let base = dense::DFA::new(&base_src).map_err(|e| format!("dfa(base): {e}"))?;
+    let classes = base.byte_classes();
+    let mut seen_cls = HashSet::new();
+    let reps: Vec<u8> = (0u8..=0x7F)
+        .filter(|&b| seen_cls.insert(classes.get(b)))
+        .collect();
+
+    // W = the widest assertion in the original pattern (the lookahead window that can
+    // make the splice's decision differ); the lookahead suffix is W+1 (one past the
+    // window, for the trailing-guard EOF / next-char distinction).
+    let w = classify(pattern)
+        .map_err(|e| format!("classify: {e:?}"))?
+        .assertions
+        .iter()
+        .filter_map(|a| a.width)
+        .max()
+        .unwrap_or(0);
+
+    // BFS: a shortest witness (byte string) reaching each base-DFA state.
+    let start = base
+        .start_state_forward(&Input::new("").anchored(Anchored::Yes))
+        .map_err(|e| format!("start: {e}"))?;
+    let mut witness: std::collections::HashMap<StateID, Vec<u8>> = std::collections::HashMap::new();
+    witness.insert(start, Vec::new());
+    let mut queue = std::collections::VecDeque::from([start]);
+    while let Some(st) = queue.pop_front() {
+        let w_st = witness[&st].clone();
+        for &b in &reps {
+            let ns = base.next_state(st, b);
+            if !witness.contains_key(&ns) {
+                let mut nw = w_st.clone();
+                nw.push(b);
+                witness.insert(ns, nw);
+                queue.push_back(ns);
+            }
+        }
+    }
+
+    // Tractability guard (states × |reps|^(W+1)): fail loudly rather than hang.
+    let suffix_space = (reps.len() as u128).checked_pow(w as u32 + 1);
+    let total = suffix_space.map(|s| s.saturating_mul(witness.len() as u128));
+    assert!(
+        total.is_some_and(|t| t <= 8_000_000),
+        "state-pruned Route-1 for {pattern:?} is intractable (states={}, |reps|={}, W={w})",
+        witness.len(),
+        reps.len(),
+    );
+
+    // Every lookahead suffix of length 0..=W+1 over the byte-class representatives.
+    let suffixes = corpus(&reps.iter().map(|&b| b as char).collect::<Vec<_>>(), w + 1);
+    let oracle = fancy_matcher(pattern).ok_or_else(|| format!("fancy rejected {pattern:?}"))?;
+    for wbytes in witness.values() {
+        for suf in &suffixes {
+            let mut full = wbytes.clone();
+            full.extend_from_slice(suf.as_bytes());
+            let Ok(s) = std::str::from_utf8(&full) else {
+                continue;
+            };
+            let lowered = lowered_prefix(name, pattern, s)?;
+            let fancy = fancy_prefix(&oracle, s);
+            if lowered != fancy {
+                return Err(format!(
+                    "counterexample on {s:?}: lowered={lowered:?} != fancy={fancy:?}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The committed Route-1 proof for the STRING opening-guard splice on its **real nested
+/// shape** — the deliverable's non-negotiable proof obligation. Each representative must
+/// (a) genuinely classify as a supported leading boundary (so the obligation targets the
+/// splice), (b) lower to branches (not decline), and (c) be proven match-length-identical
+/// to `fancy-regex` by the state-pruned decision procedure.
+#[test]
+fn route1_proof_string_idiom_real_nested_shape() {
+    for (name, pattern) in string_proof_representatives() {
+        let c = classify(pattern).unwrap_or_else(|e| panic!("classify {name} errored: {e}"));
+        assert!(
+            c.assertions
+                .iter()
+                .any(|a| a.verdict() == Verdict::Supported(ShapeClass::LeadingBoundary)),
+            "{name} must classify with a supported leading boundary (the spliced guard)"
+        );
+        assert!(
+            lower_boundary(pattern).is_ok(),
+            "{name} must lower (not decline) for the proof to be non-vacuous"
+        );
+        prove_route1_pruned(name, pattern)
+            .unwrap_or_else(|cex| panic!("Route-1 (state-pruned) failed for {name}: {cex}"));
+    }
+}
+
 /// Active now: the proof-obligation registry is the per-shape contract. Every
 /// supported shape has at least one committed representative, and each representative
 /// genuinely classifies as its shape (so the obligation targets the right thing).
