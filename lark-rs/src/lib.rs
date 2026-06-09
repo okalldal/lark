@@ -135,7 +135,7 @@ pub struct LarkOptions {
     /// has **no** Lark equivalent — it selects between byte-for-byte equivalent
     /// scanner implementations (`docs/LEXER_DFA_PLAN.md`) and exists so the L0
     /// differential oracle can build the same grammar under both engines. Defaults
-    /// to the original `regex`-crate scanner.
+    /// to the `regex-automata` DFA scanner.
     pub lexer_backend: LexerBackend,
 }
 

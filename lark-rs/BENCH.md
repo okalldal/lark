@@ -351,15 +351,36 @@ Machine-specific — **only ratios travel**; capture fresh numbers on your own b
 | expr_large  |  ~28K |  ~9.6 | ~14.6 | **~0.66×** |
 | python_8k   | ~8.0K |  ~0.5 |  ~0.5 | **~0.97×** |
 
-**Reading.** On all-plain grammars the DFA scanner is ~1.5–2.8× faster (JSON ~2.1–2.8×,
-the identifier/number/operator stream ~1.5×) — the lexer is ~55% of LALR parse time
+### Default-flip re-run (DFA is now the default)
+
+Re-run on the **flip** that makes `LexerBackend::Dfa` the default
+(`LexerBackend::default()` / `LarkOptions.lexer_backend`). Same box family, the
+`bench` profile (release + LTO). Measured 2026-06-09 — a shared runner, so the
+absolute MB/s sit lower than the 2026-06-08 reference box; **only the ratios
+travel**, and they reproduce the picture (DFA decisively faster on the all-plain
+common path, a wash on the `fancy-regex`-dominated `python.lark`).
+
+| workload | bytes | regex MB/s | dfa MB/s | dfa/regex |
+|----------|------:|-----------:|---------:|----------:|
+| json_small  |   390 |  ~6.2 | ~19.3 | **~0.32×** |
+| json_medium | ~8.7K |  ~6.7 | ~21.6 | **~0.31×** |
+| json_large  |  ~92K |  ~7.1 | ~22.9 | **~0.31×** |
+| expr_small  |   385 |  ~6.1 | ~10.1 | **~0.60×** |
+| expr_large  |  ~28K |  ~7.2 | ~12.7 | **~0.57×** |
+| python_8k   | ~8.0K |  ~0.4 |  ~0.4 | **~0.96×** |
+
+**Reading.** On all-plain grammars the DFA scanner is ~1.7–3.2× faster (JSON ~3.2×,
+the identifier/number/operator stream ~1.7×) — the lexer is ~55% of LALR parse time
 (profiling spike below), so this is a real end-to-end lever, not a micro-win. On
 `python.lark` the shared `fancy-regex` `STRING` probe dominates both backends
-(~0.5 MB/s either way), so the plain-engine swap is a wash there — exactly as
-expected, and the throughput-and-bakeability payoff for *those* terminals is what
-later phases (L3 lowering, L5 baking) deliver. The DFA backend is opt-in
-(`LarkOptions.lexer_backend = LexerBackend::Dfa` / `LexerConf::with_backend`); the
-default stays the `regex` Scanner until the rest of the plan lands.
+(~0.4 MB/s either way), so the plain-engine swap is a wash there (ratio ~0.96×) —
+exactly as expected, and the throughput-and-bakeability payoff for *those* terminals
+is what later phases (L3 lowering, L5 baking) deliver. Because the swap is
+correctness-identical (the L0 differential oracle is 0 divergences over the full
+bank + JSON + python/lark corpora) and never slower, **`LexerBackend::Dfa` is now the
+default**; `LexerBackend::Regex` remains selectable
+(`LarkOptions.lexer_backend = LexerBackend::Regex` / `LexerConf::with_backend`) and
+the differential keeps both engines gated against each other.
 
 ## Profiling findings (spike, 2026-06-04)
 

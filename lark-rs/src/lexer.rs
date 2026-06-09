@@ -156,15 +156,18 @@ fn record_scan_skip(pos: usize, match_start: Option<usize>) {
 /// differential oracle in `tests/test_scanner_differential.rs` is the contract).
 ///
 ///   * [`Regex`](LexerBackend::Regex) — the original `regex`-crate combined
-///     alternation with capture groups (the default; see [`Scanner`]).
+///     alternation with capture groups (see [`Scanner`]).
 ///   * [`Dfa`](LexerBackend::Dfa) — a `regex-automata` multi-pattern DFA
-///     (`docs/LEXER_DFA_PLAN.md`, phase L1; see [`DfaScanner`]).
+///     (`docs/LEXER_DFA_PLAN.md`, phase L1; see [`DfaScanner`]). This is now the
+///     default: the L0 differential oracle proves it lexes byte-identically to the
+///     `regex` Scanner over the full bank + JSON + python/lark corpora, and it is
+///     faster on the all-plain common path (`benches/lex_backends`, `BENCH.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LexerBackend {
-    /// The `regex`-crate combined-alternation scanner (today's engine).
-    #[default]
+    /// The `regex`-crate combined-alternation scanner (the original engine).
     Regex,
-    /// The `regex-automata` multi-pattern DFA scanner (phase L1).
+    /// The `regex-automata` multi-pattern DFA scanner (phase L1). The default.
+    #[default]
     Dfa,
 }
 
@@ -178,7 +181,7 @@ pub struct LexerConf {
     /// the combined scanner regex. Zero leaves each terminal's own flags as-is.
     pub global_flags: u32,
     /// Which combined-scanner engine to build (see [`LexerBackend`]). Defaults to
-    /// the original `regex`-crate [`Scanner`]; the DFA backend is opt-in.
+    /// the `regex-automata` [`DfaScanner`]; the original `regex` Scanner is opt-in.
     pub backend: LexerBackend,
 }
 
@@ -199,9 +202,10 @@ impl LexerConf {
     }
 
     /// Select the combined-scanner backend (builder-style). The default is the
-    /// `regex`-crate [`Scanner`]; choosing [`LexerBackend::Dfa`] swaps in the
-    /// `regex-automata` engine for the lookaround-free terminals without changing
-    /// any lexing semantics.
+    /// `regex-automata` [`DfaScanner`]; choosing [`LexerBackend::Regex`] swaps back
+    /// to the original `regex`-crate [`Scanner`] without changing any lexing
+    /// semantics (both run the lookaround-free terminals; lookaround routes to the
+    /// `fancy-regex` side-probe in either case).
     pub fn with_backend(mut self, backend: LexerBackend) -> Self {
         self.backend = backend;
         self
