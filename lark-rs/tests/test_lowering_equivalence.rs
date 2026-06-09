@@ -17,8 +17,8 @@ mod common;
 
 use common::lowering::{
     boundary_mutations, corpus, fancy_matcher, fancy_prefix, has_guard, has_lookbehind,
-    lookbehind_mutations, lowered_prefix, mutant_lookbehind_matcher, mutant_matcher,
-    string_idiom_terminals, supported_terminals, BoundaryMutation, GenTerminal,
+    long_string_idiom_terminals, lookbehind_mutations, lowered_prefix, mutant_lookbehind_matcher,
+    mutant_matcher, string_idiom_terminals, supported_terminals, BoundaryMutation, GenTerminal,
 };
 use lark_rs::ShapeClass;
 
@@ -205,6 +205,33 @@ fn string_idiom_lowered_equals_fancy() {
     assert!(
         failures.is_empty(),
         "string-idiom generative-equivalence divergence(s):\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+/// The **multi-character-close idiom** (python.LONG_STRING's real nested/prefixed shape):
+/// every generated long-string idiom terminal's lowered match-length must equal the
+/// `fancy-regex` oracle over its exhaustive corpus — which forms real long strings (the
+/// empty `""""""`, one-char bodies), lone in-body delimiter chars, and escaped backslashes.
+/// `lowered_prefix` returning `Err` (a declined terminal) is surfaced as a divergence, so a
+/// terminal that *failed* to lower fails loudly rather than passing vacuously. This is the
+/// generative gate for the lazy multi-character-close body normalization.
+#[test]
+fn long_string_idiom_lowered_equals_fancy() {
+    let terms = long_string_idiom_terminals();
+    assert!(
+        !terms.is_empty(),
+        "no long-string-idiom terminals generated"
+    );
+    let mut failures = Vec::new();
+    for t in &terms {
+        if let Some(d) = equivalence_divergence(t) {
+            failures.push(d);
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "long-string-idiom generative-equivalence divergence(s):\n  {}",
         failures.join("\n  ")
     );
 }

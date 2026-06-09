@@ -36,9 +36,11 @@
 //!     driver checks the ≤`W` chars ending at that offset against `S`. The offset is
 //!     fixed only when every base element *before* the lookbehind is fixed-width — a
 //!     lookbehind after a variable-width prefix (`python.LONG_STRING`'s
-//!     `.*?(?<!\\)`) has no fixed offset and is **declined** here (routed to
-//!     `fancy-regex`), the reject-when-unsure direction; the variable-offset
-//!     window-carry is a later milestone.
+//!     `.*?(?<!\\)`) has no fixed offset, so the *generic* per-branch path **declines**
+//!     it. `python.LONG_STRING` is instead lowered by [`recognize_long_string_idiom`],
+//!     which absorbs that `(?<!\\)` into a lazy escaped character-class body (the
+//!     multi-character-close Type-A normalization), the same way the `python.STRING`
+//!     splice absorbs its lookbehind.
 
 use super::{Look, Node};
 use crate::error::GrammarError;
@@ -115,14 +117,30 @@ pub fn lower_boundary(pattern: &str) -> Result<Vec<LoweredBranch>, GrammarError>
 /// the lazy escaped body to its proven greedy character-class equivalent (the Type-A
 /// rewrite `tests/test_lookaround.rs::matchlen` justifies) and reducing the `(?!"")`
 /// splice to an empty/non-empty arm split with a trailing `(?!")` guard on the empty arm
-/// (the only place the assertion's window over-reaches the matched token). Anything that
-/// is not exactly that idiom falls through to the generic boundary lowering.
+/// (the only place the assertion's window over-reaches the matched token).
+///
+/// The second move is the **multi-character-close idiom** (`python.LONG_STRING`):
+/// `<delim>.*?(?<!\\)(\\\\)*?<delim>` for a *multi-character literal* delimiter
+/// (`"""` / `'''`) and **no** opening guard. Because the close is multi-character, the
+/// body content class cannot exclude the delimiter char (a lone `"` is legal *inside* a
+/// `"""…"""` long string), so the Type-A normalization keeps a **lazy** body that does
+/// not exclude the delimiter — `<delim>(?:[^\\<nl>]|\\.)*?<delim>` — proven match-length
+/// identical to the original by `tests/test_lookaround.rs::long_string_match_length_equivalence`
+/// (its `LONG_NEW`). The `(?<!\\)(\\\\)*?` escape lookbehind is **absorbed** by the `\\.`
+/// alternation (every backslash is consumed paired with its escaped char, so the close
+/// can never be escaped), and with no opening guard the arm lowers to a *single
+/// unguarded* branch — the lazy body's first-close preference is reproduced exactly by
+/// the leftmost-first plain engine. [`recognize_long_string_idiom`] matches that exact
+/// shape; anything that is neither idiom falls through to the generic boundary lowering.
 pub fn lower_boundary_dotall(
     pattern: &str,
     dotall: bool,
 ) -> Result<Vec<LoweredBranch>, GrammarError> {
     let node = super::parse(pattern)?;
     if let Some(idiom) = recognize_string_idiom(&node) {
+        return idiom.lower(pattern, dotall);
+    }
+    if let Some(idiom) = recognize_long_string_idiom(&node) {
         return idiom.lower(pattern, dotall);
     }
     let mut branches = Vec::new();
@@ -846,6 +864,178 @@ pub fn recognize_string_idiom(node: &Node) -> Option<StringIdiom> {
     Some(StringIdiom { prefix, delims })
 }
 
+// ─── The multi-character-close idiom (python.LONG_STRING family) ────────────────
+//
+// `python.LONG_STRING` is `([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')`
+// (DOTALL). Each arm is `<delim>.*?(?<!\\)(\\\\)*?<delim>` for a **multi-character**
+// literal delimiter `<delim>` (`"""` / `'''`) and — unlike `python.STRING` — **no**
+// opening guard. The lowering is the Type-A greedy/lazy character-class normalization,
+// adapted to the multi-character close:
+//
+//   * **Lazy body + escape lookbehind → lazy escaped character class.** The arm body
+//     `.*?(?<!\\)(\\\\)*?` is normalized *internally* (no grammar edit) to
+//     `(?:[^\\<nl>]|\\.)*?` — `tests/test_lookaround.rs::long_string_match_length_equivalence`
+//     (its `LONG_NEW`) pins this match-length-identical to fancy. `<nl>` (the `\n`
+//     exclusion) is present iff the terminal is *not* DOTALL; under DOTALL (as the
+//     bundled `LONG_STRING` is) the body spans newlines. The `\\.` alternation **absorbs**
+//     the `(?<!\\)(\\\\)*?` escape lookbehind (every backslash is consumed paired with its
+//     escaped char, so the close can never be escaped) exactly as `python.STRING` does.
+//   * **Why lazy, and why the class does *not* exclude the delimiter.** A single `"` is
+//     legal *inside* a `"""…"""` long string (only the three-character run closes it), so
+//     the content class cannot exclude the delimiter char the way `python.STRING`'s
+//     single-character close lets it. The body therefore stays **lazy** (`*?`) — its
+//     first-close preference is what makes `"""a""""""b"""` two long strings, not one —
+//     and the leftmost-first plain engine reproduces that preference exactly (verified by
+//     the scanner differential + the `"""a""""""b"""` canary, `tests/test_long_string_splice.rs`).
+//   * **No opening guard → a single unguarded branch per arm.** With nothing like
+//     `python.STRING`'s `(?!"")` to splice, each arm lowers to one plain (guard-free)
+//     branch `<prefix><delim>(?:[^\\<nl>]|\\.)*?<delim>`. No guarded-accept accumulator
+//     and no realizability check are involved — it is an ordinary regular language.
+//
+// The recognizer matches **only** this exact shape (a multi-character literal delimiter,
+// the lazy any-body, the `(?<!\\)(\\\\)*?` escape run, the identical close); anything else
+// returns `None` and the caller falls through to the generic boundary lowering (which
+// declines it) — the reject-when-unsure direction. Newly-accepted instances are gated by
+// the Route-1 proof (`tests/test_lowering_proof.rs`, the real nested LONG_STRING
+// representative), the generative equivalence layer, and the python.lark differential.
+
+/// A recognized multi-character-close idiom: an optional bounded-width, assertion-free
+/// prefix followed by an alternation of arms, each `<delim>.*?(?<!\\)(\\\\)*?<delim>` for
+/// a **multi-character literal** delimiter `<delim>` and no opening guard.
+pub struct LongStringIdiom {
+    /// The prefix regex source (e.g. `([ubf]?r?|r[ubf])`), or empty when there is none.
+    prefix: String,
+    /// The delimiter source of each arm (e.g. `"""` then `'''`), in source order.
+    delims: Vec<String>,
+}
+
+impl LongStringIdiom {
+    /// Lower the idiom into one unguarded branch per arm. `dotall` controls whether the
+    /// body class admits a newline (excluded iff not DOTALL), exactly as the original
+    /// `.*?` body would under the terminal's `s` flag.
+    fn lower(&self, _pattern: &str, dotall: bool) -> Result<Vec<LoweredBranch>, GrammarError> {
+        let nl = if dotall { "" } else { r"\n" };
+        let mut branches = Vec::new();
+        for d in &self.delims {
+            // `<prefix><delim>(?:[^\\<nl>]|\\.)*?<delim>` — lazy, the delimiter char is
+            // *not* excluded from the content class (a lone delimiter char is legal inside
+            // a multi-character-delimited body), guard-free.
+            let regex = format!("{p}{d}(?:[^\\\\{nl}]|\\\\.)*?{d}", p = self.prefix);
+            branches.push(LoweredBranch {
+                regex,
+                leading: None,
+                trailing: None,
+                lookbehind: Vec::new(),
+            });
+        }
+        Ok(branches)
+    }
+}
+
+/// Recognize the [`LongStringIdiom`] in a parsed terminal `node`, or `None`. Structural
+/// and exact: the only shape it accepts is a multi-character-literal-delimited arm with
+/// the `.*?(?<!\\)(\\\\)*?` escaped body and no opening guard (`python.LONG_STRING`).
+pub fn recognize_long_string_idiom(node: &Node) -> Option<LongStringIdiom> {
+    let (prefix, arms_node) = split_prefix_and_arms(node)?;
+    let arm_nodes: Vec<&Node> = match arms_node {
+        Node::Alt(branches) => branches.iter().collect(),
+        other => vec![other],
+    };
+    let mut delims = Vec::new();
+    for arm in arm_nodes {
+        delims.push(match_long_string_arm(arm)?);
+    }
+    if delims.is_empty() {
+        return None;
+    }
+    Some(LongStringIdiom { prefix, delims })
+}
+
+/// Match one arm `<delim>.*?(?<!\\)(\\\\)*?<delim>` (no opening guard, multi-character
+/// literal delimiter), returning the delimiter source `<delim>`, or `None`. The opening
+/// delimiter is glued to the lazy `.*?` body in a single [`Node::Atom`] (there is no
+/// `(?!…)` between them to split it), so the arm has exactly four parts:
+/// `[Atom("<delim>.*?"), (?<!\\), (\\\\)*?, Atom("<delim>")]`.
+fn match_long_string_arm(arm: &Node) -> Option<String> {
+    let parts = match arm {
+        Node::Concat(parts) => parts.as_slice(),
+        _ => return None,
+    };
+    if parts.len() != 4 {
+        return None;
+    }
+    // parts[3]: the closing delimiter — a multi-character literal run.
+    let close = literal_run_source(&parts[3])?;
+
+    // parts[2]: (\\\\)*? — the even-backslash run.
+    match &parts[2] {
+        Node::Group { open, body, quant }
+            if open == "("
+                && quant == "*?"
+                && matches!(body.as_ref(), Node::Atom(s) if s == r"\\\\") => {}
+        _ => return None,
+    }
+
+    // parts[1]: (?<!\\)
+    match &parts[1] {
+        Node::Assertion {
+            neg: true,
+            look: Look::Behind,
+            body,
+            quant,
+        } if quant.is_empty() && body.to_source() == r"\\" => {}
+        _ => return None,
+    }
+
+    // parts[0]: <delim>.*? — the opening delimiter glued to the lazy any-body. Peel the
+    // `.*?` suffix; the remainder must be the same multi-character literal delimiter.
+    let s = match &parts[0] {
+        Node::Atom(s) => s.as_str(),
+        _ => return None,
+    };
+    let open = s.strip_suffix(".*?")?;
+    if literal_run_str(open)? != close {
+        return None;
+    }
+    Some(close)
+}
+
+/// The source of a **multi-character literal** delimiter node — a run of ≥ 2 chars, each a
+/// bare ordinary literal or an escaped-punctuation literal (the per-char rule of
+/// [`literal_delimiter_source`]). The delimiter is emitted only *bare* (open/close), never
+/// inside a character class, so it need only be bare-safe. Returns the run source, or
+/// `None` for a non-atom, a non-literal char, or a single-char run (which is the
+/// `python.STRING` short-string domain, handled by [`recognize_string_idiom`]).
+fn literal_run_source(node: &Node) -> Option<String> {
+    match node {
+        Node::Atom(s) => literal_run_str(s),
+        _ => None,
+    }
+}
+
+/// [`literal_run_source`] over a raw source string.
+fn literal_run_str(s: &str) -> Option<String> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0usize;
+    let mut count = 0usize;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => {
+                let c = *chars.get(i + 1)?;
+                if !c.is_ascii_punctuation() {
+                    return None; // `\d`, `\w`, `\n` … are classes/encoded, not literals
+                }
+                i += 2;
+            }
+            c if is_plain_literal(c) => i += 1,
+            _ => return None, // a regex metacharacter — not a fixed literal
+        }
+        count += 1;
+    }
+    // A single-char delimiter is the short-string domain; require ≥ 2 here.
+    (count >= 2).then(|| s.to_string())
+}
+
 /// Split `node` into `(prefix_source, arms_node)`: an optional leading bounded-width,
 /// assertion-free prefix and the alternation-of-arms that follows it. The arms may sit
 /// directly at top level, or (as in `python.STRING`) inside a single trailing group.
@@ -1135,9 +1325,57 @@ mod tests {
     #[test]
     fn declines_lookbehind_after_variable_prefix() {
         // A lookbehind after a variable-width prefix (`\w+`, `.*?`) has no fixed offset
-        // — declined (routed to fancy), the reject-when-unsure direction. This is the
-        // python.LONG_STRING `.*?(?<!\\)` case the variable-offset milestone covers.
+        // — declined (routed to fancy), the reject-when-unsure direction. The bare
+        // `\w+(?<!_)x` is the generic variable-offset case; the *incomplete* string body
+        // (`""".*?(?<!\\)(\\\\)*?` with no closing delimiter) is not the LONG_STRING idiom
+        // either, so it too declines.
         assert!(lower_boundary(r"\w+(?<!_)x").is_err());
         assert!(lower_boundary(r#"""".*?(?<!\\)(\\\\)*?"#).is_err());
+    }
+
+    #[test]
+    fn long_string_idiom_lowers_to_unguarded_lazy_branches() {
+        // The bundled python.LONG_STRING (lowered DOTALL, as the `/is` terminal is).
+        let raw = r#"([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')"#;
+        let b = lower_boundary_dotall(raw, true).expect("LONG_STRING must lower");
+        assert_eq!(b.len(), 2, "one branch per quote-kind arm");
+        // Each branch is unguarded (the `(?<!\\)` is absorbed into the body class) and
+        // carries the lazy escaped body with the multi-character delimiter NOT excluded.
+        assert_eq!(b[0].regex, r#"([ubf]?r?|r[ubf])"""(?:[^\\]|\\.)*?""""#);
+        assert_eq!(b[1].regex, r#"([ubf]?r?|r[ubf])'''(?:[^\\]|\\.)*?'''"#);
+        for br in &b {
+            assert!(br.leading.is_none() && br.trailing.is_none() && br.lookbehind.is_empty());
+        }
+        // Non-DOTALL excludes the newline from the content class (a short multi-char-close
+        // string can't span lines), exactly as the original `.*?` body would.
+        let nd = lower_boundary_dotall(r#"(""".*?(?<!\\)(\\\\)*?""")"#, false).unwrap();
+        assert_eq!(nd[0].regex, r#""""(?:[^\\\n]|\\.)*?""""#);
+    }
+
+    #[test]
+    fn long_string_recognizer_is_exact() {
+        use crate::lookaround::parse;
+        // Accepts: the bundled shape, a prefix-less single arm, and a 2-char delimiter.
+        for p in [
+            r#"([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')"#,
+            r#"(""".*?(?<!\\)(\\\\)*?""")"#,
+            r#"==.*?(?<!\\)(\\\\)*?=="#,
+        ] {
+            assert!(
+                recognize_long_string_idiom(&parse(p).unwrap()).is_some(),
+                "must recognize {p:?}"
+            );
+        }
+        // Declines: a *single-character* delimiter (the short-string domain, even without
+        // a guard) and a non-literal `.` delimiter.
+        for p in [
+            r#"".*?(?<!\\)(\\\\)*?""#,   // single-char close → not multi-char
+            r#"...*?(?<!\\)(\\\\)*?.."#, // `.` delimiter → not a fixed literal
+        ] {
+            assert!(
+                recognize_long_string_idiom(&parse(p).unwrap()).is_none(),
+                "must decline {p:?}"
+            );
+        }
     }
 }

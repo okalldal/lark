@@ -450,6 +450,70 @@ pub fn string_idiom_terminals() -> Vec<GenTerminal> {
     out
 }
 
+/// The **multi-character-close idiom** population (python.LONG_STRING's *actual*
+/// nested/prefixed shape — `docs/LEXER_DFA_PLAN.md`, the multi-character-close splice).
+/// Each arm is `<delim>.*?(?<!\\)(\\\\)*?<delim>` for a *multi-character* literal
+/// delimiter and **no** opening guard — the genuinely-new piece over `python.STRING`
+/// (whose single-character close lets the body exclude the delimiter; here it cannot, so
+/// the body stays lazy). Varies the prefix (none / bounded / the bundled alternation), the
+/// delimiter (`"""`, `'''`, `===`, `==`), and the arm count, so the lowering is exercised
+/// across the composition surface. The alphabet includes the delimiter char + `\` so the
+/// corpus forms real long strings (the empty `""""""` is 6 chars), escaped backslashes,
+/// and lone in-body delimiter chars — the cases a wrong (greedy / delimiter-excluding) body
+/// normalization gets wrong. `max_len` is large enough that an empty *and* a one-char-body
+/// long string both appear.
+///
+/// The shape's only assertion is the `(?<!\\)` escape lookbehind (absorbed by the body), so
+/// its `shape` field is [`ShapeClass::BoundedLookbehind`]; like the string-idiom population
+/// these are kept out of [`supported_terminals`] and driven by their own dedicated
+/// equivalence + differential gates.
+pub fn long_string_idiom_terminals() -> Vec<GenTerminal> {
+    // Each arm body: `<delim>.*?(?<!\\)(\\\\)*?<delim>`, a multi-character literal delim.
+    let tq = r#"""".*?(?<!\\)(\\\\)*?""""#; // triple double-quote
+    let ts = r#"'''.*?(?<!\\)(\\\\)*?'''"#; // triple single-quote
+    let teq = r#"===.*?(?<!\\)(\\\\)*?==="#; // 3-char `=` delimiter
+    let deq = r#"==.*?(?<!\\)(\\\\)*?=="#; // 2-char `=` delimiter (the ≥2 boundary)
+    let both = format!("{tq}|{ts}");
+    let arms: [(&str, &str, &[char]); 5] = [
+        ("tq", tq, &['"', '\\', 'a']),
+        ("ts", ts, &['\'', '\\', 'a']),
+        ("teq", teq, &['=', '\\', 'a']),
+        ("deq", deq, &['=', '\\', 'a']),
+        ("both", &both, &['"', '\'', '\\', 'a']),
+    ];
+    let prefixes: [(&str, &[char]); 3] = [
+        ("", &[]),
+        ("(r?)", &['r']),
+        ("([ubf]?r?|r[ubf])", &['r', 'b']),
+    ];
+    let mut out = Vec::new();
+    let mut n = 0usize;
+    for (plabel, pchars) in prefixes {
+        for (alabel, arm_src, achars) in &arms {
+            let pattern = format!("{plabel}({arm_src})");
+            let mut alphabet: Vec<char> = achars.to_vec();
+            for &c in pchars {
+                if !alphabet.contains(&c) {
+                    alphabet.push(c);
+                }
+            }
+            alphabet.truncate(4);
+            out.push(GenTerminal {
+                name: format!("LONG_{plabel}_{alabel}_{n}"),
+                pattern,
+                shape: ShapeClass::BoundedLookbehind,
+                alphabet,
+                // 7 reaches an empty (`""""""`, 6) and a one-char-body (`"""a"""`, 7)
+                // triple-quote string; the escape mechanics are proven by the Route-1
+                // state-pruned proof, which reaches every base-DFA state regardless of len.
+                max_len: 7,
+            });
+            n += 1;
+        }
+    }
+    out
+}
+
 /// **Adversarial string-idiom shapes with a *non-literal* delimiter** — the recognizer's
 /// own acceptance surface (not just the classifier's). Each is structurally the string
 /// idiom `<q>(?!<q><q>).*?(?<!\\)(\\\\)*?<q>` but with `<q>` a regex construct that is

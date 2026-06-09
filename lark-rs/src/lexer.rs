@@ -678,6 +678,44 @@ fn wrap_flags(flags: u32, src: &str) -> String {
     }
 }
 
+/// Peel a single whole-pattern scoped-flag group `(?<flags>:…)` (flag letters only — no
+/// group name, no `-` clear) off `raw`, returning the inner pattern source and the flag
+/// bits the wrapper adds. Returns `(raw, 0)` unchanged for anything else. The bundled
+/// `python`/`lark` grammars emit per-terminal flags this way (`/…/i` → `(?i:…)`, with
+/// `PatternRe::flags == 0`), so the lowering must lift the wrapper out — otherwise it
+/// sees the assertion nested inside a group and routes the whole terminal to `fancy-regex`
+/// (and the body normalization would miss `DOTALL`). The inverse of [`wrap_flags`].
+fn peel_scoped_flags(raw: &str) -> (String, u32) {
+    use crate::grammar::terminal::flags;
+    use crate::lookaround::Node;
+    let Ok(Node::Group { open, body, quant }) = crate::lookaround::parse(raw) else {
+        return (raw.to_string(), 0);
+    };
+    // A scoped-flag group is `(?<letters>:`; a plain/non-capturing/named group is not.
+    let Some(letters) = open
+        .strip_prefix("(?")
+        .and_then(|s| s.strip_suffix(':'))
+        .filter(|l| !l.is_empty() && l.chars().all(|c| c.is_ascii_alphabetic()))
+    else {
+        return (raw.to_string(), 0);
+    };
+    if !quant.is_empty() {
+        return (raw.to_string(), 0);
+    }
+    let mut bits = 0u32;
+    for c in letters.chars() {
+        match c {
+            'i' => bits |= flags::IGNORECASE,
+            's' => bits |= flags::DOTALL,
+            'm' => bits |= flags::MULTILINE,
+            'x' => bits |= flags::VERBOSE,
+            // An unknown flag letter — don't guess; leave the wrapper in place.
+            _ => return (raw.to_string(), 0),
+        }
+    }
+    (body.to_source(), bits)
+}
+
 /// Build an anchored dense DFA for a guard body `src` (leftmost-first; we only need a
 /// yes/no "does `S` match here").
 fn build_anchored_dfa(src: &str) -> Result<dense::DFA<Vec<u32>>, GrammarError> {
@@ -805,6 +843,18 @@ impl DfaScanner {
                 // be safe and route it to fancy rather than panicking.
                 Pattern::Str(_) => ("", 0),
             };
+            // The loader bakes per-terminal flags into a whole-pattern scoped-flag group
+            // (`/…/is` → `(?is:…)`) with `p.flags == 0`. Peel that wrapper so the lowering
+            // sees the *raw* assertion structure at top level (not nested behind `(?is:…)`,
+            // which it would mistake for an un-lowerable group and route to fancy) and so
+            // the body normalization gets the real `DOTALL`/`IGNORECASE` bits. The engine
+            // re-applies them by wrapping each lowered branch in `wrap_flags(flags, …)`, so
+            // the lowered terminal carries exactly the original flags. (The `fancy`
+            // fallback below uses the un-peeled `inline`, so a declined terminal is
+            // unaffected.)
+            let (raw_inner, wrapper_flags) = peel_scoped_flags(raw);
+            let raw = raw_inner.as_str();
+            let flags = flags | wrapper_flags;
             let compile_guard =
                 |g: &crate::lookaround::lower::GuardSpec| -> Result<Guard, GrammarError> {
                     let gsrc = format!("{prefix}{}", wrap_flags(flags, &g.set));

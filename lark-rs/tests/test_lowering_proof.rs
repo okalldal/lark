@@ -395,6 +395,56 @@ fn route1_proof_string_idiom_real_nested_shape() {
     }
 }
 
+// ─── The LONG_STRING multi-character-close idiom — real nested shape ─────────────
+//
+// `python.LONG_STRING`'s `<delim>.*?(?<!\\)(\\\\)*?<delim>` (multi-character `"""`/`'''`
+// close, no opening guard) is lowered by the lazy escaped-body normalization. Its only
+// assertion is the `(?<!\\)` escape lookbehind (W = 1), absorbed into the body class, so
+// the lowered branch is *unguarded* — the match length is a pure function of the base-DFA
+// state. The same state-pruned Myhill-Nerode procedure `prove_route1_pruned` runs for the
+// STRING splice is a complete decision procedure here (covering every base state with a
+// shortest witness, extended by ≤ W+1 lookahead), with `fancy-regex` the independent
+// oracle. The proof runs at the **non-DOTALL** lowering (matching the raw, flagless
+// oracle); the DOTALL/newline axis is covered by the committed
+// `tests/test_lookaround.rs::long_string_match_length_equivalence` and the python.lark
+// differential (the real `/is` terminal over real Python source).
+
+/// The real nested LONG_STRING representatives (a prefix-less single arm and the bundled
+/// both-arms shape — raw, no `/is`). Each is the genuine
+/// `<delim>.*?(?<!\\)(\\\\)*?<delim>` multi-character-close form the idiom must reproduce.
+fn long_string_proof_representatives() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("LONG_NESTED_DQ", r#"(""".*?(?<!\\)(\\\\)*?""")"#),
+        (
+            "LONG_NESTED_BOTH",
+            r#"([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')"#,
+        ),
+    ]
+}
+
+/// The committed Route-1 proof for the LONG_STRING multi-character-close idiom on its
+/// **real nested shape**. Each representative must (a) classify with a supported bounded
+/// lookbehind (the absorbed `(?<!\\)`), (b) lower to branches (not decline), and (c) be
+/// proven match-length-identical to `fancy-regex` by the state-pruned decision procedure.
+#[test]
+fn route1_proof_long_string_idiom_real_nested_shape() {
+    for (name, pattern) in long_string_proof_representatives() {
+        let c = classify(pattern).unwrap_or_else(|e| panic!("classify {name} errored: {e}"));
+        assert!(
+            c.assertions
+                .iter()
+                .any(|a| a.verdict() == Verdict::Supported(ShapeClass::BoundedLookbehind)),
+            "{name} must classify with a supported bounded lookbehind (the absorbed `(?<!\\\\)`)"
+        );
+        assert!(
+            lower_boundary(pattern).is_ok(),
+            "{name} must lower (not decline) for the proof to be non-vacuous"
+        );
+        prove_route1_pruned(name, pattern)
+            .unwrap_or_else(|cex| panic!("Route-1 (state-pruned) failed for {name}: {cex}"));
+    }
+}
+
 /// Active now: the proof-obligation registry is the per-shape contract. Every
 /// supported shape has at least one committed representative, and each representative
 /// genuinely classifies as its shape (so the obligation targets the right thing).

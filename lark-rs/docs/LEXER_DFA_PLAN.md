@@ -83,9 +83,11 @@ maximal-munch driver, and the differential oracle `tests/test_scanner_differenti
 
 ### L2 — The bounded-lookaround lowering feature *(the meat)*
 
-> **Status — all three lowering shapes (M0–M3) *and* the `python.STRING` opening-guard
-> splice (M4) have landed.** The harness-first net exists, and every supported shape now
-> lowers into the DFA behind it, gated green:
+> **Status — all three lowering shapes (M0–M3), the `python.STRING` opening-guard splice
+> (M4), *and* the `python.LONG_STRING` multi-character-close idiom (M5) have landed.** The
+> harness-first net exists, and every supported shape now lowers into the DFA behind it,
+> gated green. The bundled `python.STRING`/`LONG_STRING` lower into the DFA for real (the
+> flag-wrapper peel, M5); only `lark.REGEXP` and `python.DEC_NUMBER` remain on `fancy-regex`:
 > * **Front-end** resurrected from closed #110 (without its Pike-VM `matcher.rs`):
 >   `src/lookaround/mod.rs` (assertion parser) + `src/lookaround/classify.rs` (the
 >   shape classifier) + `src/lookaround/lower.rs` (the real lowering). `lower_terminal`
@@ -134,12 +136,41 @@ maximal-munch driver, and the differential oracle `tests/test_scanner_differenti
 > (`tests/test_lowering_equivalence.rs`), and the python.lark differential (0
 > divergences with STRING *lowered*, not declined).
 >
-> **Still on the `fancy-regex` side-probe (a *decline*, not a gap):**
-> `python.LONG_STRING` (a lazy `.*?` body with a *multi-character* `"""` close and no
-> opening guard) and `lark.REGEXP` (an internal `(?!\/)` after the opening slash) are
-> **attempted and declined cleanly** — they route to `fancy-regex` exactly as before, so
-> the bundled grammars stay correct. Lowering them is a bonus the STRING milestone does
-> not require; until they land, `fancy-regex` stays in the runtime and L4 waits.
+> **M5 — the `python.LONG_STRING` multi-character-close idiom (landed).** Each arm
+> `<delim>.*?(?<!\\)(\\\\)*?<delim>` has a **multi-character** close (`"""` / `'''`) and —
+> unlike `python.STRING` — **no** opening guard. The same Type-A normalization absorbs the
+> `(?<!\\)(\\\\)*?` escape lookbehind into a `\\.` alternation, but because a lone `"` is
+> legal *inside* a `"""…"""` body the content class cannot exclude the delimiter the way
+> the single-character close lets `STRING` go greedy. So the body stays **lazy** —
+> `<delim>(?:[^\\<nl>]|\\.)*?<delim>` (`<nl>` present iff not DOTALL) — proven
+> match-length-identical to fancy by `tests/test_lookaround.rs::long_string_match_length_equivalence`
+> (its `LONG_NEW`). With no opening guard each arm lowers to a *single unguarded* branch
+> that joins the leftmost-first plain engine, which reproduces the lazy first-close
+> preference exactly (`"""a""""""b"""` is two long strings, not one). Lowered by
+> `src/lookaround/lower.rs::recognize_long_string_idiom`; gated by the hand-authored
+> lazy-close/escape/DOTALL canary under the default `Dfa` backend
+> (`tests/test_long_string_splice.rs`), the state-pruned Route-1 proof on the **real
+> nested shape** (`tests/test_lowering_proof.rs::route1_proof_long_string_idiom_real_nested_shape`),
+> the generative-equivalence layer (`tests/test_lowering_equivalence.rs::long_string_idiom_lowered_equals_fancy`),
+> and the python.lark differential (0 divergences with LONG_STRING *lowered*).
+>
+> **The flag-wrapper peel (what made the bundled lowering actually fire).** The loader
+> bakes per-terminal flags into a whole-pattern scoped group (`/…/is` → `(?is:…)`, with
+> `PatternRe::flags == 0`). The `DfaScanner` build path now **peels** that wrapper
+> (`src/lexer.rs::peel_scoped_flags`) before classifying, lifting the flag bits into the
+> lowering's `dotall`/`IGNORECASE` and re-applying them via `wrap_flags` on each branch —
+> so the bundled `STRING` *and* `LONG_STRING` lower into the DFA for real (verified
+> end-to-end: the python.lark differential is now lowered-vs-fancy, not fancy-vs-fancy).
+> Without the peel the lowering saw a `(?is:…)` group and routed the whole terminal to
+> `fancy-regex`.
+>
+> **Still on the `fancy-regex` side-probe (a *decline*, not a gap):** `lark.REGEXP` (an
+> internal `(?!\/)` after the opening slash) is **attempted and declined cleanly** — it
+> routes to `fancy-regex` exactly as before, so the bundled grammars stay correct.
+> `python.DEC_NUMBER` likewise still routes to fancy: its bundled form nests the
+> `(?![1-9])` inside terminal-algebra `(?:…)` groups (a *group*-unwrap, distinct from the
+> flag-wrapper peel above). Lowering REGEXP — the last bundled decline blocking L4 — is the
+> next session; until it lands, `fancy-regex` stays in the runtime and L4 waits.
 
 A **general** lowering keyed on the assertion's **shape**, not on the six bundled
 terminals. Lower each supported bounded assertion into lookaround-free DFA states
