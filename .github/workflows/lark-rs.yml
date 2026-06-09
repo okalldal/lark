@@ -69,6 +69,15 @@ jobs:
       - name: Lexer scaling gate (perf-counters)
         run: cargo test --features perf-counters --test test_lexer_scaling
 
+      # Dense-DFA build-cost gate (docs/LEXER_DFA_PLAN.md, determinization-blowup
+      # risk). Lowering bounded lookaround into the combined DFA is paid at build
+      # time, and the L5 bake serializes that determinized dense DFA — so a lowering
+      # that blows up determinization inflates the bake target invisibly to the
+      # runtime differential. This keys on the dense_build_bytes work counter and
+      # asserts the determinized size stays flat per terminal and per guard width.
+      - name: Lexer DFA build-cost gate (perf-counters)
+        run: cargo test --features perf-counters --test test_lexer_dfa_build_scaling
+
       # python.lark LALR build gate (#79). The headline result of the EBNF-helper
       # dedup is that upstream python.lark's full LALR table now *builds* (without
       # sharing, its repeated `("," X)*` helpers collide as unresolvable R/R). The

@@ -319,9 +319,14 @@ priority surviving the union.
   (hybrid) DFA** mitigates this at *runtime* (states built on demand) — but **L5 bakes
   via `to_bytes`, which needs a fully-determinized `dense` DFA**, so the bake target
   pays the determinization the lazy path never does. The lazy mitigation therefore does
-  **not** cover the bake. Gate it: a `perf-counters` **dense build-cost gate** (a
-  codegen-time cost, paid at standalone generation, not every runtime load), matching
-  the Earley/CYK scaling gates, so a determinization regression is caught deterministically.
+  **not** cover the bake. **Gated (landed):** the `perf-counters` **dense build-cost
+  gate** — `tests/test_lexer_dfa_build_scaling.rs` keys on the `dense_build_bytes` work
+  counter (summed `dense::DFA::memory_usage` over a scanner build) and asserts the
+  determinized size stays flat *per terminal* and *per guard width* over a size sweep,
+  matching the Earley/CYK scaling gates. It is a codegen-time cost (paid at standalone
+  generation, not every runtime load), so a determinization regression — parity
+  duplication, a spliced/product union — is caught deterministically. CI runs it as its
+  own `--features perf-counters` step.
 * **Tie-break fidelity** — Lark's (priority, length, …) selection + `unless` on top of
   raw `PatternID`. The differential oracle is the net.
 * **Lost free optimizations** — the regex crate's auto-prefilters; must be re-added
