@@ -132,11 +132,13 @@ struct Differential {
     failures: Vec<String>,
     compared: usize,
     grammars: usize,
-    /// Lookaround grammars whose lowering is still stubbed-out (every one, this
-    /// session): the Regex backend builds them on `fancy-regex`, but the Dfa backend
-    /// has no real lowering yet, so they are recorded as a tracked **pending** skip
-    /// rather than compared. Each flips to a gated comparison the moment its shape's
-    /// lowering lands and [`lower_terminal`] starts returning `Ok` for it.
+    /// Lookaround grammars the Dfa backend *declines* to lower (and so routes to
+    /// `fancy-regex`, exactly as the Regex backend does): a non-greedy-monotone guarded
+    /// base, a variable-offset lookbehind, an internal lookahead. Both backends agree
+    /// trivially on these, so they are tracked as a **pending** (routed-to-fancy) skip
+    /// rather than a lowered comparison. With M1/M2/M3 landed, the generated population
+    /// is all lowerable, so this is 0 there; it stays meaningful for the bundled
+    /// terminals the variable-offset / STRING-splice milestone still declines.
     pending: usize,
     /// Lookaround grammars actually *compared* (their lowering landed) — a
     /// **dedicated** counter, separate from the shared `grammars`/`compared` the
@@ -434,11 +436,11 @@ fn lookaround_grammar(t: &GenTerminal) -> (String, String) {
 /// fourth corpus, `docs/LEXER_DFA_PLAN.md` layer 1). For each generated supported
 /// terminal: build both backends (build parity is enforced), then either compare
 /// token streams over the terminal's exhaustive corpus — *iff* the terminal actually
-/// lowers ([`lower_terminal`] returns `Ok`) — or record it as a **pending** skip
-/// while the lowering for its shape is still stubbed out. With the stub rejecting
-/// everything, every lookaround grammar is pending this session; lookaround-free
-/// grammars (the bank/JSON/Python corpora) stay fully gated, so there is no
-/// regression.
+/// lowers ([`lower_terminal`] returns `Ok`) — or record it as a **pending**
+/// (routed-to-fancy) skip when the lowering declines it. With M1/M2/M3 landed the
+/// generated population is all lowerable, so every grammar here is compared; the
+/// pending path stays live for the bundled terminals the variable-offset / STRING
+/// milestone still declines.
 fn run_lookaround_grammars(d: &mut Differential) {
     for t in supported_terminals() {
         let (grammar, pattern) = lookaround_grammar(&t);
@@ -448,10 +450,9 @@ fn run_lookaround_grammars(d: &mut Differential) {
 
         match (&lex_a, &lex_b) {
             (Some(a), Some(b)) => {
-                // Does this terminal's shape actually lower yet? While the lowering
-                // is stubbed to reject, this is always false → pending. When the
-                // shape lands it returns Ok → the same grammar flips to a gated
-                // token-stream comparison automatically.
+                // Does this terminal actually lower? `Ok` → gated token-stream
+                // comparison; an `Err` (the lowering declines it, routing to fancy) →
+                // a tracked pending skip where both backends agree trivially.
                 if lower_terminal(&t.name, &pattern).is_ok() {
                     d.lookaround_compared_grammars += 1;
                     for input in corpus(&t.alphabet, t.max_len) {
@@ -507,10 +508,10 @@ fn test_scanner_backends_lex_identically() {
         d.failures.len()
     );
 
-    // The lookaround population must be *tracked* — either as pending (lowering
-    // stubbed, this session) or as gated comparisons (once shapes land). Both counters
-    // are lookaround-specific, so this can't be satisfied by the bank/JSON/Python
-    // grammars alone: a silently-dropped lookaround population fails here in either era.
+    // The lookaround population must be *tracked* — as gated comparisons (lowered
+    // shapes) or as pending (routed-to-fancy declines). Both counters are
+    // lookaround-specific, so this can't be satisfied by the bank/JSON/Python grammars
+    // alone: a silently-dropped lookaround population fails here.
     assert!(
         d.pending > 0 || d.lookaround_compared_grammars > 0,
         "no lookaround grammars were tracked — the generated population is missing"

@@ -341,8 +341,11 @@ fn max_width_chars(node: &Node) -> Option<usize> {
 
 /// The `(min, max)` match width of `node` in characters; `max` is `None` when
 /// unbounded (a `*` / `+` / `{m,}` quantifier). A nested assertion contributes its
-/// zero consumed width.
-fn width_range(node: &Node) -> (usize, Option<usize>) {
+/// zero consumed width. This is the single width routine the whole `lookaround` module
+/// shares: the classifier's bounded-vs-unbounded verdict and stored assertion width
+/// ([`super::classify::max_width`]) both delegate here, so the proof bound and the
+/// runtime lookbehind window can never drift apart.
+pub(crate) fn width_range(node: &Node) -> (usize, Option<usize>) {
     match node {
         Node::Atom(s) => atom_width_range(s),
         Node::Concat(parts) => {

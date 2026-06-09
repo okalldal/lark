@@ -6,12 +6,12 @@
 //! small-alphabet corpus — so coverage stops depending on whose imagination (the
 //! lesson from missing `DEC_NUMBER`'s length-change until it was *run*).
 //!
-//! The equivalence assertion is `#[ignore]`'d **pending the first shape**: there is
-//! no lowered matcher yet ([`lowered_prefix`] returns `Err`), so the comparison
-//! cannot run. The moment the first-shape session implements the lowered matcher,
-//! drop the per-shape `#[ignore]` and the generators + oracle below pin it. The
-//! oracle, the generators, and the corpus enumeration are all exercised *now* by the
-//! active smoke test, so a bug in the net itself surfaces before the lowering lands.
+//! All three shapes have landed (M1 trailing, M2 leading, M3 bounded-lookbehind), so
+//! every per-shape equivalence assertion is active and compares the real lowered
+//! matcher ([`lowered_prefix`]) against the oracle. The boundary and lookbehind
+//! equivalence-layer mutation meta-tests live here too: each deliberately-wrong
+//! lowering must diverge from the oracle somewhere on the population, proving the layer
+//! has teeth.
 
 mod common;
 
@@ -25,8 +25,9 @@ use lark_rs::ShapeClass;
 /// The core comparison the per-shape gates run once the lowered matcher exists:
 /// for every input in the terminal's exhaustive quotient-alphabet corpus, the
 /// lowered match-length must equal the `fancy-regex` oracle. Returns the first
-/// divergence, or `None` on full agreement. `lowered_prefix` returning `Err` (the
-/// pending stub) is surfaced as a divergence so an un-ignored run fails loudly.
+/// divergence, or `None` on full agreement. `lowered_prefix` returning `Err` (a
+/// declined terminal) is surfaced as a divergence so it fails loudly rather than
+/// silently skipping.
 fn equivalence_divergence(t: &GenTerminal) -> Option<String> {
     let oracle_re = fancy_matcher(&t.pattern)?;
     let inputs = corpus(&t.alphabet, t.max_len);

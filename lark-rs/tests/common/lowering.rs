@@ -1,8 +1,9 @@
 //! Test infrastructure for the L2 bounded-lookaround lowering harness
-//! (`docs/LEXER_DFA_PLAN.md`, "Verification harness"). **No real lowering lives
-//! here** — this is the *net* the lowering will be built against, one shape at a
-//! time. It provides, all deterministic (seeded/exhaustive enumeration, fixed
-//! order):
+//! (`docs/LEXER_DFA_PLAN.md`, "Verification harness"). This is the *net* the lowering
+//! is gated by — the lowering itself lives in `src/lookaround/`. All three shapes have
+//! landed (M1 trailing, M2 leading, M3 bounded-lookbehind), so the per-shape gates that
+//! consume this infra are active. It provides, all deterministic (seeded/exhaustive
+//! enumeration, fixed order):
 //!
 //!   * **Generators** — per supported shape, hundreds of concrete terminals
 //!     ([`supported_terminals`]); an out-of-shape adversarial corpus
@@ -12,14 +13,15 @@
 //!     match-length reference the lowering is verified against (kept forever as a
 //!     dev/test dependency, per the plan).
 //!   * **The mutation framework** — deliberately-wrong [`Classifier`]s
-//!     ([`reject_path_mutants`]) and the reusable reject-corpus check
-//!     ([`wrongly_accepted_rejects`]) the mutation meta-test drives, validated now
-//!     on the reject path.
+//!     ([`reject_path_mutants`]) for the reject path, plus the boundary
+//!     ([`boundary_mutations`]) and lookbehind ([`lookbehind_mutations`])
+//!     equivalence-layer mutants the per-shape meta-tests drive.
 //!   * **The lowered-matcher hook** — [`lowered_prefix`], which drives the real
 //!     lowered `DfaScanner` (a one-terminal grammar under `LexerBackend::Dfa`, probed
-//!     at offset 0) for the shapes that have landed, and returns `Err` for a shape
-//!     still pending — so an equivalence layer un-ignored before its shape lands fails
-//!     loudly rather than passing for the wrong reason.
+//!     at offset 0). It returns `Err` only when the lowering *declines* a terminal (a
+//!     non-greedy-monotone base, a variable-offset lookbehind), so a comparison run
+//!     against a declined terminal fails loudly rather than passing for the wrong
+//!     reason.
 #![allow(dead_code)]
 
 use lark_rs::{classify, Classification, Classifier, Rejection, ShapeClass, Verdict};
@@ -96,7 +98,7 @@ pub fn fancy_prefix(re: &fancy_regex::Regex, input: &str) -> Option<usize> {
     }
 }
 
-// ─── The lowered-matcher hook (stubbed: pending) ───────────────────────────────
+// ─── The lowered-matcher hook ──────────────────────────────────────────────────
 
 /// Anchored matched-prefix length (in **characters**) of the *lowered* terminal at
 /// the start of `input`, or `Ok(None)` for no match — the real lowered `DfaScanner`,
@@ -107,9 +109,10 @@ pub fn fancy_prefix(re: &fancy_regex::Regex, input: &str) -> Option<usize> {
 /// only at offset 0 — rather than lexing the whole input — keeps the exhaustive
 /// generative corpus tractable.
 ///
-/// Returns `Err` only when the lowering *rejects* the terminal (a shape not yet
-/// lowered, or genuinely unsupported), so the per-shape equivalence layers fail
-/// loudly if run against a pending shape rather than passing for the wrong reason.
+/// Returns `Err` only when the lowering *declines* the terminal (a non-greedy-monotone
+/// base, a variable-offset lookbehind) or *rejects* it (out-of-shape), so a per-shape
+/// equivalence layer run against a declined terminal fails loudly rather than passing
+/// for the wrong reason.
 pub fn lowered_prefix(_name: &str, pattern: &str, input: &str) -> Result<Option<usize>, String> {
     let lexer = lowered_lexer(pattern)?;
     if input.is_empty() {
@@ -140,7 +143,8 @@ fn lowered_lexer(pattern: &str) -> Result<std::rc::Rc<lark_rs::BasicLexer>, Stri
         return Ok(l);
     }
 
-    // A shape that does not lower yet is surfaced as an error, not a silent mismatch.
+    // A terminal the lowering declines/rejects is surfaced as an error, not a silent
+    // mismatch.
     lower_terminal("TOK", pattern).map_err(|e| format!("lowering rejected `{pattern}`: {e}"))?;
 
     // Inside `/…/`, an unescaped `/` must be escaped as `\/` (mirrors the differential

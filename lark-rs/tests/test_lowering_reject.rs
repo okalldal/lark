@@ -1,20 +1,19 @@
 //! L2 lowering harness — the **active** layers (`docs/LEXER_DFA_PLAN.md`,
 //! "Verification harness").
 //!
-//! These run for real on every `cargo test`, before any lowering exists, because
-//! they test the *classifier's* dangerous direction (false-accept), which is
-//! independent of whether anything is lowered yet:
+//! These test the *classifier's* dangerous direction (false-accept), which the
+//! lowering's correctness rests on:
 //!
 //!   * **Reject corpus (layer 4).** Every out-of-shape assertion in the adversarial
 //!     corpus MUST be rejected — never accepted/lowered — and with the exact reason.
 //!   * **Mutation meta-test (deliverable 4), validated on the reject path.** A
 //!     deliberately-wrong classifier that *wrongly accepts* an out-of-shape
 //!     assertion MUST be caught (the reject corpus goes red). A surviving mutant is
-//!     a hole in the net; this proves the net has teeth before we trust it with the
-//!     lowering.
+//!     a hole in the net; this proves the net has teeth.
 //!   * **Generator ↔ classifier self-consistency.** Every generated *supported*
-//!     terminal classifies as the shape it claims, and the stubbed entry point
-//!     rejects every lookaround terminal (supported-pending or unsupported).
+//!     terminal classifies as the shape it claims, the entry point lowers every
+//!     supported shape (M1/M2/M3) into branches, and every out-of-shape lookaround
+//!     terminal is rejected permanently.
 
 mod common;
 
@@ -175,7 +174,6 @@ fn lowering_entry_point_lowers_landed_shapes_and_rejects_the_rest() {
 
     for t in supported_terminals() {
         // All three supported shapes lower for real now (M1/M2/M3).
-        let _ = ShapeClass::BoundedLookbehind; // shapes are exhaustive; no pending tier
         let lowered = lower_terminal(&t.name, &t.pattern).unwrap_or_else(|e| {
             panic!(
                 "supported {:?} terminal {:?} must lower now, got: {e}",
