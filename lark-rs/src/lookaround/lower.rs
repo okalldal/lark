@@ -37,8 +37,14 @@
 //!     fixed only when every base element *before* the lookbehind is fixed-width — a
 //!     lookbehind after a variable-width prefix (`python.LONG_STRING`'s
 //!     `.*?(?<!\\)`) has no fixed offset and is **declined** here (routed to
-//!     `fancy-regex`), the reject-when-unsure direction; the variable-offset
-//!     window-carry is a later milestone.
+//!     `fancy-regex`), the reject-when-unsure direction. **The plan is not to chase a
+//!     generic variable-offset "window-carry" lowering for this.** `python.LONG_STRING`
+//!     (and `lark.REGEXP`) are intended to lower as an **audited delimited-token idiom**
+//!     — the same narrow-recognizer-plus-separate-proof approach as the `python.STRING`
+//!     splice ([`recognize_string_idiom`]), extended to a multi-character close — not by
+//!     generalizing the fixed-offset lookbehind into an unbounded one
+//!     (`docs/LEXER_DFA_PLAN.md`, "future general bounded lookaround", Stage B). Until
+//!     that idiom lands they decline to `fancy-regex` and L4 waits.
 
 use super::{Look, Node};
 use crate::error::GrammarError;
@@ -1136,7 +1142,8 @@ mod tests {
     fn declines_lookbehind_after_variable_prefix() {
         // A lookbehind after a variable-width prefix (`\w+`, `.*?`) has no fixed offset
         // — declined (routed to fancy), the reject-when-unsure direction. This is the
-        // python.LONG_STRING `.*?(?<!\\)` case the variable-offset milestone covers.
+        // python.LONG_STRING `.*?(?<!\\)` case a future *audited delimited-token idiom*
+        // (not a generic variable-offset lowering) is intended to cover.
         assert!(lower_boundary(r"\w+(?<!_)x").is_err());
         assert!(lower_boundary(r#"""".*?(?<!\\)(\\\\)*?"#).is_err());
     }

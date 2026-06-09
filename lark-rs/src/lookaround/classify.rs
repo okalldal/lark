@@ -3,19 +3,24 @@
 //! support" + "How the lowering works").
 //!
 //! [`lower_terminal`] is the entry point the build path calls. It classifies a
-//! terminal and, for the shapes whose lowering has landed (M1 trailing-boundary, M2
-//! leading-boundary), returns the lowered per-branch sub-patterns ([`super::lower`]);
-//! a supported-but-not-yet-lowered shape (bounded lookbehind) is reported *pending*,
-//! and an out-of-shape assertion is rejected *permanently*. The classifier is the
-//! safety boundary: it decides, for each terminal pattern, whether the assertion(s)
-//! fall into a **supported shape** or an **unsupported** one (rejected at build time,
-//! forever) — and it must never false-accept.
+//! terminal and, for the supported shapes — **all of which now lower** (M1
+//! trailing-boundary, M2 leading-boundary, M3 fixed-offset bounded-lookbehind, and the
+//! M4 `python.STRING` opening-guard idiom) — returns the lowered per-branch
+//! sub-patterns ([`super::lower`]). A *supported* instance the lowering cannot
+//! faithfully realize (e.g. `python.LONG_STRING`/`lark.REGEXP`, or a variable-offset
+//! lookbehind) is **declined** (routed to `fancy-regex` by the caller, a transitional
+//! route while L4 is not done); an out-of-shape assertion is rejected *permanently*.
+//! The classifier is the safety boundary: it decides, for each terminal pattern,
+//! whether the assertion(s) fall into a **supported shape** or an **unsupported** one
+//! (rejected at build time, forever) — and it must never false-accept.
 //!
 //! ## The classifier's contract
 //!
 //! The dangerous direction is **false-accept** — classifying an out-of-shape
 //! assertion as supported, which would later be mis-lowered. So the rule is
-//! *reject when unsure*. The three supported shapes (`docs/LEXER_DFA_PLAN.md`):
+//! **reject (or decline) when unsure**: a recognized idiom is a *narrow gate*, never a
+//! general "internal lookahead is fine" relaxation. The three supported boundary shapes
+//! (`docs/LEXER_DFA_PLAN.md`):
 //!
 //!   * **Leading boundary** — a fixed-position lookahead `(?=S)` / `(?!S)` at the
 //!     start of the match. Lowered by splicing peek-branch states.
@@ -23,20 +28,25 @@
 //!     match. Lowered as a *guarded accept* (the maximal-munch driver records the
 //!     accept only when the next byte is allowed).
 //!   * **Bounded lookbehind** — `(?<=…)` / `(?<!…)` of *bounded* width, anywhere.
-//!     Lowered by carrying the needed history window in the DFA state.
+//!     Lowered as a backward guard checked at a *fixed* char-offset from the match
+//!     start (M3); a variable-offset lookbehind is declined.
 //!
 //! Everything else is **rejected** with a clear, actionable [`GrammarError`] naming
 //! the terminal, the assertion, and the reason: unbounded-width lookahead
 //! (`(?![ ]*X)`), an *internal* (mid-pattern / priority-entangled) lookahead, a
 //! backreference, a nested assertion, or a variable-width lookbehind.
 //!
-//! Recognizing a leading-boundary lookahead that sits *after a fixed-width prefix
-//! inside a sub-group* — `python.STRING`'s `(?!"")` right after the opening quote —
-//! is a deliberate **first-shape refinement**, not done here: this skeleton only
-//! recognizes assertions at the terminal's *top-level* boundary, and conservatively
-//! classifies a deeper lookahead as internal (reject). That keeps the dangerous
-//! direction safe; the reject/pending split is re-derived the moment the lowering
-//! for a shape lands.
+//! A leading-boundary lookahead that sits *after a variable-width prefix inside a
+//! sub-group* — `python.STRING`'s `(?!"")` right after the opening quote — is **not** a
+//! top-level boundary, so the top-level walk classifies it as `Internal`. It is
+//! nonetheless lowered, but **only** when the whole terminal is recognized as the exact
+//! `python.STRING` opening-guard idiom ([`super::lower::recognize_string_idiom`]); see
+//! [`classify`]. That recognizer is the single gate — a genuinely-internal lookahead
+//! outside a recognized idiom stays `Internal` (reject), so the refinement never
+//! becomes a position heuristic that could false-accept. `python.LONG_STRING` and
+//! `lark.REGEXP` are *not* yet recognized by an idiom, so they decline to `fancy-regex`
+//! — a future *audited delimiter idiom* (`docs/LEXER_DFA_PLAN.md`, Stage B) lowers them,
+//! not a generalization of the internal-lookahead gate here.
 
 use super::{Look, Node};
 use crate::error::GrammarError;

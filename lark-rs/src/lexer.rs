@@ -518,8 +518,12 @@ struct DfaScanner {
     /// Start-byte prefilter over the base union of both engines (see the struct docs).
     /// `None` disables it (always run the engines).
     start_bytes: Option<Box<[bool; 256]>>,
-    /// Lookaround terminals still routed to `fancy-regex` (a shape not yet lowered, or
-    /// a guarded base that is not greedy-monotone), rank-sorted — as in [`Scanner`].
+    /// Lookaround terminals **declined** by the lowering and therefore still routed to
+    /// `fancy-regex` (a not-yet-lowered bundled idiom — `python.LONG_STRING`,
+    /// `lark.REGEXP` — a variable-offset lookbehind, or a guarded base that is not
+    /// greedy-monotone), rank-sorted — as in [`Scanner`]. **This is the transitional
+    /// runtime fancy fallback that blocks L4** (`docs/LEXER_DFA_PLAN.md`): the lexer is
+    /// not `regex-automata`-only until this list is always empty for the bundled grammars.
     fancy: Vec<(usize, SymbolId, AnyRegex)>,
     /// regex-terminal-id → (matched-text → keyword-terminal-id) — identical retype.
     unless: HashMap<SymbolId, HashMap<String, SymbolId>>,
@@ -766,9 +770,13 @@ impl DfaScanner {
         //   * unguarded → one leftmost-first DFA (M0 semantics, exact within-pattern
         //     order — a sibling guard never disturbs `/ab|abc/`);
         //   * guarded → one all-matches DFA driven by the guarded-accept accumulator.
-        // A lookaround terminal whose shape is not yet lowered (bounded lookbehind),
-        // or whose guarded base is not greedy-monotone (see `is_greedy_monotone`), stays
-        // on `fancy-regex`.
+        // A lookaround terminal the lowering **declines** stays on `fancy-regex`: a
+        // not-yet-lowered bundled idiom (`python.LONG_STRING`, `lark.REGEXP`), a
+        // variable-offset lookbehind, or a guarded base that is not greedy-monotone (see
+        // `is_greedy_monotone`). M1/M2/M3 and the `python.STRING` idiom (M4) all lower —
+        // bounded lookbehind *is* lowered (at a fixed offset); only the variable-offset
+        // case declines. This fancy fallback is transitional and blocks L4
+        // (`docs/LEXER_DFA_PLAN.md`).
         let mut plain_subs: Vec<SubPattern> = Vec::new();
         let mut plain_srcs: Vec<String> = Vec::new();
         let mut guarded_subs: Vec<SubPattern> = Vec::new();
@@ -824,12 +832,19 @@ impl DfaScanner {
                 })
             };
 
-            // Route to fancy unless the terminal lowers. `lower_terminal` already
-            // declines a shape not yet lowered (bounded lookbehind) *and* a guarded
-            // branch whose base is not guard-realizable (it can't ride the
-            // longest-where-guard-holds accumulator) — so a returned `Branches` is
-            // always faithfully lowerable. `dotall` is threaded so the string-idiom body
-            // normalization admits a newline exactly when this terminal's `.` would.
+            // Route to fancy unless the terminal lowers. `lower_terminal` declines a
+            // not-yet-lowered bundled idiom (`python.LONG_STRING`, `lark.REGEXP`), a
+            // variable-offset lookbehind, *and* a guarded branch whose base is not
+            // guard-realizable (it can't ride the longest-where-guard-holds accumulator)
+            // — so a returned `Branches` is always faithfully lowerable. **Caveat /
+            // design debt (`docs/LEXER_DFA_PLAN.md`): this also absorbs a *permanent*
+            // rejection of an out-of-shape assertion in a user grammar into the fancy
+            // fallback** — `_ => route to fancy` does not distinguish a transitional
+            // decline from a hard reject. That is acceptable while `fancy-regex` is in
+            // the runtime, but L4 must split the two (decline → fall back; reject → loud
+            // build error) before the fallback can be removed. `dotall` is threaded so
+            // the string-idiom body normalization admits a newline exactly when this
+            // terminal's `.` would.
             let dotall = flags & crate::grammar::terminal::flags::DOTALL != 0;
             let lowered =
                 match crate::lookaround::classify::lower_terminal_dotall(&def.name, raw, dotall) {

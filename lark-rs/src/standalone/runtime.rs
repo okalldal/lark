@@ -11,6 +11,12 @@
 //! bakes one as a `static` and wires it into `Parser::new`, while the in-crate
 //! unit test builds a tiny one by hand. The module depends only on `regex` + std
 //! (no lark-rs items), so the identical source compiles in both places.
+//!
+//! **This driver lexes a baked `regex` `ScannerPlan` (a combined alternation compiled
+//! at load), not a serialized DFA, and it has no `fancy-regex`** — so it cannot run a
+//! grammar with lookaround terminals. Replacing this with a baked serialized **DFA
+//! scanner bundle** (`docs/LEXER_DFA_PLAN.md`, L5) is the bakeability payoff that makes
+//! the bundled `python`/`lark` grammars standalone-able; it is blocked on L4.
 
 use regex::Regex;
 use std::collections::{HashMap, HashSet};

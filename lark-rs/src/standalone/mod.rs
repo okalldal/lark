@@ -37,6 +37,17 @@
 //! [`ScannerPlan`](crate::lexer::ScannerPlan) (alternation order + each terminal's
 //! inline regex + the `unless` keyword-retype map + `%ignore` + global flags).
 //!
+//! **The baked lexer is still a `regex` `ScannerPlan`, not a serialized DFA.** So the
+//! DFA plan's *bakeability payoff is not yet realized here*: the runtime in
+//! [`runtime`] re-compiles a combined `regex` at load and has **no `fancy-regex`**, so
+//! a grammar with lookaround terminals (the bundled `python`/`lark`) is **not
+//! standalone-able** — `python.LONG_STRING`/`lark.REGEXP` need `fancy-regex` and even
+//! the lowered shapes are not emitted as a baked DFA. Baking a **serialized DFA scanner
+//! bundle** (the plain + guarded DFAs, guard/lookbehind tables, pattern/rank/branch
+//! maps, start-byte prefilter, `unless`, ignore set) to replace this `ScannerPlan` is
+//! **L5** in `docs/LEXER_DFA_PLAN.md`, and is blocked on L4 (removing the runtime
+//! `fancy-regex` fallback).
+//!
 //! ## How drift is prevented
 //!
 //! Two pieces could drift from the in-process engine; both are *shared by

@@ -136,9 +136,10 @@ struct Differential {
     /// `fancy-regex`, exactly as the Regex backend does): a non-greedy-monotone guarded
     /// base, a variable-offset lookbehind, an internal lookahead. Both backends agree
     /// trivially on these, so they are tracked as a **pending** (routed-to-fancy) skip
-    /// rather than a lowered comparison. With M1/M2/M3 landed, the generated population
-    /// is all lowerable, so this is 0 there; it stays meaningful for the bundled
-    /// terminals the variable-offset / STRING-splice milestone still declines.
+    /// rather than a lowered comparison. With M1/M2/M3 and the `python.STRING` splice
+    /// (M4) landed, the generated population is all lowerable, so this is 0 there; it
+    /// stays meaningful for the bundled terminals still declined to `fancy-regex`
+    /// (`python.LONG_STRING`, `lark.REGEXP`).
     pending: usize,
     /// Lookaround grammars actually *compared* (their lowering landed) — a
     /// **dedicated** counter, separate from the shared `grammars`/`compared` the
@@ -437,10 +438,10 @@ fn lookaround_grammar(t: &GenTerminal) -> (String, String) {
 /// terminal: build both backends (build parity is enforced), then either compare
 /// token streams over the terminal's exhaustive corpus — *iff* the terminal actually
 /// lowers ([`lower_terminal`] returns `Ok`) — or record it as a **pending**
-/// (routed-to-fancy) skip when the lowering declines it. With M1/M2/M3 landed the
-/// generated population is all lowerable, so every grammar here is compared; the
-/// pending path stays live for the bundled terminals the variable-offset / STRING
-/// milestone still declines.
+/// (routed-to-fancy) skip when the lowering declines it. With M1/M2/M3 and the
+/// `python.STRING` splice (M4) landed the generated population is all lowerable, so every
+/// grammar here is compared; the pending path stays live for the bundled terminals still
+/// declined to `fancy-regex` (`python.LONG_STRING`, `lark.REGEXP`).
 fn run_lookaround_grammars(d: &mut Differential) {
     // The bare boundary/lookbehind population *and* python.STRING's real nested/prefixed
     // opening-guard idiom (the marquee L2 splice) — both must lex byte-identically under

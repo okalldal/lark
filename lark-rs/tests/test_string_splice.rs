@@ -128,17 +128,27 @@ fn recognizer_still_accepts_literal_delimiters() {
 }
 
 /// **Bundled-terminal lowering-status tripwire** (deliverable 6's payoff-check, made
-/// executable). The honest scope of this milestone is: `python.STRING` lowers into the
-/// DFA, while `lark.REGEXP` (internal `(?!\/)`) and `python.LONG_STRING` (a lazy `.*?`
-/// body with a multi-character `"""` close and no opening guard) are **declined** — they
-/// route to `fancy-regex`, so `fancy-regex` stays in the runtime and L4/L5 remain blocked.
+/// executable). The honest scope on `master` is: `python.STRING` lowers into the DFA,
+/// while `lark.REGEXP` and `python.LONG_STRING` do **not** lower — at runtime they route
+/// to `fancy-regex`, so `fancy-regex` stays in the runtime and L4/L5 remain blocked
+/// (`docs/LEXER_DFA_PLAN.md` / `docs/LEXER_DFA_STATUS.md`).
 ///
-/// This pins that scope as a fact. If a future change makes REGEXP or LONG_STRING lower,
-/// this test goes red on purpose — forcing the author to (a) confirm the new lowering is
-/// proven correct and (b) re-run the payoff-check: with *all* bundled lookaround terminals
-/// lowered, L4 (drop `AnyRegex::Fancy` from the runtime) and L5 (bake) become unblocked,
-/// and `docs/LEXER_DFA_PLAN.md` + `CLAUDE.md` must be updated. It is the same negative-pin
-/// discipline as `test_lookaround.rs::string_lookaround_free_rewrite_is_not_equivalent`.
+/// **What this pins, and what it deliberately does *not*.** It asserts only the runtime
+/// observable: STRING lowers (`Ok(Lowered::Branches(_))`), and REGEXP/LONG_STRING do
+/// **not** (`!matches!(…, Ok(Lowered::Branches(_)))`). It does **not** assert *why* they
+/// fail to lower — that failure is treated as a **decline-to-fancy / transitional route**
+/// (they still need `fancy-regex` today), *not* as proof of a permanent rejection. (Per
+/// the plan's design-debt note, the current build path can even absorb a permanent
+/// rejection into the same fancy fallback; distinguishing the two is L4 work, so this
+/// tripwire stays agnostic and never matches on the error taxonomy.)
+///
+/// If a future change makes REGEXP or LONG_STRING lower, this test goes red on purpose.
+/// **If this starts lowering, that is good news only if the PR also adds
+/// equivalence/proof/canary coverage and updates the L4/L5 status** (drop `AnyRegex::Fancy`
+/// from the runtime once *all* bundled lookaround terminals lower, bake the DFA bundle,
+/// and update `docs/LEXER_DFA_PLAN.md` + `docs/LEXER_DFA_STATUS.md` + `CLAUDE.md`). It is
+/// the same negative-pin discipline as
+/// `test_lookaround.rs::string_lookaround_free_rewrite_is_not_equivalent`.
 #[test]
 fn bundled_lookaround_terminal_lowering_status() {
     // Verbatim from the bundled grammars (the `/i` / `/is` flags live on the terminal;
@@ -156,8 +166,9 @@ fn bundled_lookaround_terminal_lowering_status() {
         "python.STRING must lower into the DFA"
     );
 
-    // REGEXP and LONG_STRING are declined (route to fancy). A returned `Branches` here
-    // means the scope changed — see the doc above: prove it and re-run the L4/L5 payoff.
+    // REGEXP and LONG_STRING do NOT lower — at runtime they route to fancy (a
+    // transitional decline, not asserted to be a rejection; see the doc above). The
+    // loose `!matches!(…, Ok(Branches))` check stays off the error taxonomy on purpose.
     for (name, raw, dotall) in [
         ("lark.REGEXP", REGEXP_RAW, false),
         ("python.LONG_STRING", LONG_STRING_RAW, true),
@@ -168,8 +179,9 @@ fn bundled_lookaround_terminal_lowering_status() {
                 Ok(Lowered::Branches(_))
             ),
             "{name} unexpectedly LOWERS now — fancy-regex was supposed to stay (L4 blocked). \
-             If this lowering is intentional and proven, update the payoff-check + docs and \
-             revise this tripwire."
+             If this starts lowering, that is good news ONLY if the PR also adds \
+             equivalence/proof/canary coverage and updates the L4/L5 status (docs + this \
+             tripwire). See docs/LEXER_DFA_STATUS.md."
         );
     }
 }
