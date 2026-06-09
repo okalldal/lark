@@ -65,10 +65,11 @@ unsupported shapes must error unless a compatibility mode is deliberately chosen
 Lex **every** terminal — lookaround-bearing ones included — in a **single
 table-driven pass** over one combined automaton, built once and bakeable as static
 data. Concretely: build the combined scanner on `regex-automata` (lazy/dense DFA,
-multi-pattern `PatternID`), **lower** each bounded lookaround assertion into
-lookaround-free automaton states so it joins the same machine, drive it with a
-maximal-munch loop that reproduces Lark's exact selection, and drop `fancy-regex` from
-the runtime.
+multi-pattern `PatternID`), **lower** each *supported, proven* bounded lookaround
+assertion into lookaround-free automaton states so it joins the same machine (declining or
+rejecting the rest — see "What we support" and the red line under "Future
+generalization"), drive it with a maximal-munch loop that reproduces Lark's exact
+selection, and drop `fancy-regex` from the runtime.
 
 Wins, in priority order:
 
@@ -442,7 +443,7 @@ priority surviving the union.
 
 | Artifact | Disposition |
 |---|---|
-| `src/lookaround/mod.rs` (assertion front-end) | **Resurrect** from the closed #110 branch / git history — it is **not** on `master`, so retrieving + re-landing it is a real first task — then repurpose as the L2 lowering/classifier pass |
+| `src/lookaround/mod.rs` (assertion front-end) | **Landed** — resurrected from closed #110 and repurposed as the L2 classifier/lowering front-end (`mod.rs` parser + `classify.rs` + `lower.rs`), without its Pike-VM `matcher.rs` |
 | `src/lookaround/matcher.rs` (Pike-VM) | **Not used** — a DFA replaces it |
 | `tests/test_lookaround.rs` + `fixtures/oracles/lookaround/` | **Reuse** as the lookaround behavioral gate |
 | `fancy-regex` (runtime routing) | **Drop at L4 — retain as the test oracle** (Verification) |

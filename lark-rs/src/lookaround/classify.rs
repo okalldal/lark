@@ -8,11 +8,20 @@
 //! M4 `python.STRING` opening-guard splice — returns the lowered per-branch sub-patterns
 //! ([`super::lower`]). A per-instance lowering that cannot ride the engine (a
 //! variable-offset lookbehind, a non-realizable guarded base) is **declined** (routed to
-//! `fancy-regex`), and an out-of-shape assertion is rejected *permanently*. No supported
-//! shape is *pending* any longer — all four lowerings are live. The classifier is the
-//! safety boundary: it decides, for each terminal pattern, whether the assertion(s)
-//! fall into a **supported shape** or an **unsupported** one (rejected at build time,
-//! forever) — and it must never false-accept.
+//! `fancy-regex`), and an out-of-shape assertion is reported as a permanent rejection
+//! `GrammarError`. No supported shape is *pending* any longer — all four lowerings are
+//! live. The classifier is the safety boundary: it decides, for each terminal pattern,
+//! whether the assertion(s) fall into a **supported shape** or an **unsupported** one —
+//! and it must never false-accept.
+//!
+//! **Caveat — "rejected" here is the classifier verdict, not yet the runtime outcome.**
+//! This entry point *reports* an unsupported assertion as a `GrammarError`, but the
+//! current `DfaScanner` build path still catches that `Err` and falls back to
+//! `fancy-regex` as a compatibility route (so an out-of-shape *user* assertion lexes
+//! today rather than failing the build). L4 must split `Unsupported` from
+//! `DeclineToFancy` and make the final runtime policy explicit (`docs/LEXER_DFA_PLAN.md`,
+//! "Runtime routing taxonomy"). The classifier's *own* contract below is unaffected: it
+//! must still reject-when-unsure and never false-accept.
 //!
 //! ## The classifier's contract
 //!
