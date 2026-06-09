@@ -450,6 +450,62 @@ pub fn string_idiom_terminals() -> Vec<GenTerminal> {
     out
 }
 
+/// The **long-string escaped-body idiom** population (python.LONG_STRING's *actual*
+/// nested/prefixed shape — `docs/LEXER_DFA_PLAN.md`, L2). The genuinely-new piece vs the
+/// short STRING idiom is a **multi-character close delimiter** (`"""` / `'''`) and **no**
+/// opening guard, so each arm `<q3>.*?(?<!\\)(\\\\)*?<q3>` lowers to a single unguarded
+/// lazy-body branch. Each varies the prefix, the delimiter run (length 2 and 3, `"`/`'`/`/`),
+/// and the arm count, so the multi-char close is exercised across the composition surface.
+///
+/// These are generated *without* an inline DOTALL flag, so the lowered matcher
+/// ([`lowered_prefix`], which builds a non-DOTALL one-terminal grammar) and the
+/// `fancy-regex` oracle (also non-DOTALL) agree on the `\n` exclusion — the generative layer
+/// pins the multi-char-close *recognition + body* logic; the real DOTALL `\n`-spanning
+/// behavior is pinned by the python.lark differential, the `long_string_close_delimiter`
+/// canary, and the DOTALL Route-1 proof.
+pub fn long_string_idiom_terminals() -> Vec<GenTerminal> {
+    // (label, delimiter-run, distinguishing chars).
+    let arms: [(&str, &str, &[char]); 4] = [
+        ("dq3", r#"""""#, &['"', '\\', 'a']), // `"""`
+        ("sq3", "'''", &['\'', '\\', 'a']),   // `'''`
+        ("dq2", r#""""#, &['"', '\\', 'a']),  // `""` — a 2-char run, the boundary case
+        ("slash3", "///", &['/', '\\', 'a']), // `///` — delimiter-agnostic generality
+    ];
+    let prefixes: [(&str, &[char]); 3] = [
+        ("", &[]),
+        ("(r?)", &['r']),
+        ("([ubf]?r?|r[ubf])", &['r', 'b']),
+    ];
+    let mut out = Vec::new();
+    let mut n = 0usize;
+    for (plabel, pchars) in prefixes {
+        for (alabel, run, achars) in &arms {
+            // One grouped arm: `<prefix>(<q3>.*?(?<!\\)(\\\\)*?<q3>)`.
+            let arm = format!(r"{run}.*?(?<!\\)(\\\\)*?{run}");
+            let pattern = format!("{plabel}({arm})");
+            let mut alphabet: Vec<char> = achars.to_vec();
+            for &c in pchars {
+                if !alphabet.contains(&c) {
+                    alphabet.push(c);
+                }
+            }
+            alphabet.truncate(5);
+            out.push(GenTerminal {
+                name: format!("LONGSTR_{plabel}_{alabel}_{n}"),
+                pattern,
+                // The shape's only assertions are the `(?<!\\)` lookbehinds (absorbed by the
+                // body normalization), so its headline class is BoundedLookbehind; it is kept
+                // out of [`supported_terminals`] and driven by its own gates.
+                shape: ShapeClass::BoundedLookbehind,
+                alphabet,
+                max_len: 6,
+            });
+            n += 1;
+        }
+    }
+    out
+}
+
 /// **Adversarial string-idiom shapes with a *non-literal* delimiter** — the recognizer's
 /// own acceptance surface (not just the classifier's). Each is structurally the string
 /// idiom `<q>(?!<q><q>).*?(?<!\\)(\\\\)*?<q>` but with `<q>` a regex construct that is
@@ -473,6 +529,30 @@ pub fn string_idiom_reject_patterns() -> Vec<String> {
             // The bundled wrapping: a bounded prefix + a single grouped arm.
             format!(r"(r?)({open}(?!{guard}).*?(?<!\\)(\\\\)*?{open})")
         })
+        .collect()
+}
+
+/// **Adversarial *long*-arm idiom shapes with a non-uniform / non-literal multi-char
+/// delimiter** — the multi-char-close recognizer's acceptance surface. Each is structurally
+/// the long arm `<run>.*?(?<!\\)(\\\\)*?<run>` but with `<run>` a multi-char *open* the
+/// recognizer must **not** treat as a fixed literal-run close: a mixed run (`"'`), a run
+/// containing a metacharacter (`".`), a class run (`\d\d`), or an escaped-pair run (`\.\.`).
+/// Lowering any of these would mis-emit the open/close (a false-accept), so the recognizer
+/// MUST decline them to `fancy-regex`. Witnesses for the recognizer-decline test.
+pub fn long_string_idiom_reject_patterns() -> Vec<String> {
+    // Each `open` is a multi-char run the parser fuses with the lazy body `.*?` — but it is
+    // NOT a uniform run of one plain literal, so `multi_char_delimiter_source` must reject
+    // it. The close repeats the same `open` so the arm is otherwise idiom-shaped.
+    let opens = [
+        r#""'"#,   // a mixed run — two different chars
+        r#"".""#,  // a run containing a metacharacter `.`
+        r#"\d\d"#, // a class-escape run (digit class, not a literal)
+        r#"\.\."#, // an escaped-pair run (each `\.` is a literal dot, but not a *bare* run)
+        r#"*"#,    // (control) a single metacharacter — never a delimiter at all
+    ];
+    opens
+        .into_iter()
+        .map(|open| format!(r"(r?)({open}.*?(?<!\\)(\\\\)*?{open})"))
         .collect()
 }
 

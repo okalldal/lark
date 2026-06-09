@@ -28,8 +28,10 @@ mod common;
 use std::collections::HashSet;
 
 use common::lowering::{corpus, fancy_matcher, fancy_prefix, lowered_prefix};
-use lark_rs::lookaround::lower::lower_boundary;
-use lark_rs::{classify, ShapeClass, Verdict};
+use lark_rs::lookaround::lower::{lower_boundary, lower_boundary_dotall};
+use lark_rs::{
+    basic_lexer_conf, classify, load_grammar, lower, BasicLexer, LexerBackend, ShapeClass, Verdict,
+};
 use regex_automata::dfa::{dense, Automaton};
 
 /// A representative terminal whose Route-1 equivalence must be proven before its
@@ -392,6 +394,182 @@ fn route1_proof_string_idiom_real_nested_shape() {
         );
         prove_route1_pruned(name, pattern)
             .unwrap_or_else(|cex| panic!("Route-1 (state-pruned) failed for {name}: {cex}"));
+    }
+}
+
+// ─── The LONG_STRING multi-char-close escaped-body idiom — real nested shape ────────
+//
+// `python.LONG_STRING`'s arm `<q3>.*?(?<!\\)(\\\\)*?<q3>` has a **multi-character** close
+// `"""` / `'''` and **no** opening guard, so it lowers to a single *unguarded* lazy-body
+// branch (`<q3>(?:[^\\<nl>]|\\.)*?<q3>`) — the genuinely-new L2 piece over STRING's
+// single-char close. It is **DOTALL** (the bundled `/is`), so the body spans newlines; the
+// proof must therefore decide equivalence under DOTALL on *both* sides — the lowered DFA
+// (built with the real DOTALL flag) and the `fancy-regex` oracle (`(?s)`-wrapped).
+//
+// The decision procedure is the same state-pruned Myhill-Nerode enumeration
+// `prove_route1_pruned` documents: every divergence between the lazy lowered body and the
+// fancy original manifests at a *distinguishing base-DFA state* followed by ≤ W lookahead
+// chars (W = the widest assertion). Testing one shortest witness per reachable base state ×
+// every ≤ W+1 lookahead suffix is complete and tractable, with `fancy-regex` the
+// independent oracle.
+
+/// The real nested LONG_STRING representatives (double-quote, single-quote, and the bundled
+/// both-arms shape) — the genuine `prefix + <q3> + .*? + (?<!\\)(\\\\)*? + <q3>` nested form
+/// the multi-char-close lowering must reproduce.
+fn long_string_proof_representatives() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "LONG_STRING_NESTED_DQ",
+            r#"([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?""")"#,
+        ),
+        (
+            "LONG_STRING_NESTED_BOTH",
+            r#"([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')"#,
+        ),
+    ]
+}
+
+/// Build a real DOTALL `Dfa`-backend one-terminal lexer over `pattern` (`/…/s`), so the
+/// proof drives the **actual** lowered engine (not a regex-crate re-compile). The
+/// single-terminal scanner matches only `TOK`, so its anchored match at offset 0 is the
+/// lowered prefix.
+fn dotall_lowered_lexer(pattern: &str) -> BasicLexer {
+    // Inside `/…/`, escape an unescaped `/` as `\/` (mirrors the differential builder).
+    let mut escaped = String::with_capacity(pattern.len());
+    let mut prev_backslash = false;
+    for ch in pattern.chars() {
+        if ch == '/' && !prev_backslash {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+        prev_backslash = ch == '\\' && !prev_backslash;
+    }
+    let grammar = format!("start: TOK\nTOK: /{escaped}/s\n");
+    let g = load_grammar(&grammar, &["start".to_string()], false, false)
+        .unwrap_or_else(|e| panic!("load_grammar({pattern:?}) failed: {e:?}"));
+    let cg = lower(&g);
+    let conf = basic_lexer_conf(&cg, 0).with_backend(LexerBackend::Dfa);
+    BasicLexer::new(&conf).unwrap_or_else(|e| panic!("BasicLexer build failed: {e:?}"))
+}
+
+/// Decide DOTALL Route-1 match-length equivalence for a LONG_STRING representative via the
+/// state-pruned Myhill-Nerode procedure. The lowered side is the real DOTALL `Dfa` lexer;
+/// the oracle is `fancy-regex` `(?s)`-wrapped. `Err(cex)` carries a counterexample.
+fn prove_route1_pruned_dotall(_name: &str, pattern: &str) -> Result<(), String> {
+    use regex_automata::util::primitives::StateID;
+    use regex_automata::{Anchored, Input};
+
+    assert!(
+        pattern.is_ascii(),
+        "Route-1 proof assumes ASCII representatives; {pattern:?} is not ASCII"
+    );
+    let branches =
+        lower_boundary_dotall(pattern, true).map_err(|e| format!("lowering failed: {e:?}"))?;
+
+    // Base recognizer = the union of every lowered branch base, DOTALL-wrapped (so the byte
+    // classes and reachable states reflect the engine's `.`-spans-newline language).
+    let base_src = branches
+        .iter()
+        .map(|b| format!("(?s:{})", b.regex))
+        .collect::<Vec<_>>()
+        .join("|");
+    let base = dense::DFA::new(&base_src).map_err(|e| format!("dfa(base): {e}"))?;
+    let classes = base.byte_classes();
+    let mut seen_cls = HashSet::new();
+    let reps: Vec<u8> = (0u8..=0x7F)
+        .filter(|&b| seen_cls.insert(classes.get(b)))
+        .collect();
+
+    let w = classify(pattern)
+        .map_err(|e| format!("classify: {e:?}"))?
+        .assertions
+        .iter()
+        .filter_map(|a| a.width)
+        .max()
+        .unwrap_or(0);
+
+    // BFS: a shortest witness reaching each base-DFA state.
+    let start = base
+        .start_state_forward(&Input::new("").anchored(Anchored::Yes))
+        .map_err(|e| format!("start: {e}"))?;
+    let mut witness: std::collections::HashMap<StateID, Vec<u8>> = std::collections::HashMap::new();
+    witness.insert(start, Vec::new());
+    let mut queue = std::collections::VecDeque::from([start]);
+    while let Some(st) = queue.pop_front() {
+        let w_st = witness[&st].clone();
+        for &b in &reps {
+            let ns = base.next_state(st, b);
+            if !witness.contains_key(&ns) {
+                let mut nw = w_st.clone();
+                nw.push(b);
+                witness.insert(ns, nw);
+                queue.push_back(ns);
+            }
+        }
+    }
+
+    let suffix_space = (reps.len() as u128).checked_pow(w as u32 + 1);
+    let total = suffix_space.map(|s| s.saturating_mul(witness.len() as u128));
+    assert!(
+        total.is_some_and(|t| t <= 8_000_000),
+        "state-pruned Route-1 for {pattern:?} is intractable (states={}, |reps|={}, W={w})",
+        witness.len(),
+        reps.len(),
+    );
+
+    let suffixes = corpus(&reps.iter().map(|&b| b as char).collect::<Vec<_>>(), w + 1);
+    // The oracle: the fancy original, DOTALL-wrapped, anchored at the start.
+    let oracle = fancy_regex::Regex::new(&format!(r"\A(?s)(?:{pattern})"))
+        .map_err(|e| format!("fancy rejected {pattern:?}: {e}"))?;
+    let lexer = dotall_lowered_lexer(pattern);
+    for wbytes in witness.values() {
+        for suf in &suffixes {
+            let mut full = wbytes.clone();
+            full.extend_from_slice(suf.as_bytes());
+            let Ok(s) = std::str::from_utf8(&full) else {
+                continue;
+            };
+            // Lowered: the real DOTALL Dfa lexer's anchored match length at offset 0.
+            let lowered = if s.is_empty() {
+                None
+            } else {
+                lexer.match_at(s, 0).map(|(_, v)| v.chars().count())
+            };
+            // Oracle: the fancy DOTALL match length (zero-width mapped to None, as lark's
+            // scanner forbids zero-width tokens — mirroring `fancy_prefix`).
+            let fancy = match oracle.find(s) {
+                Ok(Some(m)) if m.start() == 0 && m.end() > 0 => Some(s[..m.end()].chars().count()),
+                _ => None,
+            };
+            if lowered != fancy {
+                return Err(format!(
+                    "counterexample on {s:?}: lowered={lowered:?} != fancy={fancy:?}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The committed Route-1 proof for the LONG_STRING multi-char-close idiom on its **real
+/// nested shape** under DOTALL — the milestone's non-negotiable proof obligation. Each
+/// representative must (a) classify fully-supported (its only assertions, the `(?<!\\)`
+/// lookbehinds, are supported), (b) lower to branches under DOTALL (not decline), and (c) be
+/// proven match-length-identical to `fancy-regex` `(?s)` by the state-pruned procedure.
+#[test]
+fn route1_proof_long_string_idiom_real_nested_shape() {
+    for (name, pattern) in long_string_proof_representatives() {
+        let c = classify(pattern).unwrap_or_else(|e| panic!("classify {name} errored: {e}"));
+        assert!(
+            c.is_fully_supported(),
+            "{name} must classify as fully supported (its `(?<!\\\\)` lookbehinds)"
+        );
+        assert!(
+            lower_boundary_dotall(pattern, true).is_ok(),
+            "{name} must lower under DOTALL (not decline) for the proof to be non-vacuous"
+        );
+        prove_route1_pruned_dotall(name, pattern)
+            .unwrap_or_else(|cex| panic!("Route-1 (DOTALL state-pruned) failed for {name}: {cex}"));
     }
 }
 

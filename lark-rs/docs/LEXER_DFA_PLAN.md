@@ -134,12 +134,39 @@ maximal-munch driver, and the differential oracle `tests/test_scanner_differenti
 > (`tests/test_lowering_equivalence.rs`), and the python.lark differential (0
 > divergences with STRING *lowered*, not declined).
 >
-> **Still on the `fancy-regex` side-probe (a *decline*, not a gap):**
-> `python.LONG_STRING` (a lazy `.*?` body with a *multi-character* `"""` close and no
-> opening guard) and `lark.REGEXP` (an internal `(?!\/)` after the opening slash) are
-> **attempted and declined cleanly** — they route to `fancy-regex` exactly as before, so
-> the bundled grammars stay correct. Lowering them is a bonus the STRING milestone does
-> not require; until they land, `fancy-regex` stays in the runtime and L4 waits.
+> **M5 — the `python.LONG_STRING` multi-char-close splice (landed).** `LONG_STRING`'s arm
+> `<q3>.*?(?<!\\)(\\\\)*?<q3>` has a **multi-character** close (`"""` / `'''`) and **no**
+> opening guard, so it is strictly simpler than M4's STRING: the same escaped-body
+> normalization applies, but with no leading-guard arm-split. Because the close is
+> multi-character a single `<q>` is legal *inside* the body (only the full `<q3>` run
+> closes it), so the greedy "exclude the delimiter" trick does not apply; the body keeps
+> its proven **lazy** form `<q3>(?:[^\\<nl>]|\\.)*?<q3>` (the E2a rewrite
+> `tests/test_lookaround.rs::long_string_match_length_equivalence` pins as
+> match-length-identical to fancy under DOTALL), and the `(?<!\\)(\\\\)*?` close lookbehind
+> is *absorbed* by the `\\.` escape pairing. There is no opening guard, so each arm lowers
+> to a **single unguarded** branch that rides the plain leftmost-first engine — which
+> reproduces Python `re`'s lazy-quantifier semantics natively, so the lazy `*?` (which the
+> guarded longest-accept accumulator could not host) is correct here precisely because no
+> guard is involved (`src/lookaround/lower.rs::recognize_string_idiom` now matches both the
+> short STRING arm and the long LONG_STRING arm; `multi_char_delimiter_source` admits a run
+> of one repeated plain literal as the close). Gated by: the `"""…"""` adversarial canary +
+> the short/long maximal-munch competition under the default `Dfa` backend
+> (`tests/test_string_splice.rs`), the DOTALL state-pruned Route-1 proof on the **real
+> nested LONG_STRING shape** (`tests/test_lowering_proof.rs::route1_proof_long_string_idiom_real_nested_shape`),
+> the generative-equivalence layer + the collapse-the-multi-char-close mutant
+> (`tests/test_lowering_equivalence.rs`), and the python.lark differential (0 divergences
+> with LONG_STRING *lowered*, not declined, over the generated population). As with M4's
+> STRING, the lowering matches the **bare** pattern; the real bundled terminal's `/is`
+> flags are folded by the loader into a `(?is:…)` wrapper (`flags=0`), so the
+> flag-wrapped real form is **declined** (route to fancy, the reject-when-unsure direction
+> — peeling the wrapper would hide the real `dotall` from the body normalization), exactly
+> as M4's real `(?i:…)`-folded STRING declines.
+>
+> **Still on the `fancy-regex` side-probe (a *decline*, not a gap):** `lark.REGEXP` (an
+> internal `(?!\/)` after the opening slash) is the **sole remaining decline** — it is
+> attempted and declined cleanly, routing to `fancy-regex` exactly as before, so the
+> bundled grammars stay correct. Lowering it (and un-folding the flag-wrapped bundled
+> string terminals) is what L4 (removing `fancy-regex` from the runtime) waits on.
 
 A **general** lowering keyed on the assertion's **shape**, not on the six bundled
 terminals. Lower each supported bounded assertion into lookaround-free DFA states

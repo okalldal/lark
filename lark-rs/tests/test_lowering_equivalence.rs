@@ -17,8 +17,8 @@ mod common;
 
 use common::lowering::{
     boundary_mutations, corpus, fancy_matcher, fancy_prefix, has_guard, has_lookbehind,
-    lookbehind_mutations, lowered_prefix, mutant_lookbehind_matcher, mutant_matcher,
-    string_idiom_terminals, supported_terminals, BoundaryMutation, GenTerminal,
+    long_string_idiom_terminals, lookbehind_mutations, lowered_prefix, mutant_lookbehind_matcher,
+    mutant_matcher, string_idiom_terminals, supported_terminals, BoundaryMutation, GenTerminal,
 };
 use lark_rs::ShapeClass;
 
@@ -207,6 +207,98 @@ fn string_idiom_lowered_equals_fancy() {
         "string-idiom generative-equivalence divergence(s):\n  {}",
         failures.join("\n  ")
     );
+}
+
+/// The **long-string escaped-body idiom** (python.LONG_STRING's real nested/prefixed
+/// shape — the multi-character `"""`/`'''` close with no opening guard): every generated
+/// long-string terminal's lowered match-length must equal the `fancy-regex` oracle over its
+/// exhaustive corpus, which includes the multi-quote-run boundary, embedded single quotes,
+/// and escaped delimiters/backslashes. `lowered_prefix` returning `Err` (a declined
+/// terminal) is surfaced as a divergence, so a terminal that *failed* to lower fails loudly
+/// rather than passing vacuously — the same loud-failure discipline the short-idiom layer
+/// uses.
+#[test]
+fn long_string_idiom_lowered_equals_fancy() {
+    let terms = long_string_idiom_terminals();
+    assert!(
+        !terms.is_empty(),
+        "no long-string-idiom terminals generated"
+    );
+    let mut failures = Vec::new();
+    for t in &terms {
+        if let Some(d) = equivalence_divergence(t) {
+            failures.push(d);
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "long-string-idiom generative-equivalence divergence(s):\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+/// **The drop-the-multi-char-close mutant** (the LONG_STRING analog of the
+/// drop-the-`(?!"")`-guard canary). A lowering that mishandled the multi-character close —
+/// treating the close as a *single* delimiter (so a lone `"` inside the body would wrongly
+/// end the string) — must diverge from the oracle. The mutant rebuilds each long arm with a
+/// **single**-char close (the first delimiter char) instead of the full run; the meta-test
+/// asserts it is caught somewhere on the population, so the multi-char-close handling is
+/// genuinely defended (not vacuously equal to a single-char close).
+#[test]
+fn collapsing_the_multichar_close_is_caught() {
+    let terms = long_string_idiom_terminals();
+    let mut caught = false;
+    for t in &terms {
+        let Some(oracle) = fancy_matcher(&t.pattern) else {
+            continue;
+        };
+        // The wrong lowering: collapse the multi-char close to a single delimiter char by
+        // turning `<q3>.*?(?<!\\)(\\\\)*?<q3>` into `<q>(?:[^<q>\\]|\\.)*?<q>`. We express
+        // this directly so the independent `fancy-regex` engine can run it.
+        let Some(mutant) = single_char_close_mutant(&t.pattern) else {
+            continue;
+        };
+        let Some(mutant_re) = fancy_matcher(&mutant) else {
+            continue;
+        };
+        for input in corpus(&t.alphabet, t.max_len) {
+            let correct = fancy_prefix(&oracle, &input);
+            let wrong = fancy_prefix(&mutant_re, &input);
+            if correct != wrong {
+                caught = true;
+                break;
+            }
+        }
+        if caught {
+            break;
+        }
+    }
+    assert!(
+        caught,
+        "the single-char-close mutant survived the long-string population — the multi-char \
+         close handling would be undefended (a hole in the net)"
+    );
+}
+
+/// Rebuild a long-string-idiom `pattern` with each arm's multi-character close collapsed to
+/// its *first* delimiter char + a delimiter-excluding lazy body — the canonical *wrong*
+/// lowering (treating `"""` as if it were a single `"`). Returns `None` if the pattern has
+/// no recognizable long arm.
+fn single_char_close_mutant(pattern: &str) -> Option<String> {
+    // The generated long-arm shape is `<run>.*?(?<!\\)(\\\\)*?<run>` for a run of one repeated
+    // char. We rewrite each `<run>X...<run>` to a single-char-close body. Operate by string
+    // replacement on the known generator shape (a run of `"` / `'` / `/`).
+    for q in ['"', '\'', '/'] {
+        for runlen in [3usize, 2] {
+            let run: String = std::iter::repeat(q).take(runlen).collect();
+            let needle = format!(r"{run}.*?(?<!\\)(\\\\)*?{run}");
+            if pattern.contains(&needle) {
+                let body = format!(r"{q}(?:[^{q}\\]|\\.)*?{q}");
+                return Some(pattern.replace(&needle, &body));
+            }
+        }
+    }
+    None
 }
 
 /// **The drop-the-`(?!"")`-guard equivalence mutant** (deliverable 4). The `(?!"")`
