@@ -83,8 +83,9 @@ maximal-munch driver, and the differential oracle `tests/test_scanner_differenti
 
 ### L2 — The bounded-lookaround lowering feature *(the meat)*
 
-> **Status — all three lowering shapes have landed (M0–M3).** The harness-first net
-> exists, and every supported shape now lowers into the DFA behind it, gated green:
+> **Status — all three lowering shapes (M0–M3) *and* the `python.STRING` opening-guard
+> splice (M4) have landed.** The harness-first net exists, and every supported shape now
+> lowers into the DFA behind it, gated green:
 > * **Front-end** resurrected from closed #110 (without its Pike-VM `matcher.rs`):
 >   `src/lookaround/mod.rs` (assertion parser) + `src/lookaround/classify.rs` (the
 >   shape classifier) + `src/lookaround/lower.rs` (the real lowering). `lower_terminal`
@@ -112,13 +113,33 @@ maximal-munch driver, and the differential oracle `tests/test_scanner_differenti
 >   (`tests/test_lowering_fixtures.rs`). Generators + oracle + mutation framework live in
 >   `tests/common/lowering.rs`.
 >
-> **Still on the `fancy-regex` side-probe (a *decline*, not a gap):** a bounded
-> lookbehind after a **variable-width** prefix — `python.LONG_STRING`'s
-> `.*?(?<!\\)(\\\\)*?` and `python.STRING`'s `(?<!\\)` — has no fixed offset, so M3
-> declines it (correct, never mis-lowered). `python.STRING`'s leading `(?!"")` after a
-> variable-width prefix needs NFA-state splicing. Both are the deferred variable-offset /
-> STRING-splice milestone; until then those terminals lex on `fancy-regex` exactly as
-> before, so the bundled `python.lark`/`lark.lark` stay correct.
+> **M4 — the `python.STRING` opening-guard splice (landed).** `python.STRING`'s
+> `(?!"")` sits after a **variable-width** prefix (`[ubf]?r?|r[ubf]`) + the opening
+> quote — an internal/variable-position leading boundary M2's fixed-offset guard cannot
+> host. It is now lowered by the **NFA-state splice** the plan calls for
+> (`src/lookaround/lower.rs::recognize_string_idiom`): the lazy escaped body
+> `.*?(?<!\\)(\\\\)*?<q>` is normalized *internally* to its proven greedy
+> character-class equivalent (the Type-A rewrite `matchlen` justifies — this **absorbs**
+> the `(?<!\\)` lookbehind, so M3's variable-offset decline does not apply), and the
+> `(?!"")` reduces — exactly, because the normalized body can never *begin* with the
+> delimiter — to an empty/non-empty arm split with a trailing `(?!")` guard on the
+> empty arm (the only place the assertion's window over-reaches the matched token). The
+> empty arm's base `<prefix>""` is *prefix-free*, so the guarded longest-accept
+> accumulator reproduces fancy's match (the realizability check now admits prefix-free
+> bases alongside greedy-monotone ones). Gated by: the hand-authored `""""`/`"" ""`
+> adversarial canary under the default `Dfa` backend (`tests/test_string_splice.rs`),
+> the state-pruned Route-1 proof on the **real nested shape**
+> (`tests/test_lowering_proof.rs::route1_proof_string_idiom_real_nested_shape`), the
+> generative-equivalence layer + the drop-the-`(?!"")`-guard mutant
+> (`tests/test_lowering_equivalence.rs`), and the python.lark differential (0
+> divergences with STRING *lowered*, not declined).
+>
+> **Still on the `fancy-regex` side-probe (a *decline*, not a gap):**
+> `python.LONG_STRING` (a lazy `.*?` body with a *multi-character* `"""` close and no
+> opening guard) and `lark.REGEXP` (an internal `(?!\/)` after the opening slash) are
+> **attempted and declined cleanly** — they route to `fancy-regex` exactly as before, so
+> the bundled grammars stay correct. Lowering them is a bonus the STRING milestone does
+> not require; until they land, `fancy-regex` stays in the runtime and L4 waits.
 
 A **general** lowering keyed on the assertion's **shape**, not on the six bundled
 terminals. Lower each supported bounded assertion into lookaround-free DFA states

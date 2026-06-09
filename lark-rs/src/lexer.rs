@@ -826,17 +826,20 @@ impl DfaScanner {
 
             // Route to fancy unless the terminal lowers. `lower_terminal` already
             // declines a shape not yet lowered (bounded lookbehind) *and* a guarded
-            // branch whose base is not greedy-monotone (it can't ride the
+            // branch whose base is not guard-realizable (it can't ride the
             // longest-where-guard-holds accumulator) — so a returned `Branches` is
-            // always faithfully lowerable.
-            let lowered = match crate::lookaround::classify::lower_terminal(&def.name, raw) {
-                Ok(crate::lookaround::classify::Lowered::Branches(branches)) => branches,
-                _ => {
-                    let anchored = AnyRegex::compile(&format!("{prefix}\\G{inline}"))?;
-                    fancy.push((rank, *id, anchored));
-                    continue;
-                }
-            };
+            // always faithfully lowerable. `dotall` is threaded so the string-idiom body
+            // normalization admits a newline exactly when this terminal's `.` would.
+            let dotall = flags & crate::grammar::terminal::flags::DOTALL != 0;
+            let lowered =
+                match crate::lookaround::classify::lower_terminal_dotall(&def.name, raw, dotall) {
+                    Ok(crate::lookaround::classify::Lowered::Branches(branches)) => branches,
+                    _ => {
+                        let anchored = AnyRegex::compile(&format!("{prefix}\\G{inline}"))?;
+                        fancy.push((rank, *id, anchored));
+                        continue;
+                    }
+                };
 
             for (bo, br) in lowered.iter().enumerate() {
                 let inline_br = wrap_flags(flags, &br.regex);

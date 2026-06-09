@@ -32,11 +32,11 @@ mod common;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 
-use common::lowering::{corpus, supported_terminals, GenTerminal};
+use common::lowering::{corpus, string_idiom_terminals, supported_terminals, GenTerminal};
 use lark_rs::grammar::terminal::flags;
 use lark_rs::{
-    basic_lexer_conf, load_grammar, lower, lower_terminal, BasicLexer, Lexer, LexerBackend,
-    ParseError,
+    basic_lexer_conf, load_grammar, lower, lower_terminal, lower_terminal_dotall, BasicLexer,
+    Lexer, LexerBackend, Lowered, ParseError,
 };
 use serde_json::Value;
 
@@ -442,7 +442,13 @@ fn lookaround_grammar(t: &GenTerminal) -> (String, String) {
 /// pending path stays live for the bundled terminals the variable-offset / STRING
 /// milestone still declines.
 fn run_lookaround_grammars(d: &mut Differential) {
-    for t in supported_terminals() {
+    // The bare boundary/lookbehind population *and* python.STRING's real nested/prefixed
+    // opening-guard idiom (the marquee L2 splice) — both must lex byte-identically under
+    // the two backends, and (with the splice landed) both genuinely lower.
+    for t in supported_terminals()
+        .into_iter()
+        .chain(string_idiom_terminals())
+    {
         let (grammar, pattern) = lookaround_grammar(&t);
         let start = ["start".to_string()];
         let mk = |backend| build_lexer(&grammar, &start, false, false, 0, backend);
@@ -496,6 +502,20 @@ fn test_scanner_backends_lex_identically() {
     run_lookaround_grammars(&mut d);
 
     let _ = std::panic::take_hook();
+
+    // Deliverable 3: the python.lark differential is run *with STRING lowered*, not
+    // silently routed to `fancy-regex`. Confirm the bundled STRING actually lowers to
+    // branches (the splice landed) — so the 0-divergence result above is the lowered
+    // engine agreeing with fancy, not two fancy side-probes trivially agreeing.
+    const STRING_RAW: &str =
+        r#"([ubf]?r?|r[ubf])("(?!"").*?(?<!\\)(\\\\)*?"|'(?!'').*?(?<!\\)(\\\\)*?')"#;
+    assert!(
+        matches!(
+            lower_terminal_dotall("STRING", STRING_RAW, false),
+            Ok(Lowered::Branches(_))
+        ),
+        "python.STRING must LOWER (Lowered::Branches) under the splice, not route to fancy"
+    );
 
     eprintln!(
         "scanner differential: {} input(s) across {} grammar(s) compared; \

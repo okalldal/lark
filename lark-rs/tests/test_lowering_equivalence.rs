@@ -18,7 +18,7 @@ mod common;
 use common::lowering::{
     boundary_mutations, corpus, fancy_matcher, fancy_prefix, has_guard, has_lookbehind,
     lookbehind_mutations, lowered_prefix, mutant_lookbehind_matcher, mutant_matcher,
-    supported_terminals, GenTerminal,
+    string_idiom_terminals, supported_terminals, BoundaryMutation, GenTerminal,
 };
 use lark_rs::ShapeClass;
 
@@ -184,6 +184,74 @@ fn bounded_lookbehind_lowering_mutants_are_caught() {
              This is a hole in the net."
         );
     }
+}
+
+/// The **string-literal opening-guard idiom** (python.STRING's real nested/prefixed
+/// shape, the marquee L2 splice): every generated idiom terminal's lowered match-length
+/// must equal the `fancy-regex` oracle over its exhaustive corpus — which includes the
+/// `""""` boundary, escaped quotes, and escaped backslashes. `lowered_prefix` returning
+/// `Err` (a declined terminal) is surfaced as a divergence, so a terminal that *failed*
+/// to lower fails loudly rather than passing vacuously.
+#[test]
+fn string_idiom_lowered_equals_fancy() {
+    let terms = string_idiom_terminals();
+    assert!(!terms.is_empty(), "no string-idiom terminals generated");
+    let mut failures = Vec::new();
+    for t in &terms {
+        if let Some(d) = equivalence_divergence(t) {
+            failures.push(d);
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "string-idiom generative-equivalence divergence(s):\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+/// **The drop-the-`(?!"")`-guard equivalence mutant** (deliverable 4). The `(?!"")`
+/// splice's residual is the trailing `(?!")` guard on the empty arm; a lowering that
+/// *forgot* it would accept `""""` (one empty string) where the oracle rejects it. The
+/// meta-test asserts this `ForgetGuard` mutant is **caught** — and that the witness is
+/// exactly the `""""`-shape (oracle matches nothing, the mutant matches a leading empty
+/// string at an over-long quote-run) — so the canary genuinely defends the splice. A
+/// surviving mutant would mean the equivalence layer could not tell a guard-less STRING
+/// from the real one: a hole in the net.
+#[test]
+fn dropping_the_opening_guard_is_caught_by_the_quad_quote() {
+    let terms = string_idiom_terminals();
+    let mut caught_by_quad_quote = false;
+    for t in &terms {
+        let Some(oracle) = fancy_matcher(&t.pattern) else {
+            continue;
+        };
+        // The wrong lowering: the empty arm's trailing guard dropped.
+        let Some(mutant) = mutant_matcher(&t.pattern, BoundaryMutation::ForgetGuard) else {
+            continue;
+        };
+        for input in corpus(&t.alphabet, t.max_len) {
+            let correct = fancy_prefix(&oracle, &input);
+            let wrong = fancy_prefix(&mutant, &input);
+            if correct == wrong {
+                continue;
+            }
+            // The divergence must be the canary: an over-long quote-run the real STRING
+            // rejects (None) but the guard-less mutant accepts as an empty string.
+            let q = if t.alphabet.contains(&'"') { '"' } else { '\'' };
+            if correct.is_none()
+                && wrong.is_some()
+                && input.starts_with(q)
+                && input[1..].starts_with(q)
+            {
+                caught_by_quad_quote = true;
+            }
+        }
+    }
+    assert!(
+        caught_by_quad_quote,
+        "the drop-(?!\"\")-guard mutant was NOT caught by a `\"\"\"\"`-shape input — the \
+         opening-guard splice would be undefended (a hole in the net)"
+    );
 }
 
 /// Active **now**: the oracle, the generators, and the exhaustive corpus all work,
