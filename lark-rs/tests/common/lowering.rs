@@ -363,6 +363,28 @@ pub fn supported_terminals() -> Vec<GenTerminal> {
         ));
     }
 
+    // --- Biting lookbehind cases (the generator-vacuity fix the plan calls for). A
+    //     leading lookbehind is vacuous at offset 0 (nothing precedes pos), so the
+    //     guard is placed where it actually *bites within an offset-0 match*: a
+    //     **variable preceding class containing the trigger** (`\w(?<!_)x` rejects
+    //     `_x`, accepts `ax`). The escaped-trigger `quotient_alphabet` decoding puts
+    //     the trigger in the corpus, so a lowering that *ignored* the lookbehind would
+    //     diverge here — it cannot pass vacuously. ---
+    let behind_biting = [
+        r"\w(?<!_)x",       // negative, trigger `_` ∈ the preceding `\w` class
+        r"\w(?<=_)x",       // positive: the preceding char *must* be `_`
+        r"[a\\](?<!\\)x",   // backslash parity — the canonical LONG_STRING flavor
+        r"[ab](?<=a)x",     // positive, narrow preceding class
+        r"[a-c](?<![ab])x", // multi-char negative trigger class
+    ];
+    for p in behind_biting {
+        out.push(gen(
+            next_name(),
+            p.to_string(),
+            ShapeClass::BoundedLookbehind,
+        ));
+    }
+
     out
 }
 
@@ -455,6 +477,114 @@ pub fn has_guard(pattern: &str) -> bool {
                 .any(|b| b.leading.is_some() || b.trailing.is_some())
         })
         .unwrap_or(false)
+}
+
+// ─── Lookbehind lowering mutants (the M3 equivalence-layer mutation meta-test) ──
+
+/// A deliberately-wrong way to lower a **bounded lookbehind** (`docs/LEXER_DFA_PLAN.md`,
+/// "Validate the harness itself"). Each must be *caught* — diverge from the
+/// `fancy-regex` oracle somewhere on the lookbehind population — so a real lowering
+/// that made the same mistake would turn the bounded-lookbehind equivalence layer red.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LookbehindMutation {
+    /// Ignore the lookbehind entirely — accept the base wherever it matches (the
+    /// "ignore-the-lookbehind" mutant the plan names; vacuity is what would let it
+    /// survive, which the biting generator cases defeat).
+    IgnoreLookbehind,
+    /// Forget the parity flip — treat `(?<!S)` as `(?<=S)` and vice-versa.
+    FlipPolarity,
+    /// Off-by-one window width — inspect one extra preceding char (`(?<!S)` →
+    /// `(?<!.S)`), so the history window is the wrong size.
+    OffByOneWidth,
+}
+
+/// Every lookbehind-lowering mutant the meta-test must catch.
+pub fn lookbehind_mutations() -> [LookbehindMutation; 3] {
+    [
+        LookbehindMutation::IgnoreLookbehind,
+        LookbehindMutation::FlipPolarity,
+        LookbehindMutation::OffByOneWidth,
+    ]
+}
+
+/// Whether `pattern` carries at least one bounded-lookbehind assertion.
+pub fn has_lookbehind(pattern: &str) -> bool {
+    use lark_rs::lookaround::{parse, Look, Node};
+    fn walk(n: &Node) -> bool {
+        match n {
+            Node::Assertion {
+                look: Look::Behind, ..
+            } => true,
+            Node::Assertion { body, .. } => walk(body),
+            Node::Atom(_) => false,
+            Node::Concat(parts) | Node::Alt(parts) => parts.iter().any(walk),
+            Node::Group { body, .. } => walk(body),
+        }
+    }
+    parse(pattern).map(|n| walk(&n)).unwrap_or(false)
+}
+
+/// Rebuild `pattern` with `mutation` applied to every bounded-lookbehind assertion —
+/// the *wrong* lowering, re-expressed so the independent `fancy-regex` engine can run
+/// it. Walks the parsed [`Node`] tree (so it is exact and structure-aware) and mutates
+/// each `(?<…)` in place.
+fn mutant_lookbehind_pattern(pattern: &str, mutation: LookbehindMutation) -> Option<String> {
+    use lark_rs::lookaround::{parse, Look, Node};
+
+    fn xform(node: &Node, m: LookbehindMutation) -> Option<Node> {
+        match node {
+            Node::Assertion {
+                neg,
+                look: Look::Behind,
+                body,
+                quant,
+            } => match m {
+                LookbehindMutation::IgnoreLookbehind => None, // drop it
+                LookbehindMutation::FlipPolarity => Some(Node::Assertion {
+                    neg: !neg,
+                    look: Look::Behind,
+                    body: body.clone(),
+                    quant: quant.clone(),
+                }),
+                LookbehindMutation::OffByOneWidth => {
+                    let wider = Node::Concat(vec![Node::Atom(".".to_string()), (**body).clone()]);
+                    Some(Node::Assertion {
+                        neg: *neg,
+                        look: Look::Behind,
+                        body: Box::new(wider),
+                        quant: quant.clone(),
+                    })
+                }
+            },
+            // A forward assertion is left untouched.
+            Node::Assertion { .. } => Some(node.clone()),
+            Node::Atom(_) => Some(node.clone()),
+            Node::Concat(parts) => Some(Node::Concat(
+                parts.iter().filter_map(|p| xform(p, m)).collect(),
+            )),
+            Node::Alt(branches) => Some(Node::Alt(
+                branches.iter().filter_map(|b| xform(b, m)).collect(),
+            )),
+            Node::Group { open, body, quant } => Some(Node::Group {
+                open: open.clone(),
+                body: Box::new(xform(body, m).unwrap_or(Node::Atom(String::new()))),
+                quant: quant.clone(),
+            }),
+        }
+    }
+
+    let node = parse(pattern).ok()?;
+    Some(xform(&node, mutation)?.to_source())
+}
+
+/// The compiled `fancy-regex` matcher for the **lookbehind-mutant** terminal, or
+/// `None` if it does not compile. Built once per `(pattern, mutation)`.
+pub fn mutant_lookbehind_matcher(
+    pattern: &str,
+    mutation: LookbehindMutation,
+) -> Option<fancy_regex::Regex> {
+    let mutated = mutant_lookbehind_pattern(pattern, mutation)?;
+    fancy_matcher(&mutated)
 }
 
 // ─── Out-of-shape adversarial corpus ───────────────────────────────────────────

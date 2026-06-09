@@ -69,16 +69,24 @@ fn obligations() -> Vec<ProofObligation> {
             pattern: r#"(?!"")[^"]*"#,
             shape: ShapeClass::LeadingBoundary,
         },
-        // Bounded lookbehind — the LONG_STRING even-backslash close + a fixed-width
-        // lookbehind representative.
+        // Bounded lookbehind — the backslash-parity close + a fixed-width lookbehind
+        // representative. Both reps are chosen to **bite within an offset-0 match** (a
+        // variable preceding class containing the trigger), so the proof is not
+        // vacuous: a leading lookbehind matched at offset 0 sees nothing before pos, so
+        // `(?<=ab)c`-style reps would prove nothing. `[a\\](?<!\\)b` rejects `\b` and
+        // accepts `ab`; `\w(?<!_)x` rejects `_x` and accepts `ax`.
+        // The reps are kept **narrow** (a small preceding class, not `\w` / `[a\\]`)
+        // so the Route-1 byte-class enumeration stays tractable against the length
+        // bound — the same discipline RESERVED uses above. The wide backslash-run /
+        // `\w` variants are covered exhaustively by the generative-equivalence layer.
         ProofObligation {
             name: "LONG_STRING_CLOSE",
-            pattern: r#"a(?<!\\)b"#,
+            pattern: r#"[\\a](?<!\\)a"#,
             shape: ShapeClass::BoundedLookbehind,
         },
         ProofObligation {
             name: "FIXED_BEHIND",
-            pattern: r"(?<=ab)c",
+            pattern: r"[ab](?<!a)b",
             shape: ShapeClass::BoundedLookbehind,
         },
     ]
@@ -116,6 +124,12 @@ fn prove_route1(name: &str, pattern: &str) -> Result<(), String> {
         base_parts.push(format!("(?:{})", b.regex));
         for g in [&b.leading, &b.trailing].into_iter().flatten() {
             parts.push(format!("(?:{})", g.set));
+        }
+        // A lookbehind's trigger body must enter the byte-class alphabet too, or the
+        // enumeration would never exercise the char the guard keys on (the proof would
+        // be vacuous — the same vacuity the biting reps defend against).
+        for lb in &b.lookbehind {
+            parts.push(format!("(?:{})", lb.set));
         }
     }
     let combined = dense::DFA::new(&parts.join("|")).map_err(|e| format!("dfa(combined): {e}"))?;
@@ -222,7 +236,6 @@ fn route1_proof_leading_boundary() {
 }
 
 #[test]
-#[ignore = "pending first shape — Route-1 proof needs the lowered automaton"]
 fn route1_proof_bounded_lookbehind() {
     discharge(ShapeClass::BoundedLookbehind);
 }

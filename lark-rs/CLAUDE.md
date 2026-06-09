@@ -392,7 +392,19 @@ on lookaround (the bundled `python.lark`/`lark.lark` do: `STRING`'s
 **Direction (2026-06-08): [`docs/LEXER_DFA_PLAN.md`](docs/LEXER_DFA_PLAN.md)** is the
 active umbrella — build the combined scanner on a `regex-automata` DFA and **lower** the
 bounded lookaround into it (a DFA, *not* PR #110's Pike-VM), so every terminal lexes
-single-pass and the `python`/`lark` grammars become bakeable. Load-time **elimination**
+single-pass and the `python`/`lark` grammars become bakeable. **Status (L2):** all three
+lowering shapes have landed behind the `LexerBackend::Dfa` engine — **trailing** boundary
+(M1, `OP`/`DEC_NUMBER`'s `(?![1-9])`/`(?![a-z])` guarded accept), **leading** boundary
+(M2, a match-start precondition), and **bounded lookbehind** (M3, a backward guard at a
+*fixed* char-offset). The `Dfa` backend is gated byte-identical to the `fancy-regex`
+`Scanner` over the compliance bank + JSON corpus + python/lark files + a generated
+lookaround population (`tests/test_scanner_differential.rs`, 0 divergences) and
+per-shape generative-equivalence + Route-1 proofs + mutation meta-tests. **Still on the
+`fancy-regex` side-probe (a *decline*, never mis-lowered):** a lookbehind after a
+*variable-width* prefix — `python.LONG_STRING`/`STRING`'s `.*?(?<!\\)` — and `STRING`'s
+leading `(?!"")` after a variable-width prefix (needs NFA-state splicing); both are the
+deferred variable-offset / STRING-splice milestone, and `LexerBackend::Dfa` is not yet
+the default. Load-time **elimination**
 (`docs/LOOKAROUND_ELIMINATION_PLAN.md`) is now **Phase 1** of that (the reducible Tier-E
 terminals); the irreducible G-tier (`STRING`/`OP`/`DEC_NUMBER` — see
 `docs/TERMINAL_REDUCTION_DIAGNOSIS.md`) is lowered into the DFA rather than rejected.

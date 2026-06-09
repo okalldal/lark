@@ -155,14 +155,13 @@ fn generated_supported_terminals_match_their_declared_shape() {
     );
 }
 
-/// The entry point lowers exactly the shapes implemented so far, leaves the rest
-/// *pending*, and rejects out-of-shape assertions permanently. This is the harness's
-/// per-shape progress gate: as each milestone lands, its shape flips from pending to
-/// `Ok(Lowered::…)`. M1 has landed **trailing-boundary**, so:
+/// The entry point lowers every implemented shape and rejects out-of-shape
+/// assertions permanently. With M1/M2/M3 landed, all three supported shapes lower:
 ///
 ///   * a plain terminal lowers (`Lowered::Plain`);
-///   * a generated **trailing** terminal lowers (`Lowered::Trailing`) — *not* pending;
-///   * a generated **leading** / **lookbehind** terminal is still pending (M2/M3);
+///   * every generated **trailing** / **leading** / **lookbehind** terminal lowers
+///     to non-empty branches (the generated lookbehind population is all fixed-offset,
+///     so none is declined to fancy);
 ///   * every adversarial out-of-shape terminal is rejected permanently.
 #[test]
 fn lowering_entry_point_lowers_landed_shapes_and_rejects_the_rest() {
@@ -175,34 +174,19 @@ fn lowering_entry_point_lowers_landed_shapes_and_rejects_the_rest() {
     ));
 
     for t in supported_terminals() {
-        match t.shape {
-            // M1 trailing + M2 leading: boundary shapes lower for real now.
-            ShapeClass::TrailingBoundary | ShapeClass::LeadingBoundary => {
-                let lowered = lower_terminal(&t.name, &t.pattern).unwrap_or_else(|e| {
-                    panic!("boundary terminal {:?} must lower now, got: {e}", t.pattern)
-                });
-                assert!(
-                    matches!(lowered, Lowered::Branches(ref b) if !b.is_empty()),
-                    "boundary terminal {:?} must lower to branches, got {lowered:?}",
-                    t.pattern
-                );
-            }
-            // M3: bounded-lookbehind still pending — message must name the terminal.
-            ShapeClass::BoundedLookbehind => {
-                let err = lower_terminal(&t.name, &t.pattern)
-                    .err()
-                    .unwrap_or_else(|| panic!("entry point unexpectedly lowered {:?}", t.pattern));
-                let msg = format!("{err}");
-                assert!(
-                    msg.contains(&t.name),
-                    "message must name the terminal: {msg}"
-                );
-                assert!(
-                    is_pending_shape_error(&err),
-                    "a not-yet-landed shape must reject as pending, got: {msg}"
-                );
-            }
-        }
+        // All three supported shapes lower for real now (M1/M2/M3).
+        let _ = ShapeClass::BoundedLookbehind; // shapes are exhaustive; no pending tier
+        let lowered = lower_terminal(&t.name, &t.pattern).unwrap_or_else(|e| {
+            panic!(
+                "supported {:?} terminal {:?} must lower now, got: {e}",
+                t.shape, t.pattern
+            )
+        });
+        assert!(
+            matches!(lowered, Lowered::Branches(ref b) if !b.is_empty()),
+            "supported terminal {:?} must lower to branches, got {lowered:?}",
+            t.pattern
+        );
     }
 
     // Every adversarial terminal is rejected (permanently, not pending).

@@ -83,26 +83,42 @@ maximal-munch driver, and the differential oracle `tests/test_scanner_differenti
 
 ### L2 — The bounded-lookaround lowering feature *(the meat)*
 
-> **Status — the verification harness landed (harness-first phase complete).** The
-> safety net the lowering is gated by exists *before* any lowering, with the lowering
-> stubbed to reject every lookaround terminal:
+> **Status — all three lowering shapes have landed (M0–M3).** The harness-first net
+> exists, and every supported shape now lowers into the DFA behind it, gated green:
 > * **Front-end** resurrected from closed #110 (without its Pike-VM `matcher.rs`):
 >   `src/lookaround/mod.rs` (assertion parser) + `src/lookaround/classify.rs` (the
->   shape classifier + `lower_terminal` entry point, which rejects all — supported
->   shapes as "pending", out-of-shape permanently).
-> * **Harness layers**: the scanner differential (`tests/test_scanner_differential.rs`)
->   now iterates a generated lookaround-grammar population, tracking each as a
->   **pending** skip until its shape lands; generative equivalence vs `fancy-regex`
->   (`tests/test_lowering_equivalence.rs`, `#[ignore]`'d pending shapes); the Route-1
->   proof skeleton (`tests/test_lowering_proof.rs`, `#[ignore]`'d); the **active**
->   reject corpus + mutation meta-test (`tests/test_lowering_reject.rs`); and the
->   seam/edge fixtures (`tests/test_lowering_fixtures.rs`). Generators + the oracle +
->   the mutation framework live in `tests/common/lowering.rs`.
+>   shape classifier) + `src/lookaround/lower.rs` (the real lowering). `lower_terminal`
+>   lowers a fully-supported terminal into per-branch sub-patterns + guards, **declines**
+>   (routes to `fancy-regex`) an instance it cannot faithfully lower (a non-greedy-
+>   monotone guarded base, a variable-offset lookbehind, a lookaround nested behind a
+>   flag wrapper), and **rejects** an out-of-shape assertion permanently.
+> * **Engine** (M0 re-platform): the `DfaScanner` is rebuilt on `thompson::Builder` →
+>   `dense::DFA`, with a **leftmost-first plain engine** (unguarded sub-patterns) and an
+>   **all-matches guarded engine** (the guarded-accept accumulator). M1 landed the
+>   trailing-boundary guarded accept, M2 the leading-boundary precondition, **M3 the
+>   bounded lookbehind** — a *backward* guard checked at a **fixed char-offset** from the
+>   match start (the offset is constant because the lowering declines a variable-width
+>   prefix), so the history window is read directly from the haystack at lex time, the
+>   "carry the window forward" move realized without a custom NFA.
+> * **Harness layers, now all active**: the scanner differential
+>   (`tests/test_scanner_differential.rs`) compares the generated lookaround-grammar
+>   population under both backends — 0 pending, ~409 grammars / 1M+ inputs, 0
+>   divergences; generative equivalence vs `fancy-regex` for all three shapes
+>   (`tests/test_lowering_equivalence.rs`) plus the boundary **and** lookbehind
+>   equivalence-layer mutation meta-tests (ignore-the-lookbehind / forget-the-parity-flip
+>   / off-by-one-width, each caught); the Route-1 DFA-equivalence proof for all three
+>   shapes (`tests/test_lowering_proof.rs`); the reject corpus + mutation meta-test
+>   (`tests/test_lowering_reject.rs`); and the seam/edge fixtures
+>   (`tests/test_lowering_fixtures.rs`). Generators + oracle + mutation framework live in
+>   `tests/common/lowering.rs`.
 >
-> The first-shape session implements a shape's lowering, points the `lowered_prefix`
-> hook (and the Dfa backend) at the real lowered `DfaScanner`, then drops that shape's
-> `#[ignore]`s — the harness flips it from pending to gated automatically. **No real
-> lowering, no `DfaScanner` engine change, was done in the harness session.**
+> **Still on the `fancy-regex` side-probe (a *decline*, not a gap):** a bounded
+> lookbehind after a **variable-width** prefix — `python.LONG_STRING`'s
+> `.*?(?<!\\)(\\\\)*?` and `python.STRING`'s `(?<!\\)` — has no fixed offset, so M3
+> declines it (correct, never mis-lowered). `python.STRING`'s leading `(?!"")` after a
+> variable-width prefix needs NFA-state splicing. Both are the deferred variable-offset /
+> STRING-splice milestone; until then those terminals lex on `fancy-regex` exactly as
+> before, so the bundled `python.lark`/`lark.lark` stay correct.
 
 A **general** lowering keyed on the assertion's **shape**, not on the six bundled
 terminals. Lower each supported bounded assertion into lookaround-free DFA states

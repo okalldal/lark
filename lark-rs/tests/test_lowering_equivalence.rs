@@ -16,8 +16,9 @@
 mod common;
 
 use common::lowering::{
-    boundary_mutations, corpus, fancy_matcher, fancy_prefix, has_guard, lowered_prefix,
-    mutant_matcher, supported_terminals, GenTerminal,
+    boundary_mutations, corpus, fancy_matcher, fancy_prefix, has_guard, has_lookbehind,
+    lookbehind_mutations, lowered_prefix, mutant_lookbehind_matcher, mutant_matcher,
+    supported_terminals, GenTerminal,
 };
 use lark_rs::ShapeClass;
 
@@ -135,9 +136,53 @@ fn leading_boundary_lowered_equals_fancy() {
 }
 
 #[test]
-#[ignore = "pending first shape — bounded-lookbehind lowering not yet implemented"]
 fn bounded_lookbehind_lowered_equals_fancy() {
     run_shape(ShapeClass::BoundedLookbehind);
+}
+
+/// The mutation meta-test for the **bounded-lookbehind** lowering (M3): each
+/// deliberately-wrong way to lower a lookbehind (ignore it, flip its polarity, an
+/// off-by-one window width) must be *caught* — it must diverge from the `fancy-regex`
+/// oracle somewhere on the (biting) lookbehind population. A surviving mutant is a
+/// hole in the net (`docs/LEXER_DFA_PLAN.md`, "Validate the harness itself"). The
+/// biting generator cases (`\w(?<!_)x`, …) are what keep the *ignore-the-lookbehind*
+/// mutant from passing vacuously.
+#[test]
+fn bounded_lookbehind_lowering_mutants_are_caught() {
+    let terms: Vec<GenTerminal> = supported_terminals()
+        .into_iter()
+        .filter(|t| t.shape == ShapeClass::BoundedLookbehind && has_lookbehind(&t.pattern))
+        .collect();
+    assert!(!terms.is_empty(), "no lookbehind terminals to mutate");
+
+    for mutation in lookbehind_mutations() {
+        let mut caught: Option<String> = None;
+        'search: for t in &terms {
+            let Some(oracle) = fancy_matcher(&t.pattern) else {
+                continue;
+            };
+            let Some(mutant_re) = mutant_lookbehind_matcher(&t.pattern, mutation) else {
+                continue;
+            };
+            for input in corpus(&t.alphabet, t.max_len) {
+                let mutant = fancy_prefix(&mutant_re, &input);
+                let correct = fancy_prefix(&oracle, &input);
+                if mutant != correct {
+                    caught = Some(format!(
+                        "{} {:?} on {input:?}: mutant={mutant:?} != correct={correct:?}",
+                        t.name, t.pattern
+                    ));
+                    break 'search;
+                }
+            }
+        }
+        assert!(
+            caught.is_some(),
+            "lookbehind mutant {mutation:?} survived the population — the \
+             generative-equivalence layer would NOT catch this wrong lowering. \
+             This is a hole in the net."
+        );
+    }
 }
 
 /// Active **now**: the oracle, the generators, and the exhaustive corpus all work,

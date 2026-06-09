@@ -21,7 +21,7 @@ pub use lookaround::classify::{
     classify, lower_terminal, Classification, Classifier, DefaultClassifier, Lowered, Rejection,
     ShapeClass, Verdict,
 };
-pub use lookaround::lower::{GuardSpec, LoweredBranch};
+pub use lookaround::lower::{GuardSpec, LookbehindGuard, LoweredBranch};
 pub use parsers::{
     basic_lexer_conf, lalr, EarleyParser, LexFailure, ParseTable, ParserConf, TokenSource,
 };
