@@ -29,11 +29,16 @@ perf-counters = []
 
 [dependencies]
 regex = "1.10"
-# Backtracking-regex overlay for the handful of bundled-grammar terminals that use
-# lookaround (lookahead/lookbehind), which the linear-time `regex` crate cannot
-# compile (issue #40). Only lookaround-bearing terminals route here; every other
-# terminal stays on the fast combined `regex` scanner. Because `regex` is a subset,
-# a pattern that compiles with `regex` is never handed to `fancy-regex`.
+# Backtracking-regex overlay for the bundled-grammar terminals that use lookaround
+# (lookahead/lookbehind) which the linear-time `regex` crate cannot compile (issue #40).
+# This is a RUNTIME dependency *today*: the lexer DFA plan has lowered most bounded
+# lookaround into the `regex-automata` DFA, but two bundled terminals still *decline* to
+# `fancy-regex` at runtime (`python.LONG_STRING`, `lark.REGEXP`), so the side-probe is
+# still live. The plan is to drop it from the runtime at **L4** (once every bundled
+# lookaround terminal lowers or is rejected by policy) and keep `fancy-regex` thereafter
+# as a permanent **dev/test oracle** only — the independent match-length reference the
+# lowering is verified against (`docs/LEXER_DFA_PLAN.md`, L4 + Verification). Because
+# `regex` is a subset, a pattern that compiles with `regex` is never handed to `fancy-regex`.
 fancy-regex = "0.18"
 # Dense-DFA support for the strict-mode regex-collision check (issue #35): the
 # `regex` crate has no intersection/emptiness test, so we drop to its automata

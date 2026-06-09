@@ -6,17 +6,70 @@ which becomes **Phase 1** here. Rationale and the decision reversal are recorded
 [`LOOKAROUND_STRATEGY_ANALYSIS.md`](LOOKAROUND_STRATEGY_ANALYSIS.md) (revision
 2026-06-08). Terminal-level classification in
 [`TERMINAL_REDUCTION_DIAGNOSIS.md`](TERMINAL_REDUCTION_DIAGNOSIS.md).*
-*Date: 2026-06-08.*
+*Date: 2026-06-08 (status refreshed 2026-06-09).*
+
+## Current status on master
+
+A one-paragraph honest snapshot, so the plan stops describing landed work as future.
+The per-terminal route table lives in [`LEXER_DFA_STATUS.md`](LEXER_DFA_STATUS.md).
+
+| Phase / piece | State |
+|---|---|
+| L0/L1 — `ScannerBackend` seam + `regex-automata` `DfaScanner` + maximal-munch driver | **Landed** (PR #114). |
+| M1 — trailing-boundary guarded accept | **Landed.** |
+| M2 — leading-boundary precondition | **Landed.** |
+| M3 — fixed-offset bounded lookbehind | **Landed.** |
+| M4 — `python.STRING` opening-guard splice (`recognize_string_idiom`) | **Landed** (PR #124). |
+| L3 — `LexerBackend::Dfa` as the default backend | **Landed** (it is `#[default]`). |
+| `python.LONG_STRING` lowering | **Not landed** — declines to `fancy-regex`. |
+| `lark.REGEXP` lowering | **Not landed** — declines to `fancy-regex`. |
+| L4 — remove runtime `fancy-regex` | **Blocked** (LONG_STRING/REGEXP still decline; decline-vs-reject contract unresolved). |
+| L5 — bake a serialized DFA scanner bundle into standalone/C/WASM | **Blocked** — standalone still bakes the regex `ScannerPlan`. |
+
+So the strategy has paid off for the common path and for `python.STRING`, but the
+*bakeability* and *drop-`fancy-regex`* wins (L4/L5) are **not** realized yet: `fancy-regex`
+is still a runtime dependency, two bundled lookaround terminals still ride it, and the
+standalone generator still emits a regex-based `ScannerPlan`, not a serialized DFA.
+
+## Runtime routing taxonomy
+
+Every terminal takes exactly one of these routes at build time. Keeping the names
+distinct is what lets the docs, the classifier comments, and the tripwire test tell one
+story:
+
+* **Plain** — no lookaround assertion. Compiles straight into the leftmost-first plain
+  DFA. The overwhelming common case.
+* **Lowered** — a supported, *proven* bounded assertion (M1/M2/M3/M4). Lowered into plain
+  DFA branches + guard side-tables; **no** `fancy-regex` at runtime for this terminal.
+* **Declined-to-fancy** — a shape supported *in principle* (or a transitional bundled
+  case) that is **not yet lowered**, or a per-instance lowering that the realizability
+  check declines. The terminal still runs on `fancy-regex` at runtime. `python.LONG_STRING`
+  and `lark.REGEXP` are here today.
+* **Rejected** — an out-of-shape assertion (unbounded, internal/priority-entangled,
+  backref, nested, variable-width lookbehind). A loud build error, **permanently**.
+* **Invalid regex** — neither `regex` nor `fancy-regex` accepts the pattern. A build error.
+
+**Design debt to resolve before L4.** The current build path conflates *declined* and
+*rejected* on the runtime side: when `lower_terminal_dotall` returns `Err` — whether that
+`Err` means "supported shape, not lowered yet" or "out-of-shape, reject" — the scanner
+compiles the terminal on `fancy-regex` and continues. That is a deliberate *compatibility
+fallback* (it keeps user grammars working while lowering is incomplete), but it means an
+unsupported user lookaround silently rides `fancy-regex` instead of erroring. This is fine
+*today* (it preserves behaviour) but it is **not** the final contract: before L4 the
+result type must separate `Lowered` / `DeclineToFancy` / `Unsupported` / `InvalidRegex`,
+and the runtime policy must be made explicit (bundled known-declines may route to fancy;
+unsupported shapes must error unless a compatibility mode is deliberately chosen).
 
 ## Goal
 
 Lex **every** terminal — lookaround-bearing ones included — in a **single
 table-driven pass** over one combined automaton, built once and bakeable as static
 data. Concretely: build the combined scanner on `regex-automata` (lazy/dense DFA,
-multi-pattern `PatternID`), **lower** each bounded lookaround assertion into
-lookaround-free automaton states so it joins the same machine, drive it with a
-maximal-munch loop that reproduces Lark's exact selection, and drop `fancy-regex` from
-the runtime.
+multi-pattern `PatternID`), **lower** each *supported, proven* bounded lookaround
+assertion into lookaround-free automaton states so it joins the same machine (declining or
+rejecting the rest — see "What we support" and the red line under "Future
+generalization"), drive it with a maximal-munch loop that reproduces Lark's exact
+selection, and drop `fancy-regex` from the runtime.
 
 Wins, in priority order:
 
@@ -170,25 +223,56 @@ Two fallouts to carry forward, both gated by the differential oracle:
 * **Re-derive the start-byte prefilter** — `plain_start_bytes` is computed off the meta
   union today; it must be recomputed from the new union (or the common path regresses).
 
-### L3 — Flip the Dfa backend to default
+### L3 — Flip the Dfa backend to default *(landed)*
 
-Once L2's lowering is green across the full differential bank, make `LexerBackend::Dfa`
-the default. The throughput + correctness wins for the lookaround grammars
-(`python`/`lark`) land here.
+**L3 has landed.** `LexerBackend::Dfa` is `#[default]`, so `LexerConf::new` /
+`LarkOptions` build the DFA scanner unless `LexerBackend::Regex` is explicitly chosen,
+with `fancy-regex` as the fallback for the *declined* lookaround terminals. The
+differential oracle is 0 divergences across the full bank + JSON + python/lark corpora,
+so the swap is correctness-identical, and it is faster on the all-plain common path. The
+remaining work is **not** the default flip; it is eliminating the fallback (L4).
 
-### L4 — Remove `fancy-regex` from the runtime
+### L4 — Remove `fancy-regex` from the runtime *(blocked)*
 
-With every terminal on the DFA, drop the `AnyRegex::Fancy` runtime routing — the lexer
-is `regex-automata`-only. **Keep `fancy-regex` as a dev/test dependency**: it remains
-the independent match-length oracle the lowering is verified against. This is a
-standing decision, not a temporary state.
+Remove the `AnyRegex::Fancy` runtime routing **after every bundled lookaround terminal is
+either lowered or intentionally rejected by policy** — so the lexer is
+`regex-automata`-only. **Keep `fancy-regex` as a dev/test dependency**: it remains the
+independent match-length oracle the lowering is verified against. This is a standing
+decision, not a temporary state.
 
-### L5 — Bake the DFA static (the bakeability payoff)
+**Blocked, two ways:**
 
-Serialize the combined DFA (`regex-automata` `to_bytes`) + the small guarded-accept
-side-table, and bake them into the standalone / C / WASM runtimes, replacing the baked
-`ScannerPlan` alternation. Confirm the bundled `python`/`lark` grammars now generate
-standalone parsers.
+1. `python.LONG_STRING` and `lark.REGEXP` still *decline to fancy* (see
+   [`LEXER_DFA_STATUS.md`](LEXER_DFA_STATUS.md)). While any bundled terminal rides
+   `fancy-regex`, the runtime cannot drop it.
+2. The **decline-vs-reject contract** for *user* grammars is unresolved (see "Runtime
+   routing taxonomy"). Today an unsupported user lookaround silently routes to
+   `fancy-regex` via the compatibility fallback. Before L4 the result type must split
+   `Lowered` / `DeclineToFancy` / `Unsupported` / `InvalidRegex`, and the policy must be
+   explicit: bundled known-declines may route to fancy during the transition; unsupported
+   shapes must produce a clear build error unless a compatibility mode is deliberately
+   chosen.
+
+### L5 — Bake the scanner bundle static (the bakeability payoff) *(blocked)*
+
+The bake target is **not** literally one serialized DFA. The implemented scanner is a
+*bundle*, and L5 must serialize the bundle the implementation actually has:
+
+* the **plain leftmost-first** dense DFA (unguarded sub-patterns),
+* the **guarded all-matches** dense DFA (guarded sub-patterns),
+* the **guard body** DFAs (or serialized guard tables) for leading/trailing guards,
+* the **lookbehind guard** side tables (offset + width + body DFA),
+* the **pattern / rank / branch-order** maps that drive leftmost-first selection,
+* the **start-byte prefilter**,
+* the **`unless`** keyword-retype map,
+* the **`%ignore`** set.
+
+Bake that bundle into the standalone / C / WASM runtimes, replacing the regex
+`ScannerPlan` alternation, starting with **Rust standalone** before C/WASM. Confirm the
+bundled `python`/`lark` grammars then generate standalone parsers. **Blocked on L4** (a
+bundle that still has a `fancy-regex` side-probe is not serializable static data) and on
+the standalone generator, which today still bakes the regex `ScannerPlan` (see
+`src/standalone/mod.rs`).
 
 ## How the lowering works
 
@@ -359,7 +443,201 @@ priority surviving the union.
 
 | Artifact | Disposition |
 |---|---|
-| `src/lookaround/mod.rs` (assertion front-end) | **Resurrect** from the closed #110 branch / git history — it is **not** on `master`, so retrieving + re-landing it is a real first task — then repurpose as the L2 lowering/classifier pass |
+| `src/lookaround/mod.rs` (assertion front-end) | **Landed** — resurrected from closed #110 and repurposed as the L2 classifier/lowering front-end (`mod.rs` parser + `classify.rs` + `lower.rs`), without its Pike-VM `matcher.rs` |
 | `src/lookaround/matcher.rs` (Pike-VM) | **Not used** — a DFA replaces it |
 | `tests/test_lookaround.rs` + `fixtures/oracles/lookaround/` | **Reuse** as the lookaround behavioral gate |
 | `fancy-regex` (runtime routing) | **Drop at L4 — retain as the test oracle** (Verification) |
+
+## Future generalization without a Pike VM
+
+This is the **next safe expansion path** — documented, not implemented in this cleanup.
+It defines what can be lowered *without* building a priority regex engine. The expansion
+ladder is four named stages; cross the red line at the end only as a deliberately-approved
+future phase.
+
+### Stage A — the general `GuardAt` model
+
+The next safe generalization is not "arbitrary lookaround." It is a uniform
+representation for assertions whose evaluation point is **uniquely determined from the
+candidate match span**.
+
+Conceptual model:
+
+```text
+GuardAt {
+    source: original assertion source, for diagnostics,
+    polarity: positive | negative,
+    direction: ahead | behind,
+    at: start + k_chars | end - k_chars | end + 0,
+    body: assertion-body regex source,
+    max_width_chars: finite width of the assertion body,
+}
+```
+
+For a candidate token match spanning byte range `[start, end)`:
+
+- `start + k_chars` means: advance `k` Unicode scalar values from `start`.
+- `end - k_chars` means: walk `k` Unicode scalar values backward from `end`.
+- `end + 0` is the normal trailing-lookahead position.
+- The resolved guard point must be a valid UTF-8 boundary.
+- A lookahead guard tests `body` anchored at the guard point.
+- A lookbehind guard tests whether `body` fully matches some bounded suffix ending at the guard point.
+- A positive guard requires the assertion body to match.
+- A negative guard requires the assertion body **not** to match.
+
+A lowered branch is:
+
+```text
+Branch {
+    base_regex: lookaround-free consumed-token regex,
+    guards: Vec<GuardAt>,
+}
+```
+
+Multiple guards per branch are allowed if every guard point is computable from the
+candidate match span and every guard body is bounded.
+
+Supported examples:
+
+```text
+(?=if)[A-Za-z_]+
+    => GuardAt { direction: ahead, at: start + 0, positive, body: "if" }
+
+[0-9]+(?![1-9])
+    => GuardAt { direction: ahead, at: end + 0, negative, body: "[1-9]" }
+
+abc(?=:) [A-Za-z]+
+    => GuardAt { direction: ahead, at: start + 3, positive, body: ":" }
+    if the prefix before the assertion is fixed-width.
+
+[A-Za-z]+ (?=:) :
+    => GuardAt { direction: ahead, at: end - 1, positive, body: ":" }
+    if the suffix after the assertion is fixed-width.
+
+[A-Za-z](?<!_)x
+    => GuardAt { direction: behind, at: start + 1, negative, body: "_" }
+```
+
+**Acceptance rule.** An assertion may lower to `GuardAt` only when its position is fixed
+relative to `start` or `end` for **every** accepting path of the branch. If the assertion
+position depends on a variable-width prefix, an ordered alternative, or a lazy/greedy path
+choice, it must be rejected or declined unless a separate proof-backed lowering proves
+exact match-end equivalence.
+
+**Branch splitting** is allowed only when it preserves Python/Lark leftmost-first branch
+order exactly. Splitting must not silently turn an internal priority problem into
+unordered alternatives.
+
+**Guarded branch realizability.** If a guard can invalidate some candidate match lengths,
+the base branch must be known to reproduce Python/Lark match-end semantics under the
+guarded-accept driver. Acceptable reasons include:
+
+- greedy-monotone base,
+- prefix-free base,
+- or a committed machine proof of match-end equivalence.
+
+Otherwise, decline/reject. Do not guess. (This is exactly the `is_guard_realizable` gate
+the M1–M4 lowerings already use — Stage A generalizes the *position*, not the
+realizability contract.)
+
+### Stage B — the delimited-token idiom family
+
+Separately from `GuardAt`, support a reusable family of audited **delimited-token**
+lowerings:
+
+```text
+opener body close suffix?
+```
+
+Examples: short strings, long strings, regex literals, block comments.
+
+These are **not** arbitrary internal-lookaround support. They are exact idioms where a
+small delimiter automaton (KMP/Aho-Corasick-style, tracking how much of a multi-character
+close delimiter has been seen, plus escape parity) can replace the lazy body +
+escape/lookaround logic. `python.STRING`'s M4 splice is the first instance;
+`python.LONG_STRING` (multi-char `"""` close) and `lark.REGEXP` (`/…/` with an internal
+`(?!\/)`) are the next two. Each idiom must have:
+
+- an exact recognizer,
+- a narrow acceptance surface,
+- oracle equivalence against `fancy-regex`,
+- a Route-1 / state-pruned proof or an equivalent stronger oracle,
+- scanner differential coverage,
+- hand-written seam canaries.
+
+### Stage C — optional proof-backed product lowering
+
+A future lowering may use product construction or another automata method **only as a
+proof-backed path**:
+
+1. propose a lowered branch + guard representation,
+2. machine-prove match-end equivalence against the reference semantics,
+3. accept only if the proof completes within deterministic size/time budgets,
+4. otherwise decline/reject.
+
+This is **not** a runtime fallback and **not** a license to accept arbitrary lookaround.
+
+### Stage D — priority automaton / TDFA / derivative matcher *(future named phase only)*
+
+Anything beyond Stages A–C — exact priority semantics for assertions whose position is
+*not* uniquely determined — is a different implementation style, not a free lowering pass.
+It is a **future named phase**, deliberately approved, never smuggled into a small
+lowering PR. Do not accidentally rebuild the Pike VM under another name.
+
+### The explicit red line
+
+Reject or decline assertions inside **unbounded repetition**, and assertions whose
+evaluation point depends on **ordered alternation, lazy quantifier choice, or other
+priority-sensitive regex path history**.
+
+Examples that must **not** be accepted by the `GuardAt` model unless a future
+priority-automaton phase is deliberately approved:
+
+```text
+(?:X(?=Y))*          // assertion inside unbounded repetition
+.*?(?=END)           // assertion point chosen by lazy search
+(a|aa)(?=a)a         // assertion point depends on ordered alternative
+(?:A|AB)(?!C)D       // only safe if split/proven without priority drift
+```
+
+Crossing this line means building a priority regex engine in another form: Pike VM,
+Tagged DFA (TDFA), derivative matcher with priority semantics, or equivalent.
+
+## Research direction / non-goals
+
+- **Do not revive the Pike VM** (closed PR #110). The DFA route lowers bounded assertions
+  *away*; it does not execute lookaround at runtime.
+- **Language recognition** for a bounded lookaround is regular (finite automata are closed
+  under intersection/complement). The hard part is exact **lexer match-end semantics**
+  under greedy/lazy quantifiers and leftmost-first terminal priority — a plain language
+  DFA is not enough (`/.*?END/` vs `/.*END/` recognize the same language but pick a
+  different match end on `aENDbEND`).
+- Going beyond **guard-at-fixed-position** (Stage A) and **audited delimiter idioms**
+  (Stage B) likely becomes a priority-automaton / TDFA / derivative-matcher project
+  (Stage D). Relevant literature: Barrière & Pit-Claudel (linear matching of JS regexes
+  with lookaround); Varatalu/Veanes/Ernits and the RE# follow-up (derivative-based
+  matching with intersection/complement/lookarounds); Trofimovich and Borsotti/Trofimovich
+  (TDFA with lookahead, the RE2C lineage); Martynova & Okhotin (regex→DFA has inherent
+  exponential worst cases — every "just determinize it" plan needs size gates).
+- That must be a **named future phase**, not hidden inside small lowering PRs.
+
+## Next implementation PR checklist
+
+Any PR that lands a **new lowering** (LONG_STRING, REGEXP, a `GuardAt` generalization, …)
+must include, in the *same* PR:
+
+- [ ] an **exact recognizer** with a narrow acceptance surface (reject-when-unsure);
+- [ ] an explicit **route/status update** (move the terminal from *declined* to *lowered*
+      in [`LEXER_DFA_STATUS.md`](LEXER_DFA_STATUS.md));
+- [ ] **generative equivalence** vs `fancy-regex` for the new shape;
+- [ ] a **Route-1 (or state-pruned) proof** representative, *or* a documented reason proof
+      is infeasible plus an equivalent stronger oracle;
+- [ ] **scanner differential** coverage (`tests/test_scanner_differential.rs`);
+- [ ] **hand-authored canaries** for the specific adversarial seam;
+- [ ] **reject-corpus** additions if the recognizer introduces a new false-accept risk;
+- [ ] the **dense-DFA build-cost gate** still green
+      (`tests/test_lexer_dfa_build_scaling.rs`);
+- [ ] the **bundled-terminal status tripwire** updated
+      (`tests/test_string_splice.rs::bundled_lookaround_terminal_lowering_status`);
+- [ ] **docs + `CLAUDE.md`** updated in the same PR (and, if *all* bundled lookaround
+      terminals now lower, the L4/L5 payoff re-evaluated).

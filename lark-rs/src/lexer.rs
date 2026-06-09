@@ -495,6 +495,15 @@ impl Scanner {
 ///     the `unless` retype are **copied verbatim** from `Scanner`: only the
 ///     plain-terminal engine changes.
 ///
+/// **The `fancy` side-probe is transitional and blocks L4.** Even under the default `Dfa`
+/// backend, a *declined* lookaround terminal — one whose shape is not yet lowered
+/// (`python.LONG_STRING`, `lark.REGEXP`), or a per-instance lowering the realizability
+/// check declines — still runs on `fancy-regex` here. This keeps the bundled grammars
+/// correct, but it means `fancy-regex` stays in the runtime: L4 (drop the side-probe) and
+/// L5 (bake the scanner as static data) are blocked until every bundled lookaround
+/// terminal lowers or is rejected by policy (`docs/LEXER_DFA_PLAN.md`, L4/L5;
+/// `docs/LEXER_DFA_STATUS.md`).
+///
 /// The `regex` crate's combined alternation came with a free literal prefilter; an
 /// *anchored* search runs no prefilter of its own, so we re-add an explicit
 /// **start-byte prefilter** (`start_bytes`): the set of bytes any plain terminal can
@@ -518,8 +527,10 @@ struct DfaScanner {
     /// Start-byte prefilter over the base union of both engines (see the struct docs).
     /// `None` disables it (always run the engines).
     start_bytes: Option<Box<[bool; 256]>>,
-    /// Lookaround terminals still routed to `fancy-regex` (a shape not yet lowered, or
-    /// a guarded base that is not greedy-monotone), rank-sorted — as in [`Scanner`].
+    /// Lookaround terminals **declined to `fancy-regex`** (a shape not yet lowered —
+    /// `python.LONG_STRING`, `lark.REGEXP` — or a per-instance decline: a variable-offset
+    /// lookbehind, or a guarded base that is not guard-realizable), rank-sorted — as in
+    /// [`Scanner`]. Transitional: this list must be empty before L4 can drop `fancy-regex`.
     fancy: Vec<(usize, SymbolId, AnyRegex)>,
     /// regex-terminal-id → (matched-text → keyword-terminal-id) — identical retype.
     unless: HashMap<SymbolId, HashMap<String, SymbolId>>,
@@ -766,9 +777,11 @@ impl DfaScanner {
         //   * unguarded → one leftmost-first DFA (M0 semantics, exact within-pattern
         //     order — a sibling guard never disturbs `/ab|abc/`);
         //   * guarded → one all-matches DFA driven by the guarded-accept accumulator.
-        // A lookaround terminal whose shape is not yet lowered (bounded lookbehind),
-        // or whose guarded base is not greedy-monotone (see `is_greedy_monotone`), stays
-        // on `fancy-regex`.
+        // A lookaround terminal whose shape is not yet lowered (`python.LONG_STRING`,
+        // `lark.REGEXP`), or whose guarded base is not guard-realizable (see
+        // `is_guard_realizable`), or whose lookbehind sits at a variable offset, declines
+        // to `fancy-regex`. M1/M2/M3 boundary+lookbehind and the M4 STRING splice all
+        // lower; the decline path is the transitional fallback that blocks L4.
         let mut plain_subs: Vec<SubPattern> = Vec::new();
         let mut plain_srcs: Vec<String> = Vec::new();
         let mut guarded_subs: Vec<SubPattern> = Vec::new();
@@ -824,12 +837,16 @@ impl DfaScanner {
                 })
             };
 
-            // Route to fancy unless the terminal lowers. `lower_terminal` already
-            // declines a shape not yet lowered (bounded lookbehind) *and* a guarded
-            // branch whose base is not guard-realizable (it can't ride the
-            // longest-where-guard-holds accumulator) — so a returned `Branches` is
-            // always faithfully lowerable. `dotall` is threaded so the string-idiom body
-            // normalization admits a newline exactly when this terminal's `.` would.
+            // Route to fancy unless the terminal lowers. `lower_terminal` declines a
+            // shape not yet lowered (`python.LONG_STRING`, `lark.REGEXP`), a lookbehind at
+            // a variable offset, *and* a guarded branch whose base is not guard-realizable
+            // (it can't ride the longest-where-guard-holds accumulator) — so a returned
+            // `Branches` is always faithfully lowerable. NOTE (decline-vs-reject debt): an
+            // *out-of-shape* (permanently rejected) user assertion also lands in this `_`
+            // arm and routes to fancy today — a compatibility fallback the L4 contract must
+            // split out (see `docs/LEXER_DFA_PLAN.md`, "Runtime routing taxonomy").
+            // `dotall` is threaded so the string-idiom body normalization admits a newline
+            // exactly when this terminal's `.` would.
             let dotall = flags & crate::grammar::terminal::flags::DOTALL != 0;
             let lowered =
                 match crate::lookaround::classify::lower_terminal_dotall(&def.name, raw, dotall) {

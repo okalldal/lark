@@ -3,13 +3,25 @@
 //! support" + "How the lowering works").
 //!
 //! [`lower_terminal`] is the entry point the build path calls. It classifies a
-//! terminal and, for the shapes whose lowering has landed (M1 trailing-boundary, M2
-//! leading-boundary), returns the lowered per-branch sub-patterns ([`super::lower`]);
-//! a supported-but-not-yet-lowered shape (bounded lookbehind) is reported *pending*,
-//! and an out-of-shape assertion is rejected *permanently*. The classifier is the
-//! safety boundary: it decides, for each terminal pattern, whether the assertion(s)
-//! fall into a **supported shape** or an **unsupported** one (rejected at build time,
-//! forever) — and it must never false-accept.
+//! terminal and, for every supported shape whose lowering has landed — M1
+//! trailing-boundary, M2 leading-boundary, M3 fixed-offset bounded-lookbehind, and the
+//! M4 `python.STRING` opening-guard splice — returns the lowered per-branch sub-patterns
+//! ([`super::lower`]). A per-instance lowering that cannot ride the engine (a
+//! variable-offset lookbehind, a non-realizable guarded base) is **declined** (routed to
+//! `fancy-regex`), and an out-of-shape assertion is reported as a permanent rejection
+//! `GrammarError`. No supported shape is *pending* any longer — all four lowerings are
+//! live. The classifier is the safety boundary: it decides, for each terminal pattern,
+//! whether the assertion(s) fall into a **supported shape** or an **unsupported** one —
+//! and it must never false-accept.
+//!
+//! **Caveat — "rejected" here is the classifier verdict, not yet the runtime outcome.**
+//! This entry point *reports* an unsupported assertion as a `GrammarError`, but the
+//! current `DfaScanner` build path still catches that `Err` and falls back to
+//! `fancy-regex` as a compatibility route (so an out-of-shape *user* assertion lexes
+//! today rather than failing the build). L4 must split `Unsupported` from
+//! `DeclineToFancy` and make the final runtime policy explicit (`docs/LEXER_DFA_PLAN.md`,
+//! "Runtime routing taxonomy"). The classifier's *own* contract below is unaffected: it
+//! must still reject-when-unsure and never false-accept.
 //!
 //! ## The classifier's contract
 //!
@@ -30,13 +42,16 @@
 //! (`(?![ ]*X)`), an *internal* (mid-pattern / priority-entangled) lookahead, a
 //! backreference, a nested assertion, or a variable-width lookbehind.
 //!
-//! Recognizing a leading-boundary lookahead that sits *after a fixed-width prefix
-//! inside a sub-group* — `python.STRING`'s `(?!"")` right after the opening quote —
-//! is a deliberate **first-shape refinement**, not done here: this skeleton only
-//! recognizes assertions at the terminal's *top-level* boundary, and conservatively
-//! classifies a deeper lookahead as internal (reject). That keeps the dangerous
-//! direction safe; the reject/pending split is re-derived the moment the lowering
-//! for a shape lands.
+//! The recognized idioms are **narrow gates, not general internal-lookahead support.**
+//! `python.STRING`'s `(?!"")` sits *after a variable-width prefix + the opening quote* —
+//! a position the top-level walk sees as `Internal`. It lowers only because
+//! [`super::lower::recognize_string_idiom`] matches that *exact* terminal shape and
+//! re-tags its interior lookaheads as `Leading`; outside a recognized idiom a deeper
+//! lookahead stays `Internal` (reject). The recognizer — never a position heuristic — is
+//! the single gate, so the dangerous direction (false-accept) stays closed. Two bundled
+//! lookaround terminals are *not* lowered yet and **decline to `fancy-regex`**:
+//! `python.LONG_STRING` (multi-char `"""` close) and `lark.REGEXP` (internal `(?!\/)`);
+//! see [`LEXER_DFA_STATUS.md`](../../docs/LEXER_DFA_STATUS.md).
 
 use super::{Look, Node};
 use crate::error::GrammarError;
