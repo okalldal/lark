@@ -83,9 +83,10 @@ maximal-munch driver, and the differential oracle `tests/test_scanner_differenti
 
 ### L2 — The bounded-lookaround lowering feature *(the meat)*
 
-> **Status — all three lowering shapes (M0–M3) *and* the `python.STRING` opening-guard
-> splice (M4) have landed.** The harness-first net exists, and every supported shape now
-> lowers into the DFA behind it, gated green:
+> **Status — all three lowering shapes (M0–M3), the `python.STRING` opening-guard splice
+> (M4), *and* the `python.LONG_STRING` multi-character close (M5) have landed.** Of the
+> bundled lookaround terminals only `lark.REGEXP` is still declined. The harness-first net
+> exists, and every supported shape now lowers into the DFA behind it, gated green:
 > * **Front-end** resurrected from closed #110 (without its Pike-VM `matcher.rs`):
 >   `src/lookaround/mod.rs` (assertion parser) + `src/lookaround/classify.rs` (the
 >   shape classifier) + `src/lookaround/lower.rs` (the real lowering). `lower_terminal`
@@ -134,12 +135,45 @@ maximal-munch driver, and the differential oracle `tests/test_scanner_differenti
 > (`tests/test_lowering_equivalence.rs`), and the python.lark differential (0
 > divergences with STRING *lowered*, not declined).
 >
-> **Still on the `fancy-regex` side-probe (a *decline*, not a gap):**
-> `python.LONG_STRING` (a lazy `.*?` body with a *multi-character* `"""` close and no
-> opening guard) and `lark.REGEXP` (an internal `(?!\/)` after the opening slash) are
-> **attempted and declined cleanly** — they route to `fancy-regex` exactly as before, so
-> the bundled grammars stay correct. Lowering them is a bonus the STRING milestone does
-> not require; until they land, `fancy-regex` stays in the runtime and L4 waits.
+> **M5 — the `python.LONG_STRING` multi-character close (landed).** `python.LONG_STRING`
+> = `("""…lazy body…(?<!\\)(\\\\)*?"""|'''…''')` is a lazy `.*?` body with a
+> *multi-character* `"""`/`'''` close, the escaped-close lookbehind, and **no opening
+> guard** — strictly simpler than `STRING` except for the multi-char close. It is now
+> lowered by the same string-idiom path (`recognize_string_idiom` generalized to a run
+> delimiter `<q>{N}` and an optional opening guard): the lazy escaped body
+> `.*?(?<!\\)(\\\\)*?<q>{N}` is normalized to its proven **greedy prefix-free**
+> character-class equivalent — "everything up to and including the **first unescaped close
+> run**" — `<q>{N}(?:[^<q>\\<nl>]|\\.|<q>{1,N-1}(?:[^<q>\\<nl>]|\\.))*<q>{N}` (the
+> `<q>{1,N-1}(?:…)` arm lets an interior short quote-run be body content while a full
+> `<q>{N}` close run is never absorbed; the `(?<!\\)` is absorbed because every backslash
+> sits in a `\\.` pair). With **no opening guard** the result is a single **unguarded**
+> branch per arm, and the plain leftmost-first engine reproduces fancy's *lazy* match
+> exactly **because the base is prefix-free** (one match length per start) — checked by
+> [`is_prefix_free`] at lowering time (reject-when-unsure: a delimiter shape it cannot
+> prove prefix-free routes to `fancy-regex`). It is DOTALL: `<nl>` (the `\n` exclusion) is
+> present iff the terminal is not DOTALL, exactly as STRING's body. Gated by: the
+> hand-authored `"""…"""` overshoot canary (`"""a""" """b"""` is two tokens, a newline-
+> spanning body is one) under the default `Dfa` backend (`tests/test_string_splice.rs`),
+> the state-pruned Route-1 proof on the **real nested LONG_STRING shape**
+> (`tests/test_lowering_proof.rs::route1_proof_long_string_idiom_real_nested_shape`), the
+> generative-equivalence layer (`long_string_idiom_lowered_equals_fancy`), the scanner
+> differential's long-string idiom population, and the python.lark differential (0
+> divergences with LONG_STRING *lowered*).
+>
+> **One latent fix M5 carried:** the loader bakes a terminal's `/…/flags` into a
+> whole-pattern `(?flags:…)` wrapper (clearing the separate flag field), so STRING's `/i`
+> and LONG_STRING's `/is` arrive as `(?i:…)` / `(?is:…)`. The idiom recognizer now peels
+> that `{i,s}` wrapper (`strip_string_flag_wrapper`), folds `s` into the body's DOTALL, and
+> re-bakes the flags onto each lowered branch — so STRING **and** LONG_STRING genuinely
+> lower in the *real* (`%import`) lexer, not only on the bare representative patterns the
+> harness layers feed. (Before this, both routed to `fancy-regex` in the shipped lexer
+> while the gate assertions passed on the unwrapped patterns.)
+>
+> **Still on the `fancy-regex` side-probe (a *decline*, not a gap):** `lark.REGEXP` (an
+> internal `(?!\/)` after the opening slash, nested inside the body repetition) is
+> **attempted and declined cleanly** — it routes to `fancy-regex` exactly as before, so the
+> bundled grammars stay correct. Lowering it is the last step before L4; until it lands,
+> `fancy-regex` stays in the runtime and L4 waits.
 
 A **general** lowering keyed on the assertion's **shape**, not on the six bundled
 terminals. Lower each supported bounded assertion into lookaround-free DFA states

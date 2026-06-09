@@ -35,10 +35,13 @@
 //!     [`LookbehindGuard`] carrying its char-offset and the body's width window; the
 //!     driver checks the ≤`W` chars ending at that offset against `S`. The offset is
 //!     fixed only when every base element *before* the lookbehind is fixed-width — a
-//!     lookbehind after a variable-width prefix (`python.LONG_STRING`'s
-//!     `.*?(?<!\\)`) has no fixed offset and is **declined** here (routed to
-//!     `fancy-regex`), the reject-when-unsure direction; the variable-offset
-//!     window-carry is a later milestone.
+//!     *bare* lookbehind after a variable-width prefix (`\w+(?<!_)x`) has no fixed offset
+//!     and is **declined** here (routed to `fancy-regex`), the reject-when-unsure
+//!     direction; the variable-offset window-carry is a later milestone. (The bundled
+//!     `python.LONG_STRING` — a lazy `.*?(?<!\\)(\\\\)*?` body with a multi-character
+//!     `"""` close — is instead lowered by the string-idiom path below, which *absorbs*
+//!     the `(?<!\\)` lookbehind into a greedy prefix-free body rather than carrying it as
+//!     a fixed-offset guard.)
 
 use super::{Look, Node};
 use crate::error::GrammarError;
@@ -108,15 +111,20 @@ pub fn lower_boundary(pattern: &str) -> Result<Vec<LoweredBranch>, GrammarError>
 /// the normalized content class — admits a newline); the boundary/lookbehind shapes are
 /// flag-agnostic at this layer (the engine wraps each branch in the terminal's flags).
 ///
-/// The first move is the **string-literal opening-guard idiom splice** (`python.STRING`):
-/// a leading `(?!"")` after a variable-width prefix + the opening quote is not a
-/// fixed-offset guard, so it is not lowerable by the generic [`lower_branch`] boundary
-/// path. [`recognize_string_idiom`] matches that exact shape and lowers it by normalizing
-/// the lazy escaped body to its proven greedy character-class equivalent (the Type-A
-/// rewrite `tests/test_lookaround.rs::matchlen` justifies) and reducing the `(?!"")`
-/// splice to an empty/non-empty arm split with a trailing `(?!")` guard on the empty arm
-/// (the only place the assertion's window over-reaches the matched token). Anything that
-/// is not exactly that idiom falls through to the generic boundary lowering.
+/// The first move is the **string-literal idiom splice** ([`recognize_string_idiom`]),
+/// which lowers two bundled shapes the generic [`lower_branch`] boundary path cannot:
+///
+///   * `python.STRING` — a leading `(?!"")` after a variable-width prefix + the opening
+///     quote is not a fixed-offset guard. The idiom lowers it by normalizing the lazy
+///     escaped body to its proven greedy character-class equivalent (the Type-A rewrite
+///     `tests/test_lookaround.rs::matchlen` justifies) and reducing the `(?!"")` splice
+///     to an empty/non-empty arm split with a trailing `(?!")` guard on the empty arm.
+///   * `python.LONG_STRING` — a lazy `.*?(?<!\\)(\\\\)*?` body with a *multi-character*
+///     `"""` close and **no** opening guard. The idiom lowers it to a greedy prefix-free
+///     body that stops at the first unescaped close run (absorbing the `(?<!\\)`).
+///
+/// Anything that is not exactly one of these idioms falls through to the generic
+/// boundary lowering.
 pub fn lower_boundary_dotall(
     pattern: &str,
     dotall: bool,
@@ -250,8 +258,8 @@ fn lower_branch(pattern: &str, branch: &Node, dotall: bool) -> Result<LoweredBra
         return Err(zero_width(pattern));
     }
     // If the base *still* carries a lookaround assertion, it was nested inside a group
-    // (or behind a flag wrapper `(?s:…)` the loader bakes in — e.g. `python.LONG_STRING`
-    // arrives as `(?s:…(?<!\\)…)`), so we could not peel it to a fixed offset. Decline
+    // (or behind a flag wrapper `(?s:…)` the loader bakes in), so we could not peel it to
+    // a fixed offset. Decline
     // (route to fancy) rather than hand a lookaround-bearing base to the DFA builder,
     // which cannot parse it — the reject-when-unsure direction.
     if base.has_assertion() {
@@ -770,80 +778,202 @@ fn parse_brace(chars: &[char], start: usize) -> Option<(usize, Option<usize>, us
 // (`tests/test_lowering_proof.rs`, the real nested STRING representative), the generative
 // equivalence layer, and the python.lark differential.
 
-/// A recognized string-literal opening-guard idiom: an optional bounded-width,
-/// assertion-free prefix followed by an alternation of quote-delimited arms, each
-/// `<q>(?!<q><q>).*?(?<!\\)(\\\\)*?<q>` for a single-character delimiter `<q>`.
+/// A recognized string-literal idiom: an optional bounded-width, assertion-free prefix
+/// followed by an alternation of quote-delimited arms. Two arm flavors are recognized,
+/// distinguished by [`StringArm::guarded`]:
+///
+///   * **`python.STRING`** — a single-character delimiter `<q>` with an opening guard:
+///     `<q>(?!<q><q>).*?(?<!\\)(\\\\)*?<q>`. Lowered by the empty/non-empty arm split
+///     with a trailing `(?!<q>)` guard on the (prefix-free) empty arm.
+///   * **`python.LONG_STRING`** — a *multi-character* run delimiter `<q>{N}` (e.g.
+///     `"""`) with **no** opening guard: `<q>{N}.*?(?<!\\)(\\\\)*?<q>{N}`. Lowered by
+///     normalizing the lazy escaped body to its proven **greedy prefix-free**
+///     character-class equivalent (which absorbs the `(?<!\\)` lookbehind and stops at
+///     the first unescaped close run), an unguarded branch the plain leftmost-first
+///     engine matches exactly because it is prefix-free.
 pub struct StringIdiom {
     /// The prefix regex source (e.g. `([ubf]?r?|r[ubf])`), or empty when there is none.
     prefix: String,
-    /// The delimiter source of each arm (e.g. `"` then `'`), in source order.
-    delims: Vec<String>,
+    /// The quote-delimited arms, in source order.
+    arms: Vec<StringArm>,
+    /// The flag letters of a whole-pattern flag-scoped wrapper `(?flags:…)` the loader
+    /// bakes in for a terminal declared `/…/flags` (e.g. `is` for `python.LONG_STRING`),
+    /// or empty when the pattern carries no such wrapper. Restricted to `{i, s}` — the
+    /// flags the bundled string terminals use; any other-flagged wrapper is not stripped
+    /// (the terminal routes to `fancy-regex`). `s` folds into the body's DOTALL; the
+    /// letters are re-baked onto every lowered branch so the engine applies them (the
+    /// loader cleared the separate flag field when it baked the wrapper).
+    flags: String,
+}
+
+/// One recognized arm of a [`StringIdiom`].
+struct StringArm {
+    /// The single delimiter character's source (e.g. `"`, `'`, or `\/`).
+    delim: String,
+    /// The delimiter run length: `1` for `python.STRING`, `3` for `python.LONG_STRING`.
+    repeat: usize,
+    /// Whether the arm carries the `(?!<q><q>)` opening guard (`python.STRING`). Only a
+    /// single-character (`repeat == 1`) delimiter is ever guarded.
+    guarded: bool,
 }
 
 impl StringIdiom {
-    /// Lower the idiom into its per-arm branches (two per arm: a non-empty plain branch
-    /// and an empty trailing-guarded branch). `dotall` controls whether the body class
-    /// admits a newline (excluded iff not DOTALL). Declines (the conservative direction)
-    /// if an empty arm's base is not guard-realizable.
+    /// Lower the idiom into its per-arm branches. `dotall` controls whether the body
+    /// class admits a newline (excluded iff not DOTALL). Declines (the conservative
+    /// direction) if a guarded arm's empty base is not guard-realizable, or an unguarded
+    /// (long-string) base is not prefix-free.
     fn lower(&self, pattern: &str, dotall: bool) -> Result<Vec<LoweredBranch>, GrammarError> {
+        // A baked `(?…s…:…)` wrapper carries DOTALL the same way the separate flag would,
+        // so fold it into the effective DOTALL used for the body class (a negated class
+        // plus `\\.` must admit a newline under `s`).
+        let dotall = dotall || self.flags.contains('s');
         let nl = if dotall { "" } else { r"\n" };
         let mut branches = Vec::new();
-        for d in &self.delims {
-            // The delimiter is a fixed literal (the recognizer's `literal_delimiter_source`
+        for arm in &self.arms {
+            // The delimiter is a fixed literal (the recognizer's `literal_run_from_str`
             // guarantees a bare non-metacharacter or an escaped punctuation literal), so it
-            // is safe both bare (the open/close `<q>`) and inside the negated class
+            // is safe both bare (the open/close run) and inside the negated class
             // `[^<q>\\<nl>]`.
-            // Non-empty arm: unguarded greedy escaped body. The `(?!<q><q>)` is vacuous
-            // here (the body never begins with the delimiter).
-            let non_empty = format!("{p}{d}(?:[^{d}\\\\{nl}]|\\\\.)+{d}", p = self.prefix);
-            branches.push(LoweredBranch {
-                regex: non_empty,
-                leading: None,
-                trailing: None,
-                lookbehind: Vec::new(),
-            });
-            // Empty arm: `<prefix><q><q>` with a trailing `(?!<q>)` guard — the spliced
-            // residual of `(?!"")` once the in-token part is shown vacuous.
-            let empty = format!("{p}{d}{d}", p = self.prefix);
-            if !is_guard_realizable(&empty, dotall) {
-                return Err(decline(
-                    pattern,
-                    "the empty-string arm's base is not guard-realizable (prefix not \
-                     length-deterministic), so the trailing-guard accumulator cannot \
-                     reproduce fancy's match",
-                ));
+            let d = &arm.delim;
+            if arm.guarded {
+                // python.STRING (single-char `<q>` + `(?!<q><q>)`): the empty/non-empty
+                // arm split with a trailing `(?!<q>)` guard on the empty arm — the spliced
+                // residual of `(?!"")` once the in-token part is shown vacuous.
+                // Non-empty arm: unguarded greedy escaped body. The `(?!<q><q>)` is vacuous
+                // here (the body never begins with the delimiter).
+                let non_empty = format!("{p}{d}(?:[^{d}\\\\{nl}]|\\\\.)+{d}", p = self.prefix);
+                branches.push(LoweredBranch {
+                    regex: non_empty,
+                    leading: None,
+                    trailing: None,
+                    lookbehind: Vec::new(),
+                });
+                let empty = format!("{p}{d}{d}", p = self.prefix);
+                if !is_guard_realizable(&empty, dotall) {
+                    return Err(decline(
+                        pattern,
+                        "the empty-string arm's base is not guard-realizable (prefix not \
+                         length-deterministic), so the trailing-guard accumulator cannot \
+                         reproduce fancy's match",
+                    ));
+                }
+                branches.push(LoweredBranch {
+                    regex: empty,
+                    leading: None,
+                    trailing: Some(GuardSpec {
+                        neg: true,
+                        set: d.clone(),
+                    }),
+                    lookbehind: Vec::new(),
+                });
+            } else {
+                // python.LONG_STRING (run delimiter `<q>{N}`, no opening guard): normalize
+                // the lazy escaped body `.*?(?<!\\)(\\\\)*?<q>{N}` to its proven greedy
+                // **prefix-free** equivalent — "everything up to and including the first
+                // unescaped close run." A body unit is a non-delimiter char `[^<q>\\<nl>]`,
+                // an escape pair `\\.`, or a *short* delimiter run `<q>{1,N-1}` immediately
+                // followed by a non-delimiter unit (so a full `<q>{N}` close run is never
+                // absorbed into the body). The `(?<!\\)` lookbehind is absorbed: every
+                // backslash sits in a `\\.` pair, so a body close run can only be unescaped.
+                // Unguarded — the plain leftmost-first engine reproduces fancy's lazy match
+                // exactly *because the base is prefix-free* (one match length per start).
+                let run = d.repeat(arm.repeat);
+                let unit = format!("[^{d}\\\\{nl}]|\\\\.");
+                let body = if arm.repeat >= 2 {
+                    format!("(?:{unit}|{d}{{1,{}}}(?:{unit}))*", arm.repeat - 1)
+                } else {
+                    format!("(?:{unit})*")
+                };
+                let base = format!("{p}{run}{body}{run}", p = self.prefix);
+                // Reject-when-unsure: the unguarded base must be prefix-free so the plain
+                // engine's leftmost-greedy match equals fancy's lazy first-close. The body
+                // construction guarantees this for the bundled `"""`/`'''` delimiters; the
+                // check defends against any delimiter shape it would not (route that
+                // terminal to `fancy-regex` instead of mis-lowering it).
+                if !is_prefix_free(&base, dotall) {
+                    return Err(decline(
+                        pattern,
+                        "the long-string base is not prefix-free, so the DFA's maximal \
+                         munch could overshoot the first unescaped close run",
+                    ));
+                }
+                branches.push(LoweredBranch {
+                    regex: base,
+                    leading: None,
+                    trailing: None,
+                    lookbehind: Vec::new(),
+                });
             }
-            branches.push(LoweredBranch {
-                regex: empty,
-                leading: None,
-                trailing: Some(GuardSpec {
-                    neg: true,
-                    set: d.clone(),
-                }),
-                lookbehind: Vec::new(),
-            });
+        }
+        // Re-bake the wrapper's flag letters onto every branch base and guard body. The
+        // loader cleared the terminal's separate flag field when it baked the `(?flags:…)`
+        // wrapper into the pattern, so the lexer's own `wrap_flags` is a no-op and the
+        // lowering is the only place the flags get re-applied to the DFA.
+        if !self.flags.is_empty() {
+            let wrap = |s: &str| format!("(?{}:{s})", self.flags);
+            for b in &mut branches {
+                b.regex = wrap(&b.regex);
+                for g in b.leading.iter_mut().chain(b.trailing.iter_mut()) {
+                    g.set = wrap(&g.set);
+                }
+                for lb in &mut b.lookbehind {
+                    lb.set = wrap(&lb.set);
+                }
+            }
         }
         Ok(branches)
     }
 }
 
 /// Recognize the [`StringIdiom`] in a parsed terminal `node`, or `None`. Structural and
-/// exact: the only newly-supported shape is `python.STRING`'s `(?!"")`-after-prefix
-/// opening guard, so the matcher pins the precise arm shape and declines everything else.
+/// exact: the supported shapes are `python.STRING`'s `(?!"")`-after-prefix opening guard
+/// and `python.LONG_STRING`'s multi-character close run, so the matcher pins the precise
+/// arm shapes and declines everything else.
+///
+/// The loader bakes a terminal's `/…/flags` into a whole-pattern flag-scoped wrapper
+/// `(?flags:…)` (clearing the separate flag field). [`strip_string_flag_wrapper`] peels
+/// that wrapper before recognition so the real arm shape is seen, and records the flags on
+/// the returned [`StringIdiom`] so [`StringIdiom::lower`] re-applies them. A bare
+/// (un-baked) pattern peels nothing.
 pub fn recognize_string_idiom(node: &Node) -> Option<StringIdiom> {
-    let (prefix, arms_node) = split_prefix_and_arms(node)?;
+    let (flags, inner) = strip_string_flag_wrapper(node);
+    let (prefix, arms_node) = split_prefix_and_arms(inner)?;
     let arm_nodes: Vec<&Node> = match arms_node {
         Node::Alt(branches) => branches.iter().collect(),
         other => vec![other],
     };
-    let mut delims = Vec::new();
+    let mut arms = Vec::new();
     for arm in arm_nodes {
-        delims.push(match_string_arm(arm)?);
+        arms.push(match_string_arm(arm)?);
     }
-    if delims.is_empty() {
+    if arms.is_empty() {
         return None;
     }
-    Some(StringIdiom { prefix, delims })
+    Some(StringIdiom {
+        prefix,
+        arms,
+        flags,
+    })
+}
+
+/// Peel a whole-pattern flag-scoped wrapper `(?flags:…)` whose flags are a subset of
+/// `{i, s}` — the form the loader bakes for a terminal declared `/…/i` or `/…/is`.
+/// Returns `(flag_letters, inner_node)`; on no wrapper (or one with any other flag, a
+/// name, a quantifier, or a non-empty flag-clear `-`), returns `("", node)` so the bare
+/// pattern is recognized unchanged and an unsupported-flag wrapper routes to `fancy-regex`
+/// (reject-when-unsure — only `{i, s}` are reflected by the prefix-free / realizability
+/// checks and the re-bake).
+fn strip_string_flag_wrapper(node: &Node) -> (String, &Node) {
+    if let Node::Group { open, body, quant } = node {
+        if quant.is_empty() {
+            if let Some(letters) = open.strip_prefix("(?").and_then(|s| s.strip_suffix(':')) {
+                if !letters.is_empty() && letters.chars().all(|c| c == 'i' || c == 's') {
+                    return (letters.to_string(), body.as_ref());
+                }
+            }
+        }
+    }
+    (String::new(), node)
 }
 
 /// Split `node` into `(prefix_source, arms_node)`: an optional leading bounded-width,
@@ -878,36 +1008,28 @@ fn unwrap_arms(node: &Node) -> Option<&Node> {
     }
 }
 
-/// Match one arm `<q>(?!<q><q>).*?(?<!\\)(\\\\)*?<q>`, returning the delimiter source
-/// `<q>`, or `None` if the arm is not exactly that shape.
-fn match_string_arm(arm: &Node) -> Option<String> {
+/// Match one arm of a [`StringIdiom`], returning its [`StringArm`], or `None` if the arm
+/// is not exactly a recognized shape. Two shapes are recognized — the only two the
+/// lowering can faithfully reproduce:
+///
+///   * **guarded** `python.STRING` — `<q>(?!<q><q>).*?(?<!\\)(\\\\)*?<q>` (6 concat
+///     parts: the parser keeps the opening `<q>`, the `(?!<q><q>)` guard, and the `.*?`
+///     as separate elements);
+///   * **unguarded** `python.LONG_STRING` — `<q>{N}.*?(?<!\\)(\\\\)*?<q>{N}` (4 concat
+///     parts: with no guard separating them, the parser fuses the opening run and the
+///     lazy `.*?` into one [`Node::Atom`] `<run>.*?`).
+fn match_string_arm(arm: &Node) -> Option<StringArm> {
     let parts = match arm {
         Node::Concat(parts) => parts.as_slice(),
         _ => return None,
     };
-    if parts.len() != 6 {
-        return None;
-    }
-    let delim = literal_delimiter_source(&parts[0])?;
-
-    // parts[1]: (?!<delim><delim>)
-    match &parts[1] {
-        Node::Assertion {
-            neg: true,
-            look: Look::Ahead,
-            body,
-            quant,
-        } if quant.is_empty() && body.to_source() == format!("{delim}{delim}") => {}
-        _ => return None,
-    }
-
-    // parts[2]: the lazy any-body `.*?`
-    if !matches!(&parts[2], Node::Atom(s) if s == ".*?") {
+    let n = parts.len();
+    if n != 4 && n != 6 {
         return None;
     }
 
-    // parts[3]: (?<!\\)
-    match &parts[3] {
+    // Shared tail: `(?<!\\)` , `(\\\\)*?` , the closing delimiter run.
+    match &parts[n - 3] {
         Node::Assertion {
             neg: true,
             look: Look::Behind,
@@ -916,51 +1038,105 @@ fn match_string_arm(arm: &Node) -> Option<String> {
         } if quant.is_empty() && body.to_source() == r"\\" => {}
         _ => return None,
     }
-
-    // parts[4]: (\\\\)*? — the even-backslash run
-    match &parts[4] {
+    match &parts[n - 2] {
         Node::Group { open, body, quant }
             if open == "("
                 && quant == "*?"
                 && matches!(body.as_ref(), Node::Atom(s) if s == r"\\\\") => {}
         _ => return None,
     }
+    let (close_delim, close_k) = literal_run_delimiter(&parts[n - 1])?;
 
-    // parts[5]: the closing delimiter, identical to the opening one.
-    if literal_delimiter_source(&parts[5])? != delim {
+    // Front: the guarded `[<q>, (?!<q><q>), .*?]` (n == 6) or the fused `[<run>.*?]`
+    // (n == 4).
+    let (delim, k, guarded) = if n == 6 {
+        let (d, k) = literal_run_delimiter(&parts[0])?;
+        // The opening guard is only ever recognized on a single-character delimiter.
+        if k != 1 {
+            return None;
+        }
+        match &parts[1] {
+            Node::Assertion {
+                neg: true,
+                look: Look::Ahead,
+                body,
+                quant,
+            } if quant.is_empty() && body.to_source() == format!("{d}{d}") => {}
+            _ => return None,
+        }
+        if !matches!(&parts[2], Node::Atom(s) if s == ".*?") {
+            return None;
+        }
+        (d, k, true)
+    } else {
+        // n == 4: the open run and the lazy body are fused into one atom `<run>.*?`.
+        let s = match &parts[0] {
+            Node::Atom(s) => s.as_str(),
+            _ => return None,
+        };
+        let run = s.strip_suffix(".*?")?;
+        let (d, k) = literal_run_from_str(run)?;
+        (d, k, false)
+    };
+    if delim != close_delim || k != close_k {
         return None;
     }
-    Some(delim)
+    Some(StringArm {
+        delim,
+        repeat: k,
+        guarded,
+    })
 }
 
-/// The source of a single-character **literal** delimiter — the only delimiters the
-/// idiom lowering can faithfully reproduce, because the delimiter is emitted in the
-/// lowered base both *bare* (the open/close `<q>`) and *inside a negated class*
-/// (`[^<q>\\…]`), and must denote exactly one fixed character in both positions:
+/// The `(delimiter_source, run_length)` of a delimiter **run** string — `N` copies of
+/// one **literal** delimiter character. These are the only delimiters the idiom lowering
+/// can faithfully reproduce, because the delimiter is emitted in the lowered base both
+/// *bare* (the open/close run) and *inside a negated class* (`[^<q>\\…]`), so it must
+/// denote exactly one fixed character in both positions. Each element of the run is:
 ///
-///   * a **bare ordinary literal** — any char that is not a regex metacharacter or a
-///     character-class-special char (so `"`, `'`, `/`, `:`, … are fine; `.`, `^`, `$`,
-///     `*`, `+`, `?`, `(`, `)`, `[`, `]`, `{`, `}`, `|`, `\`, `-` are not); or
-///   * an **escaped literal** `\X` where `X` is ASCII *punctuation* (`\.`, `\"`, `\/`,
-///     `\$`, … — a literal-escape of a metacharacter or other punctuation, emitted
-///     escaped in both positions so it stays literal).
+///   * a **bare ordinary literal** — not a regex metacharacter or a class-special char
+///     (`"`, `'`, `/`, `:`, … are fine; `.`, `^`, `$`, `*`, `+`, `?`, `(`, `)`, `[`,
+///     `]`, `{`, `}`, `|`, `\`, `-` are not); or
+///   * an **escaped punctuation literal** `\X` (`\.`, `\"`, `\/`, …).
 ///
-/// Returns `None` for everything else — crucially `.` (any char), the anchors
-/// (`^ $ \b \B \A \z \Z \G`), and the class escapes (`\d \w \s …`): these are *not*
-/// fixed single literals, so an arm built on them would mis-lower. Declining them routes
-/// the terminal to `fancy-regex` (reject-when-unsure) and closes the false-accept.
-fn literal_delimiter_source(node: &Node) -> Option<String> {
-    let s = match node {
-        Node::Atom(s) => s.as_str(),
-        _ => return None,
-    };
+/// Every element must be the **same** literal, so `"` ⇒ (`"`, 1) and `"""` ⇒ (`"`, 3).
+/// Returns `None` for anything else — crucially `.` (any char), the anchors
+/// (`^ $ \b \B \A \z \Z \G`), the class escapes (`\d \w \s …`), and a *mixed* run
+/// (`"'"`): these are not a fixed single literal repeated, so an arm built on them would
+/// mis-lower. Declining them routes the terminal to `fancy-regex` (reject-when-unsure).
+fn literal_run_from_str(s: &str) -> Option<(String, usize)> {
     let chars: Vec<char> = s.chars().collect();
-    match chars.as_slice() {
-        // A bare ordinary literal: not a regex metacharacter, not class-special.
-        [c] if is_plain_literal(*c) => Some(c.to_string()),
-        // An escaped punctuation literal (`\.`, `\"`, `\/`, …); excludes `\d \w \b \n …`
-        // (letters/digits — classes, assertions, encoded literals).
-        ['\\', c] if c.is_ascii_punctuation() => Some(format!("\\{c}")),
+    let mut toks: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' {
+            // An escaped punctuation literal `\X`; excludes `\d \w \b \n …`.
+            let c = *chars.get(i + 1)?;
+            if !c.is_ascii_punctuation() {
+                return None;
+            }
+            toks.push(format!("\\{c}"));
+            i += 2;
+        } else {
+            if !is_plain_literal(chars[i]) {
+                return None;
+            }
+            toks.push(chars[i].to_string());
+            i += 1;
+        }
+    }
+    let first = toks.first()?.clone();
+    if toks.iter().all(|t| *t == first) {
+        Some((first, toks.len()))
+    } else {
+        None
+    }
+}
+
+/// [`literal_run_from_str`] over a [`Node::Atom`]; `None` for any non-atom node.
+fn literal_run_delimiter(node: &Node) -> Option<(String, usize)> {
+    match node {
+        Node::Atom(s) => literal_run_from_str(s),
         _ => None,
     }
 }
@@ -1130,6 +1306,44 @@ mod tests {
         let b = lower_boundary("(?<=ab)c").unwrap();
         let lb = &b[0].lookbehind[0];
         assert!(!lb.neg && lb.set == "ab" && lb.offset_chars == 0 && lb.width == 2);
+    }
+
+    #[test]
+    fn long_string_lowers_to_unguarded_prefix_free_arms() {
+        // The bundled `python.LONG_STRING` (DOTALL): a multi-character `"""`/`'''` close
+        // with no opening guard. It lowers to one unguarded prefix-free branch per arm —
+        // the `(?<!\\)` lookbehind absorbed into the greedy body, no carried guard.
+        let raw = r#"([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')"#;
+        let b = lower_boundary_dotall(raw, true).expect("LONG_STRING must lower");
+        assert_eq!(b.len(), 2, "one branch per quote arm: {b:#?}");
+        for br in &b {
+            assert!(
+                br.leading.is_none() && br.trailing.is_none() && br.lookbehind.is_empty(),
+                "a long-string arm is unguarded (no leading/trailing/lookbehind): {br:?}"
+            );
+            // The body stops at the first unescaped close run (prefix-free), and keeps the
+            // variable prefix + the triple-quote open/close.
+            assert!(
+                br.regex.contains("{1,2}"),
+                "short-run unit present: {}",
+                br.regex
+            );
+            assert!(
+                br.regex.contains(r#"""""#) || br.regex.contains("'''"),
+                "triple-quote open/close present: {}",
+                br.regex
+            );
+        }
+    }
+
+    #[test]
+    fn long_string_recognizer_is_exact() {
+        // A bare triple-quote arm (no prefix, no alternation) lowers.
+        assert!(lower_boundary_dotall(r#"""".*?(?<!\\)(\\\\)*?""""#, true).is_ok());
+        // A *mixed* run delimiter is not a single repeated literal → declined.
+        assert!(lower_boundary_dotall(r#""'".*?(?<!\\)(\\\\)*?"'""#, true).is_err());
+        // A non-literal delimiter (`.`) is declined.
+        assert!(lower_boundary_dotall(r#"...*?(?<!\\)(\\\\)*?...."#, true).is_err());
     }
 
     #[test]

@@ -403,24 +403,32 @@ single-pass and the `python`/`lark` grammars become bakeable. **Status (L2):** a
 lowering shapes have landed behind the `LexerBackend::Dfa` engine — **trailing** boundary
 (M1, `OP`/`DEC_NUMBER`'s `(?![1-9])`/`(?![a-z])` guarded accept), **leading** boundary
 (M2, a match-start precondition), **bounded lookbehind** (M3, a backward guard at a
-*fixed* char-offset), and the **`python.STRING` opening-guard splice** (M4 —
-`src/lookaround/lower.rs::recognize_string_idiom`). M4 is the marquee L2 piece: `STRING`'s
+*fixed* char-offset), the **`python.STRING` opening-guard splice** (M4), and the
+**`python.LONG_STRING` multi-character close** (M5 —
+`src/lookaround/lower.rs::recognize_string_idiom`). M4: `STRING`'s
 `(?!"")` after the variable-width prefix (`[ubf]?r?|r[ubf]`) + the opening quote is an
 internal/variable-position leading boundary, lowered by normalizing the lazy escaped body
 `.*?(?<!\\)(\\\\)*?<q>` to its proven greedy character-class equivalent (which *absorbs*
 the `(?<!\\)` lookbehind) and reducing `(?!"")` to an empty/non-empty arm split with a
-trailing `(?!")` guard on the (prefix-free) empty arm. The `Dfa` backend is gated
-byte-identical to the `fancy-regex` `Scanner` over the compliance bank + JSON corpus +
-python/lark files + a generated lookaround population including STRING's nested shape
-(`tests/test_scanner_differential.rs`, 0 divergences, STRING *lowered*) and per-shape
-generative-equivalence + Route-1 proofs (incl. the real nested STRING shape) + mutation
-meta-tests (incl. the drop-the-`(?!"")`-guard canary `tests/test_string_splice.rs`:
-`""""` is a lex error, `"" ""` is two empty STRINGs). **Still on the `fancy-regex`
-side-probe (a *decline*, never mis-lowered):** `python.LONG_STRING` (a lazy `.*?` body
-with a multi-character `"""` close and no opening guard) and `lark.REGEXP` (an internal
-`(?!\/)`) are attempted and declined cleanly, routed to `fancy-regex` under **both**
-backends; lowering them is a follow-up the STRING milestone does not require (so
-`fancy-regex` stays in the runtime and L4 waits). `LexerBackend::Dfa` **is now the default**
+trailing `(?!")` guard on the (prefix-free) empty arm. M5: `LONG_STRING`'s lazy body with
+a *multi-character* `"""`/`'''` close and **no opening guard** is normalized to its proven
+**greedy prefix-free** equivalent (everything up to the first *unescaped close run*,
+`<q>{N}(?:[^<q>\\]|\\.|<q>{1,N-1}(?:[^<q>\\]|\\.))*<q>{N}`) — one **unguarded** branch per
+arm the plain engine matches exactly *because the base is prefix-free* (gated by
+`is_prefix_free` at lowering time). M5 also peels the loader's baked `(?i:…)`/`(?is:…)`
+flag wrapper (`strip_string_flag_wrapper`) so STRING **and** LONG_STRING genuinely lower in
+the real `%import` lexer, not just on bare representative patterns. The `Dfa` backend is
+gated byte-identical to the `fancy-regex` `Scanner` over the compliance bank + JSON corpus +
+python/lark files + a generated lookaround population including STRING's and LONG_STRING's
+nested shapes (`tests/test_scanner_differential.rs`, 0 divergences, both *lowered*) and
+per-shape generative-equivalence + Route-1 proofs (incl. the real nested STRING and
+LONG_STRING shapes) + mutation meta-tests (incl. the `""""` STRING canary and the
+`"""a""" """b"""` LONG_STRING overshoot canary in `tests/test_string_splice.rs`).
+**Still on the `fancy-regex` side-probe (a *decline*, never mis-lowered):** only
+`lark.REGEXP` (an internal `(?!\/)` nested in the body repetition) is attempted and
+declined cleanly, routed to `fancy-regex` under **both** backends; lowering it is the last
+step before L4 (so `fancy-regex` stays in the runtime and L4 waits). `LexerBackend::Dfa`
+**is now the default**
 (`LexerBackend::default()` / `LarkOptions.lexer_backend`): the L0 differential oracle is
 0 divergences over the full bank + JSON + python/lark corpora, so the swap is
 correctness-identical, and it is faster on the all-plain common path

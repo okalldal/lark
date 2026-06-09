@@ -128,16 +128,16 @@ fn recognizer_still_accepts_literal_delimiters() {
 }
 
 /// **Bundled-terminal lowering-status tripwire** (deliverable 6's payoff-check, made
-/// executable). The honest scope of this milestone is: `python.STRING` lowers into the
-/// DFA, while `lark.REGEXP` (internal `(?!\/)`) and `python.LONG_STRING` (a lazy `.*?`
-/// body with a multi-character `"""` close and no opening guard) are **declined** — they
-/// route to `fancy-regex`, so `fancy-regex` stays in the runtime and L4/L5 remain blocked.
+/// executable). The honest scope after this milestone is: `python.STRING` **and**
+/// `python.LONG_STRING` lower into the DFA, while `lark.REGEXP` (an internal `(?!\/)`
+/// nested inside the body repetition) is still **declined** — it routes to `fancy-regex`,
+/// so `fancy-regex` stays in the runtime and L4/L5 remain blocked until REGEXP lands.
 ///
-/// This pins that scope as a fact. If a future change makes REGEXP or LONG_STRING lower,
-/// this test goes red on purpose — forcing the author to (a) confirm the new lowering is
-/// proven correct and (b) re-run the payoff-check: with *all* bundled lookaround terminals
-/// lowered, L4 (drop `AnyRegex::Fancy` from the runtime) and L5 (bake) become unblocked,
-/// and `docs/LEXER_DFA_PLAN.md` + `CLAUDE.md` must be updated. It is the same negative-pin
+/// This pins that scope as a fact. If a future change makes REGEXP lower, this test goes
+/// red on purpose — forcing the author to (a) confirm the new lowering is proven correct
+/// and (b) re-run the payoff-check: with *all* bundled lookaround terminals lowered, L4
+/// (drop `AnyRegex::Fancy` from the runtime) and L5 (bake) become unblocked, and
+/// `docs/LEXER_DFA_PLAN.md` + `CLAUDE.md` must be updated. It is the same negative-pin
 /// discipline as `test_lookaround.rs::string_lookaround_free_rewrite_is_not_equivalent`.
 #[test]
 fn bundled_lookaround_terminal_lowering_status() {
@@ -147,7 +147,7 @@ fn bundled_lookaround_terminal_lowering_status() {
     const LONG_STRING_RAW: &str =
         r#"([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')"#;
 
-    // STRING lowers (the milestone deliverable).
+    // STRING and LONG_STRING lower (the milestone deliverables).
     assert!(
         matches!(
             lower_terminal_dotall("STRING", STRING_RAW, false),
@@ -155,23 +155,46 @@ fn bundled_lookaround_terminal_lowering_status() {
         ),
         "python.STRING must lower into the DFA"
     );
+    assert!(
+        matches!(
+            lower_terminal_dotall("LONG_STRING", LONG_STRING_RAW, true),
+            Ok(Lowered::Branches(_))
+        ),
+        "python.LONG_STRING must lower into the DFA (multi-char `\"\"\"` close, no guard)"
+    );
 
-    // REGEXP and LONG_STRING are declined (route to fancy). A returned `Branches` here
-    // means the scope changed — see the doc above: prove it and re-run the L4/L5 payoff.
-    for (name, raw, dotall) in [
-        ("lark.REGEXP", REGEXP_RAW, false),
-        ("python.LONG_STRING", LONG_STRING_RAW, true),
-    ] {
-        assert!(
-            !matches!(
-                lower_terminal_dotall(name, raw, dotall),
-                Ok(Lowered::Branches(_))
-            ),
-            "{name} unexpectedly LOWERS now — fancy-regex was supposed to stay (L4 blocked). \
-             If this lowering is intentional and proven, update the payoff-check + docs and \
-             revise this tripwire."
-        );
-    }
+    // **The real-lexer forms.** The loader bakes a terminal's `/…/flags` into a
+    // whole-pattern `(?flags:…)` wrapper (clearing the separate flag field), so the *shipped*
+    // lexer hands the lowering the wrapped pattern with `dotall = false`. Both must still
+    // lower (the flag wrapper is peeled and re-baked onto the branches) — otherwise STRING /
+    // LONG_STRING silently route to `fancy-regex` in the real `%import` lexer while the
+    // bare-pattern assertions above pass vacuously.
+    assert!(
+        matches!(
+            lower_terminal_dotall("STRING", &format!("(?i:{STRING_RAW})"), false),
+            Ok(Lowered::Branches(_))
+        ),
+        "the loader-baked `(?i:…)` STRING must lower (the flag wrapper must be peeled)"
+    );
+    assert!(
+        matches!(
+            lower_terminal_dotall("LONG_STRING", &format!("(?is:{LONG_STRING_RAW})"), false),
+            Ok(Lowered::Branches(_))
+        ),
+        "the loader-baked `(?is:…)` LONG_STRING must lower (the flag wrapper must be peeled)"
+    );
+
+    // REGEXP is still declined (routes to fancy). A returned `Branches` here means the
+    // scope changed — see the doc above: prove it and re-run the L4/L5 payoff.
+    assert!(
+        !matches!(
+            lower_terminal_dotall("lark.REGEXP", REGEXP_RAW, false),
+            Ok(Lowered::Branches(_))
+        ),
+        "lark.REGEXP unexpectedly LOWERS now — fancy-regex was supposed to stay (L4 blocked). \
+         If this lowering is intentional and proven, update the payoff-check + docs and \
+         revise this tripwire."
+    );
 }
 
 /// **The canary.** `""""` (and `''''`) is a LEX ERROR; `"" ""` (and `'' ''`) is exactly
@@ -260,4 +283,134 @@ fn escape_interactions() {
     // A backslash before a raw newline still does not rescue it (no line continuation in
     // the lexer's view of a short string).
     assert_eq!(lex(&lexer, "\"a\\\nb\""), Err(0));
+}
+
+// ─── python.LONG_STRING — the multi-character `"""` close ────────────────────────
+//
+// `LONG_STRING` is the next G-tier terminal lowered into the DFA: a lazy `.*?` body, a
+// **multi-character** `"""`/`'''` close, the escaped-close `(?<!\\)` lookbehind, and
+// crucially **no opening guard**. It is DOTALL. The body normalization is the genuinely
+// new piece — a multi-character close run absorbed into a greedy **prefix-free** body
+// (`docs/LEXER_DFA_PLAN.md`). These hand-authored cases run under the **default (`Dfa`)
+// backend** against the real bundled terminal (with its `/is` flags), so they gate the
+// shipped lexer, not a synthetic one.
+
+/// Build a default-backend (`Dfa`) basic lexer over the **bundled** `python.LONG_STRING`
+/// **and** `python.STRING` (whitespace ignored) — the short/long pair python disambiguates,
+/// so the canary covers their interaction, not LONG_STRING in isolation.
+fn long_string_lexer() -> BasicLexer {
+    let grammar = "start: (LONG_STRING|STRING)+\n\
+                   %import python.LONG_STRING\n\
+                   %import python.STRING\n\
+                   %ignore \" \"\n";
+    let g = load_grammar(grammar, &["start".to_string()], false, false)
+        .expect("grammar with %import python.LONG_STRING + STRING builds");
+    let cg = lower(&g);
+    let conf = basic_lexer_conf(&cg, 0).with_backend(LexerBackend::Dfa);
+    BasicLexer::new(&conf).expect("Dfa BasicLexer builds")
+}
+
+/// Lex into `(type, value)` pairs (dropping the ignored whitespace), or the failing byte
+/// position on a lex error.
+fn lex_typed(lexer: &BasicLexer, input: &str) -> Result<Vec<(String, String)>, usize> {
+    match lexer.lex(input) {
+        Ok(tokens) => Ok(tokens
+            .into_iter()
+            .filter(|t| t.type_ == "LONG_STRING" || t.type_ == "STRING")
+            .map(|t| (t.type_, t.value))
+            .collect()),
+        Err(ParseError::UnexpectedCharacter { pos, .. }) => Err(pos),
+        Err(_) => Err(usize::MAX),
+    }
+}
+
+/// **The LONG_STRING canary.** The multi-character `"""` close is the genuinely-new risk:
+/// a naive lowering that let the body greedily absorb interior `"""` runs (maximal munch
+/// overshooting the *first* close) would mis-tokenize. These pin the prefix-free body's
+/// first-close semantics under the default `Dfa` backend.
+#[test]
+fn long_string_closes_at_the_first_triple_quote() {
+    let lexer = long_string_lexer();
+    let long = |s: &str| ("LONG_STRING".to_string(), s.to_string());
+    // `q3` = `"""`; building quote-heavy inputs this way avoids raw-string delimiter
+    // ambiguity (a literal `r#"…"""#` miscounts a trailing quote run).
+    let q3 = "\"\"\"";
+
+    // A basic long string, and the empty `""""""` (open + close, empty body).
+    assert_eq!(
+        lex_typed(&lexer, &format!("{q3}abc{q3}")),
+        Ok(vec![long(&format!("{q3}abc{q3}"))]),
+    );
+    assert_eq!(
+        lex_typed(&lexer, &format!("{q3}{q3}")),
+        Ok(vec![long(&format!("{q3}{q3}"))]),
+    );
+    assert_eq!(lex_typed(&lexer, "''''''"), Ok(vec![long("''''''")]));
+
+    // **The overshoot canary.** `"""a""" """b"""` is *two* long strings (the first `"""`
+    // after `a` closes the first), never one token spanning the interior close. A wrongly
+    // greedy body would swallow the middle `"""` and match the whole input as one token.
+    assert_eq!(
+        lex_typed(&lexer, &format!("{q3}a{q3} {q3}b{q3}")),
+        Ok(vec![
+            long(&format!("{q3}a{q3}")),
+            long(&format!("{q3}b{q3}"))
+        ]),
+    );
+    // Interior single/double quotes are body content (a run < 3 is not a close).
+    assert_eq!(
+        lex_typed(&lexer, &format!(r#"{q3}he said "hi" ""b{q3}"#)),
+        Ok(vec![long(&format!(r#"{q3}he said "hi" ""b{q3}"#))]),
+    );
+
+    // DOTALL: a raw newline *is* allowed inside a long string (unlike the short STRING).
+    assert_eq!(
+        lex_typed(&lexer, &format!("{q3}a\nb{q3}")),
+        Ok(vec![long(&format!("{q3}a\nb{q3}"))]),
+    );
+
+    // Escapes: an escaped quote does not close; an escaped backslash before the close
+    // does let it close. The `(?<!\\)` lookbehind is absorbed into the body.
+    assert_eq!(
+        lex_typed(&lexer, &format!(r#"{q3}a\{q3}b{q3}"#)),
+        Ok(vec![long(&format!(r#"{q3}a\{q3}b{q3}"#))]),
+    );
+    assert_eq!(
+        lex_typed(&lexer, &format!(r#"{q3}\\{q3}"#)),
+        Ok(vec![long(&format!(r#"{q3}\\{q3}"#))]),
+    );
+
+    // The `r`/`b` prefixes (case-insensitive) compose with the long-string body.
+    assert_eq!(
+        lex_typed(&lexer, &format!("rb{q3}x{q3}")),
+        Ok(vec![long(&format!("rb{q3}x{q3}"))]),
+    );
+    assert_eq!(lex_typed(&lexer, "R'''y'''"), Ok(vec![long("R'''y'''")]));
+}
+
+/// The short/long disambiguation the bundled grammar relies on: with both terminals
+/// present, `""""` is still a lex error (no STRING opens in the over-long quote run, and
+/// LONG_STRING has no close), exactly as the `python__LONG_STRING`/`STRING` stdlib oracle
+/// records — and a `""` short string is preferred where it is the only valid token.
+#[test]
+fn long_and_short_string_disambiguate() {
+    let lexer = long_string_lexer();
+    let long = |s: &str| ("LONG_STRING".to_string(), s.to_string());
+    let short = |s: &str| ("STRING".to_string(), s.to_string());
+    let q3 = "\"\"\"";
+
+    // `""""` and `"""a"` (an over-long open run with no triple close) are lex errors.
+    assert_eq!(lex_typed(&lexer, "\"\"\"\""), Err(0));
+    assert_eq!(lex_typed(&lexer, &format!("{q3}a\"")), Err(0));
+
+    // `"" ""` is two short empty strings (LONG_STRING needs three quotes to open).
+    assert_eq!(
+        lex_typed(&lexer, "\"\" \"\""),
+        Ok(vec![short("\"\""), short("\"\"")]),
+    );
+    // A long string then a short string.
+    assert_eq!(
+        lex_typed(&lexer, &format!("{q3}x{q3} \"y\"")),
+        Ok(vec![long(&format!("{q3}x{q3}")), short("\"y\"")]),
+    );
 }

@@ -395,6 +395,62 @@ fn route1_proof_string_idiom_real_nested_shape() {
     }
 }
 
+// ─── The LONG_STRING multi-character close — real nested shape ───────────────────
+//
+// `python.LONG_STRING`'s lazy `.*?(?<!\\)(\\\\)*?` body with a **multi-character** `"""`
+// close and **no** opening guard is the next G-tier terminal. Unlike `python.STRING`'s
+// `(?!"")` splice, the new piece is the multi-character close run absorbed into a greedy
+// **prefix-free** body. The proof method is the same state-pruned Myhill-Nerode decision
+// procedure the STRING idiom uses (the content-bearing `.*?` body makes the brute
+// enumeration intractable), with `fancy-regex` the independent oracle. Gated additionally
+// by the generative-equivalence layer (`test_lowering_equivalence`), the `"""…"""`
+// adversarial canary (`test_string_splice`), and the python.lark differential.
+
+/// The real nested LONG_STRING representatives — the genuine `prefix + <q>{3} + .*? +
+/// (?<!\\)(\\\\)*? + <q>{3}` form the lowering must reproduce (raw, no `/is`, which
+/// `lowered_prefix`'s one-terminal grammar applies non-DOTALL — the proof targets the
+/// multi-char-close body construction, the DOTALL newline variant is covered by the
+/// python.lark differential).
+fn long_string_proof_representatives() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "LONG_STRING_NESTED_DQ",
+            r#"([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?""")"#,
+        ),
+        (
+            "LONG_STRING_NESTED_BOTH",
+            r#"([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')"#,
+        ),
+    ]
+}
+
+/// The committed Route-1 proof for the LONG_STRING multi-character close on its **real
+/// nested shape** — the deliverable's non-negotiable proof obligation. Each representative
+/// must (a) classify as fully-supported (its only assertions are the `(?<!\\)` bounded
+/// lookbehinds, absorbed by the body normalization), (b) lower to branches (not decline),
+/// and (c) be proven match-length-identical to `fancy-regex` by the state-pruned procedure.
+#[test]
+fn route1_proof_long_string_idiom_real_nested_shape() {
+    for (name, pattern) in long_string_proof_representatives() {
+        let c = classify(pattern).unwrap_or_else(|e| panic!("classify {name} errored: {e}"));
+        assert!(
+            !c.assertions.is_empty()
+                && c.assertions
+                    .iter()
+                    .all(|a| { a.verdict() == Verdict::Supported(ShapeClass::BoundedLookbehind) }),
+            "{name} must classify with only supported bounded-lookbehind assertions \
+             (the absorbed `(?<!\\\\)`): {:?}",
+            c.assertions.iter().map(|a| a.verdict()).collect::<Vec<_>>()
+        );
+        assert!(
+            lower_boundary(pattern).is_ok(),
+            "{name} must lower (not decline) for the proof to be non-vacuous"
+        );
+        prove_route1_pruned(name, pattern)
+            .unwrap_or_else(|cex| panic!("Route-1 (state-pruned) failed for {name}: {cex}"));
+    }
+}
+
 /// Active now: the proof-obligation registry is the per-shape contract. Every
 /// supported shape has at least one committed representative, and each representative
 /// genuinely classifies as its shape (so the obligation targets the right thing).

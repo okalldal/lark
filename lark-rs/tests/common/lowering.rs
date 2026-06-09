@@ -450,6 +450,63 @@ pub fn string_idiom_terminals() -> Vec<GenTerminal> {
     out
 }
 
+/// The **long-string idiom** population (`python.LONG_STRING`'s shape — a *multi-character*
+/// `"""`/`'''` close, the lazy escaped body, and **no opening guard**). Unlike the
+/// single-character `python.STRING` idiom in [`string_idiom_terminals`], the genuinely-new
+/// piece is the multi-character close run absorbed into a greedy **prefix-free** body, so
+/// the corpus must reach a complete long string (≥ 6 chars) and exercise interior quote
+/// runs (`""`), the `""" """` overshoot boundary, escaped quotes, and escaped backslashes.
+///
+/// Each varies the prefix (none / bounded / the bundled alternation), the quote kind, and
+/// the arm count. The shape carries only bounded lookbehinds (the `(?<!\\)`), so its
+/// `shape` field is [`ShapeClass::BoundedLookbehind`]; like [`string_idiom_terminals`]
+/// these are kept out of [`supported_terminals`] and driven by their own equivalence and
+/// differential gates. `max_len` is raised to 8 (a complete `"""…"""` is ≥ 6 chars) with a
+/// small alphabet so the exhaustive corpus stays tractable.
+pub fn long_string_idiom_terminals() -> Vec<GenTerminal> {
+    // `<q>{3}.*?(?<!\\)(\\\\)*?<q>{3}` for a delimiter char `<q>` — built via `format!`
+    // so the quote-heavy source avoids raw-string delimiter ambiguity.
+    let arm = |q: char| format!(r"{q}{q}{q}.*?(?<!\\)(\\\\)*?{q}{q}{q}", q = q);
+    let dq = arm('"');
+    let sq = arm('\'');
+    let both = format!("{dq}|{sq}");
+    let arms: [(&str, String, &[char]); 3] = [
+        ("ldq", dq, &['"', '\\', 'a']),
+        ("lsq", sq, &['\'', '\\', 'a']),
+        ("lboth", both, &['"', '\'', '\\', 'a']),
+    ];
+    let prefixes: [(&str, &[char]); 3] = [
+        ("", &[]),
+        ("(r?)", &['r']),
+        ("([ubf]?r?|r[ubf])", &['r', 'b']),
+    ];
+    let mut out = Vec::new();
+    let mut n = 0usize;
+    for (plabel, pchars) in prefixes {
+        for (alabel, arm_src, achars) in &arms {
+            let pattern = format!("{plabel}({arm_src})");
+            // Alphabet: the arm's distinguishing chars + the prefix letters, capped at 4 so
+            // the length-8 exhaustive corpus stays tractable (4^8 ≈ 65k).
+            let mut alphabet: Vec<char> = achars.to_vec();
+            for &c in pchars {
+                if !alphabet.contains(&c) {
+                    alphabet.push(c);
+                }
+            }
+            alphabet.truncate(4);
+            out.push(GenTerminal {
+                name: format!("LONG_{plabel}_{alabel}_{n}"),
+                pattern,
+                shape: ShapeClass::BoundedLookbehind,
+                alphabet,
+                max_len: 8,
+            });
+            n += 1;
+        }
+    }
+    out
+}
+
 /// **Adversarial string-idiom shapes with a *non-literal* delimiter** — the recognizer's
 /// own acceptance surface (not just the classifier's). Each is structurally the string
 /// idiom `<q>(?!<q><q>).*?(?<!\\)(\\\\)*?<q>` but with `<q>` a regex construct that is
