@@ -34,11 +34,11 @@
 //!     changes with the match length). The lookbehind assertion is stripped into a
 //!     [`LookbehindGuard`] carrying its char-offset and the body's width window; the
 //!     driver checks the ≤`W` chars ending at that offset against `S`. The offset is
-//!     fixed only when every base element *before* the lookbehind is fixed-width — a
-//!     lookbehind after a variable-width prefix (`python.LONG_STRING`'s
-//!     `.*?(?<!\\)`) has no fixed offset and is **declined** here (routed to
-//!     `fancy-regex`), the reject-when-unsure direction; the variable-offset
-//!     window-carry is a later milestone.
+//!     fixed only when every base element *before* the lookbehind is fixed-width. The
+//!     `python.LONG_STRING` escaped-close idiom is handled before this generic path by
+//!     normalizing the lazy body plus multi-character close delimiter into an ordinary
+//!     delimiter-excluding branch; other variable-offset lookbehinds are still declined
+//!     to `fancy-regex` in the reject-when-unsure direction.
 
 use super::{Look, Node};
 use crate::error::GrammarError;
@@ -124,6 +124,9 @@ pub fn lower_boundary_dotall(
     let node = super::parse(pattern)?;
     if let Some(idiom) = recognize_string_idiom(&node) {
         return idiom.lower(pattern, dotall);
+    }
+    if let Some(idiom) = recognize_long_string_idiom(&node) {
+        return idiom.lower(dotall);
     }
     let mut branches = Vec::new();
     match &node {
@@ -827,6 +830,83 @@ impl StringIdiom {
     }
 }
 
+/// A recognized long-string escaped-close idiom: an optional bounded-width,
+/// assertion-free prefix followed by an alternation of triple-quote-delimited arms,
+/// each `<ddd>.*?(?<!\\)(\\\\)*?<ddd>` for a repeated single-character delimiter.
+pub struct LongStringIdiom {
+    /// The prefix regex source (e.g. `([ubf]?r?|r[ubf])`), or empty when there is none.
+    prefix: String,
+    /// The repeated delimiter of each arm (e.g. `"""` then `'''`), in source order.
+    delims: Vec<RepeatedDelimiter>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RepeatedDelimiter {
+    /// The full delimiter source (`"""`, `'''`).
+    source: String,
+    /// The one-character literal repeated by `source` (`"`, `'`).
+    unit: String,
+}
+
+impl LongStringIdiom {
+    /// Lower `LONG_STRING`'s lazy escaped body with a multi-character close delimiter.
+    ///
+    /// For a triple delimiter `ddd`, the lookaround-bearing close
+    /// `.*?(?<!\\)(\\\\)*?ddd` is equivalent to the delimiter-excluding body below
+    /// followed by `ddd`: each body iteration consumes either an escaped char, a
+    /// non-delimiter/non-backslash char, or a run of one/two delimiter chars that is
+    /// immediately followed by a real body char. Thus the body can never consume the
+    /// first byte of an unescaped `ddd` close, while escaped delimiter chars remain
+    /// available through the `\\.` arm. This is the multi-character Type-A analogue of
+    /// the `python.STRING` normalization above.
+    fn lower(&self, _dotall: bool) -> Result<Vec<LoweredBranch>, GrammarError> {
+        // The bundled LONG_STRING terminal is DOTALL (`/is`). Keep the normalized
+        // body newline-admitting so it mirrors the real terminal even when a fixture has
+        // already baked flags into validation before this lowering hook runs.
+        let nl = "";
+        let mut branches = Vec::new();
+        for d in &self.delims {
+            let q = &d.unit;
+            let safe = format!("[^{q}\\\\{nl}]");
+            let esc = r"\\.";
+            let body = format!("(?:{safe}|{esc}|{q}{safe}|{q}{esc}|{q}{q}{safe}|{q}{q}{esc})*");
+            let regex = format!(
+                "{p}{open}{body}{close}",
+                p = self.prefix,
+                open = d.source,
+                close = d.source
+            );
+            branches.push(LoweredBranch {
+                regex,
+                leading: None,
+                trailing: None,
+                lookbehind: Vec::new(),
+            });
+        }
+        Ok(branches)
+    }
+}
+
+/// Recognize the [`LongStringIdiom`] in a parsed terminal `node`, or `None`. This is
+/// intentionally exact: it accepts the bundled `python.LONG_STRING` shape (plus the
+/// same shape with no/other bounded prefix) and declines anything whose close delimiter
+/// is not a repeated literal.
+pub fn recognize_long_string_idiom(node: &Node) -> Option<LongStringIdiom> {
+    let (prefix, arms_node) = split_prefix_and_arms(node)?;
+    let arm_nodes: Vec<&Node> = match arms_node {
+        Node::Alt(branches) => branches.iter().collect(),
+        other => vec![other],
+    };
+    let mut delims = Vec::new();
+    for arm in arm_nodes {
+        delims.push(match_long_string_arm(arm)?);
+    }
+    if delims.is_empty() {
+        return None;
+    }
+    Some(LongStringIdiom { prefix, delims })
+}
+
 /// Recognize the [`StringIdiom`] in a parsed terminal `node`, or `None`. Structural and
 /// exact: the only newly-supported shape is `python.STRING`'s `(?!"")`-after-prefix
 /// opening guard, so the matcher pins the precise arm shape and declines everything else.
@@ -876,6 +956,45 @@ fn unwrap_arms(node: &Node) -> Option<&Node> {
         inner @ (Node::Alt(_) | Node::Concat(_)) => Some(inner),
         _ => None,
     }
+}
+
+/// Match one arm `<ddd>.*?(?<!\\)(\\\\)*?<ddd>`, returning the repeated delimiter,
+/// or `None` if the arm is not exactly the `LONG_STRING` shape.
+fn match_long_string_arm(arm: &Node) -> Option<RepeatedDelimiter> {
+    let parts = match arm {
+        Node::Concat(parts) => parts.as_slice(),
+        _ => return None,
+    };
+    if parts.len() != 4 {
+        return None;
+    }
+    let delim = repeated_literal_delimiter_prefix(&parts[0])?;
+
+    // parts[1]: (?<!\\)
+    match &parts[1] {
+        Node::Assertion {
+            neg: true,
+            look: Look::Behind,
+            body,
+            quant,
+        } if quant.is_empty() && body.to_source() == r"\\" => {}
+        _ => return None,
+    }
+
+    // parts[2]: (\\)*? — the even-backslash run
+    match &parts[2] {
+        Node::Group { open, body, quant }
+            if open == "("
+                && quant == "*?"
+                && matches!(body.as_ref(), Node::Atom(s) if s == r"\\\\") => {}
+        _ => return None,
+    }
+
+    // parts[3]: the closing delimiter, identical to the opening one.
+    if repeated_literal_delimiter_source(&parts[3])? != delim {
+        return None;
+    }
+    Some(delim)
 }
 
 /// Match one arm `<q>(?!<q><q>).*?(?<!\\)(\\\\)*?<q>`, returning the delimiter source
@@ -949,6 +1068,30 @@ fn match_string_arm(arm: &Node) -> Option<String> {
 /// (`^ $ \b \B \A \z \Z \G`), and the class escapes (`\d \w \s …`): these are *not*
 /// fixed single literals, so an arm built on them would mis-lower. Declining them routes
 /// the terminal to `fancy-regex` (reject-when-unsure) and closes the false-accept.
+fn repeated_literal_delimiter_source(node: &Node) -> Option<RepeatedDelimiter> {
+    let s = match node {
+        Node::Atom(s) => s.as_str(),
+        _ => return None,
+    };
+    let chars: Vec<char> = s.chars().collect();
+    match chars.as_slice() {
+        [a, b, c] if a == b && b == c && is_plain_literal(*a) => Some(RepeatedDelimiter {
+            source: s.to_string(),
+            unit: a.to_string(),
+        }),
+        _ => None,
+    }
+}
+
+fn repeated_literal_delimiter_prefix(node: &Node) -> Option<RepeatedDelimiter> {
+    let s = match node {
+        Node::Atom(s) => s.as_str(),
+        _ => return None,
+    };
+    let prefix = s.strip_suffix(".*?")?;
+    repeated_literal_delimiter_source(&Node::Atom(prefix.to_string()))
+}
+
 fn literal_delimiter_source(node: &Node) -> Option<String> {
     let s = match node {
         Node::Atom(s) => s.as_str(),
@@ -1133,10 +1276,18 @@ mod tests {
     }
 
     #[test]
+    fn long_string_idiom_lowers_to_plain_branch() {
+        let b = lower_boundary_dotall(r#"""".*?(?<!\\)(\\\\)*?""""#, true).unwrap();
+        assert_eq!(b.len(), 1);
+        assert!(b[0].leading.is_none() && b[0].trailing.is_none() && b[0].lookbehind.is_empty());
+    }
+
+    #[test]
     fn declines_lookbehind_after_variable_prefix() {
-        // A lookbehind after a variable-width prefix (`\w+`, `.*?`) has no fixed offset
-        // — declined (routed to fancy), the reject-when-unsure direction. This is the
-        // python.LONG_STRING `.*?(?<!\\)` case the variable-offset milestone covers.
+        // A generic lookbehind after a variable-width prefix (`\w+`, `.*?`) has no fixed
+        // offset — declined (routed to fancy), the reject-when-unsure direction. The
+        // exact LONG_STRING escaped-close idiom is handled by the recognizer above; a
+        // partial/non-idiom lazy body still declines here.
         assert!(lower_boundary(r"\w+(?<!_)x").is_err());
         assert!(lower_boundary(r#"""".*?(?<!\\)(\\\\)*?"#).is_err());
     }

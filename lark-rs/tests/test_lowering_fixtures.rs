@@ -86,10 +86,7 @@ fn fixtures() -> Vec<SeamFixture> {
             grammar: "start: LONG\nLONG: /\"\"\".*?(?<!\\\\)(\\\\\\\\)*?\"\"\"/s\n",
             g_regex_flags: 0,
             input: "\"\"\"a\nb\"\"\"",
-            classify_target: Some((
-                r#""""\.*?(?<!\\)(\\\\)*?""""#,
-                ShapeClass::BoundedLookbehind,
-            )),
+            classify_target: Some((r#"""".*?(?<!\\)(\\\\)*?""""#, ShapeClass::BoundedLookbehind)),
         },
         SeamFixture {
             name: "utf8_byte_boundary",

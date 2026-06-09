@@ -32,7 +32,9 @@ mod common;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 
-use common::lowering::{corpus, string_idiom_terminals, supported_terminals, GenTerminal};
+use common::lowering::{
+    corpus, long_string_idiom_terminals, string_idiom_terminals, supported_terminals, GenTerminal,
+};
 use lark_rs::grammar::terminal::flags;
 use lark_rs::{
     basic_lexer_conf, load_grammar, lower, lower_terminal, lower_terminal_dotall, BasicLexer,
@@ -324,8 +326,7 @@ fn run_json_corpus(d: &mut Differential) {
 
 /// A couple of real Python source files under the bundled `python.lark`. The inputs
 /// are capped at a line boundary near `CAP` bytes so the (constant-factor-heavy)
-/// `fancy-regex` `STRING`/`LONG_STRING` side-probes — run identically by **both**
-/// backends — keep the test quick while still exercising strings, comments,
+/// formerly-`fancy-regex` `STRING`/`LONG_STRING` terminals keep the test quick while still exercising strings, comments,
 /// numbers, names, and operators on real code.
 fn run_python_files(d: &mut Differential) {
     const CAP: usize = 6_000;
@@ -437,10 +438,10 @@ fn lookaround_grammar(t: &GenTerminal) -> (String, String) {
 /// terminal: build both backends (build parity is enforced), then either compare
 /// token streams over the terminal's exhaustive corpus — *iff* the terminal actually
 /// lowers ([`lower_terminal`] returns `Ok`) — or record it as a **pending**
-/// (routed-to-fancy) skip when the lowering declines it. With M1/M2/M3 landed the
-/// generated population is all lowerable, so every grammar here is compared; the
-/// pending path stays live for the bundled terminals the variable-offset / STRING
-/// milestone still declines.
+/// (routed-to-fancy) skip when the lowering declines it. With M1/M2/M3/M4 plus the
+/// LONG_STRING escaped-close lowering landed, the generated population is all
+/// lowerable, so every grammar here is compared; the pending path stays live for the
+/// final bundled terminal (`lark.REGEXP`) and future decline-to-fancy fixtures.
 fn run_lookaround_grammars(d: &mut Differential) {
     // The bare boundary/lookbehind population *and* python.STRING's real nested/prefixed
     // opening-guard idiom (the marquee L2 splice) — both must lex byte-identically under
@@ -448,6 +449,7 @@ fn run_lookaround_grammars(d: &mut Differential) {
     for t in supported_terminals()
         .into_iter()
         .chain(string_idiom_terminals())
+        .chain(long_string_idiom_terminals())
     {
         let (grammar, pattern) = lookaround_grammar(&t);
         let start = ["start".to_string()];
@@ -503,9 +505,9 @@ fn test_scanner_backends_lex_identically() {
 
     let _ = std::panic::take_hook();
 
-    // Deliverable 3: the python.lark differential is run *with STRING lowered*, not
-    // silently routed to `fancy-regex`. Confirm the bundled STRING actually lowers to
-    // branches (the splice landed) — so the 0-divergence result above is the lowered
+    // Deliverable 3: the python.lark differential is run *with STRING and LONG_STRING
+    // lowered*, not silently routed to `fancy-regex`. Confirm both bundled terminals
+    // actually lower to branches — so the 0-divergence result above is the lowered
     // engine agreeing with fancy, not two fancy side-probes trivially agreeing.
     const STRING_RAW: &str =
         r#"([ubf]?r?|r[ubf])("(?!"").*?(?<!\\)(\\\\)*?"|'(?!'').*?(?<!\\)(\\\\)*?')"#;
@@ -515,6 +517,15 @@ fn test_scanner_backends_lex_identically() {
             Ok(Lowered::Branches(_))
         ),
         "python.STRING must LOWER (Lowered::Branches) under the splice, not route to fancy"
+    );
+    const LONG_STRING_RAW: &str =
+        r#"([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')"#;
+    assert!(
+        matches!(
+            lower_terminal_dotall("LONG_STRING", LONG_STRING_RAW, true),
+            Ok(Lowered::Branches(_))
+        ),
+        "python.LONG_STRING must LOWER (Lowered::Branches), not route to fancy"
     );
 
     eprintln!(

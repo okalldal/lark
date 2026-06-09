@@ -1,5 +1,5 @@
-//! The **non-negotiable adversarial gate** for lowering `python.STRING` into the DFA
-//! (the marquee L2 NFA-state splice — `docs/LEXER_DFA_PLAN.md`, "leading boundary").
+//! The **non-negotiable adversarial gate** for lowering Python string terminals into
+//! the DFA (`docs/LEXER_DFA_PLAN.md`, L2).
 //!
 //! `python.STRING`'s `(?!"")` opening guard is a *trailing-context* boundary: it makes
 //! `""""` a lex error while `"" ""` is two empty strings — a distinction that lives only
@@ -28,6 +28,17 @@ fn string_lexer() -> BasicLexer {
     let grammar = "start: STRING+\n%import python.STRING\n%ignore \" \"\n";
     let g = load_grammar(grammar, &["start".to_string()], false, false)
         .expect("grammar with %import python.STRING builds");
+    let cg = lower(&g);
+    let conf = basic_lexer_conf(&cg, 0).with_backend(LexerBackend::Dfa);
+    BasicLexer::new(&conf).expect("Dfa BasicLexer builds")
+}
+
+/// Build a default-backend (`Dfa`) basic lexer for the bundled DOTALL
+/// `python.LONG_STRING` terminal.
+fn long_string_lexer() -> BasicLexer {
+    let grammar = "start: LONG_STRING+\n%import python.LONG_STRING\n%ignore \" \"\n";
+    let g = load_grammar(grammar, &["start".to_string()], false, false)
+        .expect("grammar with %import python.LONG_STRING builds");
     let cg = lower(&g);
     let conf = basic_lexer_conf(&cg, 0).with_backend(LexerBackend::Dfa);
     BasicLexer::new(&conf).expect("Dfa BasicLexer builds")
@@ -127,18 +138,10 @@ fn recognizer_still_accepts_literal_delimiters() {
     }
 }
 
-/// **Bundled-terminal lowering-status tripwire** (deliverable 6's payoff-check, made
-/// executable). The honest scope of this milestone is: `python.STRING` lowers into the
-/// DFA, while `lark.REGEXP` (internal `(?!\/)`) and `python.LONG_STRING` (a lazy `.*?`
-/// body with a multi-character `"""` close and no opening guard) are **declined** — they
-/// route to `fancy-regex`, so `fancy-regex` stays in the runtime and L4/L5 remain blocked.
-///
-/// This pins that scope as a fact. If a future change makes REGEXP or LONG_STRING lower,
-/// this test goes red on purpose — forcing the author to (a) confirm the new lowering is
-/// proven correct and (b) re-run the payoff-check: with *all* bundled lookaround terminals
-/// lowered, L4 (drop `AnyRegex::Fancy` from the runtime) and L5 (bake) become unblocked,
-/// and `docs/LEXER_DFA_PLAN.md` + `CLAUDE.md` must be updated. It is the same negative-pin
-/// discipline as `test_lookaround.rs::string_lookaround_free_rewrite_is_not_equivalent`.
+/// **Bundled-terminal lowering-status tripwire** (deliverable payoff-check, made
+/// executable). `python.STRING` and `python.LONG_STRING` now lower into the DFA; only
+/// `lark.REGEXP` (internal `(?!\/)`) remains declined to `fancy-regex`, so L4 is still
+/// blocked by exactly that terminal.
 #[test]
 fn bundled_lookaround_terminal_lowering_status() {
     // Verbatim from the bundled grammars (the `/i` / `/is` flags live on the terminal;
@@ -156,22 +159,44 @@ fn bundled_lookaround_terminal_lowering_status() {
         "python.STRING must lower into the DFA"
     );
 
-    // REGEXP and LONG_STRING are declined (route to fancy). A returned `Branches` here
-    // means the scope changed — see the doc above: prove it and re-run the L4/L5 payoff.
-    for (name, raw, dotall) in [
-        ("lark.REGEXP", REGEXP_RAW, false),
-        ("python.LONG_STRING", LONG_STRING_RAW, true),
-    ] {
-        assert!(
-            !matches!(
-                lower_terminal_dotall(name, raw, dotall),
-                Ok(Lowered::Branches(_))
-            ),
-            "{name} unexpectedly LOWERS now — fancy-regex was supposed to stay (L4 blocked). \
-             If this lowering is intentional and proven, update the payoff-check + docs and \
-             revise this tripwire."
-        );
-    }
+    let long = lower_terminal_dotall("python.LONG_STRING", LONG_STRING_RAW, true);
+    assert!(
+        matches!(long, Ok(Lowered::Branches(_))),
+        "python.LONG_STRING must lower into the DFA now, got {long:?}"
+    );
+    assert!(
+        !matches!(
+            lower_terminal_dotall("lark.REGEXP", REGEXP_RAW, false),
+            Ok(Lowered::Branches(_))
+        ),
+        "lark.REGEXP remains the only bundled lookaround terminal routed to fancy-regex"
+    );
+}
+
+/// LONG_STRING's multi-character close delimiter is forced to the first unescaped
+/// triple quote. A wrong greedy body that can consume the close delimiter would return
+/// the later close here; the lowered DFA must return the same six-byte empty long
+/// string prefix as `fancy-regex`.
+#[test]
+fn long_string_triple_quote_close_is_not_swallowed() {
+    let lexer = long_string_lexer();
+    let input = "\"\"\"\"\"\"tail\"\"\"\"\"\"";
+    let (_, value) = lexer
+        .match_at(input, 0)
+        .expect("LONG_STRING should match the first empty triple-quoted literal");
+    assert_eq!(
+        value, "\"\"\"\"\"\"",
+        "LONG_STRING must stop at the first unescaped triple-quote close"
+    );
+
+    let escaped = "\"\"\"\\\"\"\"tail\"\"\"\"\"\"";
+    let (_, escaped_value) = lexer
+        .match_at(escaped, 0)
+        .expect("escaped quote run should keep scanning to the real close");
+    assert_eq!(
+        escaped_value, "\"\"\"\\\"\"\"tail\"\"\"",
+        "an escaped quote must not start the triple-quote close delimiter"
+    );
 }
 
 /// **The canary.** `""""` (and `''''`) is a LEX ERROR; `"" ""` (and `'' ''`) is exactly

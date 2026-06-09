@@ -18,7 +18,8 @@
 mod common;
 
 use common::lowering::{
-    reject_cases, reject_path_mutants, supported_terminals, wrongly_accepted_rejects,
+    long_string_idiom_terminals, reject_cases, reject_path_mutants, supported_terminals,
+    wrongly_accepted_rejects,
 };
 use lark_rs::{classify, lower_terminal, DefaultClassifier, Lowered, ShapeClass, Verdict};
 
@@ -110,7 +111,10 @@ fn reject_corpus_covers_every_rejection_reason() {
 /// the classifier (either side wrong) fails here.
 #[test]
 fn generated_supported_terminals_match_their_declared_shape() {
-    let terms = supported_terminals();
+    let terms: Vec<_> = supported_terminals()
+        .into_iter()
+        .chain(long_string_idiom_terminals())
+        .collect();
     assert!(
         terms.len() >= 200,
         "expected hundreds of supported terminals, got {}",
@@ -172,7 +176,10 @@ fn lowering_entry_point_lowers_landed_shapes_and_rejects_the_rest() {
         Ok(Lowered::Plain)
     ));
 
-    for t in supported_terminals() {
+    for t in supported_terminals()
+        .into_iter()
+        .chain(long_string_idiom_terminals())
+    {
         // All three supported shapes lower for real now (M1/M2/M3).
         let lowered = lower_terminal(&t.name, &t.pattern).unwrap_or_else(|e| {
             panic!(

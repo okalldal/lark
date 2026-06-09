@@ -17,8 +17,8 @@ mod common;
 
 use common::lowering::{
     boundary_mutations, corpus, fancy_matcher, fancy_prefix, has_guard, has_lookbehind,
-    lookbehind_mutations, lowered_prefix, mutant_lookbehind_matcher, mutant_matcher,
-    string_idiom_terminals, supported_terminals, BoundaryMutation, GenTerminal,
+    long_string_idiom_terminals, lookbehind_mutations, lowered_prefix, mutant_lookbehind_matcher,
+    mutant_matcher, string_idiom_terminals, supported_terminals, BoundaryMutation, GenTerminal,
 };
 use lark_rs::ShapeClass;
 
@@ -205,6 +205,30 @@ fn string_idiom_lowered_equals_fancy() {
     assert!(
         failures.is_empty(),
         "string-idiom generative-equivalence divergence(s):\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+/// The `python.LONG_STRING` escaped-close idiom: every generated multi-character-close
+/// terminal's lowered match-length must equal the `fancy-regex` oracle. Returning `Err`
+/// from `lowered_prefix` is a failure, so the test also pins that the idiom is genuinely
+/// lowered rather than routed to the oracle side-probe.
+#[test]
+fn long_string_idiom_lowered_equals_fancy() {
+    let terms = long_string_idiom_terminals();
+    assert!(
+        !terms.is_empty(),
+        "no LONG_STRING-idiom terminals generated"
+    );
+    let mut failures = Vec::new();
+    for t in &terms {
+        if let Some(d) = equivalence_divergence(t) {
+            failures.push(d);
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "LONG_STRING-idiom generative-equivalence divergence(s):\n  {}",
         failures.join("\n  ")
     );
 }

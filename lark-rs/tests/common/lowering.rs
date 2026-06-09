@@ -450,6 +450,50 @@ pub fn string_idiom_terminals() -> Vec<GenTerminal> {
     out
 }
 
+/// The `python.LONG_STRING` escaped-close idiom: a lazy body, a multi-character
+/// triple-quote close delimiter, and no opening guard. The alphabet/corpus exercise
+/// early triple-close selection plus escaped quotes/backslashes; DOTALL newline parity
+/// is covered by the bundled `python.lark` scanner differential, which threads the
+/// terminal's real `/is` flag into the lowering.
+pub fn long_string_idiom_terminals() -> Vec<GenTerminal> {
+    let dq = r#"""".*?(?<!\\)(\\\\)*?""""#;
+    let sq = r"'''.*?(?<!\\)(\\\\)*?'''";
+    let both = format!("{dq}|{sq}");
+    let arms: [(&str, &str, &[char]); 3] = [
+        ("dq", dq, &['"', '\\', 'a']),
+        ("sq", sq, &['\'', '\\', 'a']),
+        ("both", &both, &['"', '\'', '\\', 'a']),
+    ];
+    let prefixes: [(&str, &[char]); 3] = [
+        ("", &[]),
+        ("(r?)", &['r']),
+        ("([ubf]?r?|r[ubf])", &['r', 'b']),
+    ];
+    let mut out = Vec::new();
+    let mut n = 0usize;
+    for (plabel, pchars) in prefixes {
+        for (alabel, arm_src, achars) in &arms {
+            let pattern = format!("{plabel}({arm_src})");
+            let mut alphabet: Vec<char> = achars.to_vec();
+            for &c in pchars {
+                if !alphabet.contains(&c) {
+                    alphabet.push(c);
+                }
+            }
+            alphabet.truncate(5);
+            out.push(GenTerminal {
+                name: format!("LONG_STR_{plabel}_{alabel}_{n}"),
+                pattern,
+                shape: ShapeClass::BoundedLookbehind,
+                alphabet,
+                max_len: 7,
+            });
+            n += 1;
+        }
+    }
+    out
+}
+
 /// **Adversarial string-idiom shapes with a *non-literal* delimiter** — the recognizer's
 /// own acceptance surface (not just the classifier's). Each is structurally the string
 /// idiom `<q>(?!<q><q>).*?(?<!\\)(\\\\)*?<q>` but with `<q>` a regex construct that is

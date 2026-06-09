@@ -280,6 +280,24 @@ fn string_proof_representatives() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
+/// The real nested LONG_STRING representatives (double-quote and bundled both-arms
+/// shape): prefix + triple delimiter + lazy body + escaped-close lookbehind. The `/s`
+/// flag lives on the bundled terminal, so this proof covers the same structural regex
+/// over the ASCII representative alphabet; the scanner differential separately gates
+/// DOTALL flag threading on `python.lark` itself.
+fn long_string_proof_representatives() -> Vec<(&'static str, &'static str)> {
+    vec![
+        (
+            "LONG_STRING_NESTED_DQ",
+            r#"([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?""")"#,
+        ),
+        (
+            "LONG_STRING_NESTED_BOTH",
+            r#"([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')"#,
+        ),
+    ]
+}
+
 /// Decide Route-1 match-length equivalence via the **state-pruned** Myhill-Nerode
 /// decision procedure (see the section header). Complete and tractable for the
 /// content-bearing string idiom; `Err(cex)` carries a counterexample.
@@ -385,6 +403,28 @@ fn route1_proof_string_idiom_real_nested_shape() {
                 .iter()
                 .any(|a| a.verdict() == Verdict::Supported(ShapeClass::LeadingBoundary)),
             "{name} must classify with a supported leading boundary (the spliced guard)"
+        );
+        assert!(
+            lower_boundary(pattern).is_ok(),
+            "{name} must lower (not decline) for the proof to be non-vacuous"
+        );
+        prove_route1_pruned(name, pattern)
+            .unwrap_or_else(|cex| panic!("Route-1 (state-pruned) failed for {name}: {cex}"));
+    }
+}
+
+/// The committed Route-1 proof for the LONG_STRING multi-character close delimiter on
+/// its **real nested shape**. This is the proof obligation for absorbing the lazy body
+/// plus escaped-close lookbehind into an ordinary delimiter-excluding DFA branch.
+#[test]
+fn route1_proof_long_string_idiom_real_nested_shape() {
+    for (name, pattern) in long_string_proof_representatives() {
+        let c = classify(pattern).unwrap_or_else(|e| panic!("classify {name} errored: {e}"));
+        assert!(
+            c.assertions
+                .iter()
+                .any(|a| a.verdict() == Verdict::Supported(ShapeClass::BoundedLookbehind)),
+            "{name} must classify with a supported bounded lookbehind (the escaped close)"
         );
         assert!(
             lower_boundary(pattern).is_ok(),
