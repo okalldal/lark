@@ -637,46 +637,8 @@ fn build_combined_dfa(
         })
 }
 
-/// Whether a guarded branch's base regex `base` is **greedy-monotone**: its
-/// leftmost-first match always equals its longest match, so the guarded-accept
-/// accumulator's "longest accept where the guard holds" coincides with Python's
-/// backtracking result. This holds for a base with no alternation and no lazy
-/// quantifier; a base with an order-sensitive alternation (`ab|abc`) or a lazy
-/// quantifier (`.*?`) can prefer a *shorter* match, so it is **not** greedy-monotone
-/// and must not ride the accumulator (the caller routes it to `fancy-regex` instead —
-/// correct, never mis-lowered). Conservative: returns `false` when unsure.
-fn is_greedy_monotone(base: &str) -> bool {
-    match crate::lookaround::parse(base) {
-        Ok(node) => !node_has_alt(&node) && !node_has_lazy(&node),
-        Err(_) => false,
-    }
-}
-
-fn node_has_alt(n: &crate::lookaround::Node) -> bool {
-    use crate::lookaround::Node;
-    match n {
-        Node::Alt(_) => true,
-        Node::Concat(parts) => parts.iter().any(node_has_alt),
-        Node::Group { body, .. } => node_has_alt(body),
-        Node::Atom(_) | Node::Assertion { .. } => false,
-    }
-}
-
-fn node_has_lazy(n: &crate::lookaround::Node) -> bool {
-    use crate::lookaround::Node;
-    match n {
-        Node::Atom(s) => atom_has_lazy(s),
-        Node::Concat(parts) | Node::Alt(parts) => parts.iter().any(node_has_lazy),
-        Node::Group { body, quant, .. } => quant.ends_with('?') || node_has_lazy(body),
-        Node::Assertion { .. } => false,
-    }
-}
-
-/// A lazy quantifier in a flat atom run: a `*` / `+` / `?` / `}` immediately followed
-/// by `?`. Over-approximates (the safe direction).
-fn atom_has_lazy(atom: &str) -> bool {
-    atom.contains("*?") || atom.contains("+?") || atom.contains("??") || atom.contains("}?")
-}
+// (the greedy-monotone realizability check now lives in `crate::lookaround::lower`,
+// so `lower_terminal` itself declines a non-greedy-monotone guarded base.)
 
 impl DfaScanner {
     /// Build a DFA scanner from candidate terminals (deduplicated by id). Consumes
@@ -746,19 +708,13 @@ impl DfaScanner {
                     })
                 };
 
-            // Route to fancy unless every branch lowers cleanly (a guarded branch whose
-            // base is not greedy-monotone can't ride the longest-where-guard-holds
-            // accumulator, so the whole terminal stays on fancy — correct, never
-            // mis-lowered).
+            // Route to fancy unless the terminal lowers. `lower_terminal` already
+            // declines a shape not yet lowered (bounded lookbehind) *and* a guarded
+            // branch whose base is not greedy-monotone (it can't ride the
+            // longest-where-guard-holds accumulator) — so a returned `Branches` is
+            // always faithfully lowerable.
             let lowered = match crate::lookaround::classify::lower_terminal(&def.name, raw) {
-                Ok(crate::lookaround::classify::Lowered::Branches(branches))
-                    if branches.iter().all(|b| {
-                        (b.leading.is_none() && b.trailing.is_none())
-                            || is_greedy_monotone(&b.regex)
-                    }) =>
-                {
-                    branches
-                }
+                Ok(crate::lookaround::classify::Lowered::Branches(branches)) => branches,
                 _ => {
                     let anchored = AnyRegex::compile(&format!("{prefix}\\G{inline}"))?;
                     fancy.push((rank, *id, anchored));
@@ -1821,6 +1777,34 @@ mod tests {
             "an order-sensitive guarded base must not be lowered into either engine"
         );
         assert_agree(&terms, &["ab", "abc", "abz", "abcz", "abx", "abcx", "a"]);
+    }
+
+    #[test]
+    fn dfa_sibling_guard_does_not_demote_plain_alternation() {
+        // Regression for the cross-terminal selection bug: a guarded terminal in the
+        // same scanner as an *unguarded* order-sensitive alternation must NOT flip the
+        // plain terminal from leftmost-first to longest-match. `AB=/ab|abc/` (plain)
+        // stays leftmost-first ("ab") even though `B=/x(?!y)/` is guarded.
+        let terms = [re_term(1, "AB", "ab|abc", 0), re_term(2, "B", "x(?!y)", 0)];
+        let (s, d) = both(&terms);
+        assert_eq!(d.match_at("abc", 0), Some((SymbolId(1), "ab")));
+        assert_agree(&terms, &["abc", "ab", "x", "xy", "abx", "xab"]);
+        let _ = s;
+    }
+
+    #[test]
+    fn dfa_lazy_guarded_base_routes_to_fancy_and_agrees() {
+        // Regression for the lazy-body bug: a lazy quantifier in a guarded base
+        // (`ab??(?!c)`) is not greedy-monotone — the longest-accept accumulator would
+        // pick "ab" where leftmost-first (lazy) wants "a". The lowering declines it
+        // (routed to fancy), so the Dfa backend stays byte-identical to `Scanner`.
+        let terms = [re_term(1, "T", "ab??(?!c)", 0)];
+        let (_, d) = both(&terms);
+        assert!(
+            d.plain.is_none() && d.guarded.is_none(),
+            "a lazy guarded base must not be lowered into either engine"
+        );
+        assert_agree(&terms, &["a", "ab", "abc", "ac", "axc"]);
     }
 
     #[test]

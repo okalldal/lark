@@ -138,6 +138,23 @@ fn lower_branch(pattern: &str, branch: &Node) -> Result<LoweredBranch, GrammarEr
         // a zero-width terminal branch, which the lexer forbids.
         return Err(zero_width(pattern));
     }
+    // A guarded branch rides the driver's "longest accept where the guard holds"
+    // accumulator, which only coincides with Python's backtracking result when the
+    // base is **greedy-monotone** (its leftmost-first match is always its longest).
+    // A base with an order-sensitive alternation (`ab|abc`) or a lazy/possessive
+    // quantifier (`.*?`, `a*+`) can prefer a *shorter* match, so the accumulator would
+    // mis-lower it. Decline here (reject-when-unsure) so the caller routes the whole
+    // terminal to `fancy-regex` instead — correct, never mis-lowered.
+    if (leading.is_some() || trailing.is_some()) && !is_greedy_monotone(&base) {
+        return Err(GrammarError::Other {
+            msg: format!(
+                "terminal pattern `{pattern}`: a guarded branch's base is not \
+                 greedy-monotone (it has an order-sensitive alternation or a lazy/\
+                 possessive quantifier), so its match-length under the guard is not \
+                 reproducible by the longest-accept accumulator."
+            ),
+        });
+    }
     Ok(LoweredBranch {
         regex,
         leading,
@@ -152,6 +169,43 @@ fn zero_width(pattern: &str) -> GrammarError {
              boundary assertion); the lexer forbids zero-width terminals."
         ),
     }
+}
+
+/// Whether a guarded branch's base is **greedy-monotone**: its leftmost-first match
+/// always equals its longest match, so the driver's "longest accept where the guard
+/// holds" coincides with Python's backtracking result. True for a base with no
+/// alternation and no lazy/possessive quantifier. Conservative — the caller treats a
+/// `false` as "route to fancy."
+fn is_greedy_monotone(base: &Node) -> bool {
+    !node_has_alt(base) && !node_has_lazy(base)
+}
+
+fn node_has_alt(n: &Node) -> bool {
+    match n {
+        Node::Alt(_) => true,
+        Node::Concat(parts) => parts.iter().any(node_has_alt),
+        Node::Group { body, .. } => node_has_alt(body),
+        Node::Atom(_) | Node::Assertion { .. } => false,
+    }
+}
+
+fn node_has_lazy(n: &Node) -> bool {
+    match n {
+        Node::Atom(s) => atom_has_lazy(s),
+        Node::Concat(parts) | Node::Alt(parts) => parts.iter().any(node_has_lazy),
+        Node::Group { body, quant, .. } => quant.ends_with('?') || node_has_lazy(body),
+        Node::Assertion { .. } => false,
+    }
+}
+
+/// A lazy/possessive quantifier in a flat atom run: a `*` / `+` / `?` / `}` followed
+/// by `?` (lazy) or `+` (possessive). Over-approximates (the safe direction).
+fn atom_has_lazy(atom: &str) -> bool {
+    let lazy = ["*?", "+?", "??", "}?"];
+    let possessive = ["*+", "++", "?+", "}+"];
+    lazy.iter()
+        .chain(possessive.iter())
+        .any(|m| atom.contains(m))
 }
 
 #[cfg(test)]
@@ -173,6 +227,22 @@ mod tests {
             })
         );
         assert!(b[1].leading.is_none());
+    }
+
+    #[test]
+    fn declines_non_greedy_monotone_guarded_base() {
+        // A guarded branch whose base has an order-sensitive alternation or a lazy/
+        // possessive quantifier is declined (reject-when-unsure) so the caller routes
+        // it to fancy-regex rather than mis-lowering it via the longest-accept
+        // accumulator.
+        assert!(lower_boundary("(ab|abc)(?!z)").is_err());
+        assert!(lower_boundary("ab??(?!c)").is_err());
+        assert!(lower_boundary("(?!z)(ab|abc)").is_err());
+        assert!(lower_boundary(r"a.*?(?=c)").is_err());
+        // But a greedy-monotone guarded base (and an *unguarded* order-sensitive base)
+        // lower fine.
+        assert!(lower_boundary("[0-9]+(?![0-9])").is_ok());
+        assert!(lower_boundary("ab|abc").is_ok()); // unguarded: order-sensitivity is the engine's job
     }
 
     #[test]

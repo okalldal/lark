@@ -112,6 +112,31 @@ C: /c/
     );
 }
 
+/// A **lazy** quantifier in a guarded body must keep leftmost-first (shortest)
+/// semantics, not longest. `T=/ab??(?!c)/` on `"ab"` is `"a"` (lazy `b??` prefers
+/// empty), never `"ab"`. A longest-accept accumulator over the guard's accept-set
+/// would pick `"ab"`; the lowering must decline a non-greedy-monotone base and route
+/// it to `fancy-regex`, so the two backends agree. (Pairs with the in-crate
+/// `dfa_lazy_guarded_base_routes_to_fancy_and_agrees`.)
+#[test]
+fn lazy_guarded_body_keeps_shortest_not_longest() {
+    let grammar = r#"
+start: (T | C)+
+T: /ab??(?!c)/
+C: /c/
+"#;
+    assert_backends_agree(grammar, &["ab", "a", "ac", "abc", "aca", "abca"]);
+
+    // A lazy body with a *positive* guard, beside a plain order-sensitive sibling.
+    let mixed = r#"
+start: (AB | T | C)+
+AB: /ab|abc/
+T: /a.??(?=c)/
+C: /c/
+"#;
+    assert_backends_agree(mixed, &["abc", "ab", "ac", "aXc", "abcc"]);
+}
+
 /// The shorter branch winning is genuinely order-dependent: `/abc|ab/` (longer first)
 /// is leftmost-first `"abc"`, while `/ab|abc/` (shorter first) is `"ab"`. Both must
 /// hold under a guard, so a longest-match engine is caught from either direction.
