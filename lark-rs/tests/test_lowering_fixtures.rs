@@ -176,11 +176,12 @@ fn outcome(lexer: &BasicLexer, input: &str) -> Result<Vec<(String, String)>, usi
 }
 
 /// The Dfa backend must lex each seam fixture byte-identically to the Regex/`fancy`
-/// reference — the per-fixture restriction of the master differential. For a fixture
-/// whose shape has *landed* (M1: trailing-boundary) the Dfa side genuinely **lowers**
-/// the terminal; for a still-pending shape (leading / lookbehind) both sides route to
-/// `fancy-regex`, so they agree trivially. Either way the contract is the same:
-/// swapping the engine changes nothing. Active since M1.
+/// reference — the per-fixture restriction of the master differential. With M1/M2/M3
+/// landed the Dfa side genuinely **lowers** every fixture whose terminal is in shape;
+/// a terminal the lowering *declines* (the `newline_dotall_body` fixture's
+/// variable-offset lookbehind behind a flag wrapper) routes to `fancy-regex` on both
+/// sides, so they still agree. Either way the contract is the same: swapping the engine
+/// changes nothing.
 #[test]
 fn seam_fixtures_lowered_lex_equals_fancy() {
     for f in fixtures() {

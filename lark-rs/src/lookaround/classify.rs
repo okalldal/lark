@@ -263,16 +263,15 @@ pub enum Lowered {
     Branches(Vec<super::lower::LoweredBranch>),
 }
 
-/// **THE LOWERING ENTRY POINT — stubbed to reject every lookaround terminal.**
+/// **THE LOWERING ENTRY POINT.**
 ///
-/// A plain terminal returns [`Lowered::Plain`]. Any terminal with a lookaround
-/// assertion returns `Err`, whether its shape is *supported* (rejected as "pending
-/// — not yet lowered", so the differential harness records it and flips to a gated
-/// comparison once the shape lands) or *unsupported* (rejected for good). Either way
-/// the message names the terminal and the offending assertion.
-///
-/// Keeping both behind one entry point is the point: the build path calls this and
-/// never sees a half-lowered terminal during the harness-first phase.
+/// A plain terminal returns [`Lowered::Plain`]. A terminal whose every assertion is a
+/// supported shape (leading/trailing boundary, bounded lookbehind) is lowered to
+/// [`Lowered::Branches`] — unless the lowering *declines* a particular instance (a
+/// non-greedy-monotone guarded base, or a lookbehind after a variable-width prefix),
+/// in which case it returns `Err` and the caller routes that terminal to
+/// `fancy-regex`. A terminal with an out-of-shape assertion is rejected permanently
+/// (`Err`). Either error names the terminal and the offending assertion.
 pub fn lower_terminal(name: &str, pattern: &str) -> Result<Lowered, GrammarError> {
     lower_terminal_with(&DefaultClassifier, name, pattern)
 }
@@ -300,38 +299,23 @@ pub fn lower_terminal_with(
             ),
         });
     }
-    // Every assertion is a supported shape. The boundary lowerings (M1 trailing, M2
-    // leading) are implemented; bounded-lookbehind is not yet, so a terminal that
-    // needs it is still reported pending.
-    if classification.assertions.iter().all(|a| {
-        matches!(
-            a.verdict(),
-            Verdict::Supported(ShapeClass::TrailingBoundary)
-                | Verdict::Supported(ShapeClass::LeadingBoundary)
-        )
-    }) {
-        let branches = super::lower::lower_boundary(pattern)?;
-        return Ok(Lowered::Branches(branches));
-    }
-
-    let (info, shape) = classification
-        .first_supported()
-        .expect("non-plain, non-rejected classification has a supported assertion");
-    Err(GrammarError::Other {
-        msg: format!(
-            "terminal `{name}`: lookaround assertion `{}` is a supported \
-             {} shape, but the bounded-lookaround lowering is not yet \
-             implemented (pending first shape — docs/LEXER_DFA_PLAN.md L2).",
-            info.source,
-            shape.describe(),
-        ),
-    })
+    // Every assertion is a supported shape. All three boundary/lookbehind lowerings
+    // are implemented (M1 trailing, M2 leading, M3 bounded-lookbehind), so the lowering
+    // runs. It may still **decline** a particular instance (a non-greedy-monotone
+    // guarded base, or a lookbehind after a variable-width prefix) by returning `Err`;
+    // the caller then routes that terminal to `fancy-regex` — correct, never
+    // mis-lowered.
+    let branches = super::lower::lower_boundary(pattern)?;
+    Ok(Lowered::Branches(branches))
 }
 
-/// True iff `e` is the *pending-shape* rejection [`lower_terminal`] emits for a
-/// supported-but-not-yet-lowered assertion (as opposed to a permanent rejection).
-/// The differential harness uses this to bucket a grammar as "pending" vs
-/// "genuinely unsupported".
+/// True iff `e` is a *pending-shape* rejection — a supported assertion shape whose
+/// lowering has not yet landed (as opposed to a permanent out-of-shape rejection or a
+/// per-instance decline-to-fancy). All three supported shapes now lower (M1/M2/M3), so
+/// no shape is pending and this is always `false`; it is retained so the harness's
+/// pending-vs-permanent bucketing keeps a stable name. A per-instance *decline* (a
+/// variable-offset lookbehind, a non-greedy-monotone base) is **not** pending — it is
+/// a routed-to-fancy outcome the differential records as a skip.
 pub fn is_pending_shape_error(e: &GrammarError) -> bool {
     matches!(e, GrammarError::Other { msg } if msg.contains("pending first shape"))
 }
@@ -453,169 +437,12 @@ fn walk_internal(node: &Node, out: &mut Vec<AssertionInfo>) {
 // ─── Width / backref analysis ──────────────────────────────────────────────────
 
 /// Maximum match width of `node` in characters, or `None` if unbounded (a `*` / `+`
-/// / `{m,}` quantifier). Used only for the bounded-vs-unbounded verdict and a small
-/// window size, so character counts are conservatively *over*-approximated — never
-/// under — and a nested assertion contributes its zero consumed width.
+/// / `{m,}` quantifier). Used for the bounded-vs-unbounded verdict and the stored
+/// assertion width. Delegates to [`super::lower::width_range`] — the single width
+/// routine the module shares — so the classifier's width, the Route-1 proof bound, and
+/// the runtime lookbehind window can never drift apart.
 fn max_width(node: &Node) -> Option<usize> {
-    match node {
-        Node::Atom(s) => atom_max_width(s),
-        Node::Concat(parts) => {
-            let mut total = 0usize;
-            for p in parts {
-                total = total.saturating_add(max_width(p)?);
-            }
-            Some(total)
-        }
-        Node::Alt(branches) => {
-            let mut m = 0usize;
-            for b in branches {
-                m = m.max(max_width(b)?);
-            }
-            Some(m)
-        }
-        Node::Group { body, quant, .. } => apply_quant_width(max_width(body)?, quant),
-        Node::Assertion { .. } => Some(0),
-    }
-}
-
-/// Apply a group/element quantifier to a known body width, or `None` if the
-/// quantifier makes it unbounded.
-fn apply_quant_width(width: usize, quant: &str) -> Option<usize> {
-    let q: Vec<char> = quant.chars().collect();
-    match q.first().copied() {
-        None => Some(width),
-        Some('*') | Some('+') => None,
-        Some('?') => Some(width),
-        Some('{') => match parse_brace(&q, 0) {
-            Some((None, _)) => None, // {m,}
-            Some((Some(n), _)) => Some(width.saturating_mul(n)),
-            None => Some(width), // a literal `{` that wasn't a quantifier
-        },
-        _ => Some(width),
-    }
-}
-
-/// Conservative max width of a flat, assertion-free atom run.
-fn atom_max_width(atom: &str) -> Option<usize> {
-    let chars: Vec<char> = atom.chars().collect();
-    let mut i = 0usize;
-    let mut total = 0usize;
-    while i < chars.len() {
-        let c = chars[i];
-        let elem_w = match c {
-            '\\' => {
-                i += 1;
-                let n = chars.get(i).copied();
-                i += 1;
-                match n {
-                    // Zero-width escapes: word/text boundaries and anchors.
-                    Some('b') | Some('B') | Some('A') | Some('z') | Some('Z') | Some('G') => 0,
-                    _ => 1,
-                }
-            }
-            '[' => {
-                i += 1;
-                if chars.get(i) == Some(&'^') {
-                    i += 1;
-                }
-                if chars.get(i) == Some(&']') {
-                    i += 1; // a literal `]` as the first class member
-                }
-                while i < chars.len() && chars[i] != ']' {
-                    if chars[i] == '\\' {
-                        i += 1;
-                    }
-                    i += 1;
-                }
-                if i < chars.len() {
-                    i += 1; // consume the closing `]`
-                }
-                1
-            }
-            '^' | '$' => {
-                i += 1;
-                0
-            }
-            _ => {
-                i += 1;
-                1
-            }
-        };
-
-        // A quantifier binding to this element.
-        match chars.get(i).copied() {
-            Some('*') | Some('+') => return None,
-            Some('?') => {
-                i += 1;
-                if matches!(chars.get(i), Some('?') | Some('+')) {
-                    i += 1;
-                }
-                total = total.saturating_add(elem_w);
-            }
-            Some('{') => {
-                if let Some((maxrep, consumed)) = parse_brace(&chars, i) {
-                    i += consumed;
-                    if matches!(chars.get(i), Some('?') | Some('+')) {
-                        i += 1;
-                    }
-                    match maxrep {
-                        None => return None,
-                        Some(n) => total = total.saturating_add(elem_w.saturating_mul(n)),
-                    }
-                } else {
-                    // A literal `{` — counts as the element it already is.
-                    total = total.saturating_add(elem_w);
-                }
-            }
-            _ => total = total.saturating_add(elem_w),
-        }
-    }
-    Some(total)
-}
-
-/// Parse a `{m}` / `{m,}` / `{m,n}` brace quantifier at `chars[start] == '{'`.
-/// Returns `(max_repetitions, chars_consumed)` where `max_repetitions` is `None`
-/// for the unbounded `{m,}`. Returns `None` if it is not a well-formed quantifier
-/// (a literal `{`).
-fn parse_brace(chars: &[char], start: usize) -> Option<(Option<usize>, usize)> {
-    debug_assert_eq!(chars.get(start), Some(&'{'));
-    let mut i = start + 1;
-    let mut lo = String::new();
-    while let Some(&c) = chars.get(i) {
-        if c.is_ascii_digit() {
-            lo.push(c);
-            i += 1;
-        } else {
-            break;
-        }
-    }
-    if lo.is_empty() {
-        return None; // `{,n}` / `{}` are not quantifiers here
-    }
-    let max = if chars.get(i) == Some(&',') {
-        i += 1;
-        let mut hi = String::new();
-        while let Some(&c) = chars.get(i) {
-            if c.is_ascii_digit() {
-                hi.push(c);
-                i += 1;
-            } else {
-                break;
-            }
-        }
-        if hi.is_empty() {
-            None // `{m,}` — unbounded
-        } else {
-            Some(hi.parse::<usize>().unwrap_or(usize::MAX))
-        }
-    } else {
-        Some(lo.parse::<usize>().unwrap_or(usize::MAX)) // `{m}`
-    };
-    if chars.get(i) == Some(&'}') {
-        Some((max, i + 1 - start))
-    } else {
-        None
-    }
+    super::lower::width_range(node).1
 }
 
 /// Whether `node` contains a backreference in any atom. Covers the numeric form
@@ -831,7 +658,8 @@ mod tests {
             Ok(Lowered::Plain)
         ));
 
-        // M1/M2: trailing- and leading-boundary terminals lower into branches now.
+        // M1/M2/M3: trailing-, leading-boundary and bounded-lookbehind terminals all
+        // lower into branches now.
         assert!(matches!(
             lower_terminal("TRAIL", "[0-9]+(?![0-9])"),
             Ok(Lowered::Branches(_))
@@ -840,35 +668,32 @@ mod tests {
             lower_terminal("LEAD", "(?!--)[a-z]+"),
             Ok(Lowered::Branches(_))
         ));
+        assert!(matches!(
+            lower_terminal("BEHIND", "(?<!_)/"),
+            Ok(Lowered::Branches(_))
+        ));
 
-        // Not-yet-landed shapes are pending; out-of-shape is permanently rejected.
-        // Either way it is an Err that names the terminal and shows the assertion.
-        for (name, pat) in [
-            ("BEHIND", "(?<!_)/"),
-            ("UNB", "(?![ ]*X)Y"),
-            ("INT", "a(?=b)c"),
-        ] {
+        // Out-of-shape assertions are permanently rejected — an Err that names the
+        // terminal and shows the assertion source.
+        for (name, pat) in [("UNB", "(?![ ]*X)Y"), ("INT", "a(?=b)c")] {
             let e = lower_terminal(name, pat).unwrap_err();
             let msg = format!("{e}");
             assert!(msg.contains(name), "message must name the terminal: {msg}");
-            // and must show the assertion source.
             assert!(msg.contains("(?"), "message must show the assertion: {msg}");
         }
     }
 
     #[test]
-    fn pending_vs_permanent_rejection_is_distinguishable() {
-        // Boundary terminals now lower (no longer pending).
-        assert!(matches!(
-            lower_terminal("T", "[0-9]+(?![0-9])"),
-            Ok(Lowered::Branches(_))
-        ));
+    fn supported_shapes_lower_and_out_of_shape_is_permanently_rejected() {
+        // All three supported shapes now lower (M1/M2/M3) — none are pending.
+        for pat in ["[0-9]+(?![0-9])", "(?!--)[a-z]+", "(?<!_)/"] {
+            assert!(
+                matches!(lower_terminal("T", pat), Ok(Lowered::Branches(_))),
+                "supported shape {pat:?} must lower"
+            );
+        }
 
-        // A not-yet-landed shape (bounded lookbehind) is pending; an out-of-shape
-        // assertion is a permanent rejection.
-        let pending = lower_terminal("T", "(?<!_)/").unwrap_err();
-        assert!(is_pending_shape_error(&pending), "{pending}");
-
+        // An out-of-shape assertion is a permanent rejection (never pending).
         let permanent = lower_terminal("T", "a(?=b)c").unwrap_err();
         assert!(!is_pending_shape_error(&permanent), "{permanent}");
     }

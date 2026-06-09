@@ -552,6 +552,9 @@ struct SubPattern {
     leading: Option<Guard>,
     /// A guard checked at the match **end** — a trailing boundary `X(?!S)`.
     trailing: Option<Guard>,
+    /// Bounded-lookbehind guards, each checked *backward* at a fixed char-offset from
+    /// the match start (M3). Empty for a branch with no lookbehind.
+    lookbehind: Vec<LookbehindGuardC>,
 }
 
 /// A compiled boundary guard. The driver records an accept of the guarded
@@ -583,6 +586,81 @@ impl Guard {
     }
 }
 
+/// A compiled **bounded-lookbehind** guard (`docs/LEXER_DFA_PLAN.md`, M3). The driver
+/// records an accept of the sub-pattern only when the ≤`width` chars *ending* at the
+/// lookbehind point — byte offset `pos` advanced by `offset_chars` characters —
+/// do/don't match `S`. The offset is fixed (the lowering declines a variable-offset
+/// lookbehind), so this is a uniform precondition evaluated once, like a leading guard
+/// but read *backward* from a fixed point inside (or at the start of) the match.
+struct LookbehindGuardC {
+    /// `true` for `(?<!S)` (the window must **not** match `S`), `false` for `(?<=S)`.
+    neg: bool,
+    /// All-matches anchored DFA for the body `S`, so a window is tested for an *exact*
+    /// (full-slice) match regardless of `S`'s internal alternation order.
+    dfa: dense::DFA<Vec<u32>>,
+    /// Char offset from the match start to the lookbehind point.
+    offset_chars: usize,
+    /// Maximum char width of `S` — the driver tries window lengths `1..=width`.
+    width: usize,
+}
+
+impl LookbehindGuardC {
+    /// Whether the lookbehind holds for a match starting at byte `pos` in `text`.
+    fn holds(&self, text: &str, pos: usize) -> bool {
+        // Walk `offset_chars` characters forward from `pos` to the lookbehind point.
+        let mut point = pos;
+        for _ in 0..self.offset_chars {
+            match text[point..].chars().next() {
+                Some(c) => point += c.len_utf8(),
+                // Not enough chars consumed before the lookbehind point: the base can't
+                // match here anyway, so the value is moot. Treat the window as absent.
+                None => return self.neg,
+            }
+        }
+        // Does `S` match some suffix (1..=width chars) ending exactly at `point`?
+        let mut start = point;
+        let mut matched = false;
+        for _ in 0..self.width {
+            match text[..start].chars().next_back() {
+                Some(c) => start -= c.len_utf8(),
+                None => break, // ran off the front of the haystack — window absent
+            }
+            if self.window_full_match(&text[start..point]) {
+                matched = true;
+                break;
+            }
+        }
+        if self.neg {
+            !matched
+        } else {
+            matched
+        }
+    }
+
+    /// Whether `S` matches the whole `slice` (anchored at both ends). Uses the
+    /// all-matches DFA's overlapping search and checks for an accept whose end is the
+    /// slice end — so an order-sensitive `S` (`a|ab`) that leftmost-first would stop
+    /// short still registers its full-slice match.
+    fn window_full_match(&self, slice: &str) -> bool {
+        let input = Input::new(slice).anchored(Anchored::Yes);
+        let mut state = OverlappingState::start();
+        loop {
+            if self
+                .dfa
+                .try_search_overlapping_fwd(&input, &mut state)
+                .is_err()
+            {
+                return false;
+            }
+            match state.get_match() {
+                Some(hm) if hm.offset() == slice.len() => return true,
+                Some(_) => continue,
+                None => return false,
+            }
+        }
+    }
+}
+
 /// Wrap `src` in a flag-scoped group `(?flags:src)` for a terminal's own regex flags,
 /// or return it unchanged when the terminal has none. Mirrors
 /// [`Pattern::to_inline_regex`](crate::grammar::terminal::Pattern::to_inline_regex)
@@ -601,6 +679,23 @@ fn wrap_flags(flags: u32, src: &str) -> String {
 fn build_anchored_dfa(src: &str) -> Result<dense::DFA<Vec<u32>>, GrammarError> {
     dense::Builder::new()
         .configure(dense::Config::new().start_kind(StartKind::Anchored))
+        .build(src)
+        .map_err(|e| GrammarError::InvalidRegex {
+            pattern: src.to_string(),
+            reason: e.to_string(),
+        })
+}
+
+/// Build an anchored **all-matches** dense DFA for a lookbehind body `src`, so the
+/// driver can test whether `S` matches a window *exactly* (every accept length is
+/// surfaced via an overlapping search, not just the leftmost-first one).
+fn build_anchored_all_dfa(src: &str) -> Result<dense::DFA<Vec<u32>>, GrammarError> {
+    dense::Builder::new()
+        .configure(
+            dense::Config::new()
+                .match_kind(MatchKind::All)
+                .start_kind(StartKind::Anchored),
+        )
         .build(src)
         .map_err(|e| GrammarError::InvalidRegex {
             pattern: src.to_string(),
@@ -683,6 +778,7 @@ impl DfaScanner {
                     branch_order: 0,
                     leading: None,
                     trailing: None,
+                    lookbehind: Vec::new(),
                 });
                 plain_srcs.push(src);
                 base_inlines.push(inline.clone());
@@ -707,6 +803,16 @@ impl DfaScanner {
                         dfa: build_anchored_dfa(&gsrc)?,
                     })
                 };
+            let compile_lookbehind = |g: &crate::lookaround::lower::LookbehindGuard|
+             -> Result<LookbehindGuardC, GrammarError> {
+                let gsrc = format!("{prefix}{}", wrap_flags(flags, &g.set));
+                Ok(LookbehindGuardC {
+                    neg: g.neg,
+                    dfa: build_anchored_all_dfa(&gsrc)?,
+                    offset_chars: g.offset_chars,
+                    width: g.width,
+                })
+            };
 
             // Route to fancy unless the terminal lowers. `lower_terminal` already
             // declines a shape not yet lowered (bounded lookbehind) *and* a guarded
@@ -726,7 +832,7 @@ impl DfaScanner {
                 let inline_br = wrap_flags(flags, &br.regex);
                 let nfa_src = format!("{prefix}{inline_br}");
                 base_inlines.push(inline_br);
-                if br.leading.is_none() && br.trailing.is_none() {
+                if br.leading.is_none() && br.trailing.is_none() && br.lookbehind.is_empty() {
                     // An unguarded branch (e.g. `lark.OP`'s `[+*]`) is plain — it joins
                     // the leftmost-first engine so its priority is exact.
                     plain_subs.push(SubPattern {
@@ -735,17 +841,24 @@ impl DfaScanner {
                         branch_order: bo,
                         leading: None,
                         trailing: None,
+                        lookbehind: Vec::new(),
                     });
                     plain_srcs.push(nfa_src);
                 } else {
                     let leading = br.leading.as_ref().map(&compile_guard).transpose()?;
                     let trailing = br.trailing.as_ref().map(&compile_guard).transpose()?;
+                    let lookbehind = br
+                        .lookbehind
+                        .iter()
+                        .map(&compile_lookbehind)
+                        .collect::<Result<Vec<_>, _>>()?;
                     guarded_subs.push(SubPattern {
                         id: *id,
                         rank,
                         branch_order: bo,
                         leading,
                         trailing,
+                        lookbehind,
                     });
                     guarded_srcs.push(nfa_src);
                 }
@@ -882,14 +995,17 @@ fn guarded_best<'t>(
         .span(pos..text.len())
         .anchored(Anchored::Yes);
 
-    // A leading guard is a precondition on the match start (`pos`), identical for
-    // every accept of that sub-pattern — evaluate it once. `None` = no leading guard
-    // (always passes); `Some(false)` = the guard failed, so the sub-pattern is out.
+    // A leading guard — and every bounded-lookbehind guard — is a precondition on the
+    // match start (`pos`), identical for every accept of that sub-pattern, so evaluate
+    // it once. `false` = some precondition failed, so the sub-pattern is out entirely.
     let leading_ok: Vec<bool> = subs
         .iter()
-        .map(|s| match &s.leading {
-            None => true,
-            Some(g) => g.holds(text, pos),
+        .map(|s| {
+            let lead = match &s.leading {
+                None => true,
+                Some(g) => g.holds(text, pos),
+            };
+            lead && s.lookbehind.iter().all(|lb| lb.holds(text, pos))
         })
         .collect();
 

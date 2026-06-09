@@ -6,26 +6,28 @@
 //! small-alphabet corpus — so coverage stops depending on whose imagination (the
 //! lesson from missing `DEC_NUMBER`'s length-change until it was *run*).
 //!
-//! The equivalence assertion is `#[ignore]`'d **pending the first shape**: there is
-//! no lowered matcher yet ([`lowered_prefix`] returns `Err`), so the comparison
-//! cannot run. The moment the first-shape session implements the lowered matcher,
-//! drop the per-shape `#[ignore]` and the generators + oracle below pin it. The
-//! oracle, the generators, and the corpus enumeration are all exercised *now* by the
-//! active smoke test, so a bug in the net itself surfaces before the lowering lands.
+//! All three shapes have landed (M1 trailing, M2 leading, M3 bounded-lookbehind), so
+//! every per-shape equivalence assertion is active and compares the real lowered
+//! matcher ([`lowered_prefix`]) against the oracle. The boundary and lookbehind
+//! equivalence-layer mutation meta-tests live here too: each deliberately-wrong
+//! lowering must diverge from the oracle somewhere on the population, proving the layer
+//! has teeth.
 
 mod common;
 
 use common::lowering::{
-    boundary_mutations, corpus, fancy_matcher, fancy_prefix, has_guard, lowered_prefix,
-    mutant_matcher, supported_terminals, GenTerminal,
+    boundary_mutations, corpus, fancy_matcher, fancy_prefix, has_guard, has_lookbehind,
+    lookbehind_mutations, lowered_prefix, mutant_lookbehind_matcher, mutant_matcher,
+    supported_terminals, GenTerminal,
 };
 use lark_rs::ShapeClass;
 
 /// The core comparison the per-shape gates run once the lowered matcher exists:
 /// for every input in the terminal's exhaustive quotient-alphabet corpus, the
 /// lowered match-length must equal the `fancy-regex` oracle. Returns the first
-/// divergence, or `None` on full agreement. `lowered_prefix` returning `Err` (the
-/// pending stub) is surfaced as a divergence so an un-ignored run fails loudly.
+/// divergence, or `None` on full agreement. `lowered_prefix` returning `Err` (a
+/// declined terminal) is surfaced as a divergence so it fails loudly rather than
+/// silently skipping.
 fn equivalence_divergence(t: &GenTerminal) -> Option<String> {
     let oracle_re = fancy_matcher(&t.pattern)?;
     let inputs = corpus(&t.alphabet, t.max_len);
@@ -135,9 +137,53 @@ fn leading_boundary_lowered_equals_fancy() {
 }
 
 #[test]
-#[ignore = "pending first shape — bounded-lookbehind lowering not yet implemented"]
 fn bounded_lookbehind_lowered_equals_fancy() {
     run_shape(ShapeClass::BoundedLookbehind);
+}
+
+/// The mutation meta-test for the **bounded-lookbehind** lowering (M3): each
+/// deliberately-wrong way to lower a lookbehind (ignore it, flip its polarity, an
+/// off-by-one window width) must be *caught* — it must diverge from the `fancy-regex`
+/// oracle somewhere on the (biting) lookbehind population. A surviving mutant is a
+/// hole in the net (`docs/LEXER_DFA_PLAN.md`, "Validate the harness itself"). The
+/// biting generator cases (`\w(?<!_)x`, …) are what keep the *ignore-the-lookbehind*
+/// mutant from passing vacuously.
+#[test]
+fn bounded_lookbehind_lowering_mutants_are_caught() {
+    let terms: Vec<GenTerminal> = supported_terminals()
+        .into_iter()
+        .filter(|t| t.shape == ShapeClass::BoundedLookbehind && has_lookbehind(&t.pattern))
+        .collect();
+    assert!(!terms.is_empty(), "no lookbehind terminals to mutate");
+
+    for mutation in lookbehind_mutations() {
+        let mut caught: Option<String> = None;
+        'search: for t in &terms {
+            let Some(oracle) = fancy_matcher(&t.pattern) else {
+                continue;
+            };
+            let Some(mutant_re) = mutant_lookbehind_matcher(&t.pattern, mutation) else {
+                continue;
+            };
+            for input in corpus(&t.alphabet, t.max_len) {
+                let mutant = fancy_prefix(&mutant_re, &input);
+                let correct = fancy_prefix(&oracle, &input);
+                if mutant != correct {
+                    caught = Some(format!(
+                        "{} {:?} on {input:?}: mutant={mutant:?} != correct={correct:?}",
+                        t.name, t.pattern
+                    ));
+                    break 'search;
+                }
+            }
+        }
+        assert!(
+            caught.is_some(),
+            "lookbehind mutant {mutation:?} survived the population — the \
+             generative-equivalence layer would NOT catch this wrong lowering. \
+             This is a hole in the net."
+        );
+    }
 }
 
 /// Active **now**: the oracle, the generators, and the exhaustive corpus all work,
