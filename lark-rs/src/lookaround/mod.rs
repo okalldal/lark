@@ -42,6 +42,7 @@
 use crate::error::GrammarError;
 
 pub mod classify;
+pub mod lower;
 
 /// Which direction a zero-width assertion looks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

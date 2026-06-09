@@ -392,7 +392,11 @@ on lookaround (the bundled `python.lark`/`lark.lark` do: `STRING`'s
 **Direction (2026-06-08): [`docs/LEXER_DFA_PLAN.md`](docs/LEXER_DFA_PLAN.md)** is the
 active umbrella — build the combined scanner on a `regex-automata` DFA and **lower** the
 bounded lookaround into it (a DFA, *not* PR #110's Pike-VM), so every terminal lexes
-single-pass and the `python`/`lark` grammars become bakeable. Load-time **elimination**
+single-pass and the `python`/`lark` grammars become bakeable. **L2 first shape landed:**
+the **trailing-boundary** terminals (`OP`/`DEC_NUMBER`-style `X(?=S)`/`X(?!S)`) now lower
+to a guarded accept on `regex-automata` (`src/lookaround/lower.rs`, off `fancy-regex`)
+behind `LexerBackend::Dfa`, gated by the L2 verification harness; leading-boundary and
+bounded-lookbehind still route to `fancy-regex` (their shapes pending). Load-time **elimination**
 (`docs/LOOKAROUND_ELIMINATION_PLAN.md`) is now **Phase 1** of that (the reducible Tier-E
 terminals); the irreducible G-tier (`STRING`/`OP`/`DEC_NUMBER` — see
 `docs/TERMINAL_REDUCTION_DIAGNOSIS.md`) is lowered into the DFA rather than rejected.

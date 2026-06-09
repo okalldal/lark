@@ -21,6 +21,7 @@ pub use lookaround::classify::{
     classify, lower_terminal, Classification, Classifier, DefaultClassifier, Lowered, Rejection,
     ShapeClass, Verdict,
 };
+pub use lookaround::lower::{build_trailing, LoweredTrailing};
 pub use parsers::{
     basic_lexer_conf, lalr, EarleyParser, LexFailure, ParseTable, ParserConf, TokenSource,
 };

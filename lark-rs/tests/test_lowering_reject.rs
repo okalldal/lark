@@ -155,29 +155,48 @@ fn generated_supported_terminals_match_their_declared_shape() {
     );
 }
 
-/// The stubbed entry point rejects *every* lookaround terminal (both the
-/// supported-but-pending and the unsupported), and lowers a plain terminal. This is
-/// the "lowering stubbed to reject everything" invariant the harness-first phase
-/// depends on.
+/// The entry point lowers exactly the **landed** shapes and rejects the rest: a
+/// plain terminal and a trailing-boundary terminal lower; a not-yet-landed supported
+/// shape (leading boundary, bounded lookbehind) rejects as *pending*; an out-of-shape
+/// assertion rejects *permanently*. As each shape lands, its terminals move from the
+/// pending bucket to the lowered one — this test tracks that boundary.
 #[test]
-fn lowering_entry_point_rejects_every_lookaround_terminal() {
+fn lowering_entry_point_lowers_landed_shapes_and_rejects_the_rest() {
+    use lark_rs::Lowered;
+
     // Plain terminal: lowers (no lookaround).
     assert!(lower_terminal("PLAIN", r"[A-Za-z_][A-Za-z0-9_]*").is_ok());
 
-    // Every generated supported terminal is rejected as pending.
+    // Every generated supported terminal either lowers (a landed shape — today the
+    // trailing boundary) or rejects as pending (a shape still to land).
     for t in supported_terminals() {
-        let err = lower_terminal(&t.name, &t.pattern)
-            .err()
-            .unwrap_or_else(|| panic!("entry point unexpectedly lowered {:?}", t.pattern));
-        let msg = format!("{err}");
-        assert!(
-            msg.contains(&t.name),
-            "message must name the terminal: {msg}"
-        );
-        assert!(
-            lark_rs::lookaround::classify::is_pending_shape_error(&err),
-            "a supported shape must reject as pending, got: {msg}"
-        );
+        match lower_terminal(&t.name, &t.pattern) {
+            // A trailing-boundary terminal lowers to a guarded accept (first shape).
+            Ok(Lowered::TrailingBoundary) => assert_eq!(
+                t.shape,
+                ShapeClass::TrailingBoundary,
+                "only the trailing-boundary shape lowers so far: {:?}",
+                t.pattern
+            ),
+            Ok(other) => panic!("unexpected lowered variant {other:?} for {:?}", t.pattern),
+            Err(err) => {
+                let msg = format!("{err}");
+                assert!(
+                    msg.contains(&t.name),
+                    "message must name the terminal: {msg}"
+                );
+                assert!(
+                    lark_rs::lookaround::classify::is_pending_shape_error(&err),
+                    "a not-yet-landed supported shape must reject as pending, got: {msg}"
+                );
+                assert_ne!(
+                    t.shape,
+                    ShapeClass::TrailingBoundary,
+                    "a trailing-boundary terminal must lower, not reject: {:?}",
+                    t.pattern
+                );
+            }
+        }
     }
 
     // Every adversarial terminal is rejected (permanently, not pending).

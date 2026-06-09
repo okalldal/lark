@@ -248,25 +248,27 @@ impl Classifier for DefaultClassifier {
     }
 }
 
-/// The outcome of lowering one terminal. In this session the only non-error variant
-/// is [`Lowered::Plain`] — a terminal with no lookaround, which needs no lowering.
-/// Real lowered fragments are a future session's work (`docs/LEXER_DFA_PLAN.md`).
+/// The outcome of lowering one terminal (the gate verdict, not the built automaton —
+/// the matcher itself is constructed by [`lower`](super::lower) on the lexer path).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Lowered {
     /// No lookaround assertion — the terminal is already a plain regular language.
     Plain,
+    /// Every assertion is a top-level **trailing boundary** — lowered to a guarded
+    /// accept on `regex-automata` (`docs/LEXER_DFA_PLAN.md` L2, first shape). The
+    /// matcher is built by [`build_trailing`](super::lower::build_trailing).
+    TrailingBoundary,
 }
 
-/// **THE LOWERING ENTRY POINT — stubbed to reject every lookaround terminal.**
+/// **THE LOWERING GATE — which terminals lower vs route to `fancy-regex`.**
 ///
-/// A plain terminal returns [`Lowered::Plain`]. Any terminal with a lookaround
-/// assertion returns `Err`, whether its shape is *supported* (rejected as "pending
-/// — not yet lowered", so the differential harness records it and flips to a gated
-/// comparison once the shape lands) or *unsupported* (rejected for good). Either way
-/// the message names the terminal and the offending assertion.
-///
-/// Keeping both behind one entry point is the point: the build path calls this and
-/// never sees a half-lowered terminal during the harness-first phase.
+/// A plain terminal returns [`Lowered::Plain`]. A terminal whose assertions are *all*
+/// top-level trailing boundaries returns [`Lowered::TrailingBoundary`] — the first
+/// shape that landed (`docs/LEXER_DFA_PLAN.md` L2). Any other lookaround terminal
+/// returns `Err`: a *supported but not-yet-lowered* shape (leading boundary, bounded
+/// lookbehind) as a "pending" rejection (so the differential harness records it and
+/// flips once that shape lands), an *unsupported* assertion as a permanent rejection.
+/// Either way the message names the terminal and the offending assertion.
 pub fn lower_terminal(name: &str, pattern: &str) -> Result<Lowered, GrammarError> {
     lower_terminal_with(&DefaultClassifier, name, pattern)
 }
@@ -294,8 +296,19 @@ pub fn lower_terminal_with(
             ),
         });
     }
-    // Otherwise every assertion is a supported shape, but the lowering for it is not
-    // implemented yet — reject as pending so the harness tracks it.
+    // Every assertion is a supported shape. The trailing-boundary shape is lowered
+    // (the first shape to land); a terminal all of whose assertions are trailing
+    // boundaries lowers to a guarded accept.
+    if classification
+        .assertions
+        .iter()
+        .all(|a| a.verdict() == Verdict::Supported(ShapeClass::TrailingBoundary))
+    {
+        return Ok(Lowered::TrailingBoundary);
+    }
+    // A supported shape whose lowering has not landed yet (leading boundary, bounded
+    // lookbehind, or a terminal mixing trailing with one of those) — reject as pending
+    // so the harness tracks it and flips when that shape lands.
     let (info, shape) = classification
         .first_supported()
         .expect("non-plain, non-rejected classification has a supported assertion");
@@ -806,18 +819,23 @@ mod tests {
     }
 
     #[test]
-    fn lower_terminal_rejects_every_lookaround_terminal() {
+    fn lower_terminal_lowers_trailing_and_rejects_the_rest() {
         // Plain terminals lower trivially.
         assert!(matches!(
             lower_terminal("NAME", r#"[^\W\d]\w*"#),
             Ok(Lowered::Plain)
         ));
 
-        // Every lookaround terminal is rejected — supported shapes as "pending",
-        // unsupported as a permanent rejection. Either way it is an Err.
+        // The trailing-boundary shape (the first to land) lowers to a guarded accept.
+        assert!(matches!(
+            lower_terminal("TRAIL", "[0-9]+(?![0-9])"),
+            Ok(Lowered::TrailingBoundary)
+        ));
+
+        // Every other lookaround terminal is still rejected — a not-yet-lowered
+        // supported shape as "pending", an unsupported one as a permanent rejection.
         for (name, pat) in [
             ("LEAD", "(?!--)[a-z]+"),
-            ("TRAIL", "[0-9]+(?![0-9])"),
             ("BEHIND", "(?<!_)/"),
             ("UNB", "(?![ ]*X)Y"),
             ("INT", "a(?=b)c"),
@@ -832,7 +850,8 @@ mod tests {
 
     #[test]
     fn pending_vs_permanent_rejection_is_distinguishable() {
-        let pending = lower_terminal("T", "[0-9]+(?![0-9])").unwrap_err();
+        // A supported-but-not-yet-lowered shape (leading boundary) is a pending error.
+        let pending = lower_terminal("T", "(?!--)[a-z]+").unwrap_err();
         assert!(is_pending_shape_error(&pending), "{pending}");
 
         let permanent = lower_terminal("T", "a(?=b)c").unwrap_err();

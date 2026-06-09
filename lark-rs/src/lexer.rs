@@ -500,7 +500,12 @@ struct DfaScanner {
     /// Start-byte prefilter for the plain engine (see the struct docs). `None`
     /// disables it (always run the engine) — the safe default if it can't be built.
     start_bytes: Option<Box<[bool; 256]>>,
-    /// Lookaround terminals (`fancy-regex`), rank-sorted — identical to [`Scanner`].
+    /// Trailing-boundary terminals **lowered** onto `regex-automata` (no `fancy-regex`)
+    /// — the L2 first shape (`docs/LEXER_DFA_PLAN.md`). Each is matched as a guarded
+    /// accept; stored rank-sorted, like `fancy`, so the first match is the lowest rank.
+    guarded: Vec<(usize, SymbolId, crate::lookaround::lower::LoweredTrailing)>,
+    /// Lookaround terminals still routed to `fancy-regex` (leading boundary / bounded
+    /// lookbehind, pending their shapes), rank-sorted — identical to [`Scanner`].
     fancy: Vec<(usize, SymbolId, AnyRegex)>,
     /// regex-terminal-id → (matched-text → keyword-terminal-id) — identical retype.
     unless: HashMap<SymbolId, HashMap<String, SymbolId>>,
@@ -524,6 +529,8 @@ impl DfaScanner {
         let mut patterns: Vec<String> = Vec::new();
         let mut inlines: Vec<&str> = Vec::new();
         let mut plain: Vec<(SymbolId, usize)> = Vec::new();
+        let mut guarded: Vec<(usize, SymbolId, crate::lookaround::lower::LoweredTrailing)> =
+            Vec::new();
         let mut fancy: Vec<(usize, SymbolId, AnyRegex)> = Vec::new();
         for (rank, (id, inline)) in plan.groups.iter().enumerate() {
             let src = format!("{prefix}{inline}");
@@ -531,10 +538,19 @@ impl DfaScanner {
             // crate (a subset of `fancy-regex`) rejects it.
             let compiled = AnyRegex::compile(&src)?;
             if compiled.is_fancy() {
-                // Anchor the per-position fancy probe with `\G` — identical to
-                // `Scanner::build` (see the comment there).
-                let anchored = AnyRegex::compile(&format!("{prefix}\\G{inline}"))?;
-                fancy.push((rank, *id, anchored));
+                // A lowerable trailing-boundary terminal joins `regex-automata` as a
+                // guarded accept (L2 first shape); everything else still rides
+                // `fancy-regex` until its shape lands.
+                if let Some(lowered) =
+                    crate::lookaround::lower::build_trailing(inline, global_flags)?
+                {
+                    guarded.push((rank, *id, lowered));
+                } else {
+                    // Anchor the per-position fancy probe with `\G` — identical to
+                    // `Scanner::build` (see the comment there).
+                    let anchored = AnyRegex::compile(&format!("{prefix}\\G{inline}"))?;
+                    fancy.push((rank, *id, anchored));
+                }
             } else {
                 plain.push((*id, rank));
                 inlines.push(inline);
@@ -565,6 +581,7 @@ impl DfaScanner {
             re,
             plain,
             start_bytes,
+            guarded,
             fancy,
             unless,
         })
@@ -598,6 +615,22 @@ impl DfaScanner {
                         let (id, rank) = self.plain[m.pattern().as_usize()];
                         best = Some((rank, id, &text[pos..m.end()]));
                     }
+                }
+            }
+        }
+        // Lowest-rank lowered trailing-boundary candidate (the guarded-accept path).
+        // The list is rank-sorted, so the first satisfying match is the lowest rank;
+        // keep it only if it out-ranks the plain candidate. A zero-width match is
+        // rejected here, exactly as for the plain engine (no terminal is nullable, and
+        // a zero-width token would stall the lexer).
+        for (rank, id, matcher) in &self.guarded {
+            if best.is_some_and(|(b, _, _)| *rank > b) {
+                break;
+            }
+            if let Some(end) = matcher.match_end_at(text, pos) {
+                if end > pos {
+                    best = Some((*rank, *id, &text[pos..end]));
+                    break;
                 }
             }
         }
@@ -745,7 +778,7 @@ fn compute_unless(
 /// or an empty string when no global flags are set. Placed at the very start of a
 /// pattern it applies to the entire combined regex (every alternation branch),
 /// mirroring `re.compile(pattern, flags=g_regex_flags)`.
-fn global_flag_prefix(global_flags: u32) -> String {
+pub(crate) fn global_flag_prefix(global_flags: u32) -> String {
     let letters = crate::grammar::terminal::flag_letters(global_flags);
     if letters.is_empty() {
         String::new()

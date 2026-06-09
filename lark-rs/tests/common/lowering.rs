@@ -15,10 +15,10 @@
 //!     ([`reject_path_mutants`]) and the reusable reject-corpus check
 //!     ([`wrongly_accepted_rejects`]) the mutation meta-test drives, validated now
 //!     on the reject path.
-//!   * **The lowered-matcher hook** — [`lowered_prefix`], stubbed to the *pending*
-//!     state so the #[ignore]'d equivalence layers compile and fail loudly if
-//!     un-ignored before a shape lands. The first-shape session points it at the
-//!     real lowered `DfaScanner`.
+//!   * **The lowered-matcher hook** — [`lowered_prefix`], pointed at the real
+//!     `regex-automata` lowering ([`lark_rs::build_trailing`]) for shapes that have
+//!     landed (today the trailing boundary) and reporting *pending* for the rest, so
+//!     a still-`#[ignore]`'d equivalence layer fails loudly if un-ignored early.
 #![allow(dead_code)]
 
 use lark_rs::{classify, Classification, Classifier, Rejection, ShapeClass, Verdict};
@@ -88,23 +88,42 @@ pub fn fancy_prefix(re: &fancy_regex::Regex, input: &str) -> Option<usize> {
     }
 }
 
-// ─── The lowered-matcher hook (stubbed: pending) ───────────────────────────────
+// ─── The lowered-matcher hook ──────────────────────────────────────────────────
 
-/// **Pending hook.** Anchored matched-prefix length of the *lowered* terminal at the
-/// start of `input`, or `Ok(None)` for no match. Until a shape lands this returns
-/// `Err` for every lookaround terminal, mirroring [`lark_rs::lower_terminal`]. The
-/// generative-equivalence layer (`tests/test_lowering_equivalence.rs`) is
-/// `#[ignore]`'d on this, and `.expect()`s it, so un-ignoring before the lowering
-/// exists fails loudly rather than passing for the wrong reason.
+use std::cell::RefCell;
+use std::collections::HashMap;
+
+thread_local! {
+    /// Per-pattern cache of the built lowered matcher, so the exhaustive corpus loop
+    /// builds each terminal's automaton once instead of per input. `None` = the shape
+    /// does not lower yet (the matcher hook reports it as pending).
+    static LOWERED_CACHE: RefCell<HashMap<String, Option<lark_rs::LoweredTrailing>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Anchored matched-prefix length (in **characters**) of the *lowered* terminal at the
+/// start of `input`, or `Ok(None)` for no match. `Err` means the terminal's shape has
+/// no lowering yet — every still-pending shape (leading boundary, bounded lookbehind),
+/// so the `#[ignore]`'d equivalence layers fail loudly if un-ignored prematurely. The
+/// trailing-boundary shape (the first to land) returns the real lowered match length,
+/// built on `regex-automata` via [`lark_rs::build_trailing`] — no `fancy-regex`.
 ///
-/// The first-shape session replaces this body with the real lowered `DfaScanner`
-/// (build a one-terminal grammar under `LexerBackend::Dfa`, match at offset 0) —
-/// keeping the harness at the `match_at` boundary, engine-agnostic.
-pub fn lowered_prefix(name: &str, _pattern: &str, _input: &str) -> Result<Option<usize>, String> {
-    Err(format!(
-        "lowered matcher for `{name}` is not implemented — pending first shape \
-         (docs/LEXER_DFA_PLAN.md L2)"
-    ))
+/// This is the raw lowering's match length (it reports the zero-width nullable-body
+/// match like `fancy-regex`); the scanner applies its own non-empty rule on top.
+pub fn lowered_prefix(name: &str, pattern: &str, input: &str) -> Result<Option<usize>, String> {
+    LOWERED_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let entry = cache
+            .entry(pattern.to_string())
+            .or_insert_with(|| lark_rs::build_trailing(pattern, 0).ok().flatten());
+        match entry {
+            Some(matcher) => Ok(matcher.match_len_chars(input)),
+            None => Err(format!(
+                "lowered matcher for `{name}` is not available — its shape does not \
+                 lower yet (docs/LEXER_DFA_PLAN.md L2)"
+            )),
+        }
+    })
 }
 
 // ─── Supported-shape generators ────────────────────────────────────────────────

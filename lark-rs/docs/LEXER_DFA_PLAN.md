@@ -103,6 +103,28 @@ maximal-munch driver, and the differential oracle `tests/test_scanner_differenti
 > hook (and the Dfa backend) at the real lowered `DfaScanner`, then drops that shape's
 > `#[ignore]`s — the harness flips it from pending to gated automatically. **No real
 > lowering, no `DfaScanner` engine change, was done in the harness session.**
+>
+> **Status update — the trailing-boundary shape (first shape) has landed.**
+> `src/lookaround/lower.rs` lowers a trailing-boundary terminal `BODY(?=S)` /
+> `BODY(?!S)` (per top-level alternation branch) into a **guarded accept** on
+> `regex-automata`: one anchored multi-pattern dense DFA (`MatchKind::All`) over the
+> branch bodies + a per-branch guard table, with the driver keeping the longest accept
+> whose guard holds and selecting the lowest-index branch (Python-`re` leftmost-first).
+> The length-changing case (`[0-9]+(?![a-z])` on `"12a"` → `"1"`) falls out of
+> "longest guard-satisfying accept" with no backtracking engine, and `fancy-regex` is
+> **not** used at runtime for these terminals. `lower_terminal` now returns
+> `Lowered::TrailingBoundary` for them; `DfaScanner` routes them to the lowering
+> (a new `guarded` candidate list) instead of `fancy-regex`. Gates green: terminal
+> generative equivalence vs `fancy-regex` (`test_lowering_equivalence`), the scanner
+> differential (`test_scanner_differential` — 116 lookaround grammars / 227 k inputs
+> now *compared*, not pending, 0 divergence), the reject corpus + mutation meta-test,
+> and the seam fixtures (`test_lowering_fixtures`). **Still open for this shape:** the
+> Route-1 product-construction proof (`test_lowering_proof` stays `#[ignore]`'d), and
+> the *single-pass folding* of the guarded accepts into the one combined automaton —
+> today each lowered trailing terminal is its own anchored DFA probe (linear, on
+> `regex-automata`, bakeable), not yet unioned with the plain engine, so the throughput
+> win #1 is realized as "off `fancy-regex`" but not yet "one array lookup per byte."
+> Leading-boundary and bounded-lookbehind remain pending (route to `fancy-regex`).
 
 A **general** lowering keyed on the assertion's **shape**, not on the six bundled
 terminals. Lower each supported bounded assertion into lookaround-free DFA states
