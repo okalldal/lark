@@ -50,6 +50,22 @@ note "CYK scaling gate: cargo test --features perf-counters --test test_cyk_scal
 ( cd "$LARK_RS_DIR" && cargo test --features perf-counters --test test_cyk_scaling ) \
   || fail "CYK scaling gate failed — a complexity regression in CNF/DP (see test_cyk_scaling.rs)"
 
+# 2d. Lexer linear-scan gate (#104) — same perf-counters discipline; asserts
+#     flat-per-byte per-position scan work via the lexer_scan_steps counter, so an
+#     un-anchored fancy-regex forward-scan (the O(n²) pathology) is caught
+#     deterministically. Matches the CI "Lexer scaling gate" step.
+note "Lexer scaling gate: cargo test --features perf-counters --test test_lexer_scaling"
+( cd "$LARK_RS_DIR" && cargo test --features perf-counters --test test_lexer_scaling ) \
+  || fail "Lexer scaling gate failed — per-position scan work regressed (see test_lexer_scaling.rs)"
+
+# 2e. Dense-DFA build-cost gate (docs/LEXER_DFA_PLAN.md) — asserts the lookaround
+#     lowering's determinized dense-DFA build cost stays flat per terminal and per
+#     guard width via the dense_build_bytes counter, so a determinization blowup in
+#     the L5 bake target is caught. Matches the CI "Lexer DFA build-cost gate" step.
+note "Lexer DFA build-cost gate: cargo test --features perf-counters --test test_lexer_dfa_build_scaling"
+( cd "$LARK_RS_DIR" && cargo test --features perf-counters --test test_lexer_dfa_build_scaling ) \
+  || fail "Lexer DFA build-cost gate failed — determinization blowup in the lookaround lowering (see test_lexer_dfa_build_scaling.rs)"
+
 # 3. Oracle-freshness gate — regenerate from Python Lark and require no diff.
 #    (Needs 'pip install lark' and the JSONTestSuite submodule:
 #     git submodule update --init lark-rs/tests/corpora/JSONTestSuite)

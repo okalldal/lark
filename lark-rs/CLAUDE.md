@@ -410,8 +410,13 @@ per-shape generative-equivalence + Route-1 proofs + mutation meta-tests. **Still
 `fancy-regex` side-probe (a *decline*, never mis-lowered):** a lookbehind after a
 *variable-width* prefix — `python.LONG_STRING`/`STRING`'s `.*?(?<!\\)` — and `STRING`'s
 leading `(?!"")` after a variable-width prefix (needs NFA-state splicing); both are the
-deferred variable-offset / STRING-splice milestone, and `LexerBackend::Dfa` is not yet
-the default. Load-time **elimination**
+deferred variable-offset / STRING-splice milestone, routed to the `fancy-regex`
+side-probe under **both** backends. `LexerBackend::Dfa` **is now the default**
+(`LexerBackend::default()` / `LarkOptions.lexer_backend`): the L0 differential oracle is
+0 divergences over the full bank + JSON + python/lark corpora, so the swap is
+correctness-identical, and it is faster on the all-plain common path
+(`benches/lex_backends`, `BENCH.md`); `LexerBackend::Regex` stays selectable and the
+differential keeps both engines gated against each other. Load-time **elimination**
 (`docs/LOOKAROUND_ELIMINATION_PLAN.md`) is now **Phase 1** of that (the reducible Tier-E
 terminals); the irreducible G-tier (`STRING`/`OP`/`DEC_NUMBER` — see
 `docs/TERMINAL_REDUCTION_DIAGNOSIS.md`) is lowered into the DFA rather than rejected.
