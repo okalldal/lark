@@ -63,6 +63,9 @@ cargo test test_earley              # Earley oracle + Earley compliance bank (Ph
 cargo test --features perf-counters --test test_earley_scaling
 # CYK cubic-envelope gate (#87) — same feature; asserts O(n³) table fill.
 cargo test --features perf-counters --test test_cyk_scaling
+# Lexer linear-scan gate (#104) and dense-DFA build-cost gate (lookaround lowering).
+cargo test --features perf-counters --test test_lexer_scaling
+cargo test --features perf-counters --test test_lexer_dfa_build_scaling
 ```
 
 **Perf regression net (`perf-counters` feature).** Suspected super-linearities are
@@ -71,8 +74,12 @@ gated on the *deterministic* work counters in `src/perf.rs` (compiled in only wi
 `BENCH.md`. `tests/test_earley_scaling.rs` asserts flat-per-byte (or capped-n²)
 scaling; `tests/test_cyk_scaling.rs` (#87) asserts a cubic envelope (flat per n³,
 each doubling within [5×,12×]) for CYK's O(n³·|grammar|) table fill via the
-`cyk_table_steps` counter; `examples/profile_parse.rs scaling` prints the same
-counters as a demonstration table. CI runs both gating variants as their own steps.
+`cyk_table_steps` counter; `tests/test_lexer_scaling.rs` (#104) asserts flat-per-byte
+per-position scan work via `lexer_scan_steps`; `tests/test_lexer_dfa_build_scaling.rs`
+asserts the lookaround lowering's **dense-DFA build cost** (the L5 bake target) stays
+flat per terminal and per guard width via `dense_build_bytes` (summed
+`dense::DFA::memory_usage`); `examples/profile_parse.rs scaling` prints the same
+counters as a demonstration table. CI runs each gating variant as its own step.
 
 **Earley / ambiguity oracles (Phase 2).** `generate_oracles.py` and
 `extract_lark_compliance.py` already emit the Earley fixtures as part of their

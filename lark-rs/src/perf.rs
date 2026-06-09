@@ -36,6 +36,21 @@
 //!   over a size sweep catches an accidental complexity regression in the CNF
 //!   conversion or the DP, mirroring the Earley methodology
 //!   (`tests/test_cyk_scaling.rs`).
+//!
+//! A sixth counter backs the **dense-DFA build-cost** gate (`docs/LEXER_DFA_PLAN.md`,
+//! the determinization-blowup risk):
+//!
+//! * [`dense_build_bytes`] — the determinized heap size (`dense::DFA::memory_usage`,
+//!   a deterministic proxy for the state count × stride) of each `dense::DFA` the
+//!   lookaround-lowering `DfaScanner` builds (the combined base engines plus each
+//!   guard body). Determinization is the cost the **L5 bake** pays (`to_bytes` needs a
+//!   fully-determinized dense DFA), and a lowering that blows it up — parity
+//!   duplication, spliced branches, an interacting union of per-state contextual
+//!   scanners — would show as a super-linear climb in this count. Asserting it stays
+//!   flat per terminal (and per guard width) over a size sweep
+//!   (`tests/test_lexer_dfa_build_scaling.rs`) is the deterministic gate, the codegen-
+//!   time analog of the Earley/CYK scaling gates (paid at standalone generation, not
+//!   every runtime load).
 
 #[cfg(feature = "perf-counters")]
 mod imp {
@@ -47,6 +62,7 @@ mod imp {
     static FOREST_NODES: AtomicU64 = AtomicU64::new(0);
     static CYK_TABLE_STEPS: AtomicU64 = AtomicU64::new(0);
     static LEXER_SCAN_STEPS: AtomicU64 = AtomicU64::new(0);
+    static DENSE_BUILD_BYTES: AtomicU64 = AtomicU64::new(0);
     static LEO_DISABLED: AtomicBool = AtomicBool::new(false);
 
     #[inline]
@@ -99,6 +115,17 @@ mod imp {
         LEXER_SCAN_STEPS.fetch_add(n, Ordering::Relaxed);
     }
 
+    /// Count the determinized heap size (`dense::DFA::memory_usage`) of one
+    /// `dense::DFA` built while constructing a lookaround-lowering `DfaScanner` (a
+    /// combined base engine or a guard body). Summing this across a scanner build is its
+    /// determinization cost — the work the L5 bake pays — so asserting it stays flat per
+    /// terminal/width catches a lowering that blows up dense-DFA construction
+    /// (`tests/test_lexer_dfa_build_scaling.rs`).
+    #[inline]
+    pub fn add_dense_build_bytes(n: u64) {
+        DENSE_BUILD_BYTES.fetch_add(n, Ordering::Relaxed);
+    }
+
     /// Zero every counter. Call before the workload you want to measure.
     pub fn reset() {
         COMPLETER_SCAN_STEPS.store(0, Ordering::Relaxed);
@@ -107,6 +134,7 @@ mod imp {
         FOREST_NODES.store(0, Ordering::Relaxed);
         CYK_TABLE_STEPS.store(0, Ordering::Relaxed);
         LEXER_SCAN_STEPS.store(0, Ordering::Relaxed);
+        DENSE_BUILD_BYTES.store(0, Ordering::Relaxed);
     }
 
     pub fn completer_scan_steps() -> u64 {
@@ -131,6 +159,10 @@ mod imp {
 
     pub fn lexer_scan_steps() -> u64 {
         LEXER_SCAN_STEPS.load(Ordering::Relaxed)
+    }
+
+    pub fn dense_build_bytes() -> u64 {
+        DENSE_BUILD_BYTES.load(Ordering::Relaxed)
     }
 
     /// Turn the Joop-Leo optimization off (`true`) or on (`false`). Lets a
@@ -171,6 +203,9 @@ mod imp {
     #[inline]
     pub fn add_lexer_scan_steps(_n: u64) {}
 
+    #[inline]
+    pub fn add_dense_build_bytes(_n: u64) {}
+
     pub fn reset() {}
 
     pub fn completer_scan_steps() -> u64 {
@@ -194,6 +229,10 @@ mod imp {
     }
 
     pub fn lexer_scan_steps() -> u64 {
+        0
+    }
+
+    pub fn dense_build_bytes() -> u64 {
         0
     }
 

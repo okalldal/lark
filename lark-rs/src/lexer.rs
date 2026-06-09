@@ -677,20 +677,22 @@ fn wrap_flags(flags: u32, src: &str) -> String {
 /// Build an anchored dense DFA for a guard body `src` (leftmost-first; we only need a
 /// yes/no "does `S` match here").
 fn build_anchored_dfa(src: &str) -> Result<dense::DFA<Vec<u32>>, GrammarError> {
-    dense::Builder::new()
+    let dfa = dense::Builder::new()
         .configure(dense::Config::new().start_kind(StartKind::Anchored))
         .build(src)
         .map_err(|e| GrammarError::InvalidRegex {
             pattern: src.to_string(),
             reason: e.to_string(),
-        })
+        })?;
+    crate::perf::add_dense_build_bytes(dfa.memory_usage() as u64);
+    Ok(dfa)
 }
 
 /// Build an anchored **all-matches** dense DFA for a lookbehind body `src`, so the
 /// driver can test whether `S` matches a window *exactly* (every accept length is
 /// surfaced via an overlapping search, not just the leftmost-first one).
 fn build_anchored_all_dfa(src: &str) -> Result<dense::DFA<Vec<u32>>, GrammarError> {
-    dense::Builder::new()
+    let dfa = dense::Builder::new()
         .configure(
             dense::Config::new()
                 .match_kind(MatchKind::All)
@@ -700,7 +702,9 @@ fn build_anchored_all_dfa(src: &str) -> Result<dense::DFA<Vec<u32>>, GrammarErro
         .map_err(|e| GrammarError::InvalidRegex {
             pattern: src.to_string(),
             reason: e.to_string(),
-        })
+        })?;
+    crate::perf::add_dense_build_bytes(dfa.memory_usage() as u64);
+    Ok(dfa)
 }
 
 /// Compile `srcs` to one Thompson NFA (`build_many`, `PatternID` = index), then
@@ -719,7 +723,7 @@ fn build_combined_dfa(
             pattern: srcs.join("|"),
             reason: e.to_string(),
         })?;
-    dense::Builder::new()
+    let dfa = dense::Builder::new()
         .configure(
             dense::Config::new()
                 .match_kind(match_kind)
@@ -729,7 +733,9 @@ fn build_combined_dfa(
         .map_err(|e| GrammarError::InvalidRegex {
             pattern: srcs.join("|"),
             reason: e.to_string(),
-        })
+        })?;
+    crate::perf::add_dense_build_bytes(dfa.memory_usage() as u64);
+    Ok(dfa)
 }
 
 // (the greedy-monotone realizability check now lives in `crate::lookaround::lower`,
