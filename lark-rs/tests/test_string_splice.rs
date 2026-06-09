@@ -127,6 +127,53 @@ fn recognizer_still_accepts_literal_delimiters() {
     }
 }
 
+/// **Bundled-terminal lowering-status tripwire** (deliverable 6's payoff-check, made
+/// executable). The honest scope of this milestone is: `python.STRING` lowers into the
+/// DFA, while `lark.REGEXP` (internal `(?!\/)`) and `python.LONG_STRING` (a lazy `.*?`
+/// body with a multi-character `"""` close and no opening guard) are **declined** — they
+/// route to `fancy-regex`, so `fancy-regex` stays in the runtime and L4/L5 remain blocked.
+///
+/// This pins that scope as a fact. If a future change makes REGEXP or LONG_STRING lower,
+/// this test goes red on purpose — forcing the author to (a) confirm the new lowering is
+/// proven correct and (b) re-run the payoff-check: with *all* bundled lookaround terminals
+/// lowered, L4 (drop `AnyRegex::Fancy` from the runtime) and L5 (bake) become unblocked,
+/// and `docs/LEXER_DFA_PLAN.md` + `CLAUDE.md` must be updated. It is the same negative-pin
+/// discipline as `test_lookaround.rs::string_lookaround_free_rewrite_is_not_equivalent`.
+#[test]
+fn bundled_lookaround_terminal_lowering_status() {
+    // Verbatim from the bundled grammars (the `/i` / `/is` flags live on the terminal;
+    // LONG_STRING is DOTALL so it is lowered with `dotall = true`).
+    const REGEXP_RAW: &str = r#"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*"#;
+    const LONG_STRING_RAW: &str =
+        r#"([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')"#;
+
+    // STRING lowers (the milestone deliverable).
+    assert!(
+        matches!(
+            lower_terminal_dotall("STRING", STRING_RAW, false),
+            Ok(Lowered::Branches(_))
+        ),
+        "python.STRING must lower into the DFA"
+    );
+
+    // REGEXP and LONG_STRING are declined (route to fancy). A returned `Branches` here
+    // means the scope changed — see the doc above: prove it and re-run the L4/L5 payoff.
+    for (name, raw, dotall) in [
+        ("lark.REGEXP", REGEXP_RAW, false),
+        ("python.LONG_STRING", LONG_STRING_RAW, true),
+    ] {
+        assert!(
+            !matches!(
+                lower_terminal_dotall(name, raw, dotall),
+                Ok(Lowered::Branches(_))
+            ),
+            "{name} unexpectedly LOWERS now — fancy-regex was supposed to stay (L4 blocked). \
+             If this lowering is intentional and proven, update the payoff-check + docs and \
+             revise this tripwire."
+        );
+    }
+}
+
 /// **The canary.** `""""` (and `''''`) is a LEX ERROR; `"" ""` (and `'' ''`) is exactly
 /// two empty STRING tokens. This is the `(?!"")` trailing-context boundary, and the case
 /// a forgotten guard would get wrong (it would accept `""""` as one empty string).
