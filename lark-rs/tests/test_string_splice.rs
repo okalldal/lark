@@ -10,6 +10,9 @@
 //! hand-authored (not generated) and runs under the **default (`Dfa`) backend**, so it
 //! gates the real shipped lexer, not a synthetic one.
 
+mod common;
+
+use lark_rs::lookaround::{lower::recognize_string_idiom, parse};
 use lark_rs::{
     basic_lexer_conf, load_grammar, lower, lower_terminal_dotall, BasicLexer, Lexer, LexerBackend,
     Lowered, ParseError,
@@ -77,6 +80,50 @@ fn string_actually_lowers_to_branches_under_dfa() {
             }
         }
         other => panic!("STRING must lower to Branches, got {other:?}"),
+    }
+}
+
+/// The recognizer's own acceptance surface is gated, not just the classifier's: a
+/// string-idiom-*shaped* terminal whose delimiter is **not a fixed single literal** —
+/// `.` (any char), the anchors `\b` / `$`, the class escape `\d` — MUST be declined
+/// (routed to `fancy-regex`), never lowered. Accepting one would be a false-accept (and
+/// `\b` also breaks build-parity). This closes the recognizer's blind spot directly.
+#[test]
+fn recognizer_declines_non_literal_delimiters() {
+    for p in common::lowering::string_idiom_reject_patterns() {
+        // The structural recognizer must not match it…
+        let node = parse(&p).unwrap_or_else(|e| panic!("parse {p:?} failed: {e:?}"));
+        assert!(
+            recognize_string_idiom(&node).is_none(),
+            "recognizer wrongly accepted a non-literal-delimiter idiom: {p:?}"
+        );
+        // …and the lowering entry point must decline it (route to fancy), not lower it.
+        assert!(
+            !matches!(
+                lower_terminal_dotall("ADV", &p, false),
+                Ok(Lowered::Branches(_))
+            ),
+            "non-literal-delimiter idiom must NOT lower to branches: {p:?}"
+        );
+    }
+}
+
+/// The bundled `"` / `'` delimiters (and escaped-punctuation delimiters like `\/`) are
+/// still recognized — the literal-delimiter restriction must not over-decline and break
+/// python.STRING.
+#[test]
+fn recognizer_still_accepts_literal_delimiters() {
+    for p in [
+        STRING_RAW,
+        r#"(r?)("(?!"").*?(?<!\\)(\\\\)*?")"#,
+        // an escaped-punctuation delimiter (`\/`) is a literal-escape → still accepted.
+        r#"(\/(?!\/\/).*?(?<!\\)(\\\\)*?\/)"#,
+    ] {
+        let node = parse(p).unwrap_or_else(|e| panic!("parse {p:?} failed: {e:?}"));
+        assert!(
+            recognize_string_idiom(&node).is_some(),
+            "recognizer must still accept the literal-delimiter idiom: {p:?}"
+        );
     }
 }
 

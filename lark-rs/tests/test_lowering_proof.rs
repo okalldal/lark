@@ -10,12 +10,18 @@
 //! counterexample). A shape is **not "supported" until its representative proof is
 //! committed** (the plan's per-shape proof obligation).
 //!
-//! This is a **skeleton**: the proof needs the lowered automaton, which no shape has
-//! yet, so [`prove_route1`] is the pending hook and every proof obligation is
-//! `#[ignore]`'d. What is active now is the *obligation registry* — each supported
-//! shape has at least one committed representative whose proof must be discharged
-//! before the shape ships. That registry is the contract the first-shape session
-//! inherits.
+//! All proofs are **active** (nothing is `#[ignore]`'d): every supported shape lowers,
+//! so [`prove_route1`] runs the decision procedure against the real lowered matcher for
+//! each committed representative, with `fancy-regex` the independent oracle. Two
+//! realizations of the same Myhill-Nerode bound:
+//!   * the bounded boundary/lookbehind shapes use the brute byte-class enumeration up to
+//!     `n + W + 2` ([`prove_route1`]);
+//!   * the `python.STRING` opening-guard splice — whose content-bearing body makes that
+//!     enumeration intractable (`|alphabet|^(n+W+2)` ≈ 10²⁵) — uses the **state-pruned**
+//!     enumeration ([`prove_route1_pruned`]): one shortest witness per base-DFA state ×
+//!     all ≤ `W+1` lookahead suffixes. A shape is **not "supported" until its
+//!     representative proof is committed** (the plan's per-shape obligation), enforced by
+//!     [`every_supported_shape_has_a_committed_proof_obligation`].
 
 mod common;
 

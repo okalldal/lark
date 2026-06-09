@@ -446,6 +446,32 @@ pub fn string_idiom_terminals() -> Vec<GenTerminal> {
     out
 }
 
+/// **Adversarial string-idiom shapes with a *non-literal* delimiter** — the recognizer's
+/// own acceptance surface (not just the classifier's). Each is structurally the string
+/// idiom `<q>(?!<q><q>).*?(?<!\\)(\\\\)*?<q>` but with `<q>` a regex construct that is
+/// **not** a fixed single literal: `.` (any char), the anchors `\b` / `$`, and the class
+/// escape `\d`. A delimiter like these cannot be faithfully emitted both bare (open/close)
+/// and inside the negated body class, so the recognizer MUST decline them to `fancy-regex`
+/// (reject-when-unsure). Lowering one would be a false-accept (and `\b` also breaks
+/// build-parity). These are the witnesses for `recognizer_declines_non_literal_delimiters`.
+pub fn string_idiom_reject_patterns() -> Vec<String> {
+    // (delim-open, guard-body, delim-close) per arm, where the delimiter is non-literal.
+    // The guard body must be `<delim><delim>` in source for the arm to be *shaped* like
+    // the idiom (so the test exercises the delimiter gate, not some other mismatch).
+    let arms: [(&str, &str); 4] = [
+        (".", ".."),      // `.` — any char, not a fixed literal
+        (r"\b", r"\b\b"), // `\b` — a zero-width word-boundary anchor
+        (r"$", r"$$"),    // `$` — an end anchor
+        (r"\d", r"\d\d"), // `\d` — a digit class, not a single char
+    ];
+    arms.into_iter()
+        .map(|(open, guard)| {
+            // The bundled wrapping: a bounded prefix + a single grouped arm.
+            format!(r"(r?)({open}(?!{guard}).*?(?<!\\)(\\\\)*?{open})")
+        })
+        .collect()
+}
+
 // ─── Lowering mutants (the equivalence-layer mutation meta-test) ────────────────
 
 /// A deliberately-wrong way to lower a **boundary** guard (leading or trailing). The

@@ -129,10 +129,10 @@ pub fn lower_boundary_dotall(
     match &node {
         Node::Alt(arms) => {
             for arm in arms {
-                branches.push(lower_branch(pattern, arm)?);
+                branches.push(lower_branch(pattern, arm, dotall)?);
             }
         }
-        other => branches.push(lower_branch(pattern, other)?),
+        other => branches.push(lower_branch(pattern, other, dotall)?),
     }
     Ok(branches)
 }
@@ -146,7 +146,7 @@ pub fn lower_trailing(pattern: &str) -> Result<Vec<LoweredBranch>, GrammarError>
 /// a trailing lookahead off the end into forward guards, peel every interior
 /// bounded-lookbehind into a fixed-offset backward guard; whatever remains is the base
 /// regex.
-fn lower_branch(pattern: &str, branch: &Node) -> Result<LoweredBranch, GrammarError> {
+fn lower_branch(pattern: &str, branch: &Node, dotall: bool) -> Result<LoweredBranch, GrammarError> {
     // Normalize the branch to a slice of concat parts so we can peel both ends.
     let parts: Vec<Node> = match branch {
         Node::Concat(parts) => parts.clone(),
@@ -271,7 +271,7 @@ fn lower_branch(pattern: &str, branch: &Node) -> Result<LoweredBranch, GrammarEr
     // guard is a uniform precondition independent of the match length, but the base it
     // rides must still be greedy-monotone for the accumulator to pick Python's length.)
     let guarded = leading.is_some() || trailing.is_some() || !lookbehind.is_empty();
-    if guarded && !is_guard_realizable(&regex) {
+    if guarded && !is_guard_realizable(&regex, dotall) {
         return Err(GrammarError::Other {
             msg: format!(
                 "terminal pattern `{pattern}`: a guarded branch's base is not \
@@ -362,13 +362,15 @@ fn atom_has_lazy(atom: &str) -> bool {
 ///     *not* greedy-monotone (it has alternation) yet is unambiguous in length because the
 ///     fixed `""` suffix immediately following pins the prefix length.
 ///
-/// Conservative: a base meeting neither is declined (routed to `fancy-regex`).
-fn is_guard_realizable(base: &str) -> bool {
+/// Conservative: a base meeting neither is declined (routed to `fancy-regex`). `dotall`
+/// is the terminal's `s` flag — it changes what `.` matches and so the base's language,
+/// so the prefix-free check must evaluate the base under the same flag the engine wraps.
+fn is_guard_realizable(base: &str, dotall: bool) -> bool {
     // The greedy-monotone test works on the parsed tree (it predates this routine), so
     // re-parse the base; on a parse failure fall back to "not realizable" (decline).
     match super::parse(base) {
         Ok(node) if is_greedy_monotone(&node) => true,
-        _ => is_prefix_free(base),
+        _ => is_prefix_free(base, dotall),
     }
 }
 
@@ -378,23 +380,63 @@ fn is_guard_realizable(base: &str) -> bool {
 /// state, no match state may be reachable on a non-empty path (a reachable match state
 /// would witness a string in `L` that extends a shorter one in `L`). Bytes are explored
 /// one representative per equivalence class plus the EOI transition — sound because bytes
-/// in one class are indistinguishable to the automaton. A build/representation failure
-/// returns `false` (the conservative, decline-to-fancy direction).
-fn is_prefix_free(base: &str) -> bool {
+/// in one class are indistinguishable to the automaton.
+///
+/// Two safety guards beyond the reachability scan:
+///   * **Nullability** — a base that matches the empty string is *not* prefix-free (`""`
+///     is a prefix of every non-empty match), but the empty match's match-state is the
+///     EOI state, which has no outgoing transitions, so the reachability scan alone would
+///     miss it. We detect nullability explicitly (start → EOI is a match) and decline.
+///     (This is the gate's own invariant, not a lean on the driver's separate zero-width
+///     reject.)
+///   * **Determinization size limits** — a pathological base declines (build error →
+///     `false`) instead of blowing up the dense build, the L5 bake target.
+///
+/// A build/representation failure returns `false` (the conservative, decline-to-fancy
+/// direction). `dotall` wraps the base so `.` matches a newline exactly as the engine's
+/// flag-wrap would, keeping the decided language identical to the lowered one.
+fn is_prefix_free(base: &str, dotall: bool) -> bool {
     use regex_automata::dfa::{dense, Automaton, StartKind};
     use regex_automata::util::primitives::StateID;
     use regex_automata::{Anchored, Input, MatchKind};
 
+    // Decide the base under the same DOTALL flag the engine wraps each branch in.
+    let wrapped = if dotall {
+        format!("(?s:{base})")
+    } else {
+        base.to_string()
+    };
+    // ~10 MiB determinization budget: ample for any real terminal base, but a
+    // pathological one errors out → decline rather than blow up the bake target.
+    const SIZE_LIMIT: usize = 10 * (1 << 20);
     let Ok(dfa) = dense::Builder::new()
         .configure(
             dense::Config::new()
                 .match_kind(MatchKind::All)
-                .start_kind(StartKind::Anchored),
+                .start_kind(StartKind::Anchored)
+                .dfa_size_limit(Some(SIZE_LIMIT))
+                .determinize_size_limit(Some(SIZE_LIMIT)),
         )
-        .build(base)
+        .build(&wrapped)
     else {
         return false;
     };
+    let Ok(start) = dfa.start_state_forward(&Input::new("").anchored(Anchored::Yes)) else {
+        return false;
+    };
+    // Nullable base → empty match is a prefix of any non-empty match → not prefix-free.
+    // The empty match's match-state is the EOI state (no outgoing edges), so the
+    // reachability scan below would miss it; detect epsilon-membership explicitly via the
+    // `regex` crate (an independent engine — `find("")` matches at 0..0 iff the language
+    // contains the empty string). A compile failure (shouldn't happen — the dense DFA
+    // built) is treated as nullable → decline, the conservative direction.
+    let nullable = match regex::Regex::new(&wrapped) {
+        Ok(re) => re.find("").is_some(), // matches the empty haystack ⇒ ε ∈ L
+        Err(_) => true,                  // shouldn't happen; decline conservatively
+    };
+    if nullable {
+        return false;
+    }
     let classes = dfa.byte_classes();
     let reps: Vec<u8> = {
         let mut seen = std::collections::HashSet::new();
@@ -405,9 +447,6 @@ fn is_prefix_free(base: &str) -> bool {
             }
         }
         v
-    };
-    let Ok(start) = dfa.start_state_forward(&Input::new("").anchored(Anchored::Yes)) else {
-        return false;
     };
 
     // Successor states of `s` over every byte-class representative + the EOI transition.
@@ -735,14 +774,10 @@ impl StringIdiom {
         let nl = if dotall { "" } else { r"\n" };
         let mut branches = Vec::new();
         for d in &self.delims {
-            // Inside a character class the delimiter needs no escaping for the bundled
-            // quotes (`"`, `'`); if a future delimiter would be class-special, decline.
-            if matches!(d.as_str(), "]" | "\\" | "^" | "-") {
-                return Err(decline(
-                    pattern,
-                    "the string delimiter is character-class-special",
-                ));
-            }
+            // The delimiter is a fixed literal (the recognizer's `literal_delimiter_source`
+            // guarantees a bare non-metacharacter or an escaped punctuation literal), so it
+            // is safe both bare (the open/close `<q>`) and inside the negated class
+            // `[^<q>\\<nl>]`.
             // Non-empty arm: unguarded greedy escaped body. The `(?!<q><q>)` is vacuous
             // here (the body never begins with the delimiter).
             let non_empty = format!("{p}{d}(?:[^{d}\\\\{nl}]|\\\\.)+{d}", p = self.prefix);
@@ -755,7 +790,7 @@ impl StringIdiom {
             // Empty arm: `<prefix><q><q>` with a trailing `(?!<q>)` guard — the spliced
             // residual of `(?!"")` once the in-token part is shown vacuous.
             let empty = format!("{p}{d}{d}", p = self.prefix);
-            if !is_guard_realizable(&empty) {
+            if !is_guard_realizable(&empty, dotall) {
                 return Err(decline(
                     pattern,
                     "the empty-string arm's base is not guard-realizable (prefix not \
@@ -838,7 +873,7 @@ fn match_string_arm(arm: &Node) -> Option<String> {
     if parts.len() != 6 {
         return None;
     }
-    let delim = single_char_source(&parts[0])?;
+    let delim = literal_delimiter_source(&parts[0])?;
 
     // parts[1]: (?!<delim><delim>)
     match &parts[1] {
@@ -877,25 +912,52 @@ fn match_string_arm(arm: &Node) -> Option<String> {
     }
 
     // parts[5]: the closing delimiter, identical to the opening one.
-    if single_char_source(&parts[5])? != delim {
+    if literal_delimiter_source(&parts[5])? != delim {
         return None;
     }
     Some(delim)
 }
 
-/// The source of a single-character atom — a bare char (`"`) or an escaped char (`\.`),
-/// or `None` if the atom is not exactly one regex character unit.
-fn single_char_source(node: &Node) -> Option<String> {
+/// The source of a single-character **literal** delimiter — the only delimiters the
+/// idiom lowering can faithfully reproduce, because the delimiter is emitted in the
+/// lowered base both *bare* (the open/close `<q>`) and *inside a negated class*
+/// (`[^<q>\\…]`), and must denote exactly one fixed character in both positions:
+///
+///   * a **bare ordinary literal** — any char that is not a regex metacharacter or a
+///     character-class-special char (so `"`, `'`, `/`, `:`, … are fine; `.`, `^`, `$`,
+///     `*`, `+`, `?`, `(`, `)`, `[`, `]`, `{`, `}`, `|`, `\`, `-` are not); or
+///   * an **escaped literal** `\X` where `X` is ASCII *punctuation* (`\.`, `\"`, `\/`,
+///     `\$`, … — a literal-escape of a metacharacter or other punctuation, emitted
+///     escaped in both positions so it stays literal).
+///
+/// Returns `None` for everything else — crucially `.` (any char), the anchors
+/// (`^ $ \b \B \A \z \Z \G`), and the class escapes (`\d \w \s …`): these are *not*
+/// fixed single literals, so an arm built on them would mis-lower. Declining them routes
+/// the terminal to `fancy-regex` (reject-when-unsure) and closes the false-accept.
+fn literal_delimiter_source(node: &Node) -> Option<String> {
     let s = match node {
         Node::Atom(s) => s.as_str(),
         _ => return None,
     };
     let chars: Vec<char> = s.chars().collect();
     match chars.as_slice() {
-        [c] if *c != '\\' => Some(c.to_string()),
-        ['\\', c] => Some(format!("\\{c}")),
+        // A bare ordinary literal: not a regex metacharacter, not class-special.
+        [c] if is_plain_literal(*c) => Some(c.to_string()),
+        // An escaped punctuation literal (`\.`, `\"`, `\/`, …); excludes `\d \w \b \n …`
+        // (letters/digits — classes, assertions, encoded literals).
+        ['\\', c] if c.is_ascii_punctuation() => Some(format!("\\{c}")),
         _ => None,
     }
+}
+
+/// Whether `c` is an ordinary literal usable *bare* as a delimiter — neither a regex
+/// metacharacter (special standalone) nor a character-class-special char (`-` `]` `^`
+/// `\`). Anything excluded here can still be a delimiter in its **escaped** form.
+fn is_plain_literal(c: char) -> bool {
+    !matches!(
+        c,
+        '.' | '^' | '$' | '*' | '+' | '?' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '\\' | '-'
+    )
 }
 
 #[cfg(test)]
@@ -917,6 +979,30 @@ mod tests {
             })
         );
         assert!(b[1].leading.is_none());
+    }
+
+    #[test]
+    fn prefix_free_realizability() {
+        // Prefix-free (unique match length per start) → realizable even with alternation.
+        assert!(is_prefix_free(r#"([ubf]?r?|r[ubf])"""#, false)); // STRING empty arm
+        assert!(is_prefix_free(r#"([ubf]?r?|r[ubf])''"#, false));
+        assert!(is_prefix_free("\"\"", false));
+        assert!(is_prefix_free("[0-9]", false));
+        // Not prefix-free: a string is a proper prefix of another.
+        assert!(!is_prefix_free("[0-9]+", false));
+        assert!(!is_prefix_free("ab|abc", false));
+        // Nullable bases are NOT prefix-free — `""` is a prefix of every non-empty match.
+        // The empty match's match-state is the EOI state (no outgoing edges), so the
+        // reachability scan alone would miss it; the explicit nullability guard catches it.
+        assert!(!is_prefix_free("(|a)", false));
+        assert!(!is_prefix_free("a?", false));
+        assert!(!is_prefix_free("[0-9]*", false));
+        // Guard-realizability subsumes greedy-monotone OR prefix-free.
+        assert!(is_guard_realizable("[0-9]+", false)); // greedy-monotone (not prefix-free)
+        assert!(is_guard_realizable("[0-9]*", false)); // greedy-monotone (nullable * is fine)
+        assert!(is_guard_realizable(r#"([ubf]?r?|r[ubf])"""#, false)); // prefix-free
+                                                                       // Nullable AND alternation → not greedy-monotone, not prefix-free → declines.
+        assert!(!is_guard_realizable("(|a)", false));
     }
 
     #[test]
