@@ -62,6 +62,17 @@
 //!     standalone tool too; here they will simply fail to lex at runtime.
 //!   * **No postlex** — `%declare` + an `Indenter` postlex hook is not baked
 //!     (the generator returns an error if one is configured).
+//!   * **No lookaround grammars — the DFA-plan bakeability payoff is not realized yet.**
+//!     The baked `ScannerPlan` is a *regex* alternation (each terminal's inline pattern
+//!     compiled on the `regex` crate at runtime), so a grammar with **lookaround**
+//!     terminals (the bundled `python`/`lark`) is **not** standalone-able: the regex
+//!     runtime cannot host `(?!…)`/`(?<…)`, and this generator does not bake the
+//!     `regex-automata` DFA scanner bundle or its guard side-tables. Closing this is
+//!     **L5** of the lexer DFA plan (serialize the plain + guarded DFAs, guard/lookbehind
+//!     tables, rank maps, start-byte prefilter, `unless`, and `%ignore`, and replace the
+//!     `ScannerPlan` path with it). L5 is blocked on L4 (dropping the runtime
+//!     `fancy-regex` side-probe). See `docs/LEXER_DFA_PLAN.md` (L5) and
+//!     `docs/LEXER_DFA_STATUS.md`.
 
 // Compiled + type-checked here so the embedded driver cannot rot, then `include_str!`d
 // into every generated parser. `dead_code` is expected: nothing in the lib's normal

@@ -137,8 +137,15 @@ fn recognizer_still_accepts_literal_delimiters() {
 /// this test goes red on purpose — forcing the author to (a) confirm the new lowering is
 /// proven correct and (b) re-run the payoff-check: with *all* bundled lookaround terminals
 /// lowered, L4 (drop `AnyRegex::Fancy` from the runtime) and L5 (bake) become unblocked,
-/// and `docs/LEXER_DFA_PLAN.md` + `CLAUDE.md` must be updated. It is the same negative-pin
-/// discipline as `test_lookaround.rs::string_lookaround_free_rewrite_is_not_equivalent`.
+/// and `docs/LEXER_DFA_PLAN.md` + `docs/LEXER_DFA_STATUS.md` + `CLAUDE.md` must be updated.
+/// It is the same negative-pin discipline as
+/// `test_lookaround.rs::string_lookaround_free_rewrite_is_not_equivalent`.
+///
+/// Crucially, the non-lowering of LONG_STRING/REGEXP is a **decline-to-fancy** (a
+/// transitional route — they still lex correctly on `fancy-regex`), **not** a proof that
+/// the shape is *rejected*. The test asserts only "not `Ok(Lowered::Branches(_))`" — it
+/// does not assert a permanent rejection, because lowering them is a planned Stage-B
+/// follow-up (`docs/LEXER_DFA_STATUS.md`), not an out-of-shape error.
 #[test]
 fn bundled_lookaround_terminal_lowering_status() {
     // Verbatim from the bundled grammars (the `/i` / `/is` flags live on the terminal;
@@ -158,6 +165,8 @@ fn bundled_lookaround_terminal_lowering_status() {
 
     // REGEXP and LONG_STRING are declined (route to fancy). A returned `Branches` here
     // means the scope changed — see the doc above: prove it and re-run the L4/L5 payoff.
+    // If this starts lowering, that is good news ONLY if the PR also adds
+    // equivalence/proof/canary coverage and updates the L4/L5 status (plan + STATUS.md).
     for (name, raw, dotall) in [
         ("lark.REGEXP", REGEXP_RAW, false),
         ("python.LONG_STRING", LONG_STRING_RAW, true),
@@ -170,6 +179,13 @@ fn bundled_lookaround_terminal_lowering_status() {
             "{name} unexpectedly LOWERS now — fancy-regex was supposed to stay (L4 blocked). \
              If this lowering is intentional and proven, update the payoff-check + docs and \
              revise this tripwire."
+        );
+        // Pin the route as **decline-to-fancy**, not rejected/invalid: the raw pattern must
+        // still compile on the backtracking engine, so it lexes correctly today. This is
+        // what makes the non-lowering transitional rather than a permanent reject.
+        assert!(
+            fancy_regex::Regex::new(raw).is_ok(),
+            "{name} must still compile on fancy-regex (it is declined-to-fancy, not rejected)"
         );
     }
 }
