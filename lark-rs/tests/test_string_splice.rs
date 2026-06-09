@@ -47,11 +47,15 @@ fn lex(lexer: &BasicLexer, input: &str) -> Result<Vec<String>, usize> {
     }
 }
 
-/// Deliverable 3 (a): the splice is **actually lowered**, not silently routed to
-/// `fancy-regex`. The lowering returns four branches (a non-empty + an empty arm per
-/// quote kind), so the DFA hosts STRING — the whole point of the milestone.
+/// Deliverable 3 (a): the splice **lowers** the raw `python.STRING` shape to four
+/// branches (a non-empty + an empty arm per quote kind). This exercises the lowering
+/// *function* on the verbatim raw pattern, before the loader's flag wrapper. The
+/// **materialized** route — that the bundled terminal (`(?i:…)`, `flags == 0`) actually
+/// lowers in the built `DfaScanner` rather than declining to fancy — is pinned by
+/// `lexer.rs::tests::bundled_terminal_route_through_materialization`, which goes through
+/// the real `%import` loader and the flag-wrapper peel.
 #[test]
-fn string_actually_lowers_to_branches_under_dfa() {
+fn string_raw_shape_lowers_to_four_branches() {
     let lowered = lower_terminal_dotall("STRING", STRING_RAW, false)
         .expect("STRING must lower (not reject) now");
     match lowered {
@@ -127,20 +131,27 @@ fn recognizer_still_accepts_literal_delimiters() {
     }
 }
 
-/// **Bundled-terminal lowering-status tripwire** (deliverable 6's payoff-check, made
-/// executable). The honest scope of this milestone is: `python.STRING` lowers into the
-/// DFA, while `lark.REGEXP` (internal `(?!\/)`) and `python.LONG_STRING` (a lazy `.*?`
-/// body with a multi-character `"""` close and no opening guard) are **declined** — they
-/// route to `fancy-regex`, so `fancy-regex` stays in the runtime and L4/L5 remain blocked.
+/// **Raw-shape lowering-status tripwire** (deliverable 6's payoff-check, made
+/// executable). The honest scope of this milestone is: the `python.STRING` *shape* lowers
+/// into the DFA, while the `lark.REGEXP` (internal `(?!\/)`) and `python.LONG_STRING` (a
+/// lazy `.*?` body with a multi-character `"""` close, no opening guard) shapes are
+/// **declined** — routed to `fancy-regex`, so `fancy-regex` stays in the runtime and
+/// L4/L5 remain blocked.
 ///
-/// This pins that scope as a fact. If a future change makes REGEXP or LONG_STRING lower,
-/// this test goes red on purpose — forcing the author to (a) confirm the new lowering is
-/// proven correct and (b) re-run the payoff-check: with *all* bundled lookaround terminals
-/// lowered, L4 (drop `AnyRegex::Fancy` from the runtime) and L5 (bake) become unblocked,
-/// and `docs/LEXER_DFA_PLAN.md` + `CLAUDE.md` must be updated. It is the same negative-pin
-/// discipline as `test_lookaround.rs::string_lookaround_free_rewrite_is_not_equivalent`.
+/// NOTE — this drives the lowering *function* on the verbatim raw patterns (no flag
+/// wrapper). The *materialized* bundled route (the loader bakes `/…/i` into `(?i:…)` with
+/// `flags == 0`, which the build path must peel before the same decision fires) is pinned
+/// by `lexer.rs::tests::bundled_terminal_route_through_materialization`. Both layers must
+/// agree; this one localizes a shape-classification regression to the function.
+///
+/// If a future change makes REGEXP or LONG_STRING lower, this goes red on purpose —
+/// forcing the author to (a) confirm the new lowering is proven correct and (b) re-run the
+/// payoff-check: with *all* bundled lookaround terminals lowered, L4 (drop `AnyRegex::Fancy`
+/// from the runtime) and L5 (bake) become unblocked, and `docs/LEXER_DFA_PLAN.md` +
+/// `CLAUDE.md` must be updated. Same negative-pin discipline as
+/// `test_lookaround.rs::string_lookaround_free_rewrite_is_not_equivalent`.
 #[test]
-fn bundled_lookaround_terminal_lowering_status() {
+fn bundled_lookaround_terminal_raw_shape_lowering_status() {
     // Verbatim from the bundled grammars (the `/i` / `/is` flags live on the terminal;
     // LONG_STRING is DOTALL so it is lowered with `dotall = true`).
     const REGEXP_RAW: &str = r#"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*"#;

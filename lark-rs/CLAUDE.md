@@ -370,6 +370,19 @@ silently picks the wrong terminal.
 A terminal like `FLOAT` with 4 alternatives must list `decimal+exponent` before `decimal`
 so that `"3.14e10"` matches the right alternative.
 
+**Per-terminal flags materialize as a whole-pattern `(?flags:…)` wrapper, and the DFA
+lowering must peel it.** The loader bakes a terminal's regex flags into a *scoped group*
+when it materializes the terminal for inlining (`Pattern::to_inline_regex`): the bundled
+`python.STRING` (`/…/i`) reaches the scanner as `(?i:…)` with `PatternRe::flags == 0`,
+not as the raw `(?!"")…` pattern with an `IGNORECASE` flag bit. The lowering classifier
+declines a leading assertion nested behind a flag group, so without intervention the
+bundled `STRING`/`LONG_STRING` route to `fancy-regex` *despite* M4. `DfaScanner::build`
+calls `peel_scoped_flags` to strip a whole-pattern wrapper before classifying and
+re-applies the flags per lowered branch via `wrap_flags`. **Gotcha for tests:** a bare
+constant fed to `lower_terminal_dotall` does *not* carry this wrapper, so it cannot
+verify the bundled route — only a terminal built through the real `%import` loader does
+(`lexer.rs::tests::bundled_terminal_route_through_materialization`).
+
 **`expand1` returns `Child`, not `Tree`.** The `?rule` modifier must be able to return a
 bare `Token` when the rule has a single terminal child — e.g., `?atom: NAME` should yield
 the `NAME` token directly, not `Tree("atom", [Token])`. This propagates all the way up

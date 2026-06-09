@@ -678,6 +678,72 @@ fn wrap_flags(flags: u32, src: &str) -> String {
     }
 }
 
+/// Peel a *whole-pattern* scoped flag group `(?flags:…)` off `raw`, returning the flag
+/// bits and the inner pattern.
+///
+/// The grammar loader bakes a terminal's regex flags into exactly this shape when it
+/// materializes the terminal for inlining ([`Pattern::to_inline_regex`]): the bundled
+/// `python.STRING` (`/…/i`) arrives at the scanner as `(?i:…)` with `PatternRe::flags
+/// == 0`, and `python.LONG_STRING` (`/…/is`) as `(?is:…)`. The lowering classifier must
+/// see a terminal's leading assertion at the **top level**, not nested behind a flag
+/// group (a `(?flags:…)` wrapper is one of the shapes it declines), so the `DfaScanner`
+/// build path peels the wrapper here, threads the flags into `dotall`/`IGNORECASE`, and
+/// re-applies them per lowered branch via [`wrap_flags`]. Without this peel the bundled
+/// `python.STRING` never lowers — it routes to `fancy-regex` like an un-lowered shape.
+///
+/// Returns `None` unless `raw` is *entirely* one such group: a group that closes before
+/// the end (`(?i:a)b`) is left untouched, since peeling it would change the pattern. Only
+/// the flag letters the loader emits (`imsx`) are recognized; a non-capturing `(?:…)`, a
+/// negative form `(?i-s:…)`, or any other `(?…)` construct bails to `None`.
+fn peel_scoped_flags(raw: &str) -> Option<(u32, &str)> {
+    use crate::grammar::terminal::flags;
+    let rest = raw.strip_prefix("(?")?;
+    let colon = rest.find(':')?;
+    let letters = &rest[..colon];
+    if letters.is_empty() {
+        return None;
+    }
+    let mut bits = 0u32;
+    for c in letters.chars() {
+        bits |= match c {
+            'i' => flags::IGNORECASE,
+            'm' => flags::MULTILINE,
+            's' => flags::DOTALL,
+            'x' => flags::VERBOSE,
+            _ => return None,
+        };
+    }
+    // Walk the body to the paren that closes the opening group, respecting `\`-escapes
+    // and character classes (where parens are literal). `depth` starts at 1 for the
+    // opening group paren; the group spans the whole pattern only if it closes on the
+    // final byte.
+    let body = &rest[colon + 1..];
+    let bytes = body.as_bytes();
+    let mut depth = 1usize;
+    let mut in_class = false;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => {
+                i += 2;
+                continue;
+            }
+            b'[' if !in_class => in_class = true,
+            b']' if in_class => in_class = false,
+            b'(' if !in_class => depth += 1,
+            b')' if !in_class => {
+                depth -= 1;
+                if depth == 0 {
+                    return (i == bytes.len() - 1).then_some((bits, &body[..i]));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Build an anchored dense DFA for a guard body `src` (leftmost-first; we only need a
 /// yes/no "does `S` match here").
 fn build_anchored_dfa(src: &str) -> Result<dense::DFA<Vec<u32>>, GrammarError> {
@@ -795,15 +861,24 @@ impl DfaScanner {
                 continue;
             }
 
-            // A lookaround terminal — try to lower it. Lowering runs on the *raw*
-            // pattern (no flag wrapper), so a top-level assertion is seen at the top
-            // level, not nested in a `(?flags:…)` group.
+            // A lookaround terminal — try to lower it. The classifier needs the
+            // terminal's leading assertion at the *top level*, but the loader bakes a
+            // terminal's flags into a whole-pattern scoped group when it materializes
+            // the terminal for inlining (`Pattern::to_inline_regex`): the bundled
+            // `python.STRING` (`/…/i`) arrives here as `(?i:…)` with `flags == 0`. Peel
+            // that wrapper off the lowering input and carry its flag bits alongside any
+            // separately-stored `flags`; without this the classifier sees a `(?flags:…)`
+            // group wrapping the assertion and declines the whole terminal to fancy.
             let def = by_id[id];
-            let (raw, flags) = match &def.pattern {
+            let (raw0, flags0) = match &def.pattern {
                 Pattern::Re(p) => (p.pattern.as_str(), p.flags),
                 // A string terminal never compiles to fancy, so this is unreachable;
                 // be safe and route it to fancy rather than panicking.
                 Pattern::Str(_) => ("", 0),
+            };
+            let (raw, flags) = match peel_scoped_flags(raw0) {
+                Some((peeled, inner)) => (inner, flags0 | peeled),
+                None => (raw0, flags0),
             };
             let compile_guard =
                 |g: &crate::lookaround::lower::GuardSpec| -> Result<Guard, GrammarError> {
@@ -1952,6 +2027,71 @@ mod tests {
                 s.match_at(inp, 0),
                 d.match_at(inp, 0),
                 "diverged on {inp:?}"
+            );
+        }
+    }
+
+    /// **The bundled-terminal route, through real `%import` materialization.**
+    ///
+    /// The bare-constant lowering-status tests (`tests/test_string_splice.rs`) feed
+    /// `lower_terminal_dotall` a raw pattern that never carries the loader's flag
+    /// wrapper, so they cannot catch the regression where the *materialized* terminal
+    /// (`/…/i` → `(?i:…)`, `flags == 0`) routes to fancy. This one builds each bundled
+    /// lookaround terminal through the real loader and asserts (a) materialization does
+    /// produce a whole-pattern scoped flag group with the flag field zeroed — the shape
+    /// `peel_scoped_flags` exists to undo — and (b) the resulting `DfaScanner` route:
+    /// `python.STRING` lowers (off `fancy`), while `python.LONG_STRING` and `lark.REGEXP`
+    /// still decline to `fancy` (an independent shape gap, untouched by the flag peel).
+    #[test]
+    fn bundled_terminal_route_through_materialization() {
+        fn scanner_for(import: &str, term: &str) -> (DfaScanner, SymbolId, String, u32) {
+            let grammar = format!("start: {term}+\n%import {import}\n");
+            let g = crate::grammar::load_grammar(&grammar, &["start".to_string()], false, false)
+                .expect("grammar builds");
+            let cg = crate::grammar::lower(&g);
+            let conf = crate::parsers::basic_lexer_conf(&cg, 0);
+            let (id, def) = conf
+                .terminals
+                .iter()
+                .find(|(_, t)| t.name == term)
+                .map(|(i, t)| (*i, t.clone()))
+                .unwrap_or_else(|| panic!("terminal {term} present"));
+            let (pat, flags) = match &def.pattern {
+                Pattern::Re(p) => (p.pattern.clone(), p.flags),
+                _ => panic!("{term} is a regex terminal"),
+            };
+            let refs: Vec<(SymbolId, &TerminalDef)> =
+                conf.terminals.iter().map(|(i, t)| (*i, t)).collect();
+            let d = DfaScanner::build(&refs, conf.global_flags).expect("DfaScanner builds");
+            (d, id, pat, flags)
+        }
+        let on_fancy = |d: &DfaScanner, id: SymbolId| d.fancy.iter().any(|(_, fid, _)| *fid == id);
+
+        // python.STRING: materialized as a `(?i:…)` group with flags zeroed, and the
+        // peel makes it LOWER — it must not be on the fancy side-probe.
+        let (d, id, pat, flags) = scanner_for("python.STRING", "STRING");
+        assert!(
+            peel_scoped_flags(&pat).is_some() && flags == 0,
+            "python.STRING must materialize as a whole-pattern scoped flag group with the \
+             flag field zeroed (got flags={flags}, pattern={pat:?})"
+        );
+        assert!(
+            !on_fancy(&d, id),
+            "python.STRING must LOWER through materialization, not route to fancy — the \
+             flag-wrapper peel is what makes this fire"
+        );
+
+        // python.LONG_STRING and lark.REGEXP: still declined (a shape gap the peel does
+        // not close). If either flips to lowered, re-run the L4/L5 payoff-check + docs.
+        for (import, term) in [
+            ("python.LONG_STRING", "LONG_STRING"),
+            ("lark.REGEXP", "REGEXP"),
+        ] {
+            let (d, id, _, _) = scanner_for(import, term);
+            assert!(
+                on_fancy(&d, id),
+                "{term} unexpectedly lowered — fancy-regex was supposed to stay (L4 blocked); \
+                 prove the lowering and re-run the payoff-check + docs"
             );
         }
     }
