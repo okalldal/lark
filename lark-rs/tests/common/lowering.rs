@@ -450,6 +450,51 @@ pub fn string_idiom_terminals() -> Vec<GenTerminal> {
     out
 }
 
+/// The **long-string multi-character close idiom** population (`python.LONG_STRING`'s
+/// real nested/prefixed shape without the short-string opening guard). These generated
+/// terminals exercise the Type-A normalization for a lazy DOTALL-ish body with a
+/// three-character close delimiter: `.*?(?<!\\)(\\\\)*?<close>` becomes a plain greedy
+/// body that stops at the first unescaped close. The corpus deliberately includes quote
+/// runs and backslashes so escaped-close and premature-close mistakes are observable.
+pub fn long_string_idiom_terminals() -> Vec<GenTerminal> {
+    let dq = r#"""".*?(?<!\\)(\\\\)*?""""#;
+    let sq = "'''.*?(?<!\\\\)(\\\\\\\\)*?'''";
+    let both = format!("{dq}|{sq}");
+    let arms: [(&str, &str, &[char]); 3] = [
+        ("dq", dq, &['"', '\\', 'a']),
+        ("sq", sq, &['\'', '\\', 'a']),
+        ("both", &both, &['"', '\'', '\\', 'a']),
+    ];
+    let prefixes: [(&str, &[char]); 3] = [
+        ("", &[]),
+        ("(r?)", &['r']),
+        ("([ubf]?r?|r[ubf])", &['r', 'b']),
+    ];
+    let mut out = Vec::new();
+    let mut n = 0usize;
+    for (plabel, pchars) in prefixes {
+        for (alabel, arm_src, achars) in &arms {
+            let pattern = format!("{plabel}({arm_src})");
+            let mut alphabet: Vec<char> = achars.to_vec();
+            for &c in pchars {
+                if !alphabet.contains(&c) {
+                    alphabet.push(c);
+                }
+            }
+            alphabet.truncate(5);
+            out.push(GenTerminal {
+                name: format!("LONG_{plabel}_{alabel}_{n}"),
+                pattern,
+                shape: ShapeClass::BoundedLookbehind,
+                alphabet,
+                max_len: 8,
+            });
+            n += 1;
+        }
+    }
+    out
+}
+
 /// **Adversarial string-idiom shapes with a *non-literal* delimiter** — the recognizer's
 /// own acceptance surface (not just the classifier's). Each is structurally the string
 /// idiom `<q>(?!<q><q>).*?(?<!\\)(\\\\)*?<q>` but with `<q>` a regex construct that is

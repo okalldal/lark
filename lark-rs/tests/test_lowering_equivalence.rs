@@ -17,8 +17,8 @@ mod common;
 
 use common::lowering::{
     boundary_mutations, corpus, fancy_matcher, fancy_prefix, has_guard, has_lookbehind,
-    lookbehind_mutations, lowered_prefix, mutant_lookbehind_matcher, mutant_matcher,
-    string_idiom_terminals, supported_terminals, BoundaryMutation, GenTerminal,
+    long_string_idiom_terminals, lookbehind_mutations, lowered_prefix, mutant_lookbehind_matcher,
+    mutant_matcher, string_idiom_terminals, supported_terminals, BoundaryMutation, GenTerminal,
 };
 use lark_rs::ShapeClass;
 
@@ -192,6 +192,29 @@ fn bounded_lookbehind_lowering_mutants_are_caught() {
 /// `""""` boundary, escaped quotes, and escaped backslashes. `lowered_prefix` returning
 /// `Err` (a declined terminal) is surfaced as a divergence, so a terminal that *failed*
 /// to lower fails loudly rather than passing vacuously.
+/// The `python.LONG_STRING` multi-character close idiom: every generated long-string
+/// terminal must lower and match the `fancy-regex` oracle over quote/backslash-heavy
+/// corpora. This is the G-tier terminal added after the short-string splice.
+#[test]
+fn long_string_idiom_lowered_equals_fancy() {
+    let terms = long_string_idiom_terminals();
+    assert!(
+        !terms.is_empty(),
+        "no long-string idiom terminals generated"
+    );
+    let mut failures = Vec::new();
+    for t in &terms {
+        if let Some(d) = equivalence_divergence(t) {
+            failures.push(d);
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "long-string generative-equivalence divergence(s):\n  {}",
+        failures.join("\n  ")
+    );
+}
+
 #[test]
 fn string_idiom_lowered_equals_fancy() {
     let terms = string_idiom_terminals();

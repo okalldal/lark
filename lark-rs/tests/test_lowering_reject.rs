@@ -18,7 +18,8 @@
 mod common;
 
 use common::lowering::{
-    reject_cases, reject_path_mutants, supported_terminals, wrongly_accepted_rejects,
+    long_string_idiom_terminals, reject_cases, reject_path_mutants, supported_terminals,
+    wrongly_accepted_rejects,
 };
 use lark_rs::{classify, lower_terminal, DefaultClassifier, Lowered, ShapeClass, Verdict};
 
@@ -183,6 +184,20 @@ fn lowering_entry_point_lowers_landed_shapes_and_rejects_the_rest() {
         assert!(
             matches!(lowered, Lowered::Branches(ref b) if !b.is_empty()),
             "supported terminal {:?} must lower to branches, got {lowered:?}",
+            t.pattern
+        );
+    }
+
+    for t in long_string_idiom_terminals() {
+        let lowered = lower_terminal(&t.name, &t.pattern).unwrap_or_else(|e| {
+            panic!(
+                "LONG_STRING idiom terminal {:?} must lower now, got: {e}",
+                t.pattern
+            )
+        });
+        assert!(
+            matches!(lowered, Lowered::Branches(ref b) if !b.is_empty()),
+            "LONG_STRING idiom terminal {:?} must lower to branches, got {lowered:?}",
             t.pattern
         );
     }

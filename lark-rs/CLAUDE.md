@@ -415,12 +415,15 @@ python/lark files + a generated lookaround population including STRING's nested 
 (`tests/test_scanner_differential.rs`, 0 divergences, STRING *lowered*) and per-shape
 generative-equivalence + Route-1 proofs (incl. the real nested STRING shape) + mutation
 meta-tests (incl. the drop-the-`(?!"")`-guard canary `tests/test_string_splice.rs`:
-`""""` is a lex error, `"" ""` is two empty STRINGs). **Still on the `fancy-regex`
-side-probe (a *decline*, never mis-lowered):** `python.LONG_STRING` (a lazy `.*?` body
-with a multi-character `"""` close and no opening guard) and `lark.REGEXP` (an internal
-`(?!\/)`) are attempted and declined cleanly, routed to `fancy-regex` under **both**
-backends; lowering them is a follow-up the STRING milestone does not require (so
-`fancy-regex` stays in the runtime and L4 waits). `LexerBackend::Dfa` **is now the default**
+`""""` is a lex error, `"" ""` is two empty STRINGs). **After M4, `python.LONG_STRING`
+also lowers:** `src/lookaround/lower.rs::recognize_long_string_idiom` handles the lazy
+body with the multi-character `"""`/`'''` close and no opening guard by normalizing it to
+a lookaround-free greedy escaped-body DFA branch, absorbing the `(?<!\\)(\\\\)*?` parity
+check; the scanner threads the `/s` DOTALL flag so bundled `python.lark` stays
+byte-identical. **Still on the `fancy-regex` side-probe (a *decline*, never
+mis-lowered):** `lark.REGEXP` (an internal `(?!\/)`) is attempted and declined cleanly,
+routed to `fancy-regex` under **both** backends; lowering it is the remaining L4
+prerequisite (so `fancy-regex` stays in the runtime and L4 waits). `LexerBackend::Dfa` **is now the default**
 (`LexerBackend::default()` / `LarkOptions.lexer_backend`): the L0 differential oracle is
 0 divergences over the full bank + JSON + python/lark corpora, so the swap is
 correctness-identical, and it is faster on the all-plain common path

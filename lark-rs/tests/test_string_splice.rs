@@ -12,7 +12,10 @@
 
 mod common;
 
-use lark_rs::lookaround::{lower::recognize_string_idiom, parse};
+use lark_rs::lookaround::{
+    lower::{recognize_long_string_idiom, recognize_string_idiom},
+    parse,
+};
 use lark_rs::{
     basic_lexer_conf, load_grammar, lower, lower_terminal_dotall, BasicLexer, Lexer, LexerBackend,
     Lowered, ParseError,
@@ -21,6 +24,10 @@ use lark_rs::{
 /// The bundled `python.STRING` pattern, verbatim (the `/i` flag lives on the terminal).
 const STRING_RAW: &str =
     r#"([ubf]?r?|r[ubf])("(?!"").*?(?<!\\)(\\\\)*?"|'(?!'').*?(?<!\\)(\\\\)*?')"#;
+
+/// The bundled `python.LONG_STRING` pattern, verbatim (the `/is` flags live on the terminal).
+const LONG_STRING_RAW: &str =
+    r#"([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')"#;
 
 /// Build a default-backend (`Dfa`) basic lexer for a grammar that imports `python.STRING`
 /// (a single `TOK: STRING` terminal, whitespace ignored).
@@ -44,6 +51,41 @@ fn lex(lexer: &BasicLexer, input: &str) -> Result<Vec<String>, usize> {
             .collect()),
         Err(ParseError::UnexpectedCharacter { pos, .. }) => Err(pos),
         Err(_) => Err(usize::MAX),
+    }
+}
+
+/// Deliverable for `python.LONG_STRING`: the multi-character close idiom is **actually
+/// lowered**, not silently routed to `fancy-regex`. The two triple-quote arms lower to
+/// two unguarded DFA branches; the escaped-close lookbehind is absorbed by the body.
+#[test]
+fn long_string_actually_lowers_to_branches_under_dfa() {
+    let node = parse(LONG_STRING_RAW).expect("LONG_STRING parses");
+    assert!(
+        recognize_long_string_idiom(&node).is_some(),
+        "LONG_STRING recognizer must accept the bundled shape"
+    );
+    let lowered = lower_terminal_dotall("LONG_STRING", LONG_STRING_RAW, true)
+        .expect("LONG_STRING must lower (not decline) now");
+    match lowered {
+        Lowered::Branches(branches) => {
+            assert_eq!(
+                branches.len(),
+                2,
+                "LONG_STRING lowers to one branch per delimiter"
+            );
+            for b in &branches {
+                assert!(
+                    b.leading.is_none() && b.trailing.is_none() && b.lookbehind.is_empty(),
+                    "LONG_STRING's escaped-close lookbehind is absorbed into the body"
+                );
+                assert!(
+                    !b.regex.contains("(?<") && !b.regex.contains("(?="),
+                    "lowered LONG_STRING branch must be lookaround-free: {:?}",
+                    b.regex
+                );
+            }
+        }
+        other => panic!("LONG_STRING must lower to Branches, got {other:?}"),
     }
 }
 
@@ -127,27 +169,19 @@ fn recognizer_still_accepts_literal_delimiters() {
     }
 }
 
-/// **Bundled-terminal lowering-status tripwire** (deliverable 6's payoff-check, made
-/// executable). The honest scope of this milestone is: `python.STRING` lowers into the
-/// DFA, while `lark.REGEXP` (internal `(?!\/)`) and `python.LONG_STRING` (a lazy `.*?`
-/// body with a multi-character `"""` close and no opening guard) are **declined** — they
-/// route to `fancy-regex`, so `fancy-regex` stays in the runtime and L4/L5 remain blocked.
+/// **Bundled-terminal lowering-status tripwire** (deliverable payoff-check, made
+/// executable). The honest scope now is: `python.STRING` and `python.LONG_STRING` lower
+/// into the DFA, while `lark.REGEXP` (internal `(?!\/)`) is still **declined** — it
+/// routes to `fancy-regex`, so `fancy-regex` stays in the runtime and L4/L5 remain blocked.
 ///
-/// This pins that scope as a fact. If a future change makes REGEXP or LONG_STRING lower,
-/// this test goes red on purpose — forcing the author to (a) confirm the new lowering is
-/// proven correct and (b) re-run the payoff-check: with *all* bundled lookaround terminals
-/// lowered, L4 (drop `AnyRegex::Fancy` from the runtime) and L5 (bake) become unblocked,
-/// and `docs/LEXER_DFA_PLAN.md` + `CLAUDE.md` must be updated. It is the same negative-pin
-/// discipline as `test_lookaround.rs::string_lookaround_free_rewrite_is_not_equivalent`.
+/// This pins that scope as a fact. If a future change makes REGEXP lower, this test goes
+/// red on purpose — forcing the author to prove it and re-run the L4/L5 payoff-check.
 #[test]
 fn bundled_lookaround_terminal_lowering_status() {
     // Verbatim from the bundled grammars (the `/i` / `/is` flags live on the terminal;
     // LONG_STRING is DOTALL so it is lowered with `dotall = true`).
     const REGEXP_RAW: &str = r#"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*"#;
-    const LONG_STRING_RAW: &str =
-        r#"([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')"#;
-
-    // STRING lowers (the milestone deliverable).
+    // STRING lowers (the M4 milestone deliverable).
     assert!(
         matches!(
             lower_terminal_dotall("STRING", STRING_RAW, false),
@@ -156,22 +190,24 @@ fn bundled_lookaround_terminal_lowering_status() {
         "python.STRING must lower into the DFA"
     );
 
-    // REGEXP and LONG_STRING are declined (route to fancy). A returned `Branches` here
-    // means the scope changed — see the doc above: prove it and re-run the L4/L5 payoff.
-    for (name, raw, dotall) in [
-        ("lark.REGEXP", REGEXP_RAW, false),
-        ("python.LONG_STRING", LONG_STRING_RAW, true),
-    ] {
-        assert!(
-            !matches!(
-                lower_terminal_dotall(name, raw, dotall),
-                Ok(Lowered::Branches(_))
-            ),
-            "{name} unexpectedly LOWERS now — fancy-regex was supposed to stay (L4 blocked). \
-             If this lowering is intentional and proven, update the payoff-check + docs and \
-             revise this tripwire."
-        );
-    }
+    assert!(
+        matches!(
+            lower_terminal_dotall("python.LONG_STRING", LONG_STRING_RAW, true),
+            Ok(Lowered::Branches(_))
+        ),
+        "python.LONG_STRING must lower into the DFA"
+    );
+
+    // REGEXP is still declined (routes to fancy). A returned `Branches` here means the
+    // scope changed — prove it and re-run the L4/L5 payoff.
+    assert!(
+        !matches!(
+            lower_terminal_dotall("lark.REGEXP", REGEXP_RAW, false),
+            Ok(Lowered::Branches(_))
+        ),
+        "lark.REGEXP unexpectedly LOWERS now — prove it, update the payoff-check + docs, \
+         and revise this tripwire."
+    );
 }
 
 /// **The canary.** `""""` (and `''''`) is a LEX ERROR; `"" ""` (and `'' ''`) is exactly
@@ -212,6 +248,47 @@ fn four_quotes_is_a_lex_error_two_empties_are_two_tokens() {
     assert_eq!(
         lex(&lexer, r#""" "a""#),
         Ok(vec!["\"\"".to_string(), "\"a\"".to_string()]),
+    );
+}
+
+/// LONG_STRING canary: an empty triple-quoted string lowers as one token, an escaped
+/// close delimiter stays inside the body, and unterminated/adversarial short quote-runs
+/// remain lex errors under the default (`Dfa`) backend.
+#[test]
+fn long_string_triple_quote_canaries() {
+    let grammar = "start: LONG_STRING+\n%import python.LONG_STRING\n%ignore \" \"\n";
+    let g = load_grammar(grammar, &["start".to_string()], false, false)
+        .expect("grammar with %import python.LONG_STRING builds");
+    let cg = lower(&g);
+    let conf = basic_lexer_conf(&cg, 0).with_backend(LexerBackend::Dfa);
+    let lexer = BasicLexer::new(&conf).expect("Dfa BasicLexer builds");
+    let lex_long = |input: &str| -> Result<Vec<String>, usize> {
+        match lexer.lex(input) {
+            Ok(tokens) => Ok(tokens
+                .into_iter()
+                .filter(|t| t.type_ == "LONG_STRING")
+                .map(|t| t.value)
+                .collect()),
+            Err(ParseError::UnexpectedCharacter { pos, .. }) => Err(pos),
+            Err(_) => Err(usize::MAX),
+        }
+    };
+
+    let empty_triple = "\"\"\"\"\"\"";
+    assert_eq!(lex_long(empty_triple), Ok(vec![empty_triple.to_string()]));
+    let multiline = "\"\"\"a\nb\"\"\"";
+    assert_eq!(lex_long(multiline), Ok(vec![multiline.to_string()]));
+    let escaped_close = "\"\"\"\\\"\"\"still body\"\"\"";
+    assert_eq!(lex_long(escaped_close), Ok(vec![escaped_close.to_string()]));
+    assert_eq!(
+        lex_long("\"\"\"\"\""),
+        Err(0),
+        "five quotes is not a closed LONG_STRING"
+    );
+    assert_eq!(
+        lex_long("\"\"\"\""),
+        Err(0),
+        "four quotes is not a closed LONG_STRING"
     );
 }
 

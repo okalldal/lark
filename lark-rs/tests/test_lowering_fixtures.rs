@@ -83,11 +83,11 @@ fn fixtures() -> Vec<SeamFixture> {
         SeamFixture {
             name: "newline_dotall_body",
             seam: "a DOTALL body crossing newlines with an even-backslash lookbehind close",
-            grammar: "start: LONG\nLONG: /\"\"\".*?(?<!\\\\)(\\\\\\\\)*?\"\"\"/s\n",
+            grammar: "start: LONG_STRING\n%import python.LONG_STRING\n",
             g_regex_flags: 0,
             input: "\"\"\"a\nb\"\"\"",
             classify_target: Some((
-                r#""""\.*?(?<!\\)(\\\\)*?""""#,
+                r#"([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')"#,
                 ShapeClass::BoundedLookbehind,
             )),
         },
