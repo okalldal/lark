@@ -16,7 +16,8 @@
 mod common;
 
 use common::lowering::{
-    corpus, fancy_matcher, fancy_prefix, lowered_prefix, supported_terminals, GenTerminal,
+    boundary_mutations, corpus, fancy_matcher, fancy_prefix, has_guard, lowered_prefix,
+    mutant_matcher, supported_terminals, GenTerminal,
 };
 use lark_rs::ShapeClass;
 
@@ -73,13 +74,62 @@ fn run_shape(shape: ShapeClass) {
 }
 
 #[test]
-#[ignore = "pending first shape — trailing-boundary lowering not yet implemented"]
 fn trailing_boundary_lowered_equals_fancy() {
     run_shape(ShapeClass::TrailingBoundary);
 }
 
+/// The mutation meta-test for the **boundary** lowering (leading + trailing): each
+/// deliberately-wrong way to lower a guard (forget it, flip its polarity, drop the
+/// trailing-EOF case) must be *caught* — it must diverge from the `fancy-regex`
+/// oracle somewhere on the boundary population, so a real lowering that made the same
+/// mistake would turn the equivalence layers red. A surviving mutant is a hole in the
+/// net (`docs/LEXER_DFA_PLAN.md`, "Validate the harness itself").
 #[test]
-#[ignore = "pending first shape — leading-boundary lowering not yet implemented"]
+fn boundary_lowering_mutants_are_caught() {
+    let terms: Vec<GenTerminal> = supported_terminals()
+        .into_iter()
+        .filter(|t| {
+            matches!(
+                t.shape,
+                ShapeClass::TrailingBoundary | ShapeClass::LeadingBoundary
+            ) && has_guard(&t.pattern)
+        })
+        .collect();
+    assert!(!terms.is_empty(), "no guarded boundary terminals to mutate");
+
+    for mutation in boundary_mutations() {
+        let mut caught: Option<String> = None;
+        'search: for t in &terms {
+            let Some(oracle) = fancy_matcher(&t.pattern) else {
+                continue;
+            };
+            // Compile the mutant matcher once per (terminal, mutation), then reuse it
+            // across the corpus.
+            let Some(mutant_re) = mutant_matcher(&t.pattern, mutation) else {
+                continue;
+            };
+            for input in corpus(&t.alphabet, t.max_len) {
+                let mutant = fancy_prefix(&mutant_re, &input);
+                let correct = fancy_prefix(&oracle, &input);
+                if mutant != correct {
+                    caught = Some(format!(
+                        "{} {:?} on {input:?}: mutant={mutant:?} != correct={correct:?}",
+                        t.name, t.pattern
+                    ));
+                    break 'search;
+                }
+            }
+        }
+        assert!(
+            caught.is_some(),
+            "mutant {mutation:?} survived the boundary population — the \
+             generative-equivalence layer would NOT catch this wrong lowering. \
+             This is a hole in the net."
+        );
+    }
+}
+
+#[test]
 fn leading_boundary_lowered_equals_fancy() {
     run_shape(ShapeClass::LeadingBoundary);
 }

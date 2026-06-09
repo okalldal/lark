@@ -15,10 +15,11 @@
 //!     ([`reject_path_mutants`]) and the reusable reject-corpus check
 //!     ([`wrongly_accepted_rejects`]) the mutation meta-test drives, validated now
 //!     on the reject path.
-//!   * **The lowered-matcher hook** — [`lowered_prefix`], stubbed to the *pending*
-//!     state so the #[ignore]'d equivalence layers compile and fail loudly if
-//!     un-ignored before a shape lands. The first-shape session points it at the
-//!     real lowered `DfaScanner`.
+//!   * **The lowered-matcher hook** — [`lowered_prefix`], which drives the real
+//!     lowered `DfaScanner` (a one-terminal grammar under `LexerBackend::Dfa`, probed
+//!     at offset 0) for the shapes that have landed, and returns `Err` for a shape
+//!     still pending — so an equivalence layer un-ignored before its shape lands fails
+//!     loudly rather than passing for the wrong reason.
 #![allow(dead_code)]
 
 use lark_rs::{classify, Classification, Classifier, Rejection, ShapeClass, Verdict};
@@ -81,30 +82,89 @@ pub fn fancy_matcher(pattern: &str) -> Option<fancy_regex::Regex> {
 /// Anchored matched-prefix length (in **characters**) of a precompiled oracle
 /// matcher at the start of `input`, or `None` for no match at offset 0. This is the
 /// independent `fancy-regex` reference the lowering is verified against.
+///
+/// A **zero-width** match (`m.end() == 0`) is reported as `None`: lark's scanner
+/// requires `m.end() > pos` and Python Lark forbids zero-width terminals outright
+/// (`min_width == 0`), so a length-0 match is never a token lark emits. Mapping it to
+/// `None` makes this raw-`fancy-regex` reference model lark's scanner semantics — the
+/// same kind of adaptation as the `m.start() == 0` anchoring above — so a nullable
+/// base like `[0-9]*(?=S)` (which lark would reject at build) is compared faithfully.
 pub fn fancy_prefix(re: &fancy_regex::Regex, input: &str) -> Option<usize> {
     match re.find(input) {
-        Ok(Some(m)) if m.start() == 0 => Some(input[..m.end()].chars().count()),
+        Ok(Some(m)) if m.start() == 0 && m.end() > 0 => Some(input[..m.end()].chars().count()),
         _ => None,
     }
 }
 
 // ─── The lowered-matcher hook (stubbed: pending) ───────────────────────────────
 
-/// **Pending hook.** Anchored matched-prefix length of the *lowered* terminal at the
-/// start of `input`, or `Ok(None)` for no match. Until a shape lands this returns
-/// `Err` for every lookaround terminal, mirroring [`lark_rs::lower_terminal`]. The
-/// generative-equivalence layer (`tests/test_lowering_equivalence.rs`) is
-/// `#[ignore]`'d on this, and `.expect()`s it, so un-ignoring before the lowering
-/// exists fails loudly rather than passing for the wrong reason.
+/// Anchored matched-prefix length (in **characters**) of the *lowered* terminal at
+/// the start of `input`, or `Ok(None)` for no match — the real lowered `DfaScanner`,
+/// driven through the public lexer API so the harness stays at the `match_at`
+/// boundary (engine-agnostic). The terminal is built into a **one-terminal** grammar
+/// under [`LexerBackend::Dfa`] and probed with `BasicLexer::match_at(input, 0)`: the
+/// scanner's anchored match at offset 0 *is* the lowered prefix (or `None`). Matching
+/// only at offset 0 — rather than lexing the whole input — keeps the exhaustive
+/// generative corpus tractable.
 ///
-/// The first-shape session replaces this body with the real lowered `DfaScanner`
-/// (build a one-terminal grammar under `LexerBackend::Dfa`, match at offset 0) —
-/// keeping the harness at the `match_at` boundary, engine-agnostic.
-pub fn lowered_prefix(name: &str, _pattern: &str, _input: &str) -> Result<Option<usize>, String> {
-    Err(format!(
-        "lowered matcher for `{name}` is not implemented — pending first shape \
-         (docs/LEXER_DFA_PLAN.md L2)"
-    ))
+/// Returns `Err` only when the lowering *rejects* the terminal (a shape not yet
+/// lowered, or genuinely unsupported), so the per-shape equivalence layers fail
+/// loudly if run against a pending shape rather than passing for the wrong reason.
+pub fn lowered_prefix(_name: &str, pattern: &str, input: &str) -> Result<Option<usize>, String> {
+    let lexer = lowered_lexer(pattern)?;
+    if input.is_empty() {
+        return Ok(None);
+    }
+    // The single-terminal scanner matches only `TOK`, so any anchored match at 0 is
+    // the lowered terminal's; its char length is the lowered prefix.
+    Ok(lexer.match_at(input, 0).map(|(_, v)| v.chars().count()))
+}
+
+thread_local! {
+    /// Per-pattern cache of the built one-terminal Dfa lexer, so a terminal's whole
+    /// corpus reuses one dense DFA. `Rc` because the cache outlives each borrow.
+    static LOWERED_LEXERS: std::cell::RefCell<
+        std::collections::HashMap<String, std::rc::Rc<lark_rs::BasicLexer>>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Build (or fetch from the thread-local cache) the one-terminal `LexerBackend::Dfa`
+/// lexer for `pattern` — a single terminal `TOK` over the lowered pattern, probed at
+/// offset 0.
+fn lowered_lexer(pattern: &str) -> Result<std::rc::Rc<lark_rs::BasicLexer>, String> {
+    use lark_rs::{
+        basic_lexer_conf, load_grammar, lower, lower_terminal, BasicLexer, LexerBackend,
+    };
+
+    if let Some(l) = LOWERED_LEXERS.with(|c| c.borrow().get(pattern).cloned()) {
+        return Ok(l);
+    }
+
+    // A shape that does not lower yet is surfaced as an error, not a silent mismatch.
+    lower_terminal("TOK", pattern).map_err(|e| format!("lowering rejected `{pattern}`: {e}"))?;
+
+    // Inside `/…/`, an unescaped `/` must be escaped as `\/` (mirrors the differential
+    // grammar builder); an already-`\/` is left alone.
+    let mut escaped = String::with_capacity(pattern.len());
+    let mut prev_backslash = false;
+    for ch in pattern.chars() {
+        if ch == '/' && !prev_backslash {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+        prev_backslash = ch == '\\' && !prev_backslash;
+    }
+    let grammar = format!("start: TOK\nTOK: /{escaped}/\n");
+
+    let g = load_grammar(&grammar, &["start".to_string()], false, false)
+        .map_err(|e| format!("load_grammar failed: {e:?}"))?;
+    let cg = lower(&g);
+    let conf = basic_lexer_conf(&cg, 0).with_backend(LexerBackend::Dfa);
+    let lexer = std::rc::Rc::new(
+        BasicLexer::new(&conf).map_err(|e| format!("BasicLexer build failed: {e:?}"))?,
+    );
+    LOWERED_LEXERS.with(|c| c.borrow_mut().insert(pattern.to_string(), lexer.clone()));
+    Ok(lexer)
 }
 
 // ─── Supported-shape generators ────────────────────────────────────────────────
@@ -304,6 +364,97 @@ pub fn supported_terminals() -> Vec<GenTerminal> {
     }
 
     out
+}
+
+// ─── Lowering mutants (the equivalence-layer mutation meta-test) ────────────────
+
+/// A deliberately-wrong way to lower a **boundary** guard (leading or trailing). The
+/// mutation meta-test asserts each one is *caught* — i.e. it produces a match-length
+/// that diverges from `fancy-regex` somewhere on the boundary population, so a real
+/// lowering that made the same mistake would turn the generative-equivalence layer
+/// red. Each mirrors a concrete coding error the plan calls out
+/// (`docs/LEXER_DFA_PLAN.md`, "Validate the harness itself — mutation meta-test").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundaryMutation {
+    /// Forget the guard entirely — accept the base wherever it matches.
+    ForgetGuard,
+    /// Invert the guard's polarity — treat `(?!S)` as `(?=S)` and vice-versa.
+    FlipPolarity,
+    /// Drop the end-of-input case — require a following char on a *trailing* guard, so
+    /// a token that runs to EOF is wrongly rejected (a negative trailing guard must
+    /// hold at EOF). A no-op on a leading guard.
+    DropTrailingEof,
+}
+
+/// Every boundary-lowering mutant the meta-test must catch.
+pub fn boundary_mutations() -> [BoundaryMutation; 3] {
+    [
+        BoundaryMutation::ForgetGuard,
+        BoundaryMutation::FlipPolarity,
+        BoundaryMutation::DropTrailingEof,
+    ]
+}
+
+fn render_guard(neg: bool, set: &str) -> String {
+    if neg {
+        format!("(?!{set})")
+    } else {
+        format!("(?={set})")
+    }
+}
+
+/// Rebuild a (lookaround-bearing) reference pattern from the lowered branches with
+/// `mutation` applied to each guard — the *wrong* lowering, expressed so the
+/// independent `fancy-regex` engine can run it. The leading guard is re-emitted at the
+/// branch front, the trailing guard at the branch end.
+fn mutant_pattern(pattern: &str, mutation: BoundaryMutation) -> Option<String> {
+    let branches = lark_rs::lookaround::lower::lower_boundary(pattern).ok()?;
+    let arms: Vec<String> = branches
+        .iter()
+        .map(|b| {
+            let lead = match &b.leading {
+                None => String::new(),
+                Some(g) => match mutation {
+                    BoundaryMutation::ForgetGuard => String::new(),
+                    BoundaryMutation::FlipPolarity => render_guard(!g.neg, &g.set),
+                    // EOF-at-start is meaningless; leave the leading guard intact.
+                    BoundaryMutation::DropTrailingEof => render_guard(g.neg, &g.set),
+                },
+            };
+            let trail = match &b.trailing {
+                None => String::new(),
+                Some(g) => match mutation {
+                    BoundaryMutation::ForgetGuard => String::new(),
+                    BoundaryMutation::FlipPolarity => render_guard(!g.neg, &g.set),
+                    BoundaryMutation::DropTrailingEof => {
+                        format!("{}(?=[\\s\\S])", render_guard(g.neg, &g.set))
+                    }
+                },
+            };
+            format!("(?:{}{}{})", lead, b.regex, trail)
+        })
+        .collect();
+    Some(arms.join("|"))
+}
+
+/// The compiled `fancy-regex` matcher for the **mutant** (wrongly-lowered) terminal,
+/// or `None` if it does not compile. Built **once** per `(pattern, mutation)` and
+/// reused across the corpus via [`fancy_prefix`] — compiling it per input is what
+/// makes the mutation meta-test crawl.
+pub fn mutant_matcher(pattern: &str, mutation: BoundaryMutation) -> Option<fancy_regex::Regex> {
+    let mutated = mutant_pattern(pattern, mutation)?;
+    fancy_matcher(&mutated)
+}
+
+/// Whether `pattern` carries at least one boundary guard (so a mutation is
+/// observable).
+pub fn has_guard(pattern: &str) -> bool {
+    lark_rs::lookaround::lower::lower_boundary(pattern)
+        .map(|bs| {
+            bs.iter()
+                .any(|b| b.leading.is_some() || b.trailing.is_some())
+        })
+        .unwrap_or(false)
 }
 
 // ─── Out-of-shape adversarial corpus ───────────────────────────────────────────
