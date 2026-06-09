@@ -15,13 +15,17 @@
 //! and it must never false-accept.
 //!
 //! **Caveat — "rejected" here is the classifier verdict, not yet the runtime outcome.**
-//! This entry point *reports* an unsupported assertion as a `GrammarError`, but the
-//! current `DfaScanner` build path still catches that `Err` and falls back to
-//! `fancy-regex` as a compatibility route (so an out-of-shape *user* assertion lexes
-//! today rather than failing the build). L4 must split `Unsupported` from
-//! `DeclineToFancy` and make the final runtime policy explicit (`docs/LEXER_DFA_PLAN.md`,
-//! "Runtime routing taxonomy"). The classifier's *own* contract below is unaffected: it
-//! must still reject-when-unsure and never false-accept.
+//! This entry point *reports* an unsupported assertion as a `GrammarError`. The
+//! decline-vs-reject split PR #131 flagged is now **typed**: [`route_terminal_dotall`]
+//! returns a [`LoweringRoute`] that distinguishes [`LoweringRoute::DeclinedToFancy`] (a
+//! transitional route to `fancy-regex`) from [`LoweringRoute::Unsupported`] (the final L4
+//! reject path). The `DfaScanner` build path matches that route directly — but as a
+//! **compatibility fallback** it still routes `Unsupported` to `fancy-regex` today (so an
+//! out-of-shape *user* assertion lexes rather than failing the build). L4 must flip only
+//! that one route to a build error (`docs/LEXER_DFA_PLAN.md`, "Runtime routing taxonomy").
+//! The classifier's *own* contract below is unaffected: it must still reject-when-unsure
+//! and never false-accept. The [`lower_terminal`] / [`lower_terminal_dotall`] API is
+//! retained as a thin `Result`-flattening of the route for existing callers.
 //!
 //! ## The classifier's contract
 //!
@@ -295,6 +299,132 @@ pub enum Lowered {
     Branches(Vec<super::lower::LoweredBranch>),
 }
 
+/// A **typed routing decision** for one terminal — the explicit decline-vs-reject split
+/// PR #131 documented as design debt (`docs/LEXER_DFA_PLAN.md`, "Runtime routing
+/// taxonomy"). The historical [`Lowered`] / `Result<Lowered, GrammarError>` API collapses
+/// the last three variants into a single `Err`, conflating a *transitional decline to
+/// `fancy-regex`* with a *permanent out-of-shape rejection*. This enum keeps them distinct
+/// in the type, so the build path ([`crate::lexer`]'s `DfaScanner`) can route each
+/// explicitly instead of catching any `Err` and falling back. [`lower_terminal`] still
+/// flattens this back to `Result` for existing callers and tests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoweringRoute {
+    /// No lookaround at all — the terminal is already a plain regular language and needs
+    /// no lowering (it goes straight to the DFA).
+    Plain,
+    /// A supported shape that lowered into lookaround-free per-branch sub-patterns — the
+    /// DFA hosts it directly.
+    Lowered(Vec<super::lower::LoweredBranch>),
+    /// A **supported-in-principle** terminal whose *particular instance* the lowering
+    /// declined (a variable-offset lookbehind, a non-greedy-monotone guarded base, a
+    /// bundled idiom not yet lowered such as `python.LONG_STRING` / `lark.REGEXP`), **or**
+    /// a pattern the lookaround frontend could not parse. The runtime routes this to
+    /// `fancy-regex` during the transition — a correct fallback, never a mis-lowering.
+    DeclinedToFancy {
+        /// A human-readable reason naming the terminal and why it declined.
+        reason: String,
+    },
+    /// The classifier rejects this assertion as **out-of-shape** ([`Classification::first_rejection`]).
+    /// This is the final L4 reject path. The current compatibility policy may *still* route
+    /// it to `fancy-regex` until that policy is deliberately flipped (see `DfaScanner`'s
+    /// compatibility-fallback comment) — distinguishing it from [`Self::DeclinedToFancy`]
+    /// is exactly what lets L4 flip only this route to a build error.
+    Unsupported {
+        /// The offending assertion's exact source, e.g. `"(?=b)"`.
+        assertion: String,
+        /// Why the classifier rejected it.
+        rejection: Rejection,
+        /// The full build-error message naming the terminal and the assertion.
+        message: String,
+    },
+    /// Neither the lookaround frontend nor any regex engine can host the pattern — a
+    /// genuine build error. **Reserved:** the current router never constructs this (a
+    /// frontend-only parse failure prefers [`Self::DeclinedToFancy`] to preserve
+    /// `fancy-regex` compatibility), per the PR scope.
+    Invalid {
+        /// The build-error message.
+        message: String,
+    },
+}
+
+/// **THE ROUTING ENTRY POINT** (non-dotall). Classifies `pattern` and returns the typed
+/// [`LoweringRoute`] the build path matches on. The dotall-aware [`route_terminal_dotall`]
+/// is the real worker; this wrapper passes `dotall = false`.
+pub fn route_terminal(name: &str, pattern: &str) -> LoweringRoute {
+    route_terminal_dotall(name, pattern, false)
+}
+
+/// [`route_terminal`] aware of whether the terminal's flags include `DOTALL` (`s`) — the
+/// engine passes the real flag so the string-idiom body normalization admits a newline
+/// exactly when the terminal's `.` would. `dotall` is inert for every shape other than the
+/// string idiom.
+pub fn route_terminal_dotall(name: &str, pattern: &str, dotall: bool) -> LoweringRoute {
+    route_terminal_with(&DefaultClassifier, name, pattern, dotall)
+}
+
+/// [`route_terminal_dotall`] over an explicit classifier — the mutation meta-test drives a
+/// mutant classifier through this same routing entry point.
+pub fn route_terminal_with(
+    classifier: &dyn Classifier,
+    name: &str,
+    pattern: &str,
+    dotall: bool,
+) -> LoweringRoute {
+    let classification = match classifier.classify(pattern) {
+        Ok(c) => c,
+        // The lookaround frontend could not parse the pattern. `fancy-regex` parses a
+        // superset of our shape grammar, so it may still accept and lex this terminal —
+        // prefer a *decline* to a hard `Invalid`, since turning a frontend limitation into
+        // a build error would regress a pattern that lexes today (`docs/LEXER_DFA_PLAN.md`,
+        // "Runtime routing taxonomy" — the classify-fails-but-fancy-accepts case).
+        Err(e) => {
+            return LoweringRoute::DeclinedToFancy {
+                reason: format!(
+                    "terminal `{name}`: the lookaround frontend could not parse the pattern \
+                     ({e}); routed to fancy-regex"
+                ),
+            };
+        }
+    };
+    if classification.is_plain() {
+        return LoweringRoute::Plain;
+    }
+    // An out-of-shape assertion is the firmer verdict — report it before attempting to
+    // lower the (supported) remainder.
+    if let Some((info, rejection)) = classification.first_rejection() {
+        return LoweringRoute::Unsupported {
+            assertion: info.source.clone(),
+            rejection,
+            message: unsupported_message(name, &info.source, rejection),
+        };
+    }
+    // Every assertion is a supported shape. Run the lowering; it may still **decline** a
+    // particular instance (a non-greedy-monotone guarded base, a lookbehind after a
+    // variable-width prefix, a bundled idiom not yet lowered) by returning `Err` — that is
+    // a route-to-fancy, never a reject.
+    match super::lower::lower_boundary_dotall(pattern, dotall) {
+        Ok(branches) => LoweringRoute::Lowered(branches),
+        Err(e) => LoweringRoute::DeclinedToFancy {
+            reason: format!(
+                "terminal `{name}`: a supported shape declined this instance of lowering \
+                 ({e}); routed to fancy-regex"
+            ),
+        },
+    }
+}
+
+/// The build-error message for an out-of-shape (rejected) assertion — names the terminal
+/// and shows the assertion source. Shared by the route's [`LoweringRoute::Unsupported`]
+/// arm and the flattened [`lower_terminal`] error so the two never drift.
+fn unsupported_message(name: &str, source: &str, rejection: Rejection) -> String {
+    format!(
+        "terminal `{name}`: lookaround assertion `{source}` is unsupported ({}); it \
+         cannot be lowered into the combined DFA (docs/LEXER_DFA_PLAN.md, \"What we \
+         support\").",
+        rejection.explain(),
+    )
+}
+
 /// **THE LOWERING ENTRY POINT.**
 ///
 /// A plain terminal returns [`Lowered::Plain`]. A terminal whose every assertion is a
@@ -304,6 +434,11 @@ pub enum Lowered {
 /// in which case it returns `Err` and the caller routes that terminal to
 /// `fancy-regex`. A terminal with an out-of-shape assertion is rejected permanently
 /// (`Err`). Either error names the terminal and the offending assertion.
+///
+/// This is a thin compatibility flattening of [`route_terminal`]: the
+/// `DeclinedToFancy` / `Unsupported` / `Invalid` routes all collapse to `Err`, which is
+/// why a caller that only checks `Ok(Branches)` cannot tell a decline from a reject. The
+/// build path uses [`route_terminal_dotall`] directly to keep them apart.
 pub fn lower_terminal(name: &str, pattern: &str) -> Result<Lowered, GrammarError> {
     lower_terminal_dotall(name, pattern, false)
 }
@@ -328,30 +463,16 @@ pub fn lower_terminal_with(
     pattern: &str,
     dotall: bool,
 ) -> Result<Lowered, GrammarError> {
-    let classification = classifier.classify(pattern)?;
-    if classification.is_plain() {
-        return Ok(Lowered::Plain);
+    // Flatten the typed route back to the historical `Result`. A *decline* and an
+    // out-of-shape *reject* both collapse to `Err(GrammarError::Other)` here — the
+    // conflation `DfaScanner` now avoids by matching the route directly.
+    match route_terminal_with(classifier, name, pattern, dotall) {
+        LoweringRoute::Plain => Ok(Lowered::Plain),
+        LoweringRoute::Lowered(branches) => Ok(Lowered::Branches(branches)),
+        LoweringRoute::DeclinedToFancy { reason } => Err(GrammarError::Other { msg: reason }),
+        LoweringRoute::Unsupported { message, .. } => Err(GrammarError::Other { msg: message }),
+        LoweringRoute::Invalid { message } => Err(GrammarError::Other { msg: message }),
     }
-    // An unsupported assertion is the firmer error — report it first.
-    if let Some((info, reason)) = classification.first_rejection() {
-        return Err(GrammarError::Other {
-            msg: format!(
-                "terminal `{name}`: lookaround assertion `{}` is unsupported \
-                 ({}); it cannot be lowered into the combined DFA \
-                 (docs/LEXER_DFA_PLAN.md, \"What we support\").",
-                info.source,
-                reason.explain(),
-            ),
-        });
-    }
-    // Every assertion is a supported shape. All three boundary/lookbehind lowerings
-    // are implemented (M1 trailing, M2 leading, M3 bounded-lookbehind), so the lowering
-    // runs. It may still **decline** a particular instance (a non-greedy-monotone
-    // guarded base, or a lookbehind after a variable-width prefix) by returning `Err`;
-    // the caller then routes that terminal to `fancy-regex` — correct, never
-    // mis-lowered.
-    let branches = super::lower::lower_boundary_dotall(pattern, dotall)?;
-    Ok(Lowered::Branches(branches))
 }
 
 /// True iff `e` is a *pending-shape* rejection — a supported assertion shape whose

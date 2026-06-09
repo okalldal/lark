@@ -39,6 +39,7 @@ use regex_automata::{
 use crate::error::{GrammarError, ParseError};
 use crate::grammar::intern::SymbolId;
 use crate::grammar::terminal::{Pattern, TerminalDef};
+use crate::lookaround::classify::LoweringRoute;
 use crate::tree::Token;
 
 // ─── AnyRegex: a per-terminal regex that may need lookaround ──────────────────
@@ -756,6 +757,24 @@ fn build_combined_dfa(
 // (the greedy-monotone realizability check now lives in `crate::lookaround::lower`,
 // so `lower_terminal` itself declines a non-greedy-monotone guarded base.)
 
+/// The single named seam every **route-to-fancy** decision funnels through, so the
+/// transitional `fancy-regex` compatibility fallback is auditable in one place. Compiles
+/// `inline` as a per-position-anchored (`\G`) fancy candidate and records it in the
+/// rank-sorted `fancy` side-probe list. Every `LoweringRoute` arm in [`DfaScanner::build`]
+/// that does not lower into the DFA — `DeclinedToFancy`, the compatibility `Unsupported`
+/// fallback, and the defensive `Plain` arm — calls exactly this.
+fn push_fancy_fallback(
+    fancy: &mut Vec<(usize, SymbolId, AnyRegex)>,
+    prefix: &str,
+    inline: &str,
+    rank: usize,
+    id: SymbolId,
+) -> Result<(), GrammarError> {
+    let anchored = AnyRegex::compile(&format!("{prefix}\\G{inline}"))?;
+    fancy.push((rank, id, anchored));
+    Ok(())
+}
+
 impl DfaScanner {
     /// Build a DFA scanner from candidate terminals (deduplicated by id). Consumes
     /// the same [`ScannerPlan`] as [`Scanner::build`], so selection / ordering /
@@ -837,24 +856,48 @@ impl DfaScanner {
                 })
             };
 
-            // Route to fancy unless the terminal lowers. `lower_terminal` declines a
-            // shape not yet lowered (`python.LONG_STRING`, `lark.REGEXP`), a lookbehind at
-            // a variable offset, *and* a guarded branch whose base is not guard-realizable
-            // (it can't ride the longest-where-guard-holds accumulator) — so a returned
-            // `Branches` is always faithfully lowerable. NOTE (decline-vs-reject debt): an
-            // *out-of-shape* (permanently rejected) user assertion also lands in this `_`
-            // arm and routes to fancy today — a compatibility fallback the L4 contract must
-            // split out (see `docs/LEXER_DFA_PLAN.md`, "Runtime routing taxonomy").
-            // `dotall` is threaded so the string-idiom body normalization admits a newline
-            // exactly when this terminal's `.` would.
+            // Route the terminal explicitly through the typed `LoweringRoute` (PR #131's
+            // decline-vs-reject split, now in code). `dotall` is threaded so the
+            // string-idiom body normalization admits a newline exactly when this terminal's
+            // `.` would.
             let dotall = flags & crate::grammar::terminal::flags::DOTALL != 0;
             let lowered =
-                match crate::lookaround::classify::lower_terminal_dotall(&def.name, raw, dotall) {
-                    Ok(crate::lookaround::classify::Lowered::Branches(branches)) => branches,
-                    _ => {
-                        let anchored = AnyRegex::compile(&format!("{prefix}\\G{inline}"))?;
-                        fancy.push((rank, *id, anchored));
+                match crate::lookaround::classify::route_terminal_dotall(&def.name, raw, dotall) {
+                    // A supported shape that lowered — the DFA hosts it. The lowering only ever
+                    // returns `Branches` it can faithfully realize (a non-realizable guarded
+                    // base, a variable-offset lookbehind, or a not-yet-lowered idiom comes back
+                    // as `DeclinedToFancy`, below).
+                    LoweringRoute::Lowered(branches) => branches,
+                    // A supported-in-principle terminal whose instance was declined
+                    // (`python.LONG_STRING`, `lark.REGEXP`, a variable-offset lookbehind, a
+                    // non-greedy-monotone base) or a pattern the frontend could not parse:
+                    // route to fancy-regex exactly as today.
+                    LoweringRoute::DeclinedToFancy { .. } => {
+                        push_fancy_fallback(&mut fancy, &prefix, inline, rank, *id)?;
                         continue;
+                    }
+                    // Compatibility fallback: unsupported user lookaround still routes to
+                    // fancy-regex today. L4 must flip this to a build error or make it an
+                    // explicit compatibility mode. This is the one route the decline-vs-reject
+                    // split exists to isolate — keep it loud and auditable.
+                    LoweringRoute::Unsupported { .. } => {
+                        push_fancy_fallback(&mut fancy, &prefix, inline, rank, *id)?;
+                        continue;
+                    }
+                    // Unreachable: a plain terminal was already handled by the `!is_fancy()`
+                    // branch above (a plain pattern compiles on the `regex` crate, so it never
+                    // reaches this lowering arm). Handle defensively — route to fancy rather
+                    // than panicking.
+                    LoweringRoute::Plain => {
+                        push_fancy_fallback(&mut fancy, &prefix, inline, rank, *id)?;
+                        continue;
+                    }
+                    // Neither `regex` nor `fancy-regex` can host the pattern — a genuine build
+                    // error. (The router never constructs `Invalid` today; this arm is the L4
+                    // seam, kept explicit so a future `Invalid` is a hard error, not a silent
+                    // fancy fallback.)
+                    LoweringRoute::Invalid { message } => {
+                        return Err(GrammarError::Other { msg: message });
                     }
                 };
 

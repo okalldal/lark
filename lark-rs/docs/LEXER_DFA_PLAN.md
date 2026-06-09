@@ -23,7 +23,7 @@ The per-terminal route table lives in [`LEXER_DFA_STATUS.md`](LEXER_DFA_STATUS.m
 | L3 — `LexerBackend::Dfa` as the default backend | **Landed** (it is `#[default]`). |
 | `python.LONG_STRING` lowering | **Not landed** — declines to `fancy-regex`. |
 | `lark.REGEXP` lowering | **Not landed** — declines to `fancy-regex`. |
-| L4 — remove runtime `fancy-regex` | **Blocked** (LONG_STRING/REGEXP still decline; decline-vs-reject contract unresolved). |
+| L4 — remove runtime `fancy-regex` | **Blocked** (LONG_STRING/REGEXP still decline). Decline-vs-reject contract **typed** (`LoweringRoute` landed); runtime compatibility fallback still preserved (Unsupported → fancy). |
 | L5 — bake a serialized DFA scanner bundle into standalone/C/WASM | **Blocked** — standalone still bakes the regex `ScannerPlan`. |
 
 So the strategy has paid off for the common path and for `python.STRING`, but the
@@ -49,16 +49,21 @@ story:
   backref, nested, variable-width lookbehind). A loud build error, **permanently**.
 * **Invalid regex** — neither `regex` nor `fancy-regex` accepts the pattern. A build error.
 
-**Design debt to resolve before L4.** The current build path conflates *declined* and
-*rejected* on the runtime side: when `lower_terminal_dotall` returns `Err` — whether that
-`Err` means "supported shape, not lowered yet" or "out-of-shape, reject" — the scanner
-compiles the terminal on `fancy-regex` and continues. That is a deliberate *compatibility
-fallback* (it keeps user grammars working while lowering is incomplete), but it means an
-unsupported user lookaround silently rides `fancy-regex` instead of erroring. This is fine
-*today* (it preserves behaviour) but it is **not** the final contract: before L4 the
-result type must separate `Lowered` / `DeclineToFancy` / `Unsupported` / `InvalidRegex`,
-and the runtime policy must be made explicit (bundled known-declines may route to fancy;
-unsupported shapes must error unless a compatibility mode is deliberately chosen).
+**Design debt — route enum landed; runtime compatibility fallback still preserved.**
+The typed split is now in code: `classify::route_terminal_dotall` returns a
+`LoweringRoute` enum that separates `Plain` / `Lowered` / `DeclinedToFancy` / `Unsupported`
+/ `Invalid`, and `DfaScanner::build` matches it directly (the historical
+`lower_terminal_dotall` is retained as a thin `Result`-flattening for existing callers).
+The build path **no longer conflates** *declined* and *rejected* in the type — each route
+is a distinct, named arm. What is **deliberately unchanged** is the *runtime policy*: the
+`Unsupported` arm still routes to `fancy-regex` via a single auditable
+`push_fancy_fallback` seam, so an out-of-shape *user* lookaround keeps lexing today rather
+than erroring (preserving behaviour while lowering is incomplete). This is the
+*compatibility fallback*, now loud and isolated to one arm. **Before L4** that one arm must
+flip to a build error (or be gated behind an explicit compatibility mode); the
+`Lowered` / `DeclinedToFancy` / bundled-known-decline routes are unaffected by the flip.
+The transitional behaviour is pinned by
+`tests/test_lowering_routes.rs::unsupported_user_lookaround_currently_compat_falls_back_to_fancy`.
 
 ## Goal
 
@@ -245,13 +250,14 @@ decision, not a temporary state.
 1. `python.LONG_STRING` and `lark.REGEXP` still *decline to fancy* (see
    [`LEXER_DFA_STATUS.md`](LEXER_DFA_STATUS.md)). While any bundled terminal rides
    `fancy-regex`, the runtime cannot drop it.
-2. The **decline-vs-reject contract** for *user* grammars is unresolved (see "Runtime
-   routing taxonomy"). Today an unsupported user lookaround silently routes to
-   `fancy-regex` via the compatibility fallback. Before L4 the result type must split
-   `Lowered` / `DeclineToFancy` / `Unsupported` / `InvalidRegex`, and the policy must be
-   explicit: bundled known-declines may route to fancy during the transition; unsupported
-   shapes must produce a clear build error unless a compatibility mode is deliberately
-   chosen.
+2. The **decline-vs-reject contract** for *user* grammars is now **typed but not yet
+   enforced** (see "Runtime routing taxonomy"). The result type is split:
+   `route_terminal_dotall` returns `LoweringRoute::{Plain, Lowered, DeclinedToFancy,
+   Unsupported, Invalid}` and `DfaScanner` matches it directly. What remains for L4 is the
+   *policy flip*: today the `Unsupported` arm still routes to `fancy-regex` via the
+   compatibility fallback (so an unsupported user lookaround keeps lexing). Before L4 that
+   arm must produce a clear build error unless a compatibility mode is deliberately chosen;
+   bundled known-declines may keep routing to fancy during the transition.
 
 ### L5 — Bake the scanner bundle static (the bakeability payoff) *(blocked)*
 
