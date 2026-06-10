@@ -63,5 +63,8 @@
     "inputs/e038.txt": "features/*.feature (cel-spec conformance corpus)",
     "inputs/e039.txt": "features/*.feature (cel-spec conformance corpus)",
     "inputs/e040.txt": "features/*.feature (cel-spec conformance corpus)"
-  }
+  },
+  "local_patches": [
+    "grammar/cel.lark: BYTES_LIT/STRING_LIT/MLSTRING_LIT quantifier typo {4-8} -> {4,8} (2 sites). Upstream writes \\u[0-9a-fA-F]{4-8}; backtracking engines silently demote the malformed quantifier to literal text, a DFA engine rejects the pattern outright. Patched in the vendored copy (we do not file upstream bugs); no vendored input exercises the literal-{4-8} reading, so the Python-Lark oracle trees are unchanged."
+  ]
 }
