@@ -444,10 +444,22 @@ fn route1_proof_regexp_idiom_real_shape() {
 // (`(?:[^\\<nl>]|\\.)*?`), keeping the lazy close; the branches are unguarded. As with
 // STRING/REGEXP, the **brute** Route-1 enumeration is infeasible for this
 // content-bearing body (`|alphabet|^(n+W+2)` blows up), so the committed realization is
-// the same **state-pruned** decision procedure (`prove_route1_pruned`): one shortest
-// witness per reachable base-DFA state × every lookahead suffix of length ≤ W+1
-// (W = 1, the lookbehind body `\\`), with `fancy-regex` running the *original*
-// lookaround pattern as the independent oracle.
+// the same **state-pruned** procedure (`prove_route1_pruned`): one shortest witness per
+// reachable base-DFA state × every lookahead suffix of length ≤ W+1 (W = 1, the
+// lookbehind body `\\`), with `fancy-regex` running the *original* lookaround pattern
+// as the independent oracle.
+//
+// **An honest scope note on completeness.** `prove_route1_pruned`'s Myhill-Nerode
+// completeness argument was derived for bounded-*lookahead* matchers (the decision is a
+// function of base-DFA state + ≤W following chars). LONG_STRING's assertion is a
+// variable-position *lookbehind* absorbed into a body rewrite, so that argument is not
+// re-derived here — treat this as a strong state-structured decision-procedure *check*
+// (a proof representative in the plan's sense), not a standalone completeness proof.
+// The equivalence's primary basis is the committed Type-A pin
+// (`test_lookaround.rs::long_string_match_length_equivalence`, exhaustive over the
+// load-bearing alphabet) plus the generative layers, the three mutants, and the
+// exhaustive `/is` backend differential — per the plan's "Route-1 / state-pruned proof
+// **or an equivalent stronger oracle**" alternative.
 //
 // **Flag consistency:** the proof runs **non-dotall on both sides** —
 // `prove_route1_pruned` lowers via `lower_boundary` (dotall = false), `lowered_prefix`'s
@@ -458,13 +470,14 @@ fn route1_proof_regexp_idiom_real_shape() {
 // `test_long_string_splice.rs`, plus the python.lark differential corpus (real
 // docstrings).
 
-/// The committed Route-1 (state-pruned) proof for the long-string idiom on the
-/// **prefix-less arm** and the **real bundled `python.LONG_STRING` shape**. Each
-/// representative must (a) genuinely classify fully-supported with every verdict
+/// The committed Route-1 (state-pruned) proof **representative** for the long-string
+/// idiom on the **prefix-less arm** and the **real bundled `python.LONG_STRING`
+/// shape** (see the completeness scope note above). Each representative must
+/// (a) genuinely classify fully-supported with every verdict
 /// `Supported(BoundedLookbehind)` (unlike STRING/REGEXP there is no lookahead to
 /// re-tag — the recognizer gates only the lowering), (b) lower to branches (not
-/// decline), and (c) be proven match-length-identical to `fancy-regex` by the
-/// state-pruned decision procedure.
+/// decline), and (c) agree match-length-exactly with `fancy-regex` over the
+/// state-pruned witness × suffix sweep.
 #[test]
 fn route1_proof_long_string_idiom_real_shape() {
     for (name, pattern) in [

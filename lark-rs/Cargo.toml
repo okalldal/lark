@@ -35,11 +35,13 @@ regex = "1.10"
 # `regex-automata` DFA (STRING/REGEXP/LONG_STRING via the M4/Stage-B idioms), but the
 # side-probe is still live for per-instance *declines* in user grammars (a
 # variable-offset lookbehind outside a recognized idiom, a non-realizable guarded base)
-# and the `Unsupported` compatibility fallback. The plan is to drop it from the runtime
-# at **L4** (flip that fallback to a build error) and keep `fancy-regex` thereafter as a
-# permanent **dev/test oracle** only — the independent match-length reference the
-# lowering is verified against (`docs/LEXER_DFA_PLAN.md`, L4 + Verification). Because
-# `regex` is a subset, a pattern that compiles with `regex` is never handed to `fancy-regex`.
+# and the `Unsupported` compatibility fallback. Dropping it from the runtime is **L4**,
+# which needs two policy decisions: flip the `Unsupported` fallback to a build error,
+# AND decide the per-instance `DeclinedToFancy` cases (error vs. documented fancy
+# support). `fancy-regex` stays thereafter as a permanent **dev/test oracle** only — the
+# independent match-length reference the lowering is verified against
+# (`docs/LEXER_DFA_PLAN.md`, L4 + Verification). Because `regex` is a subset, a pattern
+# that compiles with `regex` is never handed to `fancy-regex`.
 fancy-regex = "0.18"
 # Dense-DFA support for the strict-mode regex-collision check (issue #35): the
 # `regex` crate has no intersection/emptiness test, so we drop to its automata

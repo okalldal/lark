@@ -691,7 +691,7 @@ fn wrap_flags(flags: u32, src: &str) -> String {
     }
 }
 
-/// Strip a **whole-pattern flag wrapper** `(?imsx:…)` back into the flag bitset —
+/// Strip a **whole-pattern flag wrapper** `(?ims:…)` back into the flag bitset —
 /// the inverse of what the grammar loader bakes in. The loader converts a terminal's
 /// `/…/is`-style flags into one flag-scoped group around the entire pattern
 /// (`Pattern::to_inline_regex`) and stores `PatternRe.flags = 0`, so without this
@@ -702,10 +702,11 @@ fn wrap_flags(flags: u32, src: &str) -> String {
 /// `g_regex_flags_dotall_long_string` / `newline_dotall_body` seam fixtures pin).
 ///
 /// Returns the inner pattern + the merged flags. Conservative: on anything but a
-/// single unquantified positive-`imsx` flag group spanning the whole pattern (a `-`
-/// clear, an unknown letter, a quantifier, a bare `(?:`, a parse failure) the input
-/// is returned unchanged, so the route behaves exactly as before. Loops so a nested
-/// `(?i:(?s:…))` (not produced by the loader, but cheap to honor) fully unwraps.
+/// single unquantified positive-`ims` flag group spanning the whole pattern (an `x`
+/// VERBOSE wrapper — see the inline note, a `-` clear, an unknown letter, a
+/// quantifier, a bare `(?:`, a parse failure) the input is returned unchanged, so
+/// the route behaves exactly as before. Loops so a nested `(?i:(?s:…))` (not
+/// produced by the loader, but cheap to honor) fully unwraps.
 fn strip_whole_pattern_flag_wrapper(raw: &str, flags: u32) -> (String, u32) {
     use crate::grammar::terminal::flags as f;
     let mut pattern = raw.to_string();
@@ -732,9 +733,18 @@ fn strip_whole_pattern_flag_wrapper(raw: &str, flags: u32) -> (String, u32) {
                 'i' => f::IGNORECASE,
                 'm' => f::MULTILINE,
                 's' => f::DOTALL,
-                'x' => f::VERBOSE,
-                // A flag-clear (`-`) or any unknown letter: leave the pattern alone
-                // (conservative). Named groups (`(?P<n>…`, `(?<n>…`) never get here —
+                // `x` (VERBOSE) is deliberately NOT stripped: the lookaround
+                // parser and its width/offset analysis are not verbose-aware, so a
+                // stripped `(?x:…)` body would have its whitespace/comments counted
+                // as literal width while the re-wrapped branch ignores them — a
+                // fixed-offset lookbehind could lower with a wrong offset (a
+                // false-accept). Left wrapped, the pattern declines/rejects to the
+                // fancy fallback exactly as before — the reject-when-unsure
+                // direction. Pinned by
+                // `verbose_flag_wrapper_is_not_stripped_into_lowering`.
+                //
+                // A flag-clear (`-`) or any unknown letter likewise leaves the
+                // pattern alone. Named groups (`(?P<n>…`, `(?<n>…`) never get here —
                 // their opens end with `>`, not `:`.
                 _ => return (pattern, flags),
             };
@@ -2119,6 +2129,82 @@ mod tests {
                 "/a\\/b/i",          // REGEXP with escaped slash + flag
                 "\"a\" '''b'''",     // STRING then LONG_STRING
             ],
+        );
+    }
+
+    /// **The model-vs-reality closure for the zero-probe pin.** The test above models
+    /// the loader's flag-bake format by hand (`re_term` with `(?is:…)`-wrapped
+    /// patterns); if `Pattern::to_inline_regex` ever changed its emitted form, that
+    /// model could keep passing while the *real* import path silently regressed to the
+    /// fancy probe — exactly the invisible rot this PR dug `python.STRING` out of. So
+    /// this twin builds the scanner from the **real loader output**: a grammar that
+    /// `%import`s all three bundled lookaround terminals, run through `load_grammar` →
+    /// `lower` → `basic_lexer_conf`, must also produce a scanner with **zero** fancy
+    /// side-probes.
+    #[test]
+    fn dfa_real_loader_bundled_imports_have_no_fancy_probe() {
+        let grammar = "start: STRING | LONG_STRING | REGEXP\n\
+                       %import python.STRING\n\
+                       %import python.LONG_STRING\n\
+                       %import lark.REGEXP\n";
+        let g = crate::load_grammar(grammar, &["start".to_string()], false, false)
+            .expect("grammar importing the three bundled lookaround terminals builds");
+        let cg = crate::lower(&g);
+        let conf = crate::basic_lexer_conf(&cg, 0);
+        let refs: Vec<(SymbolId, &TerminalDef)> =
+            conf.terminals.iter().map(|(i, t)| (*i, t)).collect();
+        let d = DfaScanner::build(&refs, conf.global_flags).expect("DfaScanner builds");
+        assert!(
+            d.fancy.is_empty(),
+            "the REAL loader-imported bundled terminals must lower with zero fancy \
+             side-probes — `to_inline_regex`'s bake format and the flag-wrapper strip \
+             have drifted apart"
+        );
+        assert!(d.plain.is_some() && d.guarded.is_some());
+    }
+
+    /// **The VERBOSE conservatism pin.** `strip_whole_pattern_flag_wrapper` must NOT
+    /// strip a `(?x:…)` wrapper: the lookaround parser's width/offset analysis is not
+    /// verbose-aware, so a stripped `x`-body would count whitespace as literal width
+    /// while the re-wrapped branch ignores it — a fixed-offset lookbehind could lower
+    /// with a wrong offset (a false-accept). An `x`-wrapped lookaround terminal must
+    /// keep its pre-strip behavior: assertions stay nested in the group, the route
+    /// stays out-of-shape, and the terminal rides the fancy fallback — identically on
+    /// both backends.
+    #[test]
+    fn verbose_flag_wrapper_is_not_stripped_into_lowering() {
+        // Whitespace inside the verbose body is regex-insignificant at runtime but
+        // would be width-significant to a naive strip + reparse.
+        let terms = [re_term(1, "VX", r"(?x:[0-9]+ (?![0-9]))", 0)];
+        let (s, d) = both(&terms);
+        assert!(
+            d.plain.is_none() && d.guarded.is_none(),
+            "an x-wrapped lookaround terminal must NOT lower (the strip must leave \
+             `(?x:…)` alone — its body's widths/offsets are not verbose-aware)"
+        );
+        assert_eq!(d.fancy.len(), 1, "…it rides the fancy fallback, as before");
+        for inp in ["123", "12a", "1 2", "a"] {
+            assert_eq!(
+                s.match_at(inp, 0),
+                d.match_at(inp, 0),
+                "diverged on {inp:?}"
+            );
+        }
+        // The helper itself: an `x` anywhere in the wrapper letters refuses the strip
+        // wholesale; the plain `i`/`s` strips still work.
+        assert_eq!(
+            strip_whole_pattern_flag_wrapper("(?x:a b)", 0),
+            ("(?x:a b)".to_string(), 0)
+        );
+        assert_eq!(
+            strip_whole_pattern_flag_wrapper("(?isx:a)", 0),
+            ("(?isx:a)".to_string(), 0)
+        );
+        let f =
+            crate::grammar::terminal::flags::IGNORECASE | crate::grammar::terminal::flags::DOTALL;
+        assert_eq!(
+            strip_whole_pattern_flag_wrapper("(?is:a)", 0),
+            ("a".to_string(), f)
         );
     }
 

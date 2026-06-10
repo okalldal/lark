@@ -224,8 +224,10 @@ maximal-munch driver, and the differential oracle `tests/test_scanner_differenti
 > — exact-shape only (`"""`/`'''` delimiters). Gated by: the hand canaries + the
 > exhaustive dotall backend differential (`tests/test_long_string_splice.rs`), the
 > generative equivalence + parity/two-quote/greedy mutants
-> (`tests/test_lowering_equivalence.rs`), the state-pruned Route-1 proof
-> (`tests/test_lowering_proof.rs::route1_proof_long_string_idiom_real_shape`), the
+> (`tests/test_lowering_equivalence.rs`), the state-pruned Route-1 proof representative
+> (`tests/test_lowering_proof.rs::route1_proof_long_string_idiom_real_shape` — see its
+> completeness scope note; the committed Type-A equivalence pin is the primary basis,
+> per the checklist's "or an equivalent stronger oracle" alternative), the
 > scanner-differential population + python.lark docstring corpus, and the stdlib oracles.
 >
 > **The flag-wrapper strip made the idioms real on the engine path** (2026-06-10): the
