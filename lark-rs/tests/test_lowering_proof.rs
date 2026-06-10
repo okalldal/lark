@@ -395,6 +395,33 @@ fn route1_proof_string_idiom_real_nested_shape() {
     }
 }
 
+/// The committed Route-1 proof for the **regex-literal delimited-token idiom**
+/// (`lark.REGEXP`, Stage B) on its real bundled shape. Like the STRING splice it is
+/// content-bearing (the escaped-slash body), so the brute enumeration is intractable and the
+/// **state-pruned** Myhill-Nerode decision procedure is used instead. Unlike STRING the
+/// lowered branch is **guard-free** (the `(?!\/)` is absorbed into the non-empty `+` and the
+/// lazy close into a proven greedy `+`), so the proof witnesses that the plain greedy DFA's
+/// longest match reproduces `fancy-regex`'s lazy match across every reachable base state ×
+/// short lookahead suffix — the exhaustive Python cross-check (`/`/`\`/`a`/`i` to length 8,
+/// 0 divergences) closed in this PR, here machine-proven against the independent oracle.
+#[test]
+fn route1_proof_regexp_idiom() {
+    const REGEXP_RAW: &str = r#"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*"#;
+    let c = classify(REGEXP_RAW).unwrap_or_else(|e| panic!("classify REGEXP errored: {e}"));
+    assert!(
+        c.assertions
+            .iter()
+            .any(|a| a.verdict() == Verdict::Supported(ShapeClass::LeadingBoundary)),
+        "REGEXP's `(?!\\/)` must classify as a supported leading boundary (the stripped guard)"
+    );
+    assert!(
+        lower_boundary(REGEXP_RAW).is_ok(),
+        "REGEXP must lower (not decline) for the proof to be non-vacuous"
+    );
+    prove_route1_pruned("REGEXP", REGEXP_RAW)
+        .unwrap_or_else(|cex| panic!("Route-1 (state-pruned) failed for REGEXP: {cex}"));
+}
+
 /// Active now: the proof-obligation registry is the per-shape contract. Every
 /// supported shape has at least one committed representative, and each representative
 /// genuinely classifies as its shape (so the obligation targets the right thing).

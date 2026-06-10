@@ -20,16 +20,17 @@ The per-terminal route table lives in [`LEXER_DFA_STATUS.md`](LEXER_DFA_STATUS.m
 | M2 — leading-boundary precondition | **Landed.** |
 | M3 — fixed-offset bounded lookbehind | **Landed.** |
 | M4 — `python.STRING` opening-guard splice (`recognize_string_idiom`) | **Landed** (PR #124). |
+| Stage B — `lark.REGEXP` regex-literal idiom (`recognize_regexp_idiom`) | **Landed.** |
 | L3 — `LexerBackend::Dfa` as the default backend | **Landed** (it is `#[default]`). |
 | `python.LONG_STRING` lowering | **Not landed** — declines to `fancy-regex`. |
-| `lark.REGEXP` lowering | **Not landed** — declines to `fancy-regex`. |
-| L4 — remove runtime `fancy-regex` | **Blocked** (LONG_STRING/REGEXP still decline). Decline-vs-reject contract **typed** (`LoweringRoute` landed); runtime compatibility fallback still preserved (Unsupported → fancy). |
+| L4 — remove runtime `fancy-regex` | **Blocked** (LONG_STRING still declines). Decline-vs-reject contract **typed** (`LoweringRoute` landed); runtime compatibility fallback still preserved (Unsupported → fancy). |
 | L5 — bake a serialized DFA scanner bundle into standalone/C/WASM | **Blocked** — standalone still bakes the regex `ScannerPlan`. |
 
-So the strategy has paid off for the common path and for `python.STRING`, but the
-*bakeability* and *drop-`fancy-regex`* wins (L4/L5) are **not** realized yet: `fancy-regex`
-is still a runtime dependency, two bundled lookaround terminals still ride it, and the
-standalone generator still emits a regex-based `ScannerPlan`, not a serialized DFA.
+So the strategy has paid off for the common path, for `python.STRING`, and now for
+`lark.REGEXP`, but the *bakeability* and *drop-`fancy-regex`* wins (L4/L5) are **not**
+realized yet: `fancy-regex` is still a runtime dependency, **one** bundled lookaround
+terminal (`python.LONG_STRING`) still rides it, and the standalone generator still emits a
+regex-based `ScannerPlan`, not a serialized DFA.
 
 ## Runtime routing taxonomy
 
@@ -192,12 +193,28 @@ maximal-munch driver, and the differential oracle `tests/test_scanner_differenti
 > (`tests/test_lowering_equivalence.rs`), and the python.lark differential (0
 > divergences with STRING *lowered*, not declined).
 >
+> **Stage B — the `lark.REGEXP` regex-literal idiom (landed).** `lark.REGEXP` =
+> `\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*` is an audited **delimited-token** idiom (a
+> sibling of the M4 STRING splice): `/ body / flags` with the internal `(?!\/)` rejecting
+> the empty `//`. It is lowered by `src/lookaround/lower.rs::recognize_regexp_idiom`: the
+> `(?!\/)` reduces *exactly* to "the body is non-empty" (the body alternation can never
+> begin with the delimiter), realized by the `+` quantifier, and the lazy close is proven
+> identical to a greedy `+` (the body cannot consume an *unescaped* delimiter, so the first
+> unescaped slash is the close under both). The lowered branch is the single lookaround-free,
+> **guard-free** regex `\/(?:\\\/|\\\\|[^\/])+\/[imslux]*` — it joins the leftmost-first
+> plain DFA. Gated by: the hand-authored canaries under the default `Dfa` backend
+> (`tests/test_regexp_splice.rs`: `//` rejected, `/\//`/`/\\/` one token, `/a//` does not
+> swallow the second slash), the state-pruned Route-1 proof
+> (`tests/test_lowering_proof.rs::route1_proof_regexp_idiom`), the generative-equivalence
+> layer (`tests/test_lowering_equivalence.rs::regexp_idiom_lowered_equals_fancy`, exhaustive
+> over a slash/backslash/flag corpus vs `fancy-regex`), the recognizer reject-surface tests,
+> and the scanner differential.
+>
 > **Still on the `fancy-regex` side-probe (a *decline*, not a gap):**
 > `python.LONG_STRING` (a lazy `.*?` body with a *multi-character* `"""` close and no
-> opening guard) and `lark.REGEXP` (an internal `(?!\/)` after the opening slash) are
-> **attempted and declined cleanly** — they route to `fancy-regex` exactly as before, so
-> the bundled grammars stay correct. Lowering them is a bonus the STRING milestone does
-> not require; until they land, `fancy-regex` stays in the runtime and L4 waits.
+> opening guard) is **attempted and declined cleanly** — it routes to `fancy-regex` exactly
+> as before, so the bundled grammars stay correct. Lowering it is a bonus the STRING/REGEXP
+> milestones do not require; until it lands, `fancy-regex` stays in the runtime and L4 waits.
 
 A **general** lowering keyed on the assertion's **shape**, not on the six bundled
 terminals. Lower each supported bounded assertion into lookaround-free DFA states
@@ -247,9 +264,10 @@ decision, not a temporary state.
 
 **Blocked, two ways:**
 
-1. `python.LONG_STRING` and `lark.REGEXP` still *decline to fancy* (see
-   [`LEXER_DFA_STATUS.md`](LEXER_DFA_STATUS.md)). While any bundled terminal rides
-   `fancy-regex`, the runtime cannot drop it.
+1. `python.LONG_STRING` still *declines to fancy* (see
+   [`LEXER_DFA_STATUS.md`](LEXER_DFA_STATUS.md)) — `lark.REGEXP` now lowers (Stage B), so
+   it is the last bundled decline. While any bundled terminal rides `fancy-regex`, the
+   runtime cannot drop it.
 2. The **decline-vs-reject contract** for *user* grammars is now **typed but not yet
    enforced** (see "Runtime routing taxonomy"). The result type is split:
    `route_terminal_dotall` returns `LoweringRoute::{Plain, Lowered, DeclinedToFancy,
@@ -560,9 +578,9 @@ Examples: short strings, long strings, regex literals, block comments.
 These are **not** arbitrary internal-lookaround support. They are exact idioms where a
 small delimiter automaton (KMP/Aho-Corasick-style, tracking how much of a multi-character
 close delimiter has been seen, plus escape parity) can replace the lazy body +
-escape/lookaround logic. `python.STRING`'s M4 splice is the first instance;
-`python.LONG_STRING` (multi-char `"""` close) and `lark.REGEXP` (`/…/` with an internal
-`(?!\/)`) are the next two. Each idiom must have:
+escape/lookaround logic. `python.STRING`'s M4 splice is the first instance; `lark.REGEXP`
+(`/…/` with an internal `(?!\/)`, `recognize_regexp_idiom`) is the second (**landed**);
+`python.LONG_STRING` (multi-char `"""` close) is the remaining one. Each idiom must have:
 
 - an exact recognizer,
 - a narrow acceptance surface,

@@ -18,7 +18,8 @@ mod common;
 use common::lowering::{
     boundary_mutations, corpus, fancy_matcher, fancy_prefix, has_guard, has_lookbehind,
     lookbehind_mutations, lowered_prefix, mutant_lookbehind_matcher, mutant_matcher,
-    string_idiom_terminals, supported_terminals, BoundaryMutation, GenTerminal,
+    regexp_idiom_terminals, string_idiom_terminals, supported_terminals, BoundaryMutation,
+    GenTerminal,
 };
 use lark_rs::ShapeClass;
 
@@ -205,6 +206,31 @@ fn string_idiom_lowered_equals_fancy() {
     assert!(
         failures.is_empty(),
         "string-idiom generative-equivalence divergence(s):\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+/// The **regex-literal delimited-token idiom** (`lark.REGEXP`'s real shape, Stage B):
+/// every generated REGEXP idiom terminal's lowered match-length must equal the
+/// `fancy-regex` oracle over its exhaustive slash/backslash/flag corpus — which includes
+/// `//` (rejected), escaped slashes `\/`, escaped backslashes `\\`, lone backslashes, and
+/// the flag suffix. The lowered branch is **guard-free** (the `(?!\/)` becomes a `+` and
+/// the lazy `*?` a greedy `+`), so a wrong close/quantifier shows up here as a divergence.
+/// `lowered_prefix` returning `Err` (a declined terminal) is surfaced as a divergence, so a
+/// terminal that *failed* to lower fails loudly rather than passing vacuously.
+#[test]
+fn regexp_idiom_lowered_equals_fancy() {
+    let terms = regexp_idiom_terminals();
+    assert!(!terms.is_empty(), "no regexp-idiom terminals generated");
+    let mut failures = Vec::new();
+    for t in &terms {
+        if let Some(d) = equivalence_divergence(t) {
+            failures.push(d);
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "regexp-idiom generative-equivalence divergence(s):\n  {}",
         failures.join("\n  ")
     );
 }

@@ -118,8 +118,12 @@ pub fn lower_boundary(pattern: &str) -> Result<Vec<LoweredBranch>, GrammarError>
 /// the lazy escaped body to its proven greedy character-class equivalent (the Type-A
 /// rewrite `tests/test_lookaround.rs::matchlen` justifies) and reducing the `(?!"")`
 /// splice to an empty/non-empty arm split with a trailing `(?!")` guard on the empty arm
-/// (the only place the assertion's window over-reaches the matched token). Anything that
-/// is not exactly that idiom falls through to the generic boundary lowering.
+/// (the only place the assertion's window over-reaches the matched token). The second is the
+/// **regex-literal delimited-token idiom** (`lark.REGEXP`, [`recognize_regexp_idiom`]): a
+/// slash-delimited `/ body / flags` whose internal `(?!\/)` reduces to a non-empty `+` and
+/// whose lazy close is proven equal to a greedy `+` (the body cannot consume an unescaped
+/// delimiter). Anything that is not exactly one of these idioms falls through to the generic
+/// boundary lowering.
 pub fn lower_boundary_dotall(
     pattern: &str,
     dotall: bool,
@@ -127,6 +131,9 @@ pub fn lower_boundary_dotall(
     let node = super::parse(pattern)?;
     if let Some(idiom) = recognize_string_idiom(&node) {
         return idiom.lower(pattern, dotall);
+    }
+    if let Some(idiom) = recognize_regexp_idiom(&node) {
+        return Ok(idiom.lower());
     }
     let mut branches = Vec::new();
     match &node {
@@ -978,9 +985,206 @@ fn is_plain_literal(c: char) -> bool {
     )
 }
 
+// ─── The regex-literal delimited-token idiom (lark.REGEXP family) ───────────────
+//
+// `lark.REGEXP` is `\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*` — an **audited
+// delimited-token** idiom (`docs/LEXER_DFA_PLAN.md`, Stage B), a sibling of the
+// `python.STRING` splice above:
+//
+//     / body / flags
+//
+// where the opening slash is the literal `\/`, the internal `(?!\/)` rejects the empty
+// `//` regex body, the body is a lazy repetition of escaped-slash `\\\/` / escaped-
+// backslash `\\\\` / non-slash `[^\/]`, the close slash is the literal `\/`, and the
+// flags are `[imslux]*`.
+//
+//   * **The `(?!\/)` splice ⇒ a non-empty body.** The body alternation's three arms all
+//     begin with `\` or a non-slash char, so the body can *never* begin with the
+//     delimiter. The only way the lazy body is empty is the close matching immediately
+//     after the open — i.e. the input `//`. So `(?!\/)` reduces, exactly, to "the body is
+//     non-empty", realized by changing the lazy star `*?` to a greedy `+`.
+//   * **Lazy close ⇒ greedy close, proven.** The body cannot consume an *unescaped*
+//     delimiter (`[^\/]` excludes `/`, and a `/` is reachable only via the `\\\/` escape),
+//     so the match-end (the first unescaped close, with `\` escaping the next char and a
+//     backtrack to lone-backslash content when an escape would strand the close) is
+//     identical under the lazy `*?` and the greedy `+`. This is the analog of the M4
+//     STRING body normalization, here keeping the alternation **verbatim** (it is already
+//     a plain regular language) and only flipping the quantifier's laziness. The
+//     equivalence is machine-checked exhaustively against `fancy-regex`
+//     (`tests/test_lowering_equivalence.rs`, the Route-1 proof, and the scanner
+//     differential).
+//
+// The lowered branch is therefore the single lookaround-free, **guard-free** regex
+// `\/(?:\\\/|\\\\|[^\/])+\/[imslux]*` — it joins the leftmost-first plain DFA exactly like
+// any plain terminal. The recognizer matches **only** this exact shape (slash delimiter,
+// the precise three-arm body, the `[imslux]*` flags); anything else returns `None` and the
+// caller falls through to the generic boundary lowering (which declines/rejects it) — the
+// reject-when-unsure direction.
+
+/// A recognized regex-literal delimited-token idiom (`lark.REGEXP`): a slash-delimited
+/// `/ body / flags` token with an internal `(?!\/)` non-empty guard and the exact
+/// escaped-slash body.
+pub struct RegexpIdiom {
+    /// The opening/closing delimiter source (`\/`, or a bare `/`).
+    delim: String,
+    /// The body alternation source, verbatim (`\\\/|\\\\|[^\/]`).
+    body: String,
+    /// The trailing flags class source, verbatim (`[imslux]*`).
+    flags: String,
+}
+
+impl RegexpIdiom {
+    /// Lower the idiom into its single lookaround-free branch: `/ (?:body)+ / flags`. The
+    /// `(?!\/)` becomes the `+` (non-empty body) and the lazy `*?` becomes the greedy `+`
+    /// (proven match-end-identical — the body cannot cross an unescaped delimiter). The
+    /// branch carries no guards, so it joins the plain leftmost-first engine.
+    fn lower(&self) -> Vec<LoweredBranch> {
+        let regex = format!(
+            "{d}(?:{b})+{d}{f}",
+            d = self.delim,
+            b = self.body,
+            f = self.flags
+        );
+        vec![LoweredBranch {
+            regex,
+            leading: None,
+            trailing: None,
+            lookbehind: Vec::new(),
+        }]
+    }
+}
+
+/// Recognize the [`RegexpIdiom`] in a parsed terminal `node`, or `None`. Structural and
+/// exact: it pins the slash delimiter, the single-delimiter `(?!\/)` guard, the precise
+/// three-arm escaped-slash body group, and the `[imslux]*` flags, declining everything
+/// else (a different delimiter, a different body, a different guard, missing close, or a
+/// different flags suffix).
+pub fn recognize_regexp_idiom(node: &Node) -> Option<RegexpIdiom> {
+    let parts = match node {
+        Node::Concat(parts) => parts.as_slice(),
+        _ => return None,
+    };
+    if parts.len() != 4 {
+        return None;
+    }
+    // parts[0]: the opening delimiter, which must denote a literal slash.
+    let delim = slash_delimiter_source(&parts[0])?;
+
+    // parts[1]: `(?!<delim>)` — a single-delimiter negative lookahead. This is exactly the
+    // "reject the empty `//` body" guard; its body is *one* delimiter (not two, unlike
+    // STRING's `(?!"")`), because after the opening slash an empty body would close
+    // immediately at that one slash.
+    match &parts[1] {
+        Node::Assertion {
+            neg: true,
+            look: Look::Ahead,
+            body,
+            quant,
+        } if quant.is_empty() && body.to_source() == delim => {}
+        _ => return None,
+    }
+
+    // parts[2]: `(\\\/|\\\\|[^\/])*?` — the lazy escaped-slash body group.
+    let body = match &parts[2] {
+        Node::Group { open, body, quant } if quant == "*?" && (open == "(" || open == "(?:") => {
+            match_regexp_body(body)?
+        }
+        _ => return None,
+    };
+
+    // parts[3]: `<delim>[imslux]*` — the closing delimiter (identical to the opener) fused
+    // with the flags class in a single atom run.
+    let flags = match &parts[3] {
+        Node::Atom(s) => {
+            let rest = s.strip_prefix(delim.as_str())?;
+            if rest == "[imslux]*" {
+                rest.to_string()
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    };
+
+    Some(RegexpIdiom { delim, body, flags })
+}
+
+/// The source of a slash delimiter, iff `node` is exactly the literal slash (`\/` or a
+/// bare `/`). Narrow on purpose: the regex-literal idiom is slash-delimited, and a
+/// different delimiter must **not** be accepted (the recognizer's reject-surface
+/// contract — `tests/test_regexp_splice.rs`).
+fn slash_delimiter_source(node: &Node) -> Option<String> {
+    match node {
+        Node::Atom(s) if s == "\\/" || s == "/" => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// Match the regex-literal body alternation `\\\/|\\\\|[^\/]` **exactly** — the three arms
+/// (escaped slash, escaped backslash, non-slash char), in that order — and return its
+/// verbatim source. Anything else (a different arm, an extra arm, a nested assertion, an
+/// unrelated lazy `.*?`) returns `None`, closing the false-accept surface.
+fn match_regexp_body(node: &Node) -> Option<String> {
+    let arms = match node {
+        Node::Alt(arms) => arms,
+        _ => return None,
+    };
+    if arms.len() != 3 {
+        return None;
+    }
+    let sources: Vec<&str> = arms
+        .iter()
+        .map(|a| match a {
+            Node::Atom(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if sources == [r"\\\/", r"\\\\", r"[^\/]"] {
+        Some(node.to_source())
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regexp_idiom_lowers_to_one_guard_free_branch() {
+        // The bundled lark.REGEXP: the `(?!\/)` is stripped (becomes `+`), the lazy `*?`
+        // becomes a proven greedy `+`, and the result is a single lookaround-free,
+        // guard-free branch.
+        let b = lower_boundary(r#"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*"#).unwrap();
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].regex, r#"\/(?:\\\/|\\\\|[^\/])+\/[imslux]*"#);
+        assert!(b[0].leading.is_none() && b[0].trailing.is_none() && b[0].lookbehind.is_empty());
+        // The non-capturing-body twin lowers identically.
+        let nc = lower_boundary(r#"\/(?!\/)(?:\\\/|\\\\|[^\/])*?\/[imslux]*"#).unwrap();
+        assert_eq!(nc[0].regex, b[0].regex);
+    }
+
+    #[test]
+    fn regexp_recognizer_declines_near_misses() {
+        // Wrong delimiter, nested-assertion body, unrelated `.*?` body, missing guard,
+        // missing close, different flags, two-slash guard, extra body arm — all declined.
+        for p in [
+            r#":(?!:)(\\:|\\\\|[^:])*?:[imslux]*"#,
+            r#"\/(?!\/)(\\\/|\\\\|(?!x)[^\/])*?\/[imslux]*"#,
+            r#"\/(?!\/).*?\/[imslux]*"#,
+            r#"\/(\\\/|\\\\|[^\/])*?\/[imslux]*"#,
+            r#"\/(?!\/)(\\\/|\\\\|[^\/])*?[imslux]*"#,
+            r#"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[a-z]*"#,
+            r#"\/(?!\/\/)(\\\/|\\\\|[^\/])*?\/[imslux]*"#,
+            r#"\/(?!\/)(\\\/|\\\\|[^\/]|x)*?\/[imslux]*"#,
+        ] {
+            let node = super::super::parse(p).unwrap();
+            assert!(
+                recognize_regexp_idiom(&node).is_none(),
+                "recognizer wrongly accepted {p:?}"
+            );
+        }
+    }
 
     #[test]
     fn op_splits_into_guarded_and_unguarded_branches() {

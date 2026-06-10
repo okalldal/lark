@@ -872,8 +872,8 @@ impl DfaScanner {
                     // (`python.LONG_STRING`, a variable-offset lookbehind, a
                     // non-greedy-monotone base) or a pattern the frontend could not parse:
                     // route to fancy-regex exactly as today. (`lark.REGEXP` is *not* here —
-                    // its internal `(?!\/)` is `Unsupported`, below; it reaches the same
-                    // fancy seam through the Unsupported compatibility fallback.)
+                    // its `(?!\/)` is recognized by `recognize_regexp_idiom` and lowered, so
+                    // it takes the `Lowered` arm above.)
                     LoweringRoute::DeclinedToFancy { .. } => {
                         push_fancy_fallback(&mut fancy, &prefix, inline, rank, *id)?;
                         continue;

@@ -1,7 +1,7 @@
 # Lexer DFA — per-terminal route status
 
-*Companion to [`LEXER_DFA_PLAN.md`](LEXER_DFA_PLAN.md). Status as of 2026-06-09 (after
-PR #124).*
+*Companion to [`LEXER_DFA_PLAN.md`](LEXER_DFA_PLAN.md). Status as of 2026-06-10 (after the
+Stage-B `lark.REGEXP` lowering).*
 
 This is the planning-only census of where each terminal **shape** routes on master. The
 routes are defined in the plan's "Runtime routing taxonomy" (Plain / Lowered /
@@ -16,10 +16,12 @@ goes red, this table is out of date.
 **Route enum vs. runtime outcome.** The "Route on master" column below describes the
 *runtime* outcome (what engine the terminal lexes on). That is **not** always the same as
 the `LoweringRoute` value: an `Unsupported` route still runs on `fancy-regex` today via the
-compatibility fallback in `DfaScanner` (a single `push_fancy_fallback` seam). For example
-`lark.REGEXP`'s `LoweringRoute` is `Unsupported(Internal)` (its `(?!\/)` is genuinely
-internal), yet its runtime outcome is still *decline-to-fancy*. L4 is the policy flip that
-makes the `Unsupported` route a build error.
+compatibility fallback in `DfaScanner` (a single `push_fancy_fallback` seam). For a *user*
+internal lookahead (`a(?=b)c`) the `LoweringRoute` is `Unsupported(Internal)` yet its runtime
+outcome is still *decline-to-fancy*. L4 is the policy flip that makes the `Unsupported` route
+a build error. (`lark.REGEXP`'s `(?!\/)` *looks* internal to the top-level walk, but the
+`recognize_regexp_idiom` recognizer re-tags it and lowers the whole terminal, so its route is
+`Lowered`, not `Unsupported` — see the table below.)
 
 | Terminal / shape | Example pattern | Route on master | Coverage | Next step | Blocks L4? |
 |---|---|---|---|---|---|
@@ -29,8 +31,8 @@ makes the `Unsupported` route a build error.
 | Fixed leading-boundary | `(?!--)[a-z]+`, `(?=[A-Z])[a-z]+` | **Lowered** (M2, start precondition) | M2 generative + Route-1 + reject | — | no |
 | Fixed-offset bounded lookbehind | `(?<!_)/`, `\w(?<!_)x`, `(?<=ab)c` | **Lowered** (M3, backward guard at fixed offset) | M3 generative + lookbehind mutation + Route-1 | — | no |
 | `python.STRING` opening-guard splice | `([ubf]?r?\|r[ubf])("(?!"")…"\|'(?!'')…')` | **Lowered** (M4, `recognize_string_idiom`) | `""""`/`"" ""` canary + Route-1 nested + python.lark differential | — | no |
+| `lark.REGEXP` regex-literal idiom | `\/(?!\/)(\\\/\|\\\\\|[^\/])*?\/[imslux]*` | **Lowered** (Stage B, `recognize_regexp_idiom`) | `test_regexp_splice.rs` canaries + Route-1 (state-pruned) + generative equivalence + scanner differential | — | no |
 | `python.LONG_STRING` | `…(""".*?(?<!\\)(\\\\)*?"""\|…)` | **Declined-to-fancy** | runs on `fancy-regex`; equivalence pinned by `test_lookaround.rs` | audited **delimited-token** long-string idiom (Stage B) with a multi-char `"""` delimiter automaton | **yes** |
-| `lark.REGEXP` | `\/(?!\/)(\\\/\|\\\\\|[^\/])*?\/[imslux]*` | **Declined-to-fancy** | runs on `fancy-regex` | audited **delimited-token** regex-literal idiom (Stage B): single-char `/` delimiter, internal `(?!\/)`, escaped-slash body, trailing flags | **yes** |
 | Unsupported internal lookahead (user grammar) | `a(?=b)c`, `(?:X(?=Y))*` | `LoweringRoute::Unsupported(Internal)`; the build path's compatibility fallback still routes it to `fancy-regex` (so it lexes today, masking the reject) | reject corpus (`test_lowering_reject.rs`) + route pin (`test_lowering_routes.rs`) | **flip the policy:** make the `Unsupported` arm a build error (plan, "Runtime routing taxonomy") | **yes** (contract) |
 | Backref / nested / unbounded / variable-width lookbehind | `(?=\1)`, `(?=(?!a)b)`, `(?![ ]*X)`, `(?<!a*)b` | `LoweringRoute::Unsupported(Backref/Nested/Unbounded/VariableWidthBehind)`; the scanner compatibility fallback may still route it to `fancy-regex` (it compiles there for backref/nested; an unbounded/variable-width body may then fail to compile → build error) — *not* a permanent reject yet | reject corpus + mutation meta-test + route pin (`test_lowering_routes.rs`) | flip the `Unsupported` arm to a build error before L4 | **yes** (contract) |
 
@@ -41,6 +43,7 @@ separately until the **decline-vs-reject contract** is *enforced* (an unsupporte
 lookaround should error, not silently route to fancy). The result type is now split —
 `LoweringRoute` separates `Unsupported` from `DeclinedToFancy`, so the contract is **typed**
 — but the runtime policy is **not yet flipped**: `Unsupported` still rides the compatibility
-fallback. So the two remaining gates are: lower `python.LONG_STRING` and `lark.REGEXP`, *and*
-flip the `Unsupported` route to a build error. See
-[`LEXER_DFA_PLAN.md`](LEXER_DFA_PLAN.md) L4/L5 and the "Next implementation PR checklist".
+fallback. With `lark.REGEXP` now lowered (Stage B), the two remaining gates are: lower
+`python.LONG_STRING` (the last bundled decline), *and* flip the `Unsupported` route to a
+build error. See [`LEXER_DFA_PLAN.md`](LEXER_DFA_PLAN.md) L4/L5 and the "Next implementation
+PR checklist".

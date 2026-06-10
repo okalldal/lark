@@ -32,7 +32,9 @@ mod common;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 
-use common::lowering::{corpus, string_idiom_terminals, supported_terminals, GenTerminal};
+use common::lowering::{
+    corpus, regexp_idiom_terminals, string_idiom_terminals, supported_terminals, GenTerminal,
+};
 use lark_rs::grammar::terminal::flags;
 use lark_rs::{
     basic_lexer_conf, load_grammar, lower, lower_terminal, lower_terminal_dotall, BasicLexer,
@@ -442,12 +444,14 @@ fn lookaround_grammar(t: &GenTerminal) -> (String, String) {
 /// pending path stays live for the bundled terminals the variable-offset / STRING
 /// milestone still declines.
 fn run_lookaround_grammars(d: &mut Differential) {
-    // The bare boundary/lookbehind population *and* python.STRING's real nested/prefixed
-    // opening-guard idiom (the marquee L2 splice) — both must lex byte-identically under
-    // the two backends, and (with the splice landed) both genuinely lower.
+    // The bare boundary/lookbehind population, python.STRING's real nested/prefixed
+    // opening-guard idiom (the marquee L2 splice), *and* lark.REGEXP's regex-literal idiom
+    // (Stage B) — all must lex byte-identically under the two backends, and (with the
+    // splices landed) all genuinely lower.
     for t in supported_terminals()
         .into_iter()
         .chain(string_idiom_terminals())
+        .chain(regexp_idiom_terminals())
     {
         let (grammar, pattern) = lookaround_grammar(&t);
         let start = ["start".to_string()];

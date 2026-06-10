@@ -26,9 +26,9 @@ const STRING_RAW: &str =
 /// lowering **declines** it.
 const LONG_STRING_RAW: &str =
     r#"([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')"#;
-/// The bundled `lark.REGEXP`: its `(?!\/)` is neither the first nor the last element of the
-/// match, so the classifier rejects it as `Internal` (an out-of-shape `Unsupported` route —
-/// the DfaScanner's compatibility fallback still sends it to `fancy-regex` at runtime).
+/// The bundled `lark.REGEXP`: an audited regex-literal delimited-token idiom (Stage B). Its
+/// internal `(?!\/)` is recognized by `recognize_regexp_idiom` and lowered away (the `(?!\/)`
+/// becomes a non-empty `+`, the lazy close a proven greedy `+`), so it routes to `Lowered`.
 const REGEXP_RAW: &str = r#"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*"#;
 
 /// A plain terminal (no lookaround) routes to [`LoweringRoute::Plain`].
@@ -89,29 +89,35 @@ fn python_long_string_routes_to_declined_to_fancy() {
     assert!(!matches!(route, LoweringRoute::Unsupported { .. }));
 }
 
-/// `lark.REGEXP`'s `(?!\/)` is a genuinely *internal* lookahead, so the classifier rejects
-/// it: the route is [`LoweringRoute::Unsupported`] with [`Rejection::Internal`]. This is an
-/// honest finding the typed split surfaces — the prose "declined-to-fancy" label describes
-/// the **runtime** outcome (the DfaScanner compatibility fallback still routes Unsupported
-/// to `fancy-regex`), not the classifier verdict. Either way it is **not** lowered.
+/// `lark.REGEXP` now lowers (Stage B). The `recognize_regexp_idiom` recognizer matches its
+/// exact slash-delimited shape and re-tags the interior `(?!\/)` as a supported leading
+/// boundary; the lowering strips it (`+` for the non-empty body, a proven greedy close), so
+/// the route is [`LoweringRoute::Lowered`] with a single guard-free branch. It is in
+/// particular **no longer** `Unsupported(Internal)`.
 #[test]
-fn lark_regexp_routes_to_unsupported_internal() {
+fn lark_regexp_routes_to_lowered() {
     match route_terminal("REGEXP", REGEXP_RAW) {
-        LoweringRoute::Unsupported {
-            rejection,
-            assertion,
-            ..
-        } => {
-            assert_eq!(rejection, Rejection::Internal);
+        LoweringRoute::Lowered(branches) => {
+            assert_eq!(branches.len(), 1, "REGEXP lowers to one guard-free branch");
+            let b = &branches[0];
             assert!(
-                assertion.contains("(?!"),
-                "the unsupported assertion must be REGEXP's `(?!\\/)`, got {assertion:?}"
+                b.leading.is_none() && b.trailing.is_none() && b.lookbehind.is_empty(),
+                "the REGEXP branch is guard-free (a plain leftmost-first sub-pattern)"
+            );
+            // The lowered base is lookaround-free: no `(?!`, `(?=`, `(?<` remain.
+            assert!(
+                !b.regex.contains("(?!") && !b.regex.contains("(?=") && !b.regex.contains("(?<"),
+                "the lowered REGEXP branch must be lookaround-free, got {:?}",
+                b.regex
             );
         }
-        other => {
-            panic!("lark.REGEXP's internal `(?!\\/)` must be Unsupported(Internal), got {other:?}")
-        }
+        other => panic!("lark.REGEXP must now route to Lowered, got {other:?}"),
     }
+    // It is in particular no longer routed as `Unsupported(Internal)`.
+    assert!(!matches!(
+        route_terminal("REGEXP", REGEXP_RAW),
+        LoweringRoute::Unsupported { .. }
+    ));
 }
 
 /// A reject-corpus *internal* lookahead routes to [`LoweringRoute::Unsupported`] with

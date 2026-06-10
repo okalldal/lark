@@ -476,6 +476,64 @@ pub fn string_idiom_reject_patterns() -> Vec<String> {
         .collect()
 }
 
+/// The **regex-literal delimited-token idiom** population (`lark.REGEXP`'s actual shape —
+/// `docs/LEXER_DFA_PLAN.md`, Stage B). The bundled `\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*`
+/// plus its non-capturing-body twin (the recognizer accepts `(` and `(?:`). The `(?!\/)`
+/// rejects the empty `//`; the lazy escaped-slash body lowers to a greedy `+`. A bespoke
+/// slash/backslash/flag alphabet ensures the corpus exercises `//` (rejected), escaped
+/// slashes `\/`, escaped backslashes `\\`, lone backslashes, and the flag suffix — the
+/// cases a wrong close/quantifier gets wrong.
+///
+/// Like the string idiom, the shape carries an interior opening guard (the `(?!\/)`) that
+/// the recognizer strips, so its headline `shape` is [`ShapeClass::LeadingBoundary`]; these
+/// are kept out of [`supported_terminals`] and driven by their own dedicated equivalence,
+/// differential, and proof gates.
+pub fn regexp_idiom_terminals() -> Vec<GenTerminal> {
+    let alphabet = vec!['/', '\\', 'a', 'i'];
+    [
+        ("REGEXP", r#"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*"#),
+        // Non-capturing body group — obviously equivalent, exercises the `(?:` open.
+        ("REGEXP_NC", r#"\/(?!\/)(?:\\\/|\\\\|[^\/])*?\/[imslux]*"#),
+    ]
+    .into_iter()
+    .map(|(name, pattern)| GenTerminal {
+        name: name.to_string(),
+        pattern: pattern.to_string(),
+        shape: ShapeClass::LeadingBoundary,
+        alphabet: alphabet.clone(),
+        max_len: 6,
+    })
+    .collect()
+}
+
+/// **Adversarial regex-literal-idiom near-misses** — the recognizer's own reject surface.
+/// Each is *structurally close* to `lark.REGEXP` but differs in exactly one load-bearing
+/// way: a non-slash delimiter, a body with a nested assertion, a body that is an unrelated
+/// lazy `.*?`, a missing `(?!\/)` guard, a missing close slash, or a different flags
+/// suffix. The recognizer MUST decline every one (`recognize_regexp_idiom` returns `None`),
+/// or it would risk lowering a shape whose match-end is not the proven idiom — a
+/// false-accept. Witnesses for `tests/test_regexp_splice.rs`.
+pub fn regexp_idiom_reject_patterns() -> Vec<&'static str> {
+    vec![
+        // Wrong delimiter (`:` instead of `/`).
+        r#":(?!:)(\\:|\\\\|[^:])*?:[imslux]*"#,
+        // Body arm carries a nested assertion.
+        r#"\/(?!\/)(\\\/|\\\\|(?!x)[^\/])*?\/[imslux]*"#,
+        // Body is an unrelated lazy `.*?`, not the escaped-slash alternation.
+        r#"\/(?!\/).*?\/[imslux]*"#,
+        // Missing the `(?!\/)` non-empty guard.
+        r#"\/(\\\/|\\\\|[^\/])*?\/[imslux]*"#,
+        // Missing the closing slash.
+        r#"\/(?!\/)(\\\/|\\\\|[^\/])*?[imslux]*"#,
+        // Different flags suffix (`[a-z]*` instead of `[imslux]*`).
+        r#"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[a-z]*"#,
+        // A two-delimiter guard `(?!\/\/)` (STRING-style), not the single-slash REGEXP one.
+        r#"\/(?!\/\/)(\\\/|\\\\|[^\/])*?\/[imslux]*"#,
+        // An extra body arm beyond the exact three.
+        r#"\/(?!\/)(\\\/|\\\\|[^\/]|x)*?\/[imslux]*"#,
+    ]
+}
+
 // ─── Lowering mutants (the equivalence-layer mutation meta-test) ────────────────
 
 /// A deliberately-wrong way to lower a **boundary** guard (leading or trailing). The
