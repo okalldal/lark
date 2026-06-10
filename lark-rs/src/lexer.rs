@@ -1828,14 +1828,63 @@ impl Lexer for BasicLexer {
 // ─── ContextualLexer ─────────────────────────────────────────────────────────
 
 /// A lexer that narrows the candidate terminals to those valid in the current
-/// LALR parser state. Each state gets its own [`Scanner`], so keyword/identifier
-/// disambiguation (the `unless` retyping) is computed per state — exactly as
-/// Python Lark builds one `TraditionalLexer` per parser state.
+/// LALR parser state. States with the same terminal set share one [`Scanner`]
+/// (Python Lark's `lexer_by_tokens` dedup — measured 4–5× fewer scanners on the
+/// wild bank), and each scanner is built lazily on first use (Python's
+/// `BasicLexer.scanner` property), so states an input never visits cost nothing.
+/// Keyword/identifier disambiguation (the `unless` retyping) is still computed
+/// per terminal-set, exactly as Python Lark builds one `TraditionalLexer` per
+/// distinct set.
 pub struct ContextualLexer {
-    /// Per-state scanner. State 0 is the root (fallback) scanner.
-    state_scanners: HashMap<usize, ScannerBackend>,
+    /// LALR state id → index into `scanners`. States whose terminal sets are
+    /// equal map to the same index. State 0 is the root (fallback) entry.
+    state_to_scanner: HashMap<usize, usize>,
+    /// One entry per distinct terminal set, built lazily on first use.
+    scanners: Vec<LazyScanner>,
+    /// Owned terminal definitions the lazy builds draw from.
+    terminals: HashMap<SymbolId, TerminalDef>,
+    global_flags: u32,
+    backend: LexerBackend,
     names: HashMap<SymbolId, String>,
     ignore: HashSet<SymbolId>,
+}
+
+/// A per-terminal-set scanner slot, built on first use. Single-threaded by
+/// design ([`Lark`](crate::Lark) is not `Sync` — the `regex` backend already
+/// holds a `RefCell` scratch buffer), so a plain `OnceCell` suffices.
+struct LazyScanner {
+    /// Sorted, deduped terminal ids — the dedup key. Scanner construction is
+    /// order-independent ([`scanner_plan`] sorts by `(-priority, -len, name)`,
+    /// a total order), so the set fully determines the scanner.
+    term_ids: Vec<SymbolId>,
+    cell: std::cell::OnceCell<ScannerBackend>,
+}
+
+impl LazyScanner {
+    fn get_or_build(
+        &self,
+        terminals: &HashMap<SymbolId, TerminalDef>,
+        global_flags: u32,
+        backend: LexerBackend,
+    ) -> &ScannerBackend {
+        if self.cell.get().is_none() {
+            let terms: Vec<(SymbolId, &TerminalDef)> = self
+                .term_ids
+                .iter()
+                .map(|id| (*id, &terminals[id]))
+                .collect();
+            // Cannot fail: every terminal here was already routed/lowered by the
+            // full-set validation build in `ContextualLexer::new`, and a subset
+            // alternation introduces no new failure mode (`compute_unless` pairs
+            // and DFA patterns are each a subset of the validated full set).
+            let built = ScannerBackend::build(&terms, global_flags, backend).expect(
+                "per-state scanner build failed after the full-terminal validation \
+                 build succeeded — this is a lark-rs bug",
+            );
+            let _ = self.cell.set(built);
+        }
+        self.cell.get().unwrap()
+    }
 }
 
 impl ContextualLexer {
@@ -1848,27 +1897,51 @@ impl ContextualLexer {
         state_terminals: &HashMap<usize, Vec<SymbolId>>,
         always_accept: Vec<SymbolId>,
     ) -> Result<Self, GrammarError> {
-        let term_map: HashMap<SymbolId, &TerminalDef> =
-            conf.terminals.iter().map(|(id, t)| (*id, t)).collect();
+        let terminals: HashMap<SymbolId, TerminalDef> = conf.terminals.iter().cloned().collect();
 
-        let mut state_scanners = HashMap::new();
+        // Validate every terminal once, eagerly, by building (and discarding) the
+        // full-terminal scanner — the per-state scanners are built lazily on first
+        // use, and a grammar whose terminals the lexer refuses (the categorized
+        // lookaround scope errors, `docs/LOOKAROUND_SCOPE.md`) must still fail at
+        // construction time, not mid-parse. Python Lark's `ContextualLexer` does
+        // the same: its eager `root_lexer` init validates every terminal.
+        {
+            let all: Vec<(SymbolId, &TerminalDef)> =
+                conf.terminals.iter().map(|(id, t)| (*id, t)).collect();
+            ScannerBackend::build(&all, conf.global_flags, conf.backend)?;
+        }
+
+        let mut key_to_idx: HashMap<Vec<SymbolId>, usize> = HashMap::new();
+        let mut scanners: Vec<LazyScanner> = Vec::new();
+        let mut state_to_scanner = HashMap::new();
         for (state_id, valid_ids) in state_terminals {
-            let terms: Vec<(SymbolId, &TerminalDef)> = valid_ids
+            let mut ids: Vec<SymbolId> = valid_ids
                 .iter()
                 .chain(always_accept.iter())
-                .filter_map(|id| term_map.get(id).map(|t| (*id, *t)))
+                .filter(|id| terminals.contains_key(id))
+                .copied()
                 .collect();
-            if terms.is_empty() {
+            ids.sort_unstable();
+            ids.dedup();
+            if ids.is_empty() {
                 continue;
             }
-            state_scanners.insert(
-                *state_id,
-                ScannerBackend::build(&terms, conf.global_flags, conf.backend)?,
-            );
+            let idx = *key_to_idx.entry(ids.clone()).or_insert_with(|| {
+                scanners.push(LazyScanner {
+                    term_ids: ids,
+                    cell: std::cell::OnceCell::new(),
+                });
+                scanners.len() - 1
+            });
+            state_to_scanner.insert(*state_id, idx);
         }
 
         Ok(ContextualLexer {
-            state_scanners,
+            state_to_scanner,
+            scanners,
+            terminals,
+            global_flags: conf.global_flags,
+            backend: conf.backend,
             names: conf.names(),
             ignore: conf.ignore.iter().copied().collect(),
         })
@@ -1889,11 +1962,13 @@ impl ContextualLexer {
         col: usize,
     ) -> Result<Option<Token>, ParseError> {
         let scanner = match self
-            .state_scanners
+            .state_to_scanner
             .get(&state)
-            .or_else(|| self.state_scanners.get(&0))
+            .or_else(|| self.state_to_scanner.get(&0))
         {
-            Some(s) => s,
+            Some(idx) => {
+                self.scanners[*idx].get_or_build(&self.terminals, self.global_flags, self.backend)
+            }
             None => return Ok(None),
         };
 

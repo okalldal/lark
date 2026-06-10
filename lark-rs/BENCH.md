@@ -368,14 +368,15 @@ input sets on both engines (xfail inputs excluded from both):
   parsing sits at 5–13×, consistent with the synthetic 4–5× plus the wild
   grammars' deeper trees. Earley reaches the headline's low end because Python
   Lark's Earley is so much slower in absolute terms.
-- **Build: lark-rs is up to 12× *slower* than Python Lark** on every
-  medium-or-larger LALR grammar — the wild bank's headline finding.
-  Attribution (`cargo run --release --example wild_build_cost <project>`):
-  the **contextual lexer's per-state scanner construction is ~95% of build
+- **Build: lark-rs was up to 12× *slower* than Python Lark** on every
+  medium-or-larger LALR grammar — the wild bank's headline finding, **now
+  fixed** (see below). Attribution
+  (`cargo run --release --example wild_build_cost <project>`): the
+  **contextual lexer's per-state scanner construction was ~95% of build
   time** (matter_idl: 1348 ms contextual vs 77 ms basic lexer; pyquil 963 vs
   49; tartiflette 575 vs 24 — both scanner backends pay it, the dense DFA
   slightly more than `regex`). Two gaps vs Python Lark's `ContextualLexer`:
-  1. **No dedup** — `ContextualLexer::new` builds one scanner per LALR state;
+  1. **No dedup** — `ContextualLexer::new` built one scanner per LALR state;
      Python keys lexers by `frozenset(accepts)` and shares them. Measured on
      the same grammars, that dedup is 4–5×: matter_idl 393 states → 86
      distinct terminal-sets, pyquil 540 → 108, tartiflette 315 → 81,
@@ -384,8 +385,19 @@ input sets on both engines (xfail inputs excluded from both):
      scanner lazily on first use, so states never visited (most of them, for
      a typical input) cost nothing.
 
-  Both fixes are local to `ContextualLexer::new` (dedup by sorted terminal-id
-  key; lazy `OnceCell` per scanner) and would put builds at-or-below Python's.
+  **Fix landed (2026-06-10, this branch).** `ContextualLexer` now dedups
+  states by sorted terminal-id key and builds each distinct scanner lazily on
+  first use (a `OnceCell` per set). Terminal validation stays at construction
+  time — `new` eagerly builds (and discards) the full-terminal scanner, the
+  exact analog of Python's eager `root_lexer` init, so the categorized
+  lookaround scope errors (`docs/LOOKAROUND_SCOPE.md`) still fail the build,
+  not the parse. Full suite green (compliance banks, differential, wild).
+  Wild builds re-measured (same shared runner): matter_idl 1380 → **101 ms**,
+  pyquil 962 → **51 ms**, tartiflette 592 → **39 ms**, lark_lark 241 →
+  **21 ms**, pylogics_ltl 122 → **22 ms** — i.e. contextual build cost is now
+  ≈ basic-lexer build cost, and **every wild project now builds 1.2–4.3×
+  faster than Python Lark** (parse throughput unchanged). The remaining build
+  cost is the loader + LALR table, not the lexer.
 - **Per-token allocations** remain the parse-side ceiling (the 2026-06-04
   profiling finding): `next_token` clones the terminal *name* `String` per
   token (`names[&id].clone()` — pure waste, the token already carries
