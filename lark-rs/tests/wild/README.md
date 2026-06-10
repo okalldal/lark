@@ -24,6 +24,10 @@ sets, deep EBNF nesting, postlex indentation, file-relative imports, the
   meta.json     provenance (repo, ref, commit, license) + the exact Lark
                 options upstream itself uses + input→upstream-path map
   grammar/      the .lark file(s), vendored VERBATIM from the pinned commit
+                (one exception: an upstream grammar *bug* may be patched in the
+                vendored copy, recorded in meta.json `local_patches` — we do not
+                file upstream bugs; the alternative is leaving the project
+                xfail'd. Precedent: cel's `{4-8}`-for-`{4,8}` quantifier typo.)
   inputs/       real inputs, vendored verbatim (or curated strings; the
                 meta.json inputs map records where each came from)
   LICENSE       the upstream project's license, vendored verbatim
