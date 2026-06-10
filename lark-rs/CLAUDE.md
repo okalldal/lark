@@ -343,10 +343,10 @@ underlying super-linearity has since been removed by the Joop-Leo work (#58).
 | `%declare` semantic action | ✅ | `%declare _INDENT _DEDENT` registers pattern-less terminals (`TerminalDef::declared`): interned + reserved a parse-table column, filtered out of every scanner (`basic_lexer_conf`), injected by a postlex hook. Pinned by `test_indenter.rs` |
 | Indenter / postlex | ✅ (basic + contextual lexer) | `LarkOptions.postlex: Option<Indenter>` (LALR backend), on **both** the basic and the contextual (default) lexer. Basic lexer: materialize the stream, `Indenter::process` rewrites it (INDENT/DEDENT injection, paren-depth suppression, tab expansion, end-of-input dedent flush — a token-for-token port of `lark.indenter.Indenter`), then the parser replays it. **#67: contextual lexer** — the lazy per-state lexer can't be materialized up front, so the indenter runs as a streaming `TokenSource` adapter (`PostlexContextual`) inside the pull loop, driving the shared `IndenterStream` core so it injects a byte-identical stream; the NL terminal is forced into every state's scanner via `always_accept` (Python Lark's `PostLex.always_accept`). Pinned by `test_indenter.rs`, which replays the `indent`/`indent_paren` oracles under both lexers **and** adds `indent_context` — a grammar where the contextual lexer's state-narrowing is load-bearing (`NAME`/`VALUE` overlap, basic lexer provably can't parse it) *while* postlex injects INDENT/DEDENT, so the two mechanisms are pinned together, not just for parity. **#69: a general trait-object postlex** (beyond the built-in `Indenter`) is the remaining follow-up |
 | Grammar standard library | ✅ | Beyond `common.lark`, lark-rs bundles every grammar Python Lark ships under `lark/grammars/` — `python.lark`, `unicode.lark`, and `lark.lark` — under `src/grammars/`, resolvable via the same `%import <lib>.<X>` directive. The files are **verbatim** copies (one exception, `common.lark`'s `ESCAPED_STRING`): the loader's bundled-library path parses each through lark-rs's own loader and copies the requested terminal/rule closure, mangled under the module prefix (`python__HEX_NUMBER`). A handful of their terminals use lookaround. The active **lexer DFA plan**
-(`docs/LEXER_DFA_PLAN.md`) lowers the supported bounded shapes into the DFA — `STRING` is
-**lowered** via the M4 opening-guard splice and `lark.REGEXP` via the Stage-B
-regex-literal idiom (grammars stay verbatim, not rewritten) —
-while `python.LONG_STRING` still **declines to `fancy-regex`** (see the
+(`docs/LEXER_DFA_PLAN.md`) lowers the supported bounded shapes into the DFA — **every
+bundled lookaround terminal now lowers**: `STRING` via the M4 opening-guard splice,
+`lark.REGEXP` via the Stage-B regex-literal idiom, and `python.LONG_STRING` via the
+Stage-B long-string idiom (grammars stay verbatim, not rewritten; see the
 routing note above and `docs/LEXER_DFA_STATUS.md`). *Historical:* the earlier
 **lookaround-elimination** plan (`docs/LOOKAROUND_ELIMINATION_PLAN.md`) milestone E2a added
 an *equivalence-proof harness* but changed no grammar; it found `LONG_STRING` and the
@@ -418,8 +418,9 @@ lowering shapes have landed behind the `LexerBackend::Dfa` engine — **trailing
 (M1, `OP`/`DEC_NUMBER`'s `(?![1-9])`/`(?![a-z])` guarded accept), **leading** boundary
 (M2, a match-start precondition), **bounded lookbehind** (M3, a backward guard at a
 *fixed* char-offset), the **`python.STRING` opening-guard splice** (M4 —
-`src/lookaround/lower.rs::recognize_string_idiom`), and the **`lark.REGEXP`
-regex-literal idiom** (Stage B — `recognize_regexp_idiom`). M4 is the marquee L2 piece:
+`src/lookaround/lower.rs::recognize_string_idiom`), and the **Stage-B delimited-token
+idioms** — `lark.REGEXP` (`recognize_regexp_idiom`) and `python.LONG_STRING`
+(`recognize_long_string_idiom`). M4 is the marquee L2 piece:
 `STRING`'s
 `(?!"")` after the variable-width prefix (`[ubf]?r?|r[ubf]`) + the opening quote is an
 internal/variable-position leading boundary, lowered by normalizing the lazy escaped body
@@ -432,21 +433,33 @@ and every body alternative start with disjoint chars, so REGEXP lowers to one un
 branch whose lazy/priority match end the leftmost-first plain engine reproduces natively
 (gated by `tests/test_regexp_splice.rs` canaries — `//` is a lex error, `/a//` never
 swallows the second slash, the dangling-escape close `/a\/b` → `/a\/` — plus the
-generative equivalence + `*?`-mutant and a state-pruned Route-1 proof). The `Dfa` backend
+generative equivalence + `*?`-mutant and a state-pruned Route-1 proof). The LONG_STRING
+idiom is the third: the lazy body + escape-parity close `.*?(?<!\\)(\\\\)*?"""` is
+normalized to lazy escape-pair items `(?:[^\\<nl>]|\\.)*?"""` (a backslash can only start
+a pair, so item boundaries fall exactly at the even-parity positions the lookbehind
+demanded; the kept lazy `*?` picks the first valid triple — no multi-char delimiter
+automaton needed), two unguarded per-arm branches (gated by
+`tests/test_long_string_splice.rs` canaries — `""""""` is one empty token, `"""\"""` is a
+lex error, docstrings span newlines — plus the exhaustive dotall backend differential,
+generative equivalence + parity/two-quote/greedy mutants, and a state-pruned Route-1
+proof). **The flag-wrapper strip makes the idioms real on the engine path**: the loader
+bakes terminal `/…/is` flags into the pattern (`(?is:…)`, `PatternRe.flags = 0`), so
+before `strip_whole_pattern_flag_wrapper` (in `DfaScanner::build`) the wrapped
+`python.STRING` silently rode the `Unsupported` compat fallback at runtime — invisible to
+the differential because the fancy reference agreed; now the wrapper is stripped into the
+flag bitset before routing and re-applied to every lowered branch/guard, `g_regex_flags`
+DOTALL is threaded the same way, and
+`lexer::tests::dfa_bundled_lookaround_terminals_lower_with_no_fancy_probe` pins that the
+three bundled idioms build with **zero** fancy side-probes. The `Dfa` backend
 is gated
 byte-identical to the `fancy-regex` `Scanner` over the compliance bank + JSON corpus +
 python/lark files + a generated lookaround population including STRING's nested shape and
-the REGEXP idiom
-(`tests/test_scanner_differential.rs`, 0 divergences, STRING and REGEXP *lowered*) and
+the REGEXP/LONG_STRING idioms
+(`tests/test_scanner_differential.rs`, 0 divergences, all bundled idioms *lowered*) and
 per-shape
 generative-equivalence + Route-1 proofs (incl. the real nested STRING shape) + mutation
 meta-tests (incl. the drop-the-`(?!"")`-guard canary `tests/test_string_splice.rs`:
-`""""` is a lex error, `"" ""` is two empty STRINGs). **Still on the `fancy-regex`
-side-probe (a *decline*, never mis-lowered):** `python.LONG_STRING` (a lazy `.*?` body
-with a multi-character `"""` close and no opening guard) is attempted and declined
-cleanly, routed to `fancy-regex` under **both**
-backends — the last bundled decliner; lowering it is the remaining Stage-B follow-up (so
-`fancy-regex` stays in the runtime and L4 waits). `LexerBackend::Dfa` **is now the default**
+`""""` is a lex error, `"" ""` is two empty STRINGs). `LexerBackend::Dfa` **is now the default**
 (`LexerBackend::default()` / `LarkOptions.lexer_backend`): the L0 differential oracle is
 0 divergences over the full bank + JSON + python/lark corpora, so the swap is
 correctness-identical, and it is faster on the all-plain common path
@@ -455,19 +468,21 @@ differential keeps both engines gated against each other.
 
 **Current routing (master).** Under the default `Dfa` backend each terminal takes one of a
 **typed** `classify::LoweringRoute` (`route_terminal_dotall`, matched directly by
-`DfaScanner::build`): *Plain* (no lookaround → the DFA), *Lowered* (a supported bounded
-assertion → DFA branches + guard tables, M1/M2/M3/M4 + the Stage-B REGEXP idiom —
-`STRING`/`REGEXP`/`OP`/`DEC_NUMBER` and
-fixed-offset lookbehind are here), *DeclinedToFancy* (`python.LONG_STRING`, or a per-instance
-decline → still on `fancy-regex` at runtime), or *Unsupported* (out-of-shape — user
+`DfaScanner::build` after the flag-wrapper strip): *Plain* (no lookaround → the DFA),
+*Lowered* (a supported bounded
+assertion → DFA branches + guard tables, M1/M2/M3/M4 + the Stage-B REGEXP/LONG_STRING
+idioms — every bundled lookaround terminal and fixed-offset lookbehind are here),
+*DeclinedToFancy* (a per-instance
+decline — a variable-offset lookbehind outside a recognized idiom, a non-realizable
+guarded base → still on `fancy-regex` at runtime), or *Unsupported* (out-of-shape — user
 internal/unbounded/backref/etc. lookaround). The decline-vs-reject
 split PR #131 flagged is now in the type; what is **transitional** is the runtime policy: the
 *Unsupported* arm still routes to `fancy-regex` via a single auditable `push_fancy_fallback`
 compatibility seam, so an out-of-shape user assertion lexes today rather than erroring — L4
-must flip only that arm to a build error. Because one bundled terminal
-(`python.LONG_STRING`) still declines,
+must flip only that arm to a build error. Because of that fallback (and the per-instance
+declines),
 **`fancy-regex` remains a runtime dependency and L4 (drop it) + L5 (bake the scanner static)
-are blocked**; see
+are blocked on the policy flip alone**; see
 `docs/LEXER_DFA_STATUS.md` for the per-terminal table and `docs/LEXER_DFA_PLAN.md` for the
 phase status. Detection of a *declined* terminal is automatic (a pattern is sent to
 `fancy-regex` only when the `regex` crate rejects it), so user grammars with lookaround
@@ -481,21 +496,24 @@ support them if needed).
 > harness but **changed no grammar**, recording that `LONG_STRING` was *provably* rewritable
 > lookaround-free (the old plan deferred that rewrite to "E4") while `STRING`'s `(?!"")` was
 > *proven irreducible* by a grammar rewrite. The active DFA plan supersedes that framing:
-> grammars stay **verbatim**, `STRING` and `REGEXP` are now **lowered** into the DFA (the
-> M4 opening-guard splice and the Stage-B regex-literal idiom — not rewritten, not routed
-> to fancy), and `LONG_STRING` is
-> **declined-to-fancy** pending its audited delimited-token idiom (Stage B), not a grammar
-> edit. The behavioral findings are still pinned by `tests/test_lookaround.rs`.
+> grammars stay **verbatim**, and `STRING`, `REGEXP`, and `LONG_STRING` are all
+> **lowered** into the DFA (the M4 opening-guard splice and the two Stage-B
+> delimited-token idioms — not rewritten, not routed to fancy). E2a's
+> `long_string_match_length_equivalence` finding became the committed proof basis for the
+> LONG_STRING idiom's body normalization. The behavioral findings are still pinned by
+> `tests/test_lookaround.rs`.
 
 **The declined terminals' per-position scan is anchored with `\G`.** A fancy terminal is
 tried at each offset with `find_from_pos`, which is an *unanchored forward search* — left
-as-is it scans ahead to the next match, so a *sparse* declined terminal (historically
-`python.lark`'s `STRING` and `lark.REGEXP`, today `LONG_STRING`) is O(n²) over the input (a 124 KB
+as-is it scans ahead to the next match, so a *sparse* fancy-routed terminal (historically
+the bundled `STRING` / `lark.REGEXP` / `LONG_STRING`, all lowered now; today the seam
+carries only per-instance user declines, the `Unsupported` compat fallback, and the whole
+`Regex` reference backend) is O(n²) over the input (a 124 KB
 Python file took ~177 s before this was fixed; the pure-`regex` JSON/SQL scanners were
 unaffected). Prepending `\G` (start-of-search anchor) at `Scanner::build` makes the search
 fail immediately when nothing matches at `pos`, restoring linear-per-byte lexing; it is
 behaviour-preserving because the match is already required to start exactly at `pos`.
-Measured cost (`cargo bench --bench redos`): the shipped declined terminals stay **linear**
+Measured cost (`cargo bench --bench redos`): the fancy-routed terminals stay **linear**
 — `fancy-regex` runs their ambiguous bodies on the linear engine and only backtracks around
 the fixed leading assertion, so there is no ReDoS; only a constant-factor tax. One terminal
 — `common.lark`'s `ESCAPED_STRING` — keeps its hand-written lookaround-free adaptation

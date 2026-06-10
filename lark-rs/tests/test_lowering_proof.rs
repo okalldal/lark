@@ -436,6 +436,58 @@ fn route1_proof_regexp_idiom_real_shape() {
         .unwrap_or_else(|cex| panic!("Route-1 (state-pruned) failed for REGEXP: {cex}"));
 }
 
+// ─── The LONG_STRING delimited-token idiom — real bundled shape (Stage B) ────────
+//
+// `python.LONG_STRING`'s `(?<!\\)(\\\\)*?` escape-parity close sits after the
+// variable-width `.*?` — the position the generic M3 lowering declines. The exact
+// `recognize_long_string_idiom` rewrite absorbs it into lazy escape-pair body items
+// (`(?:[^\\<nl>]|\\.)*?`), keeping the lazy close; the branches are unguarded. As with
+// STRING/REGEXP, the **brute** Route-1 enumeration is infeasible for this
+// content-bearing body (`|alphabet|^(n+W+2)` blows up), so the committed realization is
+// the same **state-pruned** decision procedure (`prove_route1_pruned`): one shortest
+// witness per reachable base-DFA state × every lookahead suffix of length ≤ W+1
+// (W = 1, the lookbehind body `\\`), with `fancy-regex` running the *original*
+// lookaround pattern as the independent oracle.
+//
+// **Flag consistency:** the proof runs **non-dotall on both sides** —
+// `prove_route1_pruned` lowers via `lower_boundary` (dotall = false), `lowered_prefix`'s
+// one-terminal grammar is unflagged, and the `fancy_matcher` oracle compiles the raw
+// pattern unflagged too — a coherent comparison that *additionally* exercises the
+// `[^\\\n]` non-dotall body-class threading. The real `/is` (DOTALL) path is covered by
+// the splice canaries and the exhaustive backend differential in
+// `test_long_string_splice.rs`, plus the python.lark differential corpus (real
+// docstrings).
+
+/// The committed Route-1 (state-pruned) proof for the long-string idiom on the
+/// **prefix-less arm** and the **real bundled `python.LONG_STRING` shape**. Each
+/// representative must (a) genuinely classify fully-supported with every verdict
+/// `Supported(BoundedLookbehind)` (unlike STRING/REGEXP there is no lookahead to
+/// re-tag — the recognizer gates only the lowering), (b) lower to branches (not
+/// decline), and (c) be proven match-length-identical to `fancy-regex` by the
+/// state-pruned decision procedure.
+#[test]
+fn route1_proof_long_string_idiom_real_shape() {
+    for (name, pattern) in [
+        ("LONG_STRING_DQ_ARM", r#"(""".*?(?<!\\)(\\\\)*?""")"#),
+        ("LONG_STRING_BUNDLED", common::lowering::LONG_STRING_RAW),
+    ] {
+        let c = classify(pattern).unwrap_or_else(|e| panic!("classify {name} errored: {e}"));
+        assert!(
+            c.is_fully_supported()
+                && c.assertions
+                    .iter()
+                    .all(|a| a.verdict() == Verdict::Supported(ShapeClass::BoundedLookbehind)),
+            "{name} must classify with every assertion a supported bounded lookbehind"
+        );
+        assert!(
+            lower_boundary(pattern).is_ok(),
+            "{name} must lower (not decline) for the proof to be non-vacuous"
+        );
+        prove_route1_pruned(name, pattern)
+            .unwrap_or_else(|cex| panic!("Route-1 (state-pruned) failed for {name}: {cex}"));
+    }
+}
+
 /// Active now: the proof-obligation registry is the per-shape contract. Every
 /// supported shape has at least one committed representative, and each representative
 /// genuinely classifies as its shape (so the obligation targets the right thing).

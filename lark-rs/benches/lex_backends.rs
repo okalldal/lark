@@ -202,17 +202,21 @@ fn main() {
         compare(name, &expr_re, &expr_dfa, &gen_expr(terms));
     }
 
-    // --- Python: mixed plain + fancy-regex lookaround terminals -----------------
-    // STRING/LONG_STRING/DEC_NUMBER route to fancy-regex in BOTH backends (only the
-    // plain engine changes), so this shows the swap with a shared fancy side-probe.
-    println!("Python (python.lark — mixed plain + fancy-regex lookaround terminals):");
+    // --- Python: mixed plain + lookaround terminals ------------------------------
+    // Historically STRING/LONG_STRING/DEC_NUMBER routed to fancy-regex in BOTH
+    // backends (a shared side-probe; the recorded ratio was ~1.0 here). Since the
+    // M4/Stage-B idioms + the flag-wrapper strip landed, the Dfa side lexes
+    // python.lark fully LOWERED (zero fancy probes) while the Regex reference still
+    // pays them — this workload now measures lowered-vs-fancy, and the ratio is
+    // expected to move in the Dfa backend's favor on the next recorded run (BENCH.md).
+    println!("Python (python.lark — mixed plain + lookaround terminals):");
     let py_grammar = std::fs::read_to_string(manifest_dir().join("src/grammars/python.lark"));
     match py_grammar {
         Ok(grammar) => {
             let py_re = build_lexer(&grammar, "file_input", LexerBackend::Regex);
             let py_dfa = build_lexer(&grammar, "file_input", LexerBackend::Dfa);
-            // A capped real Python source (the fancy STRING probe is the bottleneck,
-            // shared by both backends, so keep it modest).
+            // A capped real Python source (the Regex reference side still pays the
+            // fancy STRING probe, so keep it modest).
             let src = std::fs::read_to_string(manifest_dir().join("tools/generate_oracles.py"))
                 .unwrap_or_default();
             let cut = src[..src.len().min(8_000)]

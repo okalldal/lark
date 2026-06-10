@@ -22,15 +22,17 @@ The per-terminal route table lives in [`LEXER_DFA_STATUS.md`](LEXER_DFA_STATUS.m
 | M4 — `python.STRING` opening-guard splice (`recognize_string_idiom`) | **Landed** (PR #124). |
 | L3 — `LexerBackend::Dfa` as the default backend | **Landed** (it is `#[default]`). |
 | `lark.REGEXP` lowering — Stage-B regex-literal idiom (`recognize_regexp_idiom`) | **Landed** (2026-06-10). |
-| `python.LONG_STRING` lowering | **Not landed** — declines to `fancy-regex` (the last bundled decliner). |
-| L4 — remove runtime `fancy-regex` | **Blocked** (LONG_STRING still declines). Decline-vs-reject contract **typed** (`LoweringRoute` landed); runtime compatibility fallback still preserved (Unsupported → fancy). |
+| `python.LONG_STRING` lowering — Stage-B long-string idiom (`recognize_long_string_idiom`) | **Landed** (2026-06-10). |
+| Flag-wrapper strip — terminal `/…/is` flags reach the lowering (`strip_whole_pattern_flag_wrapper`) | **Landed** (2026-06-10, with the LONG_STRING idiom). The loader bakes terminal flags into the pattern as `(?is:…)` with `PatternRe.flags = 0`; before the strip, the wrapped `python.STRING` silently rode the `Unsupported` compatibility fallback and a wrapped LONG_STRING the decline route **on the engine path** (the route-level proofs all held — on the unwrapped constants), invisible to the differential because the fancy reference agreed. The engine now strips the wrapper into the flag bitset before routing and re-applies it to every lowered branch/guard, so the M4/Stage-B idioms genuinely engage at runtime; pinned by `lexer::tests::dfa_bundled_lookaround_terminals_lower_with_no_fancy_probe` (zero fancy side-probes). `g_regex_flags` DOTALL is likewise threaded into the lowering now (the global `(?s…)` prefix is prepended to lowered branches, so the lowering must see it). |
+| L4 — remove runtime `fancy-regex` | **Blocked on one gate**: the `Unsupported` compatibility-fallback policy flip. Every bundled lookaround terminal now lowers (decline-vs-reject contract **typed**; runtime fallback still preserved: Unsupported → fancy). |
 | L5 — bake a serialized DFA scanner bundle into standalone/C/WASM | **Blocked** — standalone still bakes the regex `ScannerPlan`. |
 
-So the strategy has paid off for the common path, `python.STRING`, and `lark.REGEXP`, but
-the *bakeability* and *drop-`fancy-regex`* wins (L4/L5) are **not** realized yet:
-`fancy-regex` is still a runtime dependency, one bundled lookaround terminal
-(`python.LONG_STRING`) still rides it, the `Unsupported` compatibility fallback still
-routes out-of-shape user lookaround to fancy instead of erroring, and the standalone
+So the strategy has paid off for the common path and for **every bundled lookaround
+terminal** (`python.STRING`, `lark.REGEXP`, `python.LONG_STRING` — all lowered, on the
+real engine path), but the *bakeability* and *drop-`fancy-regex`* wins (L4/L5) are
+**not** realized yet: `fancy-regex` is still a runtime dependency because the
+`Unsupported` compatibility fallback still routes out-of-shape user lookaround to fancy
+instead of erroring (and per-instance declines still ride it), and the standalone
 generator still emits a regex-based `ScannerPlan`, not a serialized DFA.
 
 ## Runtime routing taxonomy
@@ -43,10 +45,11 @@ story:
   DFA. The overwhelming common case.
 * **Lowered** — a supported, *proven* bounded assertion (M1/M2/M3/M4). Lowered into plain
   DFA branches + guard side-tables; **no** `fancy-regex` at runtime for this terminal.
-* **Declined-to-fancy** — a shape supported *in principle* (or a transitional bundled
-  case) that is **not yet lowered**, or a per-instance lowering that the realizability
-  check declines. The terminal still runs on `fancy-regex` at runtime. `python.LONG_STRING`
-  is here today (the last bundled decliner; `lark.REGEXP` lowered via Stage B).
+* **Declined-to-fancy** — a per-instance lowering the realizability check declines (a
+  variable-offset lookbehind outside a recognized idiom, a non-greedy-monotone guarded
+  base), or a pattern the lookaround frontend cannot parse. The terminal still runs on
+  `fancy-regex` at runtime. **No bundled terminal is here any more** — STRING, REGEXP,
+  and LONG_STRING all lower via their idioms.
 * **Rejected** — an out-of-shape assertion (unbounded, internal/priority-entangled,
   backref, nested, variable-width lookbehind). A loud build error, **permanently**.
 * **Invalid regex** — neither `regex` nor `fancy-regex` accepts the pattern. A build error.
@@ -208,11 +211,39 @@ maximal-munch driver, and the differential oracle `tests/test_scanner_differenti
 > bundled shape (`tests/test_lowering_proof.rs::route1_proof_regexp_idiom_real_shape`),
 > and the scanner-differential population + lark.lark file corpus.
 >
-> **Still on the `fancy-regex` side-probe (a *decline*, not a gap):**
-> `python.LONG_STRING` (a lazy `.*?` body with a *multi-character* `"""` close and no
-> opening guard) is **attempted and declined cleanly** — it routes to `fancy-regex`
-> exactly as before, so the bundled grammars stay correct. Lowering it is the remaining
-> Stage-B instance; until it lands, `fancy-regex` stays in the runtime and L4 waits.
+> **The Stage-B long-string idiom (`python.LONG_STRING`) is lowered too** (2026-06-10):
+> the lazy escaped body + escape-parity close `.*?(?<!\\)(\\\\)*?"""` is normalized to
+> lazy escape-pair items `(?:[^\\<nl>]|\\.)*?"""` (`<nl>` excluded iff not DOTALL) — a
+> backslash can only be consumed as the start of a pair, so item boundaries fall exactly
+> at the even-backslash-parity positions the `(?<!\\)(\\\\)*?` close demands, and the
+> kept lazy `*?` picks the first such `"""` on both sides (the committed Type-A finding
+> `tests/test_lookaround.rs::long_string_match_length_equivalence`). Two **unguarded**
+> per-arm branches join the leftmost-first plain engine; no multi-char delimiter
+> automaton was needed (a lone `"` in the body simply doesn't close — laziness picks the
+> first full triple). Recognizer: `src/lookaround/lower.rs::recognize_long_string_idiom`
+> — exact-shape only (`"""`/`'''` delimiters). Gated by: the hand canaries + the
+> exhaustive dotall backend differential (`tests/test_long_string_splice.rs`), the
+> generative equivalence + parity/two-quote/greedy mutants
+> (`tests/test_lowering_equivalence.rs`), the state-pruned Route-1 proof
+> (`tests/test_lowering_proof.rs::route1_proof_long_string_idiom_real_shape`), the
+> scanner-differential population + python.lark docstring corpus, and the stdlib oracles.
+>
+> **The flag-wrapper strip made the idioms real on the engine path** (2026-06-10): the
+> loader bakes terminal `/…/is` flags into the pattern (`(?is:…)`, `PatternRe.flags = 0`),
+> so the router used to see every assertion nested inside a `Group` — the wrapped
+> `python.STRING` silently rode the `Unsupported` compatibility fallback at runtime
+> (every M4 proof held, but on the unwrapped constants; the differential could not see
+> it because the fancy reference agreed by construction). `DfaScanner::build` now strips
+> a whole-pattern flag wrapper back into the flag bitset before routing
+> (`strip_whole_pattern_flag_wrapper`) and re-applies it to every lowered branch and
+> guard; `g_regex_flags` DOTALL is threaded into the lowering the same way. Pinned by
+> `lexer::tests::dfa_bundled_lookaround_terminals_lower_with_no_fancy_probe` (the three
+> bundled idioms build with **zero** fancy side-probes) and the
+> `newline_dotall_body` / `g_regex_flags_dotall_long_string` seam fixtures.
+>
+> **No bundled terminal rides the `fancy-regex` side-probe any more.** The probe stays
+> in the runtime only for per-instance user declines and the `Unsupported` compatibility
+> fallback — the L4 policy flip is the remaining gate.
 
 A **general** lowering keyed on the assertion's **shape**, not on the six bundled
 terminals. Lower each supported bounded assertion into lookaround-free DFA states
@@ -260,20 +291,20 @@ either lowered or intentionally rejected by policy** — so the lexer is
 independent match-length oracle the lowering is verified against. This is a standing
 decision, not a temporary state.
 
-**Blocked, two ways:**
+**Blocked on one gate** (the bundled-terminal gate cleared 2026-06-10 — STRING, REGEXP,
+and LONG_STRING all lower on the engine path, pinned by
+`dfa_bundled_lookaround_terminals_lower_with_no_fancy_probe`):
 
-1. `python.LONG_STRING` still *declines to fancy* (see
-   [`LEXER_DFA_STATUS.md`](LEXER_DFA_STATUS.md)) — the last bundled decliner, now that
-   `lark.REGEXP` lowers via the Stage-B regex-literal idiom. While any bundled terminal
-   rides `fancy-regex`, the runtime cannot drop it.
-2. The **decline-vs-reject contract** for *user* grammars is now **typed but not yet
-   enforced** (see "Runtime routing taxonomy"). The result type is split:
-   `route_terminal_dotall` returns `LoweringRoute::{Plain, Lowered, DeclinedToFancy,
-   Unsupported, Invalid}` and `DfaScanner` matches it directly. What remains for L4 is the
-   *policy flip*: today the `Unsupported` arm still routes to `fancy-regex` via the
-   compatibility fallback (so an unsupported user lookaround keeps lexing). Before L4 that
-   arm must produce a clear build error unless a compatibility mode is deliberately chosen;
-   bundled known-declines may keep routing to fancy during the transition.
+The **decline-vs-reject contract** for *user* grammars is **typed but not yet
+enforced** (see "Runtime routing taxonomy"). The result type is split:
+`route_terminal_dotall` returns `LoweringRoute::{Plain, Lowered, DeclinedToFancy,
+Unsupported, Invalid}` and `DfaScanner` matches it directly. What remains for L4 is the
+*policy flip*: today the `Unsupported` arm still routes to `fancy-regex` via the
+compatibility fallback (so an unsupported user lookaround keeps lexing), and per-instance
+`DeclinedToFancy` user cases (a variable-offset lookbehind outside a recognized idiom, a
+non-realizable guarded base) also still ride the probe. Before L4 the `Unsupported` arm
+must produce a clear build error unless a compatibility mode is deliberately chosen, and
+a decision is needed for the per-instance declines (error vs. documented fancy support).
 
 ### L5 — Bake the scanner bundle static (the bakeability payoff) *(blocked)*
 
@@ -305,7 +336,9 @@ finite window. Three shapes, three moves:
 * **Bounded lookbehind** (`LONG_STRING`'s `(?<!\\)(\\\\)*?`) → **carry the window
   forward in the state.** Track the needed history (here, backslash-run parity) as you
   scan; gate the relevant edge on it. A finite (e.g. 2×) state duplication. Easiest
-  case — you move *toward* the lookbehind.
+  case — you move *toward* the lookbehind. (In practice the bundled LONG_STRING never
+  carries a window at all: the Stage-B idiom's escape-pair body normalization absorbs
+  the parity into the branch regex itself.)
 * **Leading boundary** (`STRING`'s `(?!"")`) → **splice in branch states** that peek the
   next ≤k chars; the forbidden continuation leads to a dead (non-accepting) state. Pure
   NFA construction.
@@ -576,11 +609,14 @@ Examples: short strings, long strings, regex literals, block comments.
 These are **not** arbitrary internal-lookaround support. They are exact idioms where a
 small delimiter automaton (KMP/Aho-Corasick-style, tracking how much of a multi-character
 close delimiter has been seen, plus escape parity) can replace the lazy body +
-escape/lookaround logic. `python.STRING`'s M4 splice is the first instance;
-`lark.REGEXP` (`/…/` with an internal `(?!\/)` — **landed**, `recognize_regexp_idiom`,
-where the guard reduces to a non-empty-body `*?`→`+?` bump rather than needing a
-delimiter automaton at all) is the second; `python.LONG_STRING` (multi-char `"""` close)
-is the remaining one. Each idiom must have:
+escape/lookaround logic. **All three bundled instances have landed**:
+`python.STRING`'s M4 splice was the first; `lark.REGEXP` (`recognize_regexp_idiom`,
+where the internal `(?!\/)` reduces to a non-empty-body `*?`→`+?` bump) the second; and
+`python.LONG_STRING` (`recognize_long_string_idiom`, where the escape-pair body
+normalization absorbs the `(?<!\\)(\\\\)*?` parity close) the third. Notably neither
+Stage-B idiom needed an explicit delimiter automaton — the leftmost-first plain engine's
+native lazy semantics cover the multi-char `"""` close once the body items force escape
+pairing. Each idiom must have (and each landed one has):
 
 - an exact recognizer,
 - a narrow acceptance surface,
@@ -647,7 +683,7 @@ Tagged DFA (TDFA), derivative matcher with priority semantics, or equivalent.
 
 ## Next implementation PR checklist
 
-Any PR that lands a **new lowering** (LONG_STRING, a `GuardAt` generalization, …)
+Any PR that lands a **new lowering** (a `GuardAt` generalization, a new idiom, …)
 must include, in the *same* PR (the REGEXP idiom PR is the worked example):
 
 - [ ] an **exact recognizer** with a narrow acceptance surface (reject-when-unsure);

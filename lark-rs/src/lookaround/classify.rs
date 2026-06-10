@@ -5,8 +5,9 @@
 //! [`lower_terminal`] is the entry point the build path calls. It classifies a
 //! terminal and, for every supported shape whose lowering has landed — M1
 //! trailing-boundary, M2 leading-boundary, M3 fixed-offset bounded-lookbehind, the
-//! M4 `python.STRING` opening-guard splice, and the Stage-B `lark.REGEXP`
-//! regex-literal idiom — returns the lowered per-branch sub-patterns
+//! M4 `python.STRING` opening-guard splice, and the Stage-B `lark.REGEXP` /
+//! `python.LONG_STRING` delimited-token idioms — returns the lowered per-branch
+//! sub-patterns
 //! ([`super::lower`]). A per-instance lowering that cannot ride the engine (a
 //! variable-offset lookbehind, a non-realizable guarded base) is **declined** (routed to
 //! `fancy-regex`), and an out-of-shape assertion is reported as a permanent rejection
@@ -54,11 +55,15 @@
 //! recognizer ([`super::lower::recognize_string_idiom`] /
 //! [`super::lower::recognize_regexp_idiom`]) matches that *precise* terminal shape and
 //! re-tags its interior lookaheads as `Leading`; outside a recognized idiom a deeper
-//! lookahead stays `Internal` (reject). The recognizer — never a position heuristic — is
-//! the single gate, so the dangerous direction (false-accept) stays closed. One bundled
-//! lookaround terminal is *not* lowered yet and **declines to `fancy-regex`**:
-//! `python.LONG_STRING` (multi-char `"""` close);
-//! see [`LEXER_DFA_STATUS.md`](../../docs/LEXER_DFA_STATUS.md).
+//! lookahead stays `Internal` (reject). The third idiom, `python.LONG_STRING`
+//! ([`super::lower::recognize_long_string_idiom`]), needs **no** re-tag at all: its only
+//! assertions are bounded lookbehinds, which classify as supported at any position — the
+//! recognizer's job there is purely to let the *lowering* absorb them. The recognizer —
+//! never a position heuristic — is the single gate, so the dangerous direction
+//! (false-accept) stays closed. **Every bundled lookaround terminal now lowers**; the
+//! decline-to-fancy route remains only for per-instance cases (a variable-offset
+//! lookbehind outside the idiom, a non-realizable guarded base); see
+//! [`LEXER_DFA_STATUS.md`](../../docs/LEXER_DFA_STATUS.md).
 
 use super::{Look, Node};
 use crate::error::GrammarError;
@@ -265,6 +270,11 @@ pub fn classify(pattern: &str) -> Result<Classification, GrammarError> {
     // interior `(?=)/(?!)` lookaheads as `Leading`. Outside a recognized idiom the
     // verdict is unchanged, so a genuinely-internal lookahead (`a(?=b)c`, the verilog
     // `(?!/)` inside a `*`) stays `Internal` (rejected).
+    //
+    // The third idiom — **python.LONG_STRING** (`recognize_long_string_idiom`) — is
+    // deliberately absent here: its only assertions are bounded lookbehinds, which the
+    // walk already classifies `Supported(BoundedLookbehind)` position-independently, so
+    // there is nothing to re-tag; its recognizer gates only the *lowering*.
     if super::lower::recognize_string_idiom(&node).is_some()
         || super::lower::recognize_regexp_idiom(&node).is_some()
     {
@@ -328,13 +338,13 @@ pub enum LoweringRoute {
     /// DFA hosts it directly.
     Lowered(Vec<super::lower::LoweredBranch>),
     /// A **supported-in-principle** terminal whose *particular instance* the lowering
-    /// declined (a variable-offset lookbehind, a non-greedy-monotone guarded base, a
-    /// bundled idiom not yet lowered such as `python.LONG_STRING`), **or** a pattern the
-    /// lookaround frontend could not parse. The runtime routes this to `fancy-regex` during
-    /// the transition — a correct fallback, never a mis-lowering. (`lark.REGEXP` used to
-    /// reach the fancy seam as `Unsupported(Internal)`; it now lowers via the Stage-B
-    /// regex-literal idiom — [`super::lower::recognize_regexp_idiom`] — so it is
-    /// [`Self::Lowered`], not here.)
+    /// declined (a variable-offset lookbehind outside a recognized idiom, a
+    /// non-greedy-monotone guarded base), **or** a pattern the lookaround frontend could
+    /// not parse. The runtime routes this to `fancy-regex` during the transition — a
+    /// correct fallback, never a mis-lowering. **No bundled terminal is here any more**:
+    /// `python.STRING` (M4 splice), `lark.REGEXP`, and `python.LONG_STRING` (the Stage-B
+    /// delimited-token idioms) all route [`Self::Lowered`]; only per-instance user
+    /// declines remain.
     DeclinedToFancy {
         /// A human-readable reason naming the terminal and why it declined.
         reason: String,
@@ -415,8 +425,8 @@ pub fn route_terminal_with(
     }
     // Every assertion is a supported shape. Run the lowering; it may still **decline** a
     // particular instance (a non-greedy-monotone guarded base, a lookbehind after a
-    // variable-width prefix, a bundled idiom not yet lowered) by returning `Err` — that is
-    // a route-to-fancy, never a reject.
+    // variable-width prefix outside a recognized idiom) by returning `Err` — that is a
+    // route-to-fancy, never a reject.
     match super::lower::lower_boundary_dotall(pattern, dotall) {
         Ok(branches) => LoweringRoute::Lowered(branches),
         Err(e) => LoweringRoute::DeclinedToFancy {
