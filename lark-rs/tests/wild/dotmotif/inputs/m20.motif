@@ -1,0 +1,12 @@
+
+
+        descending(a, b, c) {
+            a -> b as Edge1
+            b -> c as Edge2
+            Edge1.foo > Edge2.foo
+        }
+
+        descending(a, b, c)
+        descending(b, c, d)
+
+        

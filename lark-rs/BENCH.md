@@ -71,7 +71,9 @@ Lark: 0.13 s) — a build-cost target; wild LALR parse throughput lands at
 6–14 MB/s on file-sized inputs; the mistql Earley + dynamic-lexer corpus is
 ~0.05 MB/s; and the cel corpus (tiny expression inputs, deep non-collapsed
 trees) reports only ~0.3 MB/s — small-input per-parse overhead is part of the
-wild profile, unlike the synthetic large-input workloads.
+wild profile, unlike the synthetic large-input workloads. The bench's input
+set self-updates as xfails burn down: matter_idl's 100 KB/341 KB large-bucket
+files join its corpus row the moment the `"optional"i` mis-lex is fixed.
 
 `vs_python_lark` is the **cross-engine end-to-end comparison** (issue #50, the
 "10–100×" headline) and is the single command that reports the speedup ratio: it

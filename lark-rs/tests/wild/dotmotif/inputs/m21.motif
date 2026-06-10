@@ -1,0 +1,17 @@
+
+            tri(A, B, C) {
+                A -> B
+                B -> C
+                C -> A
+            }
+
+            tri2(A, B, C) {
+                tri(A, B, C)
+            }
+
+            tri3(A, B, C) {
+                tri2(A, B, C)
+            }
+
+            tri3(A, B, C)
+            

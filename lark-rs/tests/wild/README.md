@@ -34,9 +34,12 @@ sets, deep EBNF nesting, postlex indentation, file-relative imports, the
 | project        | language                  | engine             | source |
 |----------------|---------------------------|--------------------|--------|
 | cel            | Common Expression Language | LALR (g_regex_flags) | cloud-custodian/cel-python |
+| dotmotif       | graph-motif query DSL     | **Earley/dynamic** | aplbrain/dotmotif |
 | gersemi_cmake  | CMake                     | LALR               | BlankSpruce/gersemi |
 | hcl2           | Terraform HCL2            | LALR               | amplify-education/python-hcl2 @ v4.3.5 |
+| lark_lark      | Lark grammars (self-hosting) | LALR            | lark-parser/lark (this repo) |
 | mappyfile      | MapServer mapfiles        | LALR               | geographika/mappyfile |
+| matter_idl     | Matter cluster IDL        | LALR (341 KB large bucket) | project-chip/connectedhomeip |
 | miniwdl_wdl    | Workflow Description Lang 1.0 | LALR           | chanzuckerberg/miniwdl |
 | mistql         | MistQL JSON queries       | **Earley/dynamic** | evinism/mistql |
 | poetry_markers | PEP 508 env markers       | LALR               | python-poetry/poetry-core |
@@ -67,5 +70,20 @@ string `versions["1.0"]` since upstream ships no .lark file.
    together.
 
 Keep licensing honest: only vendor from projects whose license permits
-redistribution with attribution (MIT/Apache-2.0/BSD), keep the LICENSE file,
-and record the SPDX id in `meta.json`.
+redistribution with attribution (MIT/Apache-2.0/BSD/MPL-2.0), keep the LICENSE
+file, and record the SPDX id in `meta.json`.
+
+## Vetted leads (mined, not vendored — and why)
+
+| source | verdict |
+|--------|---------|
+| endgameinc/eql | grammar + fixtures exist, but **AGPL-3.0** — license doesn't fit vendoring |
+| gorilla-co/odata-query, pwwang/liquidpy | inspected — **not lark-based** |
+| gavanderhoorn/fanuc_va_lark_grammar | Apache-2.0 grammar + 7 real `.va` fixtures, but the grammar **crashes Python Lark itself** (Earley `ForestSumVisitor`: `max() arg is an empty sequence` in `visit_symbol_node_out`) — the oracle is broken; revisit if upstream Lark fixes it (candidate bug report) |
+| daltskin/sysml-v2-grammar | ANTLR grammar repo; its one lark file parses OMG KEBNF notation whose input corpus is fetched at build time, not vendored — revisit with the OMG spec files |
+| ligurio/lark-grammars | curated grammar collection, MIT-style — but inputs are Hypothesis-generated, no fixed corpus; use as a lead generator for grammars only |
+| opendatacube/datacube-core, SPFlow, storyscript, outlines | small/embedded/derivative grammars — low value vs. what's already banked |
+
+GitHub code-search patterns for further mining: `"from lark import Lark" tests`,
+`"Lark.open(" grammar`, `"*.lark" "%declare"`, `"*.lark" "%override"`,
+`"parser=\"earley\"" lark`, `"lexer=\"dynamic\"" lark`, `"ambiguity=" lark`.

@@ -1,0 +1,6 @@
+
+            A -> B
+            B -> A
+            A.size > B.size
+            A.size < B.size
+            

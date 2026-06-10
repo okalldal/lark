@@ -1,0 +1,39 @@
+{
+  "name": "lark_lark",
+  "description": "Lark's self-hosting grammar (lark.lark) parsing real .lark grammar files — the exact corpus examples/lark_grammar.py parses upstream (plus examples/grammars/verilog.lark, a full Verilog grammar). The P0 baseline entry: not wild code, but the canonical conformance workload.",
+  "source": {
+    "repo": "https://github.com/lark-parser/lark",
+    "ref": "HEAD",
+    "commit": "6e08035871650c0530ae63725d1e744fe8195ba9",
+    "license": "MIT",
+    "grammar_files": {
+      "grammar/lark.lark": "lark/grammars/lark.lark"
+    }
+  },
+  "entry_grammar": "grammar/lark.lark",
+  "lark_options": {
+    "parser": "lalr",
+    "lexer": "contextual",
+    "start": "start",
+    "maybe_placeholders": true,
+    "propagate_positions": false,
+    "keep_all_tokens": false,
+    "regex_module": false,
+    "postlex": null
+  },
+  "inputs": {
+    "inputs/examples__advanced__python2.lark": "examples/advanced/python2.lark",
+    "inputs/examples__relative-imports__multiples.lark": "examples/relative-imports/multiples.lark",
+    "inputs/examples__relative-imports__multiple2.lark": "examples/relative-imports/multiple2.lark",
+    "inputs/examples__relative-imports__multiple3.lark": "examples/relative-imports/multiple3.lark",
+    "inputs/examples__tests__no_newline_at_end.lark": "examples/tests/no_newline_at_end.lark",
+    "inputs/examples__tests__negative_priority.lark": "examples/tests/negative_priority.lark",
+    "inputs/examples__standalone__json.lark": "examples/standalone/json.lark",
+    "inputs/lark__grammars__common.lark": "lark/grammars/common.lark",
+    "inputs/lark__grammars__lark.lark": "lark/grammars/lark.lark",
+    "inputs/lark__grammars__unicode.lark": "lark/grammars/unicode.lark",
+    "inputs/lark__grammars__python.lark": "lark/grammars/python.lark",
+    "inputs/examples__grammars__verilog.lark": "examples/grammars/verilog.lark"
+  },
+  "notes": "Vendored from this repository itself (the Python Lark checkout is the upstream); commit is the local HEAD at vendoring time."
+}

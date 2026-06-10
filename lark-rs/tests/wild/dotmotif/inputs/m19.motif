@@ -1,0 +1,10 @@
+
+
+        descending(a, b) {
+            a -> b as Edge1
+            Edge1.foo >= 1
+        }
+
+        descending(real_a, real_b)
+
+        

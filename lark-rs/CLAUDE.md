@@ -616,11 +616,19 @@ Initial findings (2026-06-10, the current xfail set — burndown candidates):
   correctness and a build-cost target.
 * **gersemi_cmake builds but diverges** on 4 of 8 inputs (different child
   counts under `start`) — a tree-shaping divergence to localize.
-* **Fully passing**: cel (40 conformance-suite expressions, incl.
+* **dotmotif does not build**: its grammar puts `//` comment lines *between*
+  the `|` alternatives of a multi-line rule, which lark-rs's loader rejects
+  ("Unexpected token at top level: Or") — a grammar-loader syntax gap.
+* **matter_idl 5/8**: the three failing inputs all use the case-insensitive
+  anonymous keyword `"optional"i` (`member_attribute`); the token *after* the
+  type mis-lexes — same family as the standalone bank's `"a"i` xfail.
+* **Fully passing**: lark_lark (the P0 baseline — lark.lark over the 12 real
+  grammar files `examples/lark_grammar.py` parses upstream, incl. python.lark
+  and a full Verilog grammar), cel (40 conformance-suite expressions, incl.
   `g_regex_flags` MULTILINE and 100+-level precedence cascades), pylogics_ltl
   (relative rule imports + trailing-lookahead terminals through the M1
   lowering), mistql (Earley + dynamic lexer), tartiflette, poetry_markers,
-  poetry_pep508 (file-relative `%import`) — 130/215 inputs agree overall.
+  poetry_pep508 (file-relative `%import`) — 147/257 inputs agree overall.
 
 Oracle note: embedded trees are capped at 55 levels (`EMBED_DEPTH_LIMIT`) —
 serde_json refuses JSON nested deeper than 128 and a tree level costs ~2 —

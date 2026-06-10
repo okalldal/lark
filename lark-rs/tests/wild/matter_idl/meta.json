@@ -1,0 +1,34 @@
+{
+  "name": "matter_idl",
+  "description": "Matter (Connected Home over IP) cluster-definition IDL grammar from project-chip, start=\"idl\". Upstream also passes lexer_callbacks={\"C_COMMENT\": ...} (a doc-comment side channel); the bank drops it. The two large_*.matter inputs are the large-bucket benchmark workloads.",
+  "source": {
+    "repo": "https://github.com/project-chip/connectedhomeip",
+    "ref": "HEAD",
+    "commit": "1d2908cc94d49de7e6b34859430716f748051400",
+    "license": "Apache-2.0",
+    "grammar_files": {
+      "grammar/matter_grammar.lark": "scripts/py_matter_idl/matter/idl/matter_grammar.lark"
+    }
+  },
+  "entry_grammar": "grammar/matter_grammar.lark",
+  "lark_options": {
+    "parser": "lalr",
+    "lexer": "contextual",
+    "start": "idl",
+    "maybe_placeholders": true,
+    "propagate_positions": true,
+    "keep_all_tokens": false,
+    "regex_module": false,
+    "postlex": null
+  },
+  "inputs": {
+    "inputs/cluster_struct_attribute.matter": "scripts/py_matter_idl/matter/idl/tests/inputs/cluster_struct_attribute.matter",
+    "inputs/optional_argument.matter": "scripts/py_matter_idl/matter/idl/tests/inputs/optional_argument.matter",
+    "inputs/cluster_with_commands.matter": "scripts/py_matter_idl/matter/idl/tests/inputs/cluster_with_commands.matter",
+    "inputs/several_clusters.matter": "scripts/py_matter_idl/matter/idl/tests/inputs/several_clusters.matter",
+    "inputs/global_struct_attribute.matter": "scripts/py_matter_idl/matter/idl/tests/inputs/global_struct_attribute.matter",
+    "inputs/simple_attribute.matter": "scripts/py_matter_idl/matter/idl/tests/inputs/simple_attribute.matter",
+    "inputs/large_lighting_app.matter": "scripts/py_matter_idl/matter/idl/tests/inputs/large_lighting_app.matter",
+    "inputs/large_all_clusters_app.matter": "scripts/py_matter_idl/matter/idl/tests/inputs/large_all_clusters_app.matter"
+  }
+}
