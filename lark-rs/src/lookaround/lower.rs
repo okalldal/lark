@@ -147,6 +147,10 @@ pub fn lower_boundary_dotall(
         reason: DeclineReason::FrontendParse,
         detail: format!("the lookaround analyzer could not parse `{pattern}` ({e})"),
     })?;
+    // The same vacuous-`(?:…)`-wrapper normalization the classifier applies, so the
+    // two layers see one shape (a loader-wrapped alternation arm's trailing guard is
+    // a *boundary* guard to both, never a group-nested internal assertion).
+    let node = super::classify::unwrap_vacuous_groups(node);
     if let Some(idiom) = recognize_string_idiom(&node) {
         return idiom.lower(pattern, dotall);
     }
@@ -427,8 +431,119 @@ fn is_guard_realizable(base: &str, dotall: bool) -> bool {
     // re-parse the base; on a parse failure fall back to "not realizable" (decline).
     match super::parse(base) {
         Ok(node) if is_greedy_monotone(&node) => true,
-        _ => is_prefix_free(base, dotall),
+        _ => is_prefix_free(base, dotall) || is_leftmost_longest(base, dotall),
     }
+}
+
+/// **The exact (semantic) realizability decision**: whether the base's leftmost-first
+/// match length equals its longest match length **on every input** — which is verbatim
+/// the property the accumulator needs ("its leftmost-first match is always its
+/// longest"), decided on the automata instead of approximated from the syntax. The two
+/// syntactic fast paths above ([`is_greedy_monotone`], [`is_prefix_free`]) are sound
+/// but incomplete: the bundled `python.DEC_NUMBER`'s guarded arm base `0(?:(?:_)?0)*`
+/// fails both (it has an optional group, and `"0"` is a prefix of `"00"`), yet its
+/// all-greedy preference order *is* descending by length — this check proves it.
+///
+/// **Decision procedure.** Build two anchored dense DFAs over the same base: `L`
+/// (`MatchKind::LeftmostFirst` — the backtracking-preference result, the same
+/// semantics the plain engine runs) and `A` (`MatchKind::All` — every accept length).
+/// Walk their product from the anchored start over one representative byte per
+/// *joint* byte-class (plus the EOI transition). For any input `w`, the leftmost-first
+/// engine's report is the **deepest `L`-match state** along `w`'s walk, and the
+/// longest accept is the **deepest `A`-match state**; `L`'s match is always one of
+/// `A`'s accepts, so the two lengths are equal for every input **iff no reachable
+/// product state has `A` matching where `L` does not** (such a state, taken as the end
+/// of the input, witnesses `longest > leftmost-first`; conversely if every `A`-match
+/// state is an `L`-match state, the deepest accepts coincide on every walk). Both DFAs
+/// delay their match flag by one transition equally, so the per-state comparison is
+/// depth-aligned by construction.
+///
+/// **Flags.** `dotall` is wrapped exactly. Unlike `is_prefix_free`'s one-directional
+/// `(?i)` argument, leftmost-longest is **not** monotone under language enlargement in
+/// either direction, so the check must pass for the base **both** bare and
+/// `(?i)`-wrapped — whichever wrap the engine actually applies is then covered.
+/// A nullable base, a compile/size-limit failure, or a quit state declines
+/// (conservative).
+fn is_leftmost_longest(base: &str, dotall: bool) -> bool {
+    let s = if dotall {
+        format!("(?s:{base})")
+    } else {
+        base.to_string()
+    };
+    leftmost_longest_one(&s) && leftmost_longest_one(&format!("(?i:{s})"))
+}
+
+fn leftmost_longest_one(base: &str) -> bool {
+    use regex_automata::dfa::{dense, Automaton, StartKind};
+    use regex_automata::util::primitives::StateID;
+    use regex_automata::{Anchored, Input, MatchKind};
+
+    const SIZE_LIMIT: usize = 10 * (1 << 20);
+    let build = |kind: MatchKind| -> Option<dense::DFA<Vec<u32>>> {
+        dense::Builder::new()
+            .configure(
+                dense::Config::new()
+                    .match_kind(kind)
+                    .start_kind(StartKind::Anchored)
+                    .dfa_size_limit(Some(SIZE_LIMIT))
+                    .determinize_size_limit(Some(SIZE_LIMIT)),
+            )
+            .build(base)
+            .ok()
+    };
+    let (Some(l), Some(a)) = (build(MatchKind::LeftmostFirst), build(MatchKind::All)) else {
+        return false;
+    };
+    let anchored_start = |dfa: &dense::DFA<Vec<u32>>| -> Option<StateID> {
+        dfa.start_state_forward(&Input::new("").anchored(Anchored::Yes))
+            .ok()
+    };
+    let (Some(ls), Some(as_)) = (anchored_start(&l), anchored_start(&a)) else {
+        return false;
+    };
+    // A nullable base: decline conservatively, mirroring `is_prefix_free` (the lexer
+    // forbids zero-width matches, and the accumulator's interplay with a nullable
+    // base has no audited equivalence argument).
+    if a.is_match_state(a.next_eoi_state(as_)) {
+        return false;
+    }
+    // One representative byte per *joint* (L, A) byte-equivalence class.
+    let reps: Vec<u8> = {
+        let (cl, ca) = (l.byte_classes(), a.byte_classes());
+        let mut seen = std::collections::HashSet::new();
+        let mut v = Vec::new();
+        for byte in 0u8..=0xFF {
+            if seen.insert((cl.get(byte), ca.get(byte))) {
+                v.push(byte);
+            }
+        }
+        v
+    };
+
+    let mut seen = std::collections::HashSet::new();
+    let mut stack = vec![(ls, as_)];
+    seen.insert((ls, as_));
+    while let Some((sl, sa)) = stack.pop() {
+        if l.is_quit_state(sl) || a.is_quit_state(sa) {
+            return false; // no equivalence argument through a quit — decline
+        }
+        if a.is_match_state(sa) && !l.is_match_state(sl) {
+            return false; // a longer accept the leftmost-first engine won't report
+        }
+        if l.is_dead_state(sl) && a.is_dead_state(sa) {
+            continue;
+        }
+        let mut push = |nl: StateID, na: StateID| {
+            if seen.insert((nl, na)) {
+                stack.push((nl, na));
+            }
+        };
+        for &b in &reps {
+            push(l.next_state(sl, b), a.next_state(sa, b));
+        }
+        push(l.next_eoi_state(sl), a.next_eoi_state(sa));
+    }
+    true
 }
 
 /// Whether the anchored language of `base` is **prefix-free**: no string it matches is a
@@ -1336,18 +1451,59 @@ mod tests {
 
     #[test]
     fn declines_non_greedy_monotone_guarded_base() {
-        // A guarded branch whose base has an order-sensitive alternation or a lazy/
-        // possessive quantifier is declined (reject-when-unsure) so the caller routes
-        // it to fancy-regex rather than mis-lowering it via the longest-accept
-        // accumulator.
-        assert!(lower_boundary("(ab|abc)(?!z)").is_err());
-        assert!(lower_boundary("ab??(?!c)").is_err());
-        assert!(lower_boundary("(?!z)(ab|abc)").is_err());
-        assert!(lower_boundary(r"a.*?(?=c)").is_err());
+        // A guarded branch whose base prefers a shorter match (order-sensitive
+        // alternation, lazy quantifier) is declined with the typed
+        // NonRealizableGuardedBase reason (reject-when-unsure) rather than
+        // mis-lowered via the longest-accept accumulator.
+        for pat in ["(ab|abc)(?!z)", "ab??(?!c)", "(?!z)(ab|abc)", r"a.*?(?=c)"] {
+            assert_eq!(
+                lower_boundary(pat).unwrap_err().reason,
+                DeclineReason::NonRealizableGuardedBase,
+                "{pat}"
+            );
+        }
         // But a greedy-monotone guarded base (and an *unguarded* order-sensitive base)
         // lower fine.
         assert!(lower_boundary("[0-9]+(?![0-9])").is_ok());
         assert!(lower_boundary("ab|abc").is_ok()); // unguarded: order-sensitivity is the engine's job
+    }
+
+    /// The **semantic** realizability gate (`is_leftmost_longest`): exact
+    /// leftmost-first-equals-longest on the product of the LeftmostFirst and All
+    /// DFAs. Must accept the loader-shaped `python.DEC_NUMBER` guarded-arm base
+    /// (which both syntactic fast paths miss) and must keep rejecting every
+    /// shorter-match-preferring base — including the all-greedy optional-chain
+    /// counterexample, where preferring the first optional blocks a longer match.
+    #[test]
+    fn semantic_gate_decides_leftmost_equals_longest_exactly() {
+        // The real loader-baked DEC_NUMBER arm base: optional `(?:_)?` group inside a
+        // star — syntactically suspect, semantically descending-by-length.
+        assert!(is_leftmost_longest(r"0(?:(?:(?:_)?0))*", false));
+        // Longer-first alternation: leftmost-first IS longest.
+        assert!(is_leftmost_longest("abc|ab", false));
+        // Shorter-first alternation: leftmost-first picks "ab" where longest is "abc".
+        assert!(!is_leftmost_longest("ab|abc", false));
+        // Lazy quantifier: prefers the shorter match outright.
+        assert!(!is_leftmost_longest("ab??", false));
+        // ALL-GREEDY counterexample: on "ab", preference order tries "a"+"ab"
+        // (fails), then "a" (len 1) — but skipping the first optional gives "ab"
+        // (len 2). Greedy-only syntax is NOT sufficient; the semantic gate must
+        // catch it.
+        assert!(!is_leftmost_longest("(?:a)?(?:ab)?", false));
+        // Case-folding direction: leftmost-longest holds case-sensitively (the `Ab`
+        // arm can never overlap a consumed `a`) but breaks under `(?i)` — the gate
+        // requires BOTH wraps to pass, so this must decline.
+        assert!(!is_leftmost_longest("(?:a)?(?:Ab)?", false));
+        // Nullable base: declined conservatively.
+        assert!(!is_leftmost_longest("a*", false));
+        // End-to-end: the full loader-baked DEC_NUMBER lowers to two branches with
+        // the trailing guard on the zero arm.
+        let b = lower_boundary(r"(?:0(?:(?:(?:_)?0))*(?![1-9]))|(?:[1-9](?:(?:(?:_)?[0-9]))*)")
+            .expect("the loader-baked DEC_NUMBER must lower");
+        assert_eq!(b.len(), 2);
+        assert_eq!(b[0].trailing.as_ref().unwrap().set, "[1-9]");
+        assert!(b[0].trailing.as_ref().unwrap().neg);
+        assert!(b[1].trailing.is_none());
     }
 
     #[test]

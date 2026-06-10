@@ -1,0 +1,79 @@
+# Lookaround Scope — the two-category contract
+
+Since **L4** (`LEXER_DFA_PLAN.md`) the lexer has **no fallback regex engine**: every
+terminal either compiles on the linear `regex` crate, **lowers** into the
+`regex-automata` DFA through an audited path, or **fails the grammar build** with a
+categorized `GrammarError::LookaroundScope`. This document is the scoreboard's prose
+twin: it says, for every refused shape, *which* of two very different things the
+refusal means. The machine-checked source of truth is
+[`tests/test_lookaround_scope.rs`](../tests/test_lookaround_scope.rs) — its
+exhaustiveness meta-test forces every refusal variant in the code
+(`classify::Rejection`, `classify::DeclineReason`) to map to a row here or carry an
+explicit defensive justification.
+
+The boundary principle: **supported = an audited lowering exists.** The rejected set
+is kept a subset of what Python Lark accepts wherever possible, and every deliberate
+parity break is named below.
+
+## What lowers (for contrast)
+
+Leading/trailing boundary lookahead of bounded width (M1/M2), fixed-offset bounded
+lookbehind (M3), the audited **delimited-token idioms** — `python.STRING` (M4),
+`lark.REGEXP`, `python.LONG_STRING` (Stage B) — and guarded bases proven
+*leftmost-first ≡ longest* by the semantic realizability gate
+(`lower.rs::is_leftmost_longest`, the exact product-DFA decision that admits e.g.
+`python.DEC_NUMBER`'s `0(?:_?0)*` arm). Every bundled lookaround terminal lowers; the
+bundled grammars build with zero refusals.
+
+## Category 1 — OutOfScope (by-design non-goals)
+
+End-to-end tests **assert these rejections as the contract**. They will not be
+lowered in any future version; changing that requires a documented scope decision
+here first.
+
+| Shape | Example | Variant | Why it is a non-goal |
+|---|---|---|---|
+| Internal (mid-pattern) lookahead | `a(?=b)c`, the block-comment `(\*(?!\/)\|[^*])*` | `Rejection::Internal` | Priority-entangled: a mid-pattern assertion couples greedy/lazy match length to positions a per-state guard cannot represent; a general lowering means product-construction state blowup and an audit surface this project deliberately refuses. **Named parity break** (Python's backtracking engine accepts these). The **audited delimited-token idioms are the sanctioned growth path**: a common, exactly-recognizable shape can be admitted one Stage-B audit at a time (STRING/REGEXP/LONG_STRING are the precedents). |
+| Variable-width lookbehind body | `(?<!a*)b` | `Rejection::VariableWidthBehind` (+ defensive `UnboundedLookbehindBody`) | **Python `re` rejects these too** ("look-behind requires fixed-width pattern") — rejection is oracle *parity*, not a break. |
+| Backreferences | `(a)\1b`, `(a)(?=\1)` | `DeclineReason::BacktrackingOnlySyntax`, `Rejection::Backref` | Not a regular language; no DFA can host it. **The named parity break class** (with the rest of backtracking-only syntax: atomic groups, possessive quantifiers). No bundled grammar uses them. |
+| Nested assertions | `(?=(?!a)b)c` | `Rejection::Nested` | Audit cost out of proportion to demand; flatten the assertion instead. |
+| Quantified assertions | `a(?=b)?` | `Rejection::QuantifiedAssertion` (+ defensive `QuantifiedLookbehind`) | Degenerate and priority-entangled; almost always a bug in the grammar. |
+| Zero-width degenerates | `(?!a)` alone, `a(?<=())b` | `DeclineReason::ZeroWidthBranch`, `ZeroWidthLookbehindBody` | A zero-width terminal/window; the lexer forbids zero-width matches. |
+
+## Category 2 — NotYetImplemented (conservative rejections)
+
+In-principle lowerable; rejected **cleanly** today so they can never silently
+mis-lex. The scoreboard rows are **promotion tripwires**: if one of these starts
+building, the test fails loudly and demands the promotion protocol below.
+
+| Shape | Example | Variant | Path to support |
+|---|---|---|---|
+| Fixed-width lookbehind at variable offset | `\w+(?<!_)q` | `DeclineReason::VariableOffsetLookbehind` | Python accepts these (the body is fixed-width). Generalize M3's offset model (window-carrying over variable prefixes) or admit common shapes as idioms. The headline NYI case. |
+| Unbounded trailing lookahead | `[a-z]+(?=ab+)` | `Rejection::Unbounded` | Regular (classic lex trailing context); needs a reverse-scan/product mechanism. No current plan — demand-driven. |
+| Non-realizable guarded base | `(ab\|abc)(?!z)`, `ab??(?!c)` | `DeclineReason::NonRealizableGuardedBase` | The base prefers a shorter match than its longest, so the longest-accept accumulator cannot host it. The semantic gate already proves the provable cases; widening further means a preference-aware accumulator. |
+| Assertion in an interior group | `(a(?<!b))c` | `DeclineReason::NestedInGroup` | Needs group-aware peeling. (A *vacuous* whole-arm `(?:…)` wrapper is already unwrapped and lowers — that is a proven identity, not a special case.) |
+| VERBOSE-wrapped lookaround | `(?x:[0-9]+ (?![0-9]))` | `DeclineReason::VerboseWrapper` | The analyzer's width/offset arithmetic is not verbose-aware; stripping `x` would miscount whitespace as literal width (a false-accept hazard). Needs a verbose-aware frontend. |
+| Analyzer parse gaps | — | `DeclineReason::FrontendParse` | Defensive catch-all (terminal loading gates on the same parser, so it is unreachable end-to-end today). Any instance found in the wild is a frontend bug to fix. |
+
+## The promotion protocol (NYI → supported)
+
+A pattern leaves Category 2 only through the **Stage-B audit ladder**
+(`LEXER_DFA_PLAN.md`): an exact recognizer or a *proven* gate extension; a generative
+equivalence sweep against the `fancy-regex` dev-oracle over the shape's load-bearing
+alphabet; a mutation canary proving the net catches a wrong lowering; route-level
+pins; and a scanner-differential population entry. Then move the scoreboard row to a
+`*_lowers` pin and update this document. Precedents: the M4 STRING splice, the
+Stage-B REGEXP/LONG_STRING idioms, the `is_leftmost_longest` semantic-gate widening
+that admitted `python.DEC_NUMBER`.
+
+Moving something *out of Category 1* is a scope decision, not an implementation task:
+amend this document (and the recorded rationale) first, then treat it as Category 2.
+
+## Where `fancy-regex` stands
+
+`fancy-regex` is **not a runtime dependency and not a user escape hatch**. It remains
+a dev-dependency as the independent per-pattern oracle (equivalence/proof tests), and
+the `fancy-oracle` cargo feature (default **off**, CI/test-only) resurrects the
+historical fancy side-probes of the `Regex` reference backend so the whole-lexer
+differential keeps an independent reference. Default builds contain zero fancy-regex
+code; grammar-build outcomes are identical with and without the feature.

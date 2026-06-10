@@ -424,8 +424,39 @@ impl Classification {
 /// on a pattern the front-end cannot parse (which the regex engines also reject).
 ///
 /// This is the swappable seam the mutation meta-test attacks: see [`Classifier`].
+/// Strip **semantically vacuous** group wrappers: a *bare* non-capturing,
+/// unquantified group (`(?:X)` — never a flag-scoped `(?i:…)`, never a capturing
+/// `(…)`, never quantified) that constitutes an **entire pattern or an entire
+/// top-level alternation arm** is pure precedence syntax, so `(?:X) ≡ X` exactly —
+/// unwrapping is language-, priority-, and match-length-neutral. The grammar loader
+/// routinely produces this shape for terminal-algebra alternations
+/// (`T: "a" /(?!x)/ | "b"` compiles to `(?:a(?!x))|(?:b)`), so without this
+/// normalization a trailing boundary guard at an arm's end would be misread as a
+/// group-nested *internal* assertion and rejected — refusing grammars our own loader
+/// generates (and Python Lark accepts) for an already-audited lowerable shape.
+///
+/// Deliberately **not** descended into: interior concat positions (`a(?:b(?!c))d`
+/// stays opaque — the group there is load-bearing for the positional analysis) and
+/// flag wrappers (PR #136's `unwrap_arms` hardening: peeling `(?i:…)` would silently
+/// drop flags; whole-pattern flag wrappers are stripped into the flag *bitset*
+/// upstream by `lexer::strip_whole_pattern_flag_wrapper`).
+pub(super) fn unwrap_vacuous_groups(node: Node) -> Node {
+    match node {
+        Node::Group { open, body, quant } if open == "(?:" && quant.is_empty() => {
+            unwrap_vacuous_groups(*body)
+        }
+        Node::Alt(arms) => Node::Alt(arms.into_iter().map(unwrap_vacuous_groups).collect()),
+        // A degenerate single-part concat is the same "entire arm" case.
+        Node::Concat(mut parts) if parts.len() == 1 => {
+            unwrap_vacuous_groups(parts.pop().expect("len checked"))
+        }
+        other => other,
+    }
+}
+
 pub fn classify(pattern: &str) -> Result<Classification, GrammarError> {
     let node = super::parse(pattern)?;
+    let node = unwrap_vacuous_groups(node);
     let mut assertions = Vec::new();
     walk_top_level(&node, &mut assertions);
     // Audited-idiom refinement (the recognizers are the single gate, never a position

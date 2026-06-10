@@ -9,9 +9,9 @@
 //! makes an unsupported assertion suddenly lower (or a declined idiom reject) is caught.
 //!
 //! The companion `lower_terminal` API tests (the flattened `Result` view) stay in
-//! `test_lowering_reject.rs`. The runtime compatibility fallback is pinned both here
-//! (`unsupported_user_lookaround_currently_compat_falls_back_to_fancy`, the direct pin) and
-//! by the bundled-terminal status tripwire in `test_string_splice.rs`.
+//! `test_lowering_reject.rs`. The L4 policy flip (refusals are categorized build errors; no fancy
+//! fallback) is pinned both here (`unsupported_user_lookaround_is_now_a_categorized_build_error`)
+//! and by the bundled-terminal status tripwire in `test_string_splice.rs`.
 
 use lark_rs::{
     basic_lexer_conf, load_grammar, lower, route_terminal, route_terminal_dotall, BasicLexer,
@@ -253,22 +253,20 @@ fn route_flattens_to_lower_terminal_api() {
     assert!(lower_terminal("INT", "a(?=b)c").is_err());
 }
 
-/// **Transitional compatibility-fallback pin.** An out-of-shape *user* lookahead routes to
-/// [`LoweringRoute::Unsupported`] at the route level, but the `DfaScanner` build path's
-/// compatibility fallback **still routes it to `fancy-regex`** today, so the lexer builds
-/// and lexes correctly. This proves the routing-contract split did **not** silently change
-/// runtime behavior in this PR.
-///
-/// L4 should **delete or invert** this test when unsupported user lookaround becomes a hard
-/// build error, or when an explicit compatibility mode is introduced — at that point the
-/// grammar below should fail to build (or build only under the compatibility flag), and
-/// this assertion is what flags that the policy flip happened.
+/// **The L4 policy-flip pin** (the inversion of the historical
+/// `unsupported_user_lookaround_currently_compat_falls_back_to_fancy`). An
+/// out-of-shape *user* lookahead routes to [`LoweringRoute::Unsupported`] at the route
+/// level, and since L4 the engine path turns that into a **categorized build error**
+/// (`GrammarError::LookaroundScope`, scope `OutOfScope`) — there is no `fancy-regex`
+/// compatibility fallback any more. This is the test the old pin's doc said would
+/// "flag that the policy flip happened": it has, and this asserts the new contract
+/// end-to-end (grammar load → lexer build).
 #[test]
-fn unsupported_user_lookaround_currently_compat_falls_back_to_fancy() {
+fn unsupported_user_lookaround_is_now_a_categorized_build_error() {
+    use lark_rs::{GrammarError, LookaroundIssue, Scope};
+
     // `TOK`'s `a(?=b)b` is a genuinely *internal* lookahead (between two elements, so
-    // neither leading nor trailing) — the route says Unsupported(Internal). (Note a
-    // *trailing* `a(?=b)` would instead lower; the lookahead must sit mid-pattern to be
-    // out-of-shape.)
+    // neither leading nor trailing) — the route says Unsupported(Internal).
     assert!(matches!(
         route_terminal("TOK", "a(?=b)b"),
         LoweringRoute::Unsupported {
@@ -277,30 +275,34 @@ fn unsupported_user_lookaround_currently_compat_falls_back_to_fancy() {
         }
     ));
 
-    // Yet under the default Dfa backend's compatibility fallback the grammar still builds
-    // and lexes "abc" as TOK="ab", B="c" (via the fancy-regex side-probe).
+    // The grammar still LOADS (terminal validation defers the lookaround verdict to
+    // the lexer build), but the Dfa BasicLexer build refuses with the categorized
+    // OutOfScope error.
     let grammar = "start: TOK B\nTOK: /a(?=b)b/\nB: \"c\"\n";
     let g = load_grammar(grammar, &["start".to_string()], false, false)
-        .expect("grammar with an unsupported user lookahead still builds (compat fallback)");
+        .expect("grammar loads; the scope verdict lands at lexer build");
     let cg = lower(&g);
     let conf = basic_lexer_conf(&cg, 0).with_backend(LexerBackend::Dfa);
-    let lexer =
-        BasicLexer::new(&conf).expect("Dfa BasicLexer builds despite the unsupported lookahead");
-
-    let tokens = lexer
-        .lex("abc")
-        .expect("\"abc\" lexes via the fancy-regex compatibility fallback");
-    let got: Vec<(String, String)> = tokens
-        .into_iter()
-        .filter(|t| t.type_ != "$END")
-        .map(|t| (t.type_.to_string(), t.value))
-        .collect();
-    assert_eq!(
-        got,
-        vec![
-            ("TOK".to_string(), "ab".to_string()),
-            ("B".to_string(), "c".to_string()),
-        ],
-        "the unsupported lookahead must still lex via fancy-regex"
-    );
+    match BasicLexer::new(&conf) {
+        Err(GrammarError::LookaroundScope {
+            scope,
+            issue,
+            terminal,
+            msg,
+            ..
+        }) => {
+            assert_eq!(scope, Scope::OutOfScope);
+            assert_eq!(issue, LookaroundIssue::Rejected(Rejection::Internal));
+            assert_eq!(terminal, "TOK");
+            assert!(
+                msg.contains("docs/LOOKAROUND_SCOPE.md"),
+                "the error points the user at the scope doc: {msg}"
+            );
+        }
+        Err(other) => panic!("expected the categorized LookaroundScope error, got {other:?}"),
+        Ok(_) => panic!(
+            "an out-of-shape user lookahead BUILT — the L4 reject contract regressed \
+             (or the pattern was silently promoted; see docs/LOOKAROUND_SCOPE.md)"
+        ),
+    }
 }

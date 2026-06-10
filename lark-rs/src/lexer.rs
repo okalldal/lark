@@ -39,7 +39,6 @@ use regex_automata::{
 use crate::error::{GrammarError, ParseError};
 use crate::grammar::intern::SymbolId;
 use crate::grammar::terminal::{Pattern, TerminalDef};
-use crate::lookaround::classify::LoweringRoute;
 use crate::tree::Token;
 
 // ─── AnyRegex: a per-terminal regex that may need lookaround ──────────────────
@@ -465,8 +464,8 @@ impl Scanner {
 // ─── DfaScanner: the combined scanner on a regex-automata multi-pattern DFA ────
 
 /// The combined scanner (`docs/LEXER_DFA_PLAN.md`). Same contract and selection
-/// rules as [`Scanner`] — leftmost-first ranking, `unless` retyping, `fancy-regex`
-/// side-probes — but the *plain* (lookaround-free) terminals are matched by one
+/// rules as [`Scanner`] — leftmost-first ranking, `unless` retyping — but the
+/// *plain* (lookaround-free) terminals are matched by one
 /// hand-built `regex-automata` **dense DFA** over all of them, returning a
 /// `PatternID`, instead of the `regex`-crate alternation-with-capture-groups trick.
 ///
@@ -492,19 +491,15 @@ impl Scanner {
 ///   * The search is **anchored** at `pos` (`Anchored::Yes` over `pos..len`), so it
 ///     can only begin exactly at `pos` and never forward-scans. A zero-width match is
 ///     rejected, mirroring `Scanner`.
-///   * The `fancy` list, the rank-merge between the plain and fancy candidates, and
-///     the `unless` retype are **copied verbatim** from `Scanner`: only the
+///   * The `unless` retype is **copied verbatim** from `Scanner`: only the
 ///     plain-terminal engine changes.
 ///
-/// **The `fancy` side-probe is transitional and blocks L4.** Even under the default `Dfa`
-/// backend, a *declined* lookaround terminal — a per-instance lowering the realizability
-/// check declines (a variable-offset lookbehind outside a recognized idiom, a
-/// non-realizable guarded base) — still runs on `fancy-regex` here. **No bundled
-/// terminal declines any more** (STRING/REGEXP/LONG_STRING all lower); the probe also
-/// carries the `Unsupported` compatibility fallback for out-of-shape user lookaround.
-/// So `fancy-regex` stays in the runtime, and L4 (drop the side-probe) and L5 (bake the
-/// scanner as static data) are blocked, until that fallback policy is deliberately
-/// flipped to a build error (`docs/LEXER_DFA_PLAN.md`, L4/L5; `docs/LEXER_DFA_STATUS.md`).
+/// **There is no fallback engine (L4).** Every terminal either compiles plain, lowers
+/// into the DFA (M1/M2/M3/M4 + the Stage-B idioms — all bundled lookaround terminals),
+/// or **fails the build** with the categorized scope error
+/// (`route_fancy_only_terminal`, `docs/LOOKAROUND_SCOPE.md`). The historical
+/// `fancy-regex` side-probe and its `push_fancy_fallback` compatibility seam are gone;
+/// the scanner is fully self-contained `regex-automata` data — the L5 bake target.
 ///
 /// The `regex` crate's combined alternation came with a free literal prefilter; an
 /// *anchored* search runs no prefilter of its own, so we re-add an explicit
@@ -529,11 +524,6 @@ struct DfaScanner {
     /// Start-byte prefilter over the base union of both engines (see the struct docs).
     /// `None` disables it (always run the engines).
     start_bytes: Option<Box<[bool; 256]>>,
-    /// Lookaround terminals **declined to `fancy-regex`** (a per-instance decline: a
-    /// variable-offset lookbehind outside a recognized idiom, or a guarded base that is
-    /// not guard-realizable — no bundled terminal any more), rank-sorted — as in
-    /// [`Scanner`]. Transitional: this list must be empty before L4 can drop `fancy-regex`.
-    fancy: Vec<(usize, SymbolId, AnyRegex)>,
     /// regex-terminal-id → (matched-text → keyword-terminal-id) — identical retype.
     unless: HashMap<SymbolId, HashMap<String, SymbolId>>,
 }
@@ -754,6 +744,136 @@ fn strip_whole_pattern_flag_wrapper(raw: &str, flags: u32) -> (String, u32) {
     }
 }
 
+/// True when `raw` is a whole-pattern flag wrapper whose letters include `x` (VERBOSE)
+/// **and** whose body contains a lookaround assertion — the shape
+/// [`strip_whole_pattern_flag_wrapper`] deliberately refuses to strip (the lookaround
+/// analyzer's width/offset arithmetic is not verbose-aware). Detected *before*
+/// classification so the refusal surfaces as the honest
+/// [`DeclineReason::VerboseWrapper`] (NotYetImplemented) instead of the classifier
+/// mislabeling the group-nested assertion as out-of-scope internal lookahead. An
+/// `x`-wrapped pattern with **no** assertion never reaches the routing seam (the
+/// `regex` crate supports verbose mode and compiles it plain), and one that is
+/// regex-rejected for a non-lookaround reason (e.g. a backref) falls through to the
+/// `BacktrackingOnlySyntax` triage.
+fn is_verbose_wrapped_lookaround(raw: &str) -> bool {
+    let Ok(crate::lookaround::Node::Group { open, body, quant }) = crate::lookaround::parse(raw)
+    else {
+        return false;
+    };
+    let Some(letters) = open.strip_prefix("(?").and_then(|s| s.strip_suffix(':')) else {
+        return false;
+    };
+    quant.is_empty()
+        && !letters.is_empty()
+        && letters.chars().all(|c| matches!(c, 'i' | 'm' | 's' | 'x'))
+        && letters.contains('x')
+        && body.has_assertion()
+}
+
+/// **THE single refusal seam** (L4): route one `regex`-crate-rejected terminal through
+/// the typed lowering and either return its lowered branches (+ the merged flag bitset
+/// to re-wrap them with), or the **categorized scope build error**
+/// (`GrammarError::LookaroundScope`, `docs/LOOKAROUND_SCOPE.md`). The successor of the
+/// historical `push_fancy_fallback` compatibility seam: every refusal — a per-instance
+/// decline, an out-of-shape rejection, or backtracking-only syntax — funnels through
+/// exactly this function, on every engine (`DfaScanner`, the `Scanner` reference
+/// backend's default build, the Earley `DynamicMatcher`, and `compute_unless`), so the
+/// categorized error is produced in one auditable place.
+///
+/// `compile_err` is the `regex` crate's rejection message for the full source — quoted
+/// in the backtracking-only triage so the user sees the engine's own reason.
+fn route_fancy_only_terminal(
+    def: &TerminalDef,
+    global_flags: u32,
+    compile_err: &str,
+) -> Result<(Vec<crate::lookaround::lower::LoweredBranch>, u32), GrammarError> {
+    use crate::lookaround::classify::{
+        route_terminal_dotall, scope_message, DeclineReason, LookaroundIssue, LoweringRoute,
+    };
+    let (raw, flags) = match &def.pattern {
+        Pattern::Re(p) => (p.pattern.as_str(), p.flags),
+        // A string literal compiles as an escaped plain pattern and never reaches this
+        // seam; error defensively rather than panicking.
+        Pattern::Str(_) => {
+            return Err(GrammarError::InvalidRegex {
+                pattern: def.name.clone(),
+                reason: format!("string terminal failed to compile: {compile_err}"),
+            });
+        }
+    };
+    // The loader bakes terminal-level `/…/is` flags into the pattern as one
+    // whole-pattern wrapper (`(?is:…)`, `PatternRe.flags = 0`); strip it back into the
+    // flag bitset so the lowering sees the assertions at top level. The caller re-wraps
+    // every lowered branch/guard with the returned `flags`.
+    let (raw, flags) = strip_whole_pattern_flag_wrapper(raw, flags);
+    let raw = raw.as_str();
+    // A `(?x:…)`-wrapped lookaround pattern: the strip refused it (VERBOSE bodies are
+    // not analyzable), so refuse it here with the honest NYI reason, before the
+    // classifier can mislabel the group-nested assertion.
+    if is_verbose_wrapped_lookaround(raw) {
+        let reason = DeclineReason::VerboseWrapper;
+        return Err(GrammarError::LookaroundScope {
+            terminal: def.name.clone(),
+            subject: raw.to_string(),
+            scope: reason.scope(),
+            issue: LookaroundIssue::Declined(reason),
+            msg: scope_message(
+                &def.name,
+                raw,
+                LookaroundIssue::Declined(reason),
+                reason.explain(),
+            ),
+        });
+    }
+    // `dotall` must reflect the terminal's own flags *or* the global `(?s…)` prefix —
+    // both end up wrapped around every lowered branch source.
+    let dotall = ((flags | global_flags) & crate::grammar::terminal::flags::DOTALL) != 0;
+    match route_terminal_dotall(&def.name, raw, dotall) {
+        LoweringRoute::Lowered(branches) => Ok((branches, flags)),
+        LoweringRoute::Declined { reason, message } => Err(GrammarError::LookaroundScope {
+            terminal: def.name.clone(),
+            subject: raw.to_string(),
+            scope: reason.scope(),
+            issue: LookaroundIssue::Declined(reason),
+            msg: message,
+        }),
+        LoweringRoute::Unsupported {
+            assertion,
+            rejection,
+            message,
+        } => Err(GrammarError::LookaroundScope {
+            terminal: def.name.clone(),
+            subject: assertion,
+            scope: rejection.scope(),
+            issue: LookaroundIssue::Rejected(rejection),
+            msg: message,
+        }),
+        // No lookaround at all, yet the `regex` crate rejected the pattern:
+        // backtracking-only syntax (a top-level backreference, an atomic group, a
+        // possessive quantifier) — a by-design non-goal (and, for backrefs, the one
+        // named parity break with Python Lark's backtracking engine).
+        LoweringRoute::Plain => {
+            let reason = DeclineReason::BacktrackingOnlySyntax;
+            Err(GrammarError::LookaroundScope {
+                terminal: def.name.clone(),
+                subject: raw.to_string(),
+                scope: reason.scope(),
+                issue: LookaroundIssue::Declined(reason),
+                msg: scope_message(
+                    &def.name,
+                    raw,
+                    LookaroundIssue::Declined(reason),
+                    &format!(
+                        "{} (the regex engine said: {compile_err})",
+                        reason.explain()
+                    ),
+                ),
+            })
+        }
+        LoweringRoute::Invalid { message } => Err(GrammarError::Other { msg: message }),
+    }
+}
+
 /// Build an anchored dense DFA for a guard body `src` (leftmost-first; we only need a
 /// yes/no "does `S` match here").
 fn build_anchored_dfa(src: &str) -> Result<dense::DFA<Vec<u32>>, GrammarError> {
@@ -821,24 +941,6 @@ fn build_combined_dfa(
 // (the greedy-monotone realizability check now lives in `crate::lookaround::lower`,
 // so `lower_terminal` itself declines a non-greedy-monotone guarded base.)
 
-/// The single named seam every **route-to-fancy** decision funnels through, so the
-/// transitional `fancy-regex` compatibility fallback is auditable in one place. Compiles
-/// `inline` as a per-position-anchored (`\G`) fancy candidate and records it in the
-/// rank-sorted `fancy` side-probe list. Every `LoweringRoute` arm in [`DfaScanner::build`]
-/// that does not lower into the DFA — `Declined`, the compatibility `Unsupported`
-/// fallback, and the defensive `Plain` arm — calls exactly this.
-fn push_fancy_fallback(
-    fancy: &mut Vec<(usize, SymbolId, AnyRegex)>,
-    prefix: &str,
-    inline: &str,
-    rank: usize,
-    id: SymbolId,
-) -> Result<(), GrammarError> {
-    let anchored = AnyRegex::compile(&format!("{prefix}\\G{inline}"))?;
-    fancy.push((rank, id, anchored));
-    Ok(())
-}
-
 impl DfaScanner {
     /// Build a DFA scanner from candidate terminals (deduplicated by id). Consumes
     /// the same [`ScannerPlan`] as [`Scanner::build`], so selection / ordering /
@@ -862,57 +964,45 @@ impl DfaScanner {
         //   * guarded → one all-matches DFA driven by the guarded-accept accumulator.
         // A lookaround terminal whose guarded base is not guard-realizable (see
         // `is_guard_realizable`), or whose lookbehind sits at a variable offset outside
-        // a recognized idiom, declines to `fancy-regex`. M1/M2/M3 boundary+lookbehind,
-        // the M4 STRING splice, and the Stage-B `lark.REGEXP` / `python.LONG_STRING`
-        // delimited-token idioms all lower — no bundled terminal declines; the decline
-        // path is the transitional fallback for per-instance user cases.
+        // a recognized idiom, FAILS THE BUILD with the categorized scope error (L4 —
+        // there is no fallback engine). M1/M2/M3 boundary+lookbehind, the M4 STRING
+        // splice, and the Stage-B `lark.REGEXP` / `python.LONG_STRING` delimited-token
+        // idioms all lower, so every bundled grammar builds.
         let mut plain_subs: Vec<SubPattern> = Vec::new();
         let mut plain_srcs: Vec<String> = Vec::new();
         let mut guarded_subs: Vec<SubPattern> = Vec::new();
         let mut guarded_srcs: Vec<String> = Vec::new();
         let mut base_inlines: Vec<String> = Vec::new(); // for the start-byte union
-        let mut fancy: Vec<(usize, SymbolId, AnyRegex)> = Vec::new();
 
         for (rank, (id, inline)) in plan.groups.iter().enumerate() {
             let src = format!("{prefix}{inline}");
-            // Same fancy-detection as `Scanner`: a pattern is fancy iff the `regex`
-            // crate (a subset of `fancy-regex`) rejects it.
-            let compiled = AnyRegex::compile(&src)?;
-            if !compiled.is_fancy() {
-                plain_subs.push(SubPattern {
-                    id: *id,
-                    rank,
-                    branch_order: 0,
-                    leading: None,
-                    trailing: None,
-                    lookbehind: Vec::new(),
-                });
-                plain_srcs.push(src);
-                base_inlines.push(inline.clone());
-                continue;
-            }
-
-            // A lookaround terminal — try to lower it. Lowering runs on the *raw*
-            // pattern (no flag wrapper), so a top-level assertion is seen at the top
-            // level, not nested in a `(?flags:…)` group.
-            let def = by_id[id];
-            let (raw, flags) = match &def.pattern {
-                Pattern::Re(p) => (p.pattern.as_str(), p.flags),
-                // A string terminal never compiles to fancy, so this is unreachable;
-                // be safe and route it to fancy rather than panicking.
-                Pattern::Str(_) => ("", 0),
+            // A pattern the `regex` crate compiles is plain; everything else must
+            // lower or refuse with the categorized scope error — there is no runtime
+            // fallback engine any more (L4).
+            let compile_err = match Regex::new(&src) {
+                Ok(_) => {
+                    plain_subs.push(SubPattern {
+                        id: *id,
+                        rank,
+                        branch_order: 0,
+                        leading: None,
+                        trailing: None,
+                        lookbehind: Vec::new(),
+                    });
+                    plain_srcs.push(src);
+                    base_inlines.push(inline.clone());
+                    continue;
+                }
+                Err(e) => e.to_string(),
             };
-            // The grammar loader bakes terminal-level `/…/is`-style flags into the
-            // pattern as one whole-pattern flag-scoped wrapper (`(?is:…)`, with
-            // `PatternRe.flags = 0`) — so the raw pattern, routed as-is, would hide
-            // every assertion inside a `Group` and mis-route the bundled
-            // `python.STRING` / `python.LONG_STRING` idioms to the fancy fallback
-            // (with their flags silently lost if a recognizer peeled the group).
-            // Strip the wrapper back into the flag bitset: the lowering sees the
-            // assertions at top level, and `wrap_flags(flags, …)` re-applies the same
-            // scoping to every lowered branch and guard below.
-            let (raw, flags) = strip_whole_pattern_flag_wrapper(raw, flags);
-            let raw = raw.as_str();
+
+            // A lookaround (or otherwise regex-rejected) terminal — lower it through
+            // THE single refusal seam, or fail the build with the categorized scope
+            // error. The seam strips the loader's whole-pattern flag wrapper and
+            // returns the merged flag bitset; `wrap_flags(flags, …)` re-applies the
+            // same scoping to every lowered branch and guard below.
+            let def = by_id[id];
+            let (lowered, flags) = route_fancy_only_terminal(def, global_flags, &compile_err)?;
             let compile_guard =
                 |g: &crate::lookaround::lower::GuardSpec| -> Result<Guard, GrammarError> {
                     let gsrc = format!("{prefix}{}", wrap_flags(flags, &g.set));
@@ -931,57 +1021,6 @@ impl DfaScanner {
                     width: g.width,
                 })
             };
-
-            // Route the terminal explicitly through the typed `LoweringRoute` (PR #131's
-            // decline-vs-reject split, now in code). `dotall` is threaded so the
-            // string/long-string idiom body normalization admits a newline exactly when
-            // this terminal's `.` would — which is governed by the terminal's own flags
-            // *or* the grammar-wide `g_regex_flags` (the global `(?s…)` prefix is
-            // prepended to every lowered branch source, so the lowering must see the
-            // same DOTALL the engine will apply, or the `\n`-excluding body class would
-            // mis-lower a global-DOTALL idiom terminal).
-            let dotall = ((flags | global_flags) & crate::grammar::terminal::flags::DOTALL) != 0;
-            let lowered =
-                match crate::lookaround::classify::route_terminal_dotall(&def.name, raw, dotall) {
-                    // A supported shape that lowered — the DFA hosts it. The lowering only ever
-                    // returns `Branches` it can faithfully realize (a non-realizable guarded
-                    // base, a variable-offset lookbehind, or a not-yet-lowered idiom comes back
-                    // as `Declined`, below).
-                    LoweringRoute::Lowered(branches) => branches,
-                    // A supported-in-principle terminal whose instance was declined (a
-                    // variable-offset lookbehind outside a recognized idiom, a
-                    // non-greedy-monotone base) or a pattern the frontend could not parse:
-                    // route to fancy-regex exactly as today. (No bundled terminal is here —
-                    // STRING/REGEXP/LONG_STRING all lower via their idioms, `Lowered` above.)
-                    LoweringRoute::Declined { .. } => {
-                        push_fancy_fallback(&mut fancy, &prefix, inline, rank, *id)?;
-                        continue;
-                    }
-                    // Compatibility fallback: unsupported user lookaround still routes to
-                    // fancy-regex today. L4 must flip this to a build error or make it an
-                    // explicit compatibility mode. This is the one route the decline-vs-reject
-                    // split exists to isolate — keep it loud and auditable.
-                    LoweringRoute::Unsupported { .. } => {
-                        push_fancy_fallback(&mut fancy, &prefix, inline, rank, *id)?;
-                        continue;
-                    }
-                    // A terminal with no lookaround assertion. The common plain case was
-                    // already handled by the `!is_fancy()` branch above; reaching here means
-                    // the pattern is fancy-only for some *other* reason (e.g. a top-level
-                    // backreference outside any lookaround), so keep the compatibility
-                    // fallback — route to fancy rather than panicking.
-                    LoweringRoute::Plain => {
-                        push_fancy_fallback(&mut fancy, &prefix, inline, rank, *id)?;
-                        continue;
-                    }
-                    // Neither `regex` nor `fancy-regex` can host the pattern — a genuine build
-                    // error. (The router never constructs `Invalid` today; this arm is the L4
-                    // seam, kept explicit so a future `Invalid` is a hard error, not a silent
-                    // fancy fallback.)
-                    LoweringRoute::Invalid { message } => {
-                        return Err(GrammarError::Other { msg: message });
-                    }
-                };
 
             for (bo, br) in lowered.iter().enumerate() {
                 let inline_br = wrap_flags(flags, &br.regex);
@@ -1067,7 +1106,6 @@ impl DfaScanner {
             plain,
             guarded,
             start_bytes,
-            fancy,
             unless,
         })
     }
@@ -1106,18 +1144,6 @@ impl DfaScanner {
                 }
             }
         }
-        // Lowest-rank fancy candidate — a fancy terminal's rank is disjoint from every
-        // lowered terminal's, so a rank comparison alone settles it.
-        for (rank, id, re) in &self.fancy {
-            if best.is_some_and(|(b, _, _, _)| *rank > b) {
-                break;
-            }
-            if let Some(end) = re.match_end_at(text, pos) {
-                best = Some((*rank, 0, *id, &text[pos..end]));
-                break;
-            }
-        }
-
         let (_, _, id, value) = best?;
         let ty = self
             .unless
@@ -1291,16 +1317,88 @@ fn compute_unless(
         return Ok(HashMap::new());
     }
 
+    // The whole-string ("full match") membership test for one regex terminal: the
+    // anchored `regex` crate for the plain common case; a lookaround terminal is
+    // routed through THE refusal seam and full-matched via its lowered branches
+    // (each `^(?:branch)$` is lookaround-free, so `is_match` under the anchors is
+    // pure language membership — greedy/lazy is irrelevant — plus the branch's
+    // guards evaluated within the keyword value: leading at 0, trailing at the end
+    // [EOI semantics, matching the assertion's view under `^…$`], lookbehinds at
+    // their fixed offsets). A terminal the seam REFUSES is skipped silently here:
+    // the engine build that follows reports the one canonical categorized error
+    // (`docs/LOOKAROUND_SCOPE.md`), so no duplicate/diverging message is produced.
+    enum FullMatcher {
+        Plain(Regex),
+        Lowered(Vec<(Regex, Option<Guard>, Option<Guard>, Vec<LookbehindGuardC>)>),
+        Refused,
+    }
+    impl FullMatcher {
+        fn is_full(&self, value: &str) -> bool {
+            match self {
+                FullMatcher::Plain(re) => re.is_match(value),
+                FullMatcher::Lowered(branches) => {
+                    branches.iter().any(|(re, leading, trailing, behinds)| {
+                        re.is_match(value)
+                            && leading.as_ref().is_none_or(|g| g.holds(value, 0))
+                            && trailing
+                                .as_ref()
+                                .is_none_or(|g| g.holds(value, value.len()))
+                            && behinds.iter().all(|g| g.holds(value, 0))
+                    })
+                }
+                FullMatcher::Refused => false,
+            }
+        }
+    }
+
+    let prefix = global_flag_prefix(global_flags);
     let mut unless: HashMap<SymbolId, HashMap<String, SymbolId>> = HashMap::new();
     for (re_id, re_t) in &res {
-        let full_src = format!(
-            "{}^(?:{})$",
-            global_flag_prefix(global_flags),
-            re_t.pattern.to_inline_regex()
-        );
-        // A lookaround terminal (issue #40) cannot compile under the `regex` crate;
-        // `AnyRegex` falls back to `fancy-regex` so keyword embedding still works.
-        let full = AnyRegex::compile(&full_src)?;
+        let full_src = format!("{}^(?:{})$", prefix, re_t.pattern.to_inline_regex());
+        let full = match Regex::new(&full_src) {
+            Ok(re) => FullMatcher::Plain(re),
+            Err(e) => match route_fancy_only_terminal(re_t, global_flags, &e.to_string()) {
+                Ok((branches, flags)) => {
+                    let mut compiled = Vec::new();
+                    for br in &branches {
+                        let re_src = format!("{prefix}^(?:{})$", wrap_flags(flags, &br.regex));
+                        let re = Regex::new(&re_src).map_err(|e| GrammarError::InvalidRegex {
+                            pattern: re_src.clone(),
+                            reason: e.to_string(),
+                        })?;
+                        let guard = |g: &crate::lookaround::lower::GuardSpec| {
+                            Ok::<_, GrammarError>(Guard {
+                                neg: g.neg,
+                                dfa: build_anchored_dfa(&format!(
+                                    "{prefix}{}",
+                                    wrap_flags(flags, &g.set)
+                                ))?,
+                            })
+                        };
+                        let leading = br.leading.as_ref().map(&guard).transpose()?;
+                        let trailing = br.trailing.as_ref().map(&guard).transpose()?;
+                        let behinds = br
+                            .lookbehind
+                            .iter()
+                            .map(|g| {
+                                Ok::<_, GrammarError>(LookbehindGuardC {
+                                    neg: g.neg,
+                                    dfa: build_anchored_all_dfa(&format!(
+                                        "{prefix}{}",
+                                        wrap_flags(flags, &g.set)
+                                    ))?,
+                                    offset_chars: g.offset_chars,
+                                    width: g.width,
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?;
+                        compiled.push((re, leading, trailing, behinds));
+                    }
+                    FullMatcher::Lowered(compiled)
+                }
+                Err(_) => FullMatcher::Refused,
+            },
+        };
         for (s_id, s_t) in &strs {
             if s_t.priority != re_t.priority {
                 continue;
@@ -1309,7 +1407,7 @@ fn compute_unless(
                 Pattern::Str(p) => &p.value,
                 Pattern::Re(_) => continue,
             };
-            if full.is_full_match(value) {
+            if full.is_full(value) {
                 unless
                     .entry(*re_id)
                     .or_default()
@@ -1837,23 +1935,120 @@ impl ContextualLexer {
 /// sit in the scan set) already decides which terminals to try, so `if`-vs-`iffy`
 /// is resolved by the grammar, not by a lexer tie-break. Per-terminal flags
 /// (`(?i:…)`) and `g_regex_flags` are preserved exactly as the basic lexer does.
+/// **One lookaround terminal, matched alone** — the per-terminal analogue of the
+/// combined [`DfaScanner`], for engines that match terminals individually: the Earley
+/// dynamic lexer ([`DynamicMatcher`]) and the `Scanner` reference backend's lowered
+/// side-probes. Internally it *is* a single-terminal `DfaScanner` built through the
+/// same plan/routing/guard machinery, so its semantics (greedy/lazy match end, guard
+/// evaluation, lookbehind windows over the surrounding text) are the combined
+/// scanner's by construction — one lowering, not two.
+///
+/// Build cost: only terminals the `regex` crate rejects pay for it (one small dense
+/// DFA each); plain terminals never come near this type.
+pub(crate) struct LoweredTerminalMatcher {
+    scanner: DfaScanner,
+}
+
+impl LoweredTerminalMatcher {
+    /// Build the matcher for one terminal, or fail with the same categorized scope
+    /// error the combined build produces (`route_fancy_only_terminal` runs inside
+    /// `DfaScanner::build`). `compile_err` is the `regex` crate's rejection message,
+    /// quoted by the backtracking-only triage.
+    fn build(
+        id: SymbolId,
+        def: &TerminalDef,
+        global_flags: u32,
+        compile_err: &str,
+    ) -> Result<Self, GrammarError> {
+        // `compile_err` is only consumed on the refusal path; pre-check the routing so
+        // the error carries the engine's own message (DfaScanner::build re-derives the
+        // same answer from the plan source, which includes the global prefix).
+        route_fancy_only_terminal(def, global_flags, compile_err)?;
+        let scanner = DfaScanner::build(&[(id, def)], global_flags)?;
+        Ok(LoweredTerminalMatcher { scanner })
+    }
+
+    /// End of the non-empty match starting exactly at `pos` (the full `text` is
+    /// passed so a lookbehind guard can see the bytes before `pos`).
+    fn match_end_at(&self, text: &str, pos: usize) -> Option<usize> {
+        let (_, value) = self.scanner.match_at(text, pos)?;
+        Some(pos + value.len())
+    }
+
+    /// End offset of a non-empty match anchored at the start of `sub`.
+    fn match_end_in(&self, sub: &str) -> Option<usize> {
+        let (_, value) = self.scanner.match_at(sub, 0)?;
+        Some(value.len())
+    }
+}
+
 pub struct DynamicMatcher {
-    res: HashMap<SymbolId, AnyRegex>,
+    res: HashMap<SymbolId, TermRegex>,
     ignore: Vec<SymbolId>,
     names: HashMap<SymbolId, String>,
+}
+
+/// One terminal's per-terminal matcher for the dynamic lexer: the `regex` crate for
+/// the plain common case, the lowered single-terminal DFA for a lookaround terminal.
+enum TermRegex {
+    Plain(Regex),
+    Lowered(LoweredTerminalMatcher),
+}
+
+impl TermRegex {
+    /// End of the non-empty match starting exactly at `pos`, or `None` — the
+    /// contract `AnyRegex::match_end_at` had. The full `text` (not a suffix) is
+    /// passed so a lookbehind can see the bytes before `pos`, exactly as the
+    /// historical fancy probe could.
+    fn match_end_at(&self, text: &str, pos: usize) -> Option<usize> {
+        match self {
+            TermRegex::Plain(re) => {
+                let m = re.find_at(text, pos);
+                record_scan_skip(pos, m.as_ref().map(|m| m.start()));
+                let m = m?;
+                (m.start() == pos && m.end() > pos).then_some(m.end())
+            }
+            TermRegex::Lowered(m) => m.match_end_at(text, pos),
+        }
+    }
+
+    /// End offset of a non-empty match anchored at the start of `sub`, or `None` —
+    /// the contract `AnyRegex::match_end_in` had (used by the `dynamic_complete`
+    /// scan, which re-matches against a truncated haystack).
+    fn match_end_in(&self, sub: &str) -> Option<usize> {
+        match self {
+            TermRegex::Plain(re) => {
+                let m = re.find(sub)?;
+                (m.start() == 0 && m.end() > 0).then_some(m.end())
+            }
+            TermRegex::Lowered(m) => m.match_end_in(sub),
+        }
+    }
 }
 
 impl DynamicMatcher {
     /// Build a matcher from the same [`LexerConf`] the basic lexer uses, so both
     /// engines honour identical terminal patterns and global flags. A lookaround
-    /// terminal (issue #40) compiles via `fancy-regex`, exactly as in the basic
-    /// scanner, so the dynamic lexer matches the same language.
+    /// terminal lowers to its own single-terminal [`DfaScanner`]
+    /// ([`LoweredTerminalMatcher`]); a terminal the lowering refuses fails the build
+    /// with the **same categorized scope error** the basic-lexer path produces
+    /// (`docs/LOOKAROUND_SCOPE.md`), so the dynamic lexer accepts exactly the same
+    /// grammars.
     pub fn new(conf: &LexerConf) -> Result<Self, GrammarError> {
         let prefix = global_flag_prefix(conf.global_flags);
         let mut res = HashMap::new();
         for (id, term) in &conf.terminals {
             let src = format!("{}{}", prefix, term.pattern.to_inline_regex());
-            res.insert(*id, AnyRegex::compile(&src)?);
+            let compiled = match Regex::new(&src) {
+                Ok(re) => TermRegex::Plain(re),
+                Err(e) => TermRegex::Lowered(LoweredTerminalMatcher::build(
+                    *id,
+                    term,
+                    conf.global_flags,
+                    &e.to_string(),
+                )?),
+            };
+            res.insert(*id, compiled);
         }
         Ok(DynamicMatcher {
             res,
@@ -1975,6 +2170,29 @@ mod tests {
         }
     }
 
+    /// Assert `DfaScanner::build` refuses `terms` with the expected categorized scope
+    /// error (`docs/LOOKAROUND_SCOPE.md`) — the L4 contract: no fallback engine, a
+    /// clean typed refusal instead.
+    fn assert_dfa_scope_error(
+        terms: &[(SymbolId, TerminalDef)],
+        scope: crate::lookaround::classify::Scope,
+        issue: crate::lookaround::classify::LookaroundIssue,
+    ) {
+        let refs: Vec<(SymbolId, &TerminalDef)> = terms.iter().map(|(i, t)| (*i, t)).collect();
+        match DfaScanner::build(&refs, 0) {
+            Err(GrammarError::LookaroundScope {
+                scope: got_scope,
+                issue: got_issue,
+                ..
+            }) => {
+                assert_eq!(got_scope, scope);
+                assert_eq!(got_issue, issue);
+            }
+            Err(other) => panic!("expected a LookaroundScope error, got {other:?}"),
+            Ok(_) => panic!("expected the build to refuse, but it succeeded"),
+        }
+    }
+
     #[test]
     fn dfa_tiebreak_same_start_picks_lowest_rank_not_longest() {
         // Two regex terminals matching at the same start with different lengths.
@@ -2033,21 +2251,40 @@ mod tests {
         );
     }
 
+    /// `unless` keyword retyping over a LOWERED terminal: the keyword's full-match
+    /// test runs on the lowered branches + guards (`compute_unless`'s `FullMatcher`),
+    /// not on any fallback engine. `T=/ab(?!c)|q/` overlaps the keyword `"ab"` (its
+    /// trailing guard at the end of the value sees EOI → `(?!c)` holds, exactly as
+    /// the historical `^(?:…)$` full-match saw it), so `"ab"` retypes to `K`; the
+    /// guard still bites at scan time (`"abc"` is no `T` at 0).
     #[test]
-    fn dfa_guarded_order_sensitive_base_routes_to_fancy_and_agrees() {
+    fn dfa_unless_retype_works_over_lowered_terminal() {
+        let terms = [re_term(1, "T", "ab(?!c)|q", 0), str_term(2, "K", "ab", 0)];
+        let refs: Vec<(SymbolId, &TerminalDef)> = terms.iter().map(|(i, t)| (*i, t)).collect();
+        let d = DfaScanner::build(&refs, 0).expect("lowered terminal + keyword builds");
+        assert_eq!(
+            d.match_at("ab", 0),
+            Some((SymbolId(2), "ab")),
+            "retyped to K"
+        );
+        assert_eq!(d.match_at("q", 0), Some((SymbolId(1), "q")), "stays T");
+        assert_eq!(d.match_at("abc", 0), None, "the trailing guard still bites");
+    }
+
+    #[test]
+    fn dfa_guarded_order_sensitive_base_is_a_categorized_nyi_error() {
         // A trailing guard over a base whose internal alternation is order-sensitive
         // (`(ab|abc)`) is NOT greedy-monotone: "longest accept where the guard holds"
         // would pick "abc" where leftmost-first wants "ab". `is_greedy_monotone` keeps
-        // it off the accumulator (routed to fancy-regex), so the Dfa backend stays
-        // byte-identical to the reference `Scanner`. Pairs with the cross-terminal
-        // differential (tests/test_scanner_combined_selection.rs).
+        // it off the accumulator; since L4 there is no fallback engine, so the build
+        // refuses with the categorized NotYetImplemented error — never a mis-lowering.
+        use crate::lookaround::classify::{DeclineReason, LookaroundIssue, Scope};
         let terms = [re_term(1, "T", "(ab|abc)(?!z)", 0)];
-        let (_, d) = both(&terms);
-        assert!(
-            d.plain.is_none() && d.guarded.is_none(),
-            "an order-sensitive guarded base must not be lowered into either engine"
+        assert_dfa_scope_error(
+            &terms,
+            Scope::NotYetImplemented,
+            LookaroundIssue::Declined(DeclineReason::NonRealizableGuardedBase),
         );
-        assert_agree(&terms, &["ab", "abc", "abz", "abcz", "abx", "abcx", "a"]);
     }
 
     #[test]
@@ -2064,18 +2301,18 @@ mod tests {
     }
 
     #[test]
-    fn dfa_lazy_guarded_base_routes_to_fancy_and_agrees() {
+    fn dfa_lazy_guarded_base_is_a_categorized_nyi_error() {
         // Regression for the lazy-body bug: a lazy quantifier in a guarded base
         // (`ab??(?!c)`) is not greedy-monotone — the longest-accept accumulator would
-        // pick "ab" where leftmost-first (lazy) wants "a". The lowering declines it
-        // (routed to fancy), so the Dfa backend stays byte-identical to `Scanner`.
+        // pick "ab" where leftmost-first (lazy) wants "a". The lowering declines it;
+        // since L4 the build refuses with the categorized NotYetImplemented error.
+        use crate::lookaround::classify::{DeclineReason, LookaroundIssue, Scope};
         let terms = [re_term(1, "T", "ab??(?!c)", 0)];
-        let (_, d) = both(&terms);
-        assert!(
-            d.plain.is_none() && d.guarded.is_none(),
-            "a lazy guarded base must not be lowered into either engine"
+        assert_dfa_scope_error(
+            &terms,
+            Scope::NotYetImplemented,
+            LookaroundIssue::Declined(DeclineReason::NonRealizableGuardedBase),
         );
-        assert_agree(&terms, &["a", "ab", "abc", "ac", "axc"]);
     }
 
     /// **The engine-path pin for the bundled idioms.** The grammar loader delivers a
@@ -2108,11 +2345,9 @@ mod tests {
             re_term(3, "REGEXP", r"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*", 0),
         ];
         let (_, d) = both(&terms);
-        assert!(
-            d.fancy.is_empty(),
-            "every bundled lookaround terminal must lower on the engine path — a \
-             non-empty fancy side-probe means the flag-wrapper strip regressed"
-        );
+        // Since L4 there is no fallback engine at all, so the *build succeeding* is
+        // itself the pin (a refused terminal is a categorized build error); the
+        // structural assert below shows the idioms genuinely populate the engines.
         assert!(
             d.plain.is_some() && d.guarded.is_some(),
             "the lowered idioms populate both engines (unguarded branches + STRING's \
@@ -2139,8 +2374,9 @@ mod tests {
     /// fancy probe — exactly the invisible rot this PR dug `python.STRING` out of. So
     /// this twin builds the scanner from the **real loader output**: a grammar that
     /// `%import`s all three bundled lookaround terminals, run through `load_grammar` →
-    /// `lower` → `basic_lexer_conf`, must also produce a scanner with **zero** fancy
-    /// side-probes.
+    /// `lower` → `basic_lexer_conf`, must also build — and since L4 a successful build
+    /// IS the zero-probe claim (a refused terminal is a categorized build error; no
+    /// fallback engine exists).
     #[test]
     fn dfa_real_loader_bundled_imports_have_no_fancy_probe() {
         let grammar = "start: STRING | LONG_STRING | REGEXP\n\
@@ -2153,12 +2389,9 @@ mod tests {
         let conf = crate::basic_lexer_conf(&cg, 0);
         let refs: Vec<(SymbolId, &TerminalDef)> =
             conf.terminals.iter().map(|(i, t)| (*i, t)).collect();
-        let d = DfaScanner::build(&refs, conf.global_flags).expect("DfaScanner builds");
-        assert!(
-            d.fancy.is_empty(),
-            "the REAL loader-imported bundled terminals must lower with zero fancy \
-             side-probes — `to_inline_regex`'s bake format and the flag-wrapper strip \
-             have drifted apart"
+        let d = DfaScanner::build(&refs, conf.global_flags).expect(
+            "the REAL loader-imported bundled terminals must lower — a refusal here \
+             means `to_inline_regex`'s bake format and the flag-wrapper strip drifted",
         );
         assert!(d.plain.is_some() && d.guarded.is_some());
     }
@@ -2168,28 +2401,21 @@ mod tests {
     /// verbose-aware, so a stripped `x`-body would count whitespace as literal width
     /// while the re-wrapped branch ignores it — a fixed-offset lookbehind could lower
     /// with a wrong offset (a false-accept). An `x`-wrapped lookaround terminal must
-    /// keep its pre-strip behavior: assertions stay nested in the group, the route
-    /// stays out-of-shape, and the terminal rides the fancy fallback — identically on
-    /// both backends.
+    /// never lower: the strip leaves the wrapper alone, and since L4 the build refuses
+    /// it with the honest categorized NotYetImplemented `VerboseWrapper` error (not the
+    /// classifier's mislabel of the group-nested assertion as out-of-scope internal
+    /// lookahead).
     #[test]
     fn verbose_flag_wrapper_is_not_stripped_into_lowering() {
+        use crate::lookaround::classify::{DeclineReason, LookaroundIssue, Scope};
         // Whitespace inside the verbose body is regex-insignificant at runtime but
         // would be width-significant to a naive strip + reparse.
         let terms = [re_term(1, "VX", r"(?x:[0-9]+ (?![0-9]))", 0)];
-        let (s, d) = both(&terms);
-        assert!(
-            d.plain.is_none() && d.guarded.is_none(),
-            "an x-wrapped lookaround terminal must NOT lower (the strip must leave \
-             `(?x:…)` alone — its body's widths/offsets are not verbose-aware)"
+        assert_dfa_scope_error(
+            &terms,
+            Scope::NotYetImplemented,
+            LookaroundIssue::Declined(DeclineReason::VerboseWrapper),
         );
-        assert_eq!(d.fancy.len(), 1, "…it rides the fancy fallback, as before");
-        for inp in ["123", "12a", "1 2", "a"] {
-            assert_eq!(
-                s.match_at(inp, 0),
-                d.match_at(inp, 0),
-                "diverged on {inp:?}"
-            );
-        }
         // The helper itself: an `x` anywhere in the wrapper letters refuses the strip
         // wholesale; the plain `i`/`s` strips still work.
         assert_eq!(
@@ -2209,22 +2435,18 @@ mod tests {
     }
 
     #[test]
-    fn dfa_all_lookaround_terminals_has_no_plain_engine() {
+    fn dfa_all_lookaround_terminals_is_a_categorized_out_of_scope_error() {
         // A scanner whose only terminal is an *internal*-assertion lookaround pattern
-        // (not a lowerable boundary shape) builds with neither a plain nor a guarded
-        // engine and still matches via the fancy side-probe, identically to `Scanner`.
+        // (not a lowerable boundary shape, not a recognized idiom) refuses to build
+        // with the categorized OutOfScope error — since L4 there is no fancy
+        // side-probe to ride.
+        use crate::lookaround::classify::Rejection;
+        use crate::lookaround::classify::{LookaroundIssue, Scope};
         let terms = [re_term(1, "STR", "\"(?!\")[^\"]*\"", 0)];
-        let (s, d) = both(&terms);
-        assert!(
-            d.plain.is_none() && d.guarded.is_none(),
-            "all-lookaround scanner has no lowered engine"
+        assert_dfa_scope_error(
+            &terms,
+            Scope::OutOfScope,
+            LookaroundIssue::Rejected(Rejection::Internal),
         );
-        for inp in ["\"ab\"", "\"\"", "\"\"\"\"", "x"] {
-            assert_eq!(
-                s.match_at(inp, 0),
-                d.match_at(inp, 0),
-                "diverged on {inp:?}"
-            );
-        }
     }
 }

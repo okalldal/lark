@@ -48,7 +48,7 @@ mod common;
 
 use common::{load_oracle, tree_matches_oracle};
 use lark_rs::grammar::terminal::flags;
-use lark_rs::{Lark, LarkOptions, LexerType, ParserAlgorithm};
+use lark_rs::{GrammarError, Lark, LarkOptions, LexerType, ParserAlgorithm, Scope};
 
 /// Map a serialized `g_regex_flags` name (the oracle's strings) to its flag bit —
 /// the lockstep counterpart of `_RE_FLAGS` in `generate_oracles.py`.
@@ -81,6 +81,18 @@ fn combo_enums(parser: &str, lexer: &str) -> (ParserAlgorithm, LexerType) {
     (p, l)
 }
 
+/// Oracle groups whose grammar Python Lark builds but lark-rs **rejects by design**
+/// (`Scope::OutOfScope`, `docs/LOOKAROUND_SCOPE.md`) — the *named parity breaks*,
+/// asserted rather than skipped. `block_comment`'s `\*(?!\/)` is a genuinely internal
+/// lookahead (nested inside a quantified group): general internal lookahead is a
+/// permanent non-goal, with the audited delimited-token idioms as the only growth
+/// path. For each such group every available combo must fail to build with an
+/// `OutOfScope` `LookaroundScope` error — on every parser×lexer combination — so this
+/// oracle now pins the rejection contract exactly as it used to pin the (fancy-era)
+/// lexing behavior. (The historical match-length finding for the shape stays pinned
+/// by `matchlen::block_comment_match_length_equivalence` below.)
+const OUT_OF_SCOPE_GROUPS: &[&str] = &["block_comment"];
+
 #[test]
 fn test_lookaround_oracle() {
     let oracle = load_oracle("lookaround", "cases");
@@ -89,6 +101,7 @@ fn test_lookaround_oracle() {
     let mut failures = Vec::new();
     let mut checked_combos = 0usize;
     let mut checked_cases = 0usize;
+    let mut asserted_rejections = 0usize;
 
     for group in groups {
         let name = group["name"].as_str().expect("group needs a name");
@@ -114,9 +127,7 @@ fn test_lookaround_oracle() {
             let (algo, lexer_ty) = combo_enums(parser, lexer);
             let tag = format!("{name} [{parser}/{lexer}]");
 
-            // Python built this combo, so lark-rs must too; a build failure here is a
-            // real parity divergence, not a skip.
-            let lark = match Lark::new(
+            let built = Lark::new(
                 grammar,
                 LarkOptions {
                     parser: algo,
@@ -125,7 +136,32 @@ fn test_lookaround_oracle() {
                     g_regex_flags,
                     ..Default::default()
                 },
-            ) {
+            );
+
+            // A named parity break: Python built this combo, but lark-rs must REJECT
+            // it — by design, categorized, on every parser×lexer combination.
+            if OUT_OF_SCOPE_GROUPS.contains(&name) {
+                match built {
+                    Err(lark_rs::LarkError::Grammar(GrammarError::LookaroundScope {
+                        scope: Scope::OutOfScope,
+                        ..
+                    })) => asserted_rejections += 1,
+                    Err(e) => failures.push(format!(
+                        "{tag}: must be rejected with an OutOfScope LookaroundScope \
+                         error, got a different error: {e}"
+                    )),
+                    Ok(_) => failures.push(format!(
+                        "{tag}: an out-of-scope pattern BUILT — a by-design rejection \
+                         was silently promoted (docs/LOOKAROUND_SCOPE.md protocol \
+                         violated)"
+                    )),
+                }
+                continue;
+            }
+
+            // Python built this combo, so lark-rs must too; a build failure here is a
+            // real parity divergence, not a skip.
+            let lark = match built {
                 Ok(l) => l,
                 Err(e) => {
                     failures.push(format!(
@@ -161,8 +197,13 @@ fn test_lookaround_oracle() {
     }
 
     assert!(
-        checked_combos >= 30,
-        "expected the full cross-algorithm matrix (~36 combos), only checked {checked_combos}"
+        checked_combos >= 24,
+        "expected the full cross-algorithm matrix, only checked {checked_combos}"
+    );
+    assert!(
+        asserted_rejections >= 6,
+        "the out-of-scope groups must be exercised (and rejected) on every combo, \
+         got only {asserted_rejections} asserted rejections"
     );
 
     if !failures.is_empty() {

@@ -451,3 +451,25 @@ fn oracle_and_generators_are_well_formed() {
         terms.len()
     );
 }
+
+/// **The semantic-realizability-gate audit** (`is_leftmost_longest`): the
+/// loader-baked `python.DEC_NUMBER` — whose guarded-arm base `0(?:(?:_)?0)*` both
+/// syntactic realizability fast paths miss — must lower **match-length-identically
+/// to the `fancy-regex` oracle** over an exhaustive corpus on its load-bearing
+/// alphabet (`0` / a guard-failing digit / a guard-passing digit / the `_`
+/// separator). This is the generative-equivalence leg of the Stage-B ladder for the
+/// gate widening that admitted it; the route pin lives in
+/// `lower.rs::semantic_gate_decides_leftmost_equals_longest_exactly`, and the real
+/// `%import python.DEC_NUMBER` engine path is exercised by `test_stdlib` and the
+/// scanner differential's python corpus.
+#[test]
+fn dec_number_loader_shape_lowered_equals_fancy() {
+    let t = GenTerminal {
+        name: "DEC_NUMBER".to_string(),
+        pattern: r"(?:0(?:(?:(?:_)?0))*(?![1-9]))|(?:[1-9](?:(?:(?:_)?[0-9]))*)".to_string(),
+        shape: ShapeClass::TrailingBoundary,
+        alphabet: vec!['0', '1', '9', '_'],
+        max_len: 7,
+    };
+    assert_eq!(equivalence_divergence(&t), None);
+}
