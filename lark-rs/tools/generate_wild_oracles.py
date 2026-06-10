@@ -192,7 +192,12 @@ def main():
     for pdir in projects:
         result = generate_project(pdir)
         out = ORACLES_DIR / f"{result['name']}.json"
-        out.write_text(json.dumps(result, indent=2, ensure_ascii=False) + "\n")
+        # Compact separators, not indent=2: pretty-printing inflates these
+        # fixtures ~7x (every token costs 5 lines) for files nobody reads
+        # linearly. Pipe through `python3 -m json.tool` to inspect one.
+        out.write_text(
+            json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n"
+        )
         n_ok = sum(1 for c in result["cases"] if c["ok"])
         n_embedded = sum(1 for c in result["cases"] if "tree" in c)
         print(
