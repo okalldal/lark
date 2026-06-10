@@ -86,9 +86,45 @@ pub struct PatternRe {
     pub flags: u32,
 }
 
+/// Normalize the **`\<` and `\>` escapes** from the Python `re` dialect to the
+/// `regex` crate's. Python treats an escaped punctuation char as that literal
+/// everywhere, so `\<` / `\>` mean `<` / `>`; the `regex` crate instead reserves
+/// them as **word-boundary escapes** — outside a character class `\<\>` is two
+/// zero-width assertions that match *nothing* where Python matches `"<>"` (a silent
+/// mis-lex), and inside a class they are rejected outright ("invalid escape sequence
+/// found in character class" — the wild-bank dotmotif `OPERATOR`'s `[\!=\>\<]` and
+/// `\<\>`). Rewriting exactly those two escapes to the bare char is
+/// semantics-preserving in *both* dialects (`<` and `>` are ordinary literals bare,
+/// in and out of classes, in Python and in the regex crate); every other escape —
+/// including class-special ones like `\]` and idiom-pinned ones like `[^\/]` (the
+/// bundled `lark.REGEXP` shape) — is left byte-exact.
+fn normalize_python_escapes(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len());
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' {
+            match chars.get(i + 1).copied() {
+                Some(n @ ('<' | '>')) => out.push(n), // drop the divergent escape
+                Some(n) => {
+                    out.push('\\');
+                    out.push(n);
+                }
+                None => out.push('\\'),
+            }
+            i += 2;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 impl PatternRe {
     pub fn new(pattern: impl Into<String>, flags: u32) -> Result<Self, GrammarError> {
-        let pattern = pattern.into();
+        let pattern = normalize_python_escapes(&pattern.into());
         let flag_prefix = build_flag_prefix(flags);
         let full = format!("{}{}", flag_prefix, pattern);
         // Validate the regex early to surface grammar errors. A pattern the linear

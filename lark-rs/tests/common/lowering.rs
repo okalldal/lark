@@ -553,6 +553,72 @@ pub fn long_string_idiom_terminals() -> Vec<GenTerminal> {
         .collect()
 }
 
+/// The wild-bank dotmotif `FLEXIBLE_KEY` pattern, verbatim — the **short-string
+/// idiom** (idiom #4): a single-char-delimited token with a *non-empty* lazy escaped
+/// body and the escape-parity `(?<!\\)(\\\\)*?` close, no opening guard.
+pub const SHORT_STRING_RAW: &str = r#"(?:".+?(?<!\\)(\\\\)*?")|(?:'.+?(?<!\\)(\\\\)*?')"#;
+
+/// The **short-string idiom** population (dotmotif `FLEXIBLE_KEY`, idiom #4). The
+/// population varies the structural forms the recognizer admits (prefix-less single
+/// arm, both quote kinds, the full wild two-arm shape) and the **exhaustive corpus**:
+/// quote/backslash stress for the parity close, the guardless quote-leading-body
+/// boundary (`"""` is one 3-char token, `""x"` one 4-char token, `""` no match —
+/// where python.STRING's `(?!"")` would behave differently), and a newline alphabet
+/// for the non-dotall `\n` exclusion. `shape` is [`ShapeClass::BoundedLookbehind`] —
+/// what the pattern's assertions actually classify as (like LONG_STRING, there is no
+/// lookahead to re-tag).
+pub fn short_string_idiom_terminals() -> Vec<GenTerminal> {
+    let dq_arm = r#"".+?(?<!\\)(\\\\)*?""#;
+    let sq_arm = r#"'.+?(?<!\\)(\\\\)*?'"#;
+    let cases: [(&str, &str, &[char], usize); 4] = [
+        // prefix-less dq arm: quote/backslash/content stress
+        ("dq", dq_arm, &['"', '\\', 'a'], 7),
+        // sq twin
+        ("sq", sq_arm, &['\'', '\\', 'a'], 7),
+        // the non-dotall newline-exclusion corpus
+        ("nl", dq_arm, &['"', '\\', '\n'], 7),
+        // the full wild two-arm shape
+        ("full", SHORT_STRING_RAW, &['"', '\'', '\\', 'a'], 6),
+    ];
+    cases
+        .into_iter()
+        .map(|(label, pattern, alphabet, max_len)| GenTerminal {
+            name: format!("SHORT_{label}"),
+            pattern: pattern.to_string(),
+            shape: ShapeClass::BoundedLookbehind,
+            alphabet: alphabet.to_vec(),
+            max_len,
+        })
+        .collect()
+}
+
+/// **Near-miss short-string-idiom shapes the recognizer must NOT accept** — its
+/// reject surface. Each is the wild shape with exactly one pinned part changed. The
+/// headline near-miss is the **empty-capable `.*?` body without an opening guard**:
+/// it closes at width 0 on `""` where the idiom's rewrite would consume a char, so it
+/// must keep declining until someone proves its own rewrite (the section comment in
+/// `src/lookaround/lower.rs` records this). The missing-lookbehind variant is
+/// lookaround-*free* and classifies `Plain` ("not Branches" is the assertion, the
+/// string-idiom reject convention). The recognizer-level assertion lives in
+/// `src/lookaround/lower.rs::tests::short_string_idiom_recognizer_is_exact`.
+pub fn short_string_idiom_reject_patterns() -> Vec<String> {
+    [
+        r#"".*?(?<!\\)(\\\\)*?""#, // empty-capable `.*?` body — the headline near-miss
+        r#"".+?(\\\\)*?""#,        // missing the lookbehind (lookaround-free)
+        r#"".+?(?<!x)(\\\\)*?""#,  // wrong lookbehind body
+        r#"".+?(?<=\\)(\\\\)*?""#, // positive lookbehind
+        r#"".+(?<!\\)(\\\\)*?""#,  // greedy `.+` body
+        r#"".+?(?<!\\)(\\\\)*""#,  // greedy escape group
+        r#"".+?(?<!\\)(\\)*?""#,   // wrong escape-group body
+        r#"".+?(?<!\\)(\\\\)*?'"#, // mismatched open/close
+        r#"ab.+?(?<!\\)(\\\\)*?b"#, // multi-char opener (not a single literal delimiter)
+        r#".".+?(?<!\\)(\\\\)*?""#, // `.` before the opener (no longer the arm shape)
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
+}
+
 /// **Near-miss long-string-idiom shapes the recognizer must NOT accept** — its reject
 /// surface. Each is the bundled idiom with exactly one pinned part changed: the
 /// delimiter, the lookbehind, the escape group, or a quantifier's laziness. None may

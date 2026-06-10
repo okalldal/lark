@@ -197,7 +197,18 @@ impl<'a> Lexer<'a> {
                         .bytes()
                         .take_while(|&b| b == b'\n' || b == b'\r' || b == b' ' || b == b'\t')
                         .count();
-                    Dispatch::Newline(n)
+                    // A full-line comment swallows its *leading* newline run, exactly
+                    // as Python Lark's grammar-of-grammars does: lark.lark's
+                    // `COMMENT: /\s*/ "//" /[^\n]*/` out-lengths `_NL` at the newline,
+                    // so a comment line between the `|` alternatives of a multi-line
+                    // rule never terminates the rule (the wild-bank dotmotif shape).
+                    // The comment's own trailing newline is left for the next
+                    // dispatch, exactly like Python's.
+                    if rest[n..].starts_with("//") || rest[n..].starts_with('#') {
+                        Dispatch::Comment(rest[n..].find('\n').map_or(rest.len(), |k| n + k))
+                    } else {
+                        Dispatch::Newline(n)
+                    }
                 } else if rest.starts_with("//") || rest.starts_with('#') {
                     Dispatch::Comment(rest.find('\n').unwrap_or(rest.len()))
                 } else if rest.starts_with("%ignore")

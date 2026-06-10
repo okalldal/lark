@@ -18,8 +18,8 @@ mod common;
 use common::lowering::{
     boundary_mutations, corpus, fancy_matcher, fancy_prefix, has_guard, has_lookbehind,
     long_string_idiom_terminals, lookbehind_mutations, lowered_prefix, mutant_lookbehind_matcher,
-    mutant_matcher, regexp_idiom_terminals, string_idiom_terminals, supported_terminals,
-    BoundaryMutation, GenTerminal, REGEXP_RAW,
+    mutant_matcher, regexp_idiom_terminals, short_string_idiom_terminals, string_idiom_terminals,
+    supported_terminals, BoundaryMutation, GenTerminal, REGEXP_RAW,
 };
 use lark_rs::ShapeClass;
 
@@ -341,6 +341,109 @@ fn long_string_idiom_lowered_equals_fancy() {
         failures.is_empty(),
         "long-string-idiom generative-equivalence divergence(s):\n  {}",
         failures.join("\n  ")
+    );
+}
+
+/// The **short-string idiom** (dotmotif `FLEXIBLE_KEY`, idiom #4): the lowered
+/// match-length must equal the `fancy-regex` oracle over every exhaustive corpus —
+/// which includes the guardless quote-leading-body boundary (`"""` one 3-char token,
+/// `""x"` one 4-char token, `""` no match), escape parity (`"\""` accepted as 4,
+/// `"\"` rejected), the first-close laziness (`"a"b"` matches `"a"`), and the
+/// non-dotall newline exclusion. `lowered_prefix` returning `Err` (a declined
+/// terminal) is surfaced as a divergence, so a FLEXIBLE_KEY that *failed* to lower
+/// fails loudly rather than passing vacuously.
+#[test]
+fn short_string_idiom_lowered_equals_fancy() {
+    let terms = short_string_idiom_terminals();
+    assert!(
+        !terms.is_empty(),
+        "no short-string-idiom terminals generated"
+    );
+    let mut failures = Vec::new();
+    for t in &terms {
+        if let Some(d) = equivalence_divergence(t) {
+            failures.push(d);
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "short-string-idiom generative-equivalence divergence(s):\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+/// **The uniform-body-class mutant** (short-string idiom). The rewrite's twist is
+/// that the *first* item may be the bare delimiter (the missing `(?!"")` guard +
+/// the non-empty `.+?` force a position-0 quote to be consumed as body). A lowering
+/// that used python.STRING's uniform delimiter-excluded class for *every* item —
+/// `"(?:[^"\\]|\\.)+"` — would reject `"""` (and `""x"`) where the oracle matches.
+/// The meta-test asserts this mutant is **caught** by exactly that quote-leading
+/// shape, so the first-item twist is genuinely defended.
+#[test]
+fn uniform_body_class_is_caught_by_the_quote_leading_body() {
+    let mutant = fancy_matcher(r#""(?:[^"\\]|\\.)+""#).expect("mutant compiles");
+    let oracle = fancy_matcher(r#"".+?(?<!\\)(\\\\)*?""#).expect("oracle compiles");
+
+    let mut caught = false;
+    for t in &short_string_idiom_terminals() {
+        if !t.alphabet.contains(&'"') {
+            continue;
+        }
+        for input in corpus(&t.alphabet, t.max_len) {
+            let correct = fancy_prefix(&oracle, &input);
+            let wrong = fancy_prefix(&mutant, &input);
+            if correct == wrong {
+                continue;
+            }
+            // The load-bearing divergence: a quote-leading body (`""…`) the oracle
+            // accepts but the uniform-class mutant rejects.
+            if correct.is_some() && wrong.is_none() && input.starts_with("\"\"") {
+                caught = true;
+            }
+        }
+    }
+    assert!(
+        caught,
+        "the uniform-body-class mutant was NOT caught by a quote-leading body — the \
+         short-string first-item twist would be undefended (a hole in the net)"
+    );
+}
+
+/// **The close-exclusion mutant** (short-string idiom). Excluding the delimiter from
+/// the *subsequent* items is what makes the greedy lowered body close at the FIRST
+/// free-standing quote (the original's lazy close). A lowering that admitted the
+/// quote everywhere — `"(?:[^\\]|\\.)+"` — would greedily swallow interior quotes
+/// and close at the last one (`"a"b"` → 5 chars where the oracle matches `"a"` → 3).
+/// The meta-test asserts this mutant is **caught** by exactly that two-close shape.
+#[test]
+fn unexcluded_close_is_caught_by_the_interior_quote() {
+    let mutant = fancy_matcher(r#""(?:[^\\]|\\.)+""#).expect("mutant compiles");
+    let oracle = fancy_matcher(r#"".+?(?<!\\)(\\\\)*?""#).expect("oracle compiles");
+
+    let mut caught = false;
+    for t in &short_string_idiom_terminals() {
+        if !t.alphabet.contains(&'"') {
+            continue;
+        }
+        for input in corpus(&t.alphabet, t.max_len) {
+            let correct = fancy_prefix(&oracle, &input);
+            let wrong = fancy_prefix(&mutant, &input);
+            if correct == wrong {
+                continue;
+            }
+            // The load-bearing divergence: the mutant over-matches past the oracle's
+            // first-quote close.
+            if let (Some(c), Some(w)) = (correct, wrong) {
+                if w > c {
+                    caught = true;
+                }
+            }
+        }
+    }
+    assert!(
+        caught,
+        "the unexcluded-close mutant was NOT caught by an interior-quote input — the \
+         short-string first-close exclusion would be undefended (a hole in the net)"
     );
 }
 

@@ -121,3 +121,58 @@ fn test_global_keep_all_tokens_and_placeholders() {
     assert_eq!(tree.children.len(), 3, "one None per absent optional");
     assert!(tree.children.iter().all(|c| matches!(c, Child::None)));
 }
+
+#[test]
+fn test_python_dialect_angle_escapes_are_literals() {
+    // Python `re` treats `\<` / `\>` as the literal chars; the regex crate reserves
+    // them as word-boundary escapes (zero-width — `\<\>` would match *nothing* where
+    // Python matches "<>", and inside a class they are a compile error). The
+    // wild-bank dotmotif OPERATOR `(?:[\!=\>\<][=]?)|(?:\<\>)` is the real-world
+    // shape; the loader normalizes the two divergent escapes to bare literals.
+    // The wild arm order: the class arm wins leftmost-first at `<`, so `<>` splits
+    // into two OPs — exactly what Python `re` does on the same pattern (the un-fixed
+    // word-boundary reading would instead make `<` and `>` *unmatchable*).
+    let lark = make_lalr("start: OP+\nOP: /(?:[\\!=\\>\\<][=]?)|(?:\\<\\>)/\n%ignore / /");
+    let tree = lark
+        .parse("<> >= !")
+        .expect("parse")
+        .as_tree()
+        .unwrap()
+        .clone();
+    assert_eq!(tree.children.len(), 4);
+    assert_eq!(tok_value(&tree.children, 0), ("OP", "<"));
+    assert_eq!(tok_value(&tree.children, 1), ("OP", ">"));
+    assert_eq!(tok_value(&tree.children, 2), ("OP", ">="));
+    assert_eq!(tok_value(&tree.children, 3), ("OP", "!"));
+
+    // Reordered so the `\<\>` arm is reachable: it must match the literal "<>" as
+    // one token (Python parity), not act as a pair of word-boundary assertions.
+    let lark = make_lalr("start: OP+\nOP: /(?:\\<\\>)|(?:[\\!=\\>\\<][=]?)/\n%ignore / /");
+    let tree = lark
+        .parse("<> >=")
+        .expect("parse")
+        .as_tree()
+        .unwrap()
+        .clone();
+    assert_eq!(tree.children.len(), 2);
+    assert_eq!(tok_value(&tree.children, 0), ("OP", "<>"));
+    assert_eq!(tok_value(&tree.children, 1), ("OP", ">="));
+}
+
+#[test]
+fn test_comment_lines_between_rule_alternatives() {
+    // Python Lark's grammar-of-grammars lets a full-line comment sit *between* the
+    // `|` alternatives of a multi-line rule (lark.lark's COMMENT swallows its
+    // leading newline run, so the rule is not terminated) — the wild-bank dotmotif
+    // grammar's shape. Both `//` and `#` comment forms, including consecutive
+    // comment lines and a comment terminating the last alternative.
+    let lark = make_lalr(
+        "start: A\n     // a comment between alternatives\n     | B\n     # hash form\n     \
+         // two in a row\n     | C\n     // trailing comment after the last alternative\n\
+         A: \"a\"\nB: \"b\"\nC: \"c\"",
+    );
+    for (input, ty) in [("a", "A"), ("b", "B"), ("c", "C")] {
+        let tree = lark.parse(input).expect("parse").as_tree().unwrap().clone();
+        assert_eq!(tok_value(&tree.children, 0), (ty, input));
+    }
+}
