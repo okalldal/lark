@@ -128,6 +128,13 @@ pub fn lower_boundary_dotall(
     if let Some(idiom) = recognize_string_idiom(&node) {
         return idiom.lower(pattern, dotall);
     }
+    // The second audited delimited-token idiom (Stage B): the bundled `lark.REGEXP`
+    // regex-literal shape. Exact-match recognizer; `dotall` is inert (the idiom contains
+    // no `.` — its body is the explicit class `[^\/]`, which admits a newline under any
+    // flags, exactly as the original does).
+    if let Some(idiom) = recognize_regexp_idiom(&node) {
+        return Ok(idiom.lower());
+    }
     let mut branches = Vec::new();
     match &node {
         Node::Alt(arms) => {
@@ -978,6 +985,108 @@ fn is_plain_literal(c: char) -> bool {
     )
 }
 
+// ─── The regex-literal idiom (the bundled lark.REGEXP, Stage B) ──────────────────
+//
+// `lark.REGEXP` is `\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*` — a `/ body / flags`
+// delimited token whose `(?!\/)` sits *between* the opening slash and the lazy body, an
+// internal position the top-level classifier rejects. It is the second audited
+// **delimited-token idiom** (`docs/LEXER_DFA_PLAN.md`, Stage B), after the M4 STRING
+// splice. The lowering rests on one exact observation:
+//
+//   **The guard reduces to "the body is non-empty."** At the guard position (right
+//   after the opening `\/`), the forbidden continuation is a `/`. Every body
+//   alternative starts with a char that is *not* `/` (`\\\/` and `\\\\` start with a
+//   backslash; `[^\/]` excludes the slash), and the close `\/` starts with exactly `/`.
+//   So at that position the engine can close (next char is `/`) **xor** consume a body
+//   item — never both. `(?!\/)` therefore fails exactly when the body would match zero
+//   items and the close would fire immediately (the empty `//`), and holds in every
+//   other case where the token can proceed. Dropping the guard and bumping the lazy
+//   repetition's minimum — `(…)*?` → `(…)+?` — is an *exact* rewrite, not an
+//   approximation. (The same close-vs-item first-char disjointness holds at **every**
+//   iteration boundary, which is also why `tests/test_lookaround.rs::matchlen`'s E2a
+//   harness found this terminal Type-A regex-rewritable.)
+//
+// The single lowered branch is **unguarded** and joins the leftmost-first plain
+// engine, which reproduces the lazy `+?` / ordered-alternation match end exactly
+// (including the backtracking "dangling escaped slash" close — `/a\/b` matches
+// `/a\/` — and the greedy `[imslux]*` flags suffix), so no guard machinery and no
+// realizability question is involved. Gated by the route pins
+// (`tests/test_lowering_routes.rs`), the hand canaries (`tests/test_regexp_splice.rs`),
+// the generative equivalence + `*?`-mutant (`tests/test_lowering_equivalence.rs`), the
+// state-pruned Route-1 proof (`tests/test_lowering_proof.rs`), and the scanner
+// differential population.
+//
+// The recognizer matches **only** the exact bundled shape — anything else returns
+// `None` and falls through to the generic path (which rejects/declines it), the
+// reject-when-unsure direction. It is deliberately *not* parameterized over the
+// delimiter, the body alternatives, their order, the quantifier, or the flags suffix:
+// each of those is load-bearing in the reduction above (the first-char disjointness,
+// the close shape, the laziness), so a variant must re-prove, not ride along.
+
+/// A recognized regex-literal idiom — exactly the bundled `lark.REGEXP` shape
+/// `\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*`. Carries no parameters: the recognizer
+/// pins every part of the shape, so the lowering is a fixed, audited rewrite.
+pub struct RegexpIdiom;
+
+/// Recognize the [`RegexpIdiom`] in a parsed terminal `node`, or `None`. Structural and
+/// exact — see the section comment above for why no variant is admitted.
+pub fn recognize_regexp_idiom(node: &Node) -> Option<RegexpIdiom> {
+    let parts = match node {
+        Node::Concat(parts) if parts.len() == 4 => parts,
+        _ => return None,
+    };
+    // parts[0]: the opening delimiter, exactly the escaped slash `\/`.
+    if !matches!(&parts[0], Node::Atom(s) if s == r"\/") {
+        return None;
+    }
+    // parts[1]: the empty-body guard, exactly `(?!\/)`, unquantified.
+    match &parts[1] {
+        Node::Assertion {
+            neg: true,
+            look: Look::Ahead,
+            body,
+            quant,
+        } if quant.is_empty() && matches!(body.as_ref(), Node::Atom(s) if s == r"\/") => {}
+        _ => return None,
+    }
+    // parts[2]: the lazy escaped body, exactly `(\\\/|\\\\|[^\/])*?` — the capturing
+    // group, the three alternatives in source order, and the lazy star are all pinned.
+    match &parts[2] {
+        Node::Group { open, body, quant } if open == "(" && quant == "*?" => {
+            let arms = match body.as_ref() {
+                Node::Alt(arms) if arms.len() == 3 => arms,
+                _ => return None,
+            };
+            for (arm, want) in arms.iter().zip([r"\\\/", r"\\\\", r"[^\/]"]) {
+                if !matches!(arm, Node::Atom(s) if s == want) {
+                    return None;
+                }
+            }
+        }
+        _ => return None,
+    }
+    // parts[3]: the close + flags tail, exactly `\/[imslux]*`.
+    if !matches!(&parts[3], Node::Atom(s) if s == r"\/[imslux]*") {
+        return None;
+    }
+    Some(RegexpIdiom)
+}
+
+impl RegexpIdiom {
+    /// Lower the idiom: drop the `(?!\/)` and bump the lazy body to non-empty
+    /// (`*?` → `+?`) — the exact rewrite the section comment proves. One unguarded,
+    /// lookaround-free branch; its lazy/priority match end is the plain leftmost-first
+    /// engine's native semantics.
+    fn lower(&self) -> Vec<LoweredBranch> {
+        vec![LoweredBranch {
+            regex: r"\/(\\\/|\\\\|[^\/])+?\/[imslux]*".to_string(),
+            leading: None,
+            trailing: None,
+            lookbehind: Vec::new(),
+        }]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1133,6 +1242,43 @@ mod tests {
         let b = lower_boundary("(?<=ab)c").unwrap();
         let lb = &b[0].lookbehind[0];
         assert!(!lb.neg && lb.set == "ab" && lb.offset_chars == 0 && lb.width == 2);
+    }
+
+    #[test]
+    fn regexp_idiom_lowers_to_one_unguarded_branch() {
+        let b = lower_boundary(r"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*").unwrap();
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].regex, r"\/(\\\/|\\\\|[^\/])+?\/[imslux]*");
+        assert!(
+            b[0].leading.is_none() && b[0].trailing.is_none() && b[0].lookbehind.is_empty(),
+            "the regexp idiom lowers to a single unguarded branch"
+        );
+    }
+
+    #[test]
+    fn regexp_idiom_recognizer_is_exact() {
+        // The bundled shape is recognized…
+        let node = super::super::parse(r"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*").unwrap();
+        assert!(recognize_regexp_idiom(&node).is_some());
+        // …and every near-miss is not (each deviates in one pinned part).
+        for p in [
+            r"\#(?!\#)(\\\#|\\\\|[^\#])*?\#[imslux]*", // wrong delimiter
+            r"\/(\\\/|\\\\|[^\/])*?\/[imslux]*",       // missing the guard
+            r"\/(?!x)(\\\/|\\\\|[^\/])*?\/[imslux]*",  // guard body is not the close
+            r"\/(?!\/)((?=a)\\\/|\\\\|[^\/])*?\/[imslux]*", // nested assertion in body
+            r"\/(?!\/)(.*?|\\\\|[^\/])*?\/[imslux]*",  // an unrelated lazy `.*?` arm
+            r"\/(?!\/)(\\\/|\\\\|[^\/])*\/[imslux]*",  // greedy body, not the lazy `*?`
+            r"\/(?!\/)(\\\/|\\\\|[^\/])*?[imslux]*",   // missing the close slash
+            r"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[a-z]*",    // different flags suffix
+            r"\/(?!\/)(\\\\|\\\/|[^\/])*?\/[imslux]*", // body alternatives reordered
+            r"\/(?!\/)(\\\/|\\\\|\\n|[^\/])*?\/[imslux]*", // extra body alternative
+        ] {
+            let node = super::super::parse(p).unwrap_or_else(|e| panic!("parse {p:?}: {e:?}"));
+            assert!(
+                recognize_regexp_idiom(&node).is_none(),
+                "recognizer wrongly accepted near-miss {p:?}"
+            );
+        }
     }
 
     #[test]

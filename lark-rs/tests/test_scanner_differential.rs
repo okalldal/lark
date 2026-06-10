@@ -32,7 +32,10 @@ mod common;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 
-use common::lowering::{corpus, string_idiom_terminals, supported_terminals, GenTerminal};
+use common::lowering::{
+    corpus, regexp_idiom_terminals, string_idiom_terminals, supported_terminals, GenTerminal,
+    REGEXP_RAW,
+};
 use lark_rs::grammar::terminal::flags;
 use lark_rs::{
     basic_lexer_conf, load_grammar, lower, lower_terminal, lower_terminal_dotall, BasicLexer,
@@ -374,8 +377,9 @@ fn run_python_files(d: &mut Differential) {
 /// Real `.lark` grammar files lexed under the bundled `lark.lark` (which is
 /// self-hosting). This drives the **real `lark.OP`** terminal — `/[+*]|[?](?![a-z])/`,
 /// a trailing-boundary guard M1 lowers — under the Dfa backend over genuine grammar
-/// text full of `+`/`*`/`?` EBNF operators, alongside its (still-fancy) `STRING` /
-/// `REGEXP`. Both backends must lex identically.
+/// text full of `+`/`*`/`?` EBNF operators, alongside the now-lowered `REGEXP`
+/// (the Stage-B regex-literal idiom) over the files' real `/…/` terminal patterns.
+/// Both backends must lex identically.
 fn run_lark_files(d: &mut Differential) {
     let grammar = std::fs::read_to_string(manifest_dir().join("src/grammars/lark.lark")).ok();
     let Some(grammar) = grammar else {
@@ -442,12 +446,14 @@ fn lookaround_grammar(t: &GenTerminal) -> (String, String) {
 /// pending path stays live for the bundled terminals the variable-offset / STRING
 /// milestone still declines.
 fn run_lookaround_grammars(d: &mut Differential) {
-    // The bare boundary/lookbehind population *and* python.STRING's real nested/prefixed
-    // opening-guard idiom (the marquee L2 splice) — both must lex byte-identically under
-    // the two backends, and (with the splice landed) both genuinely lower.
+    // The bare boundary/lookbehind population, python.STRING's real nested/prefixed
+    // opening-guard idiom (the marquee L2 splice), *and* lark.REGEXP's regex-literal
+    // idiom (Stage B) — all must lex byte-identically under the two backends, and (with
+    // the splice + idiom landed) all genuinely lower.
     for t in supported_terminals()
         .into_iter()
         .chain(string_idiom_terminals())
+        .chain(regexp_idiom_terminals())
     {
         let (grammar, pattern) = lookaround_grammar(&t);
         let start = ["start".to_string()];
@@ -515,6 +521,16 @@ fn test_scanner_backends_lex_identically() {
             Ok(Lowered::Branches(_))
         ),
         "python.STRING must LOWER (Lowered::Branches) under the splice, not route to fancy"
+    );
+    // Likewise lark.REGEXP: the lark.lark differential above runs with REGEXP *lowered*
+    // (the Stage-B regex-literal idiom), so its 0-divergence result is the lowered
+    // engine agreeing with fancy on real grammar files, not two fancy probes agreeing.
+    assert!(
+        matches!(
+            lower_terminal_dotall("REGEXP", REGEXP_RAW, false),
+            Ok(Lowered::Branches(_))
+        ),
+        "lark.REGEXP must LOWER (Lowered::Branches) via the regex-literal idiom"
     );
 
     eprintln!(

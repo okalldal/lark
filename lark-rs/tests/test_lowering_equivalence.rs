@@ -18,7 +18,8 @@ mod common;
 use common::lowering::{
     boundary_mutations, corpus, fancy_matcher, fancy_prefix, has_guard, has_lookbehind,
     lookbehind_mutations, lowered_prefix, mutant_lookbehind_matcher, mutant_matcher,
-    string_idiom_terminals, supported_terminals, BoundaryMutation, GenTerminal,
+    regexp_idiom_terminals, string_idiom_terminals, supported_terminals, BoundaryMutation,
+    GenTerminal, REGEXP_RAW,
 };
 use lark_rs::ShapeClass;
 
@@ -251,6 +252,68 @@ fn dropping_the_opening_guard_is_caught_by_the_quad_quote() {
         caught_by_quad_quote,
         "the drop-(?!\"\")-guard mutant was NOT caught by a `\"\"\"\"`-shape input — the \
          opening-guard splice would be undefended (a hole in the net)"
+    );
+}
+
+/// The **regex-literal idiom** (`lark.REGEXP`, Stage B): the lowered match-length must
+/// equal the `fancy-regex` oracle over every slash/backslash-heavy exhaustive corpus —
+/// which includes the `//` reject, escaped slashes/backslashes (`/\//`, `/\\/`), the
+/// lazy first-close (`/a//` matches `/a/`), the dangling-escaped-slash backtracking
+/// close (`/a\/b` matches `/a\/`), and greedy multi-flag suffixes (`/a/im`, `/a/iX`
+/// stopping at `X`). `lowered_prefix` returning `Err` (a declined terminal) is surfaced
+/// as a divergence, so a REGEXP that *failed* to lower fails loudly rather than passing
+/// vacuously.
+#[test]
+fn regexp_idiom_lowered_equals_fancy() {
+    let terms = regexp_idiom_terminals();
+    assert!(!terms.is_empty(), "no regexp-idiom terminals generated");
+    let mut failures = Vec::new();
+    for t in &terms {
+        if let Some(d) = equivalence_divergence(t) {
+            failures.push(d);
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "regexp-idiom generative-equivalence divergence(s):\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+/// **The drop-the-non-empty-body-bump equivalence mutant.** The `(?!\/)` guard's entire
+/// residual in the lowering is the `*?` → `+?` bump; a lowering that *forgot* it (kept
+/// `*?` while dropping the guard) would accept the empty `//` where the oracle rejects
+/// it. The meta-test asserts this mutant is **caught**, and that the witness is exactly
+/// a `//`-shaped input (oracle matches nothing, the mutant matches an empty regex
+/// literal at a leading `//`) — so the empty-body canary genuinely defends the idiom. A
+/// surviving mutant would mean the equivalence layer could not tell the bump-less
+/// REGEXP from the real one: a hole in the net.
+#[test]
+fn dropping_the_nonempty_body_bump_is_caught_by_the_empty_regexp() {
+    // The wrong lowering: guard dropped, lazy star kept.
+    let mutant_src = r"\/(\\\/|\\\\|[^\/])*?\/[imslux]*";
+    let mutant = fancy_matcher(mutant_src).expect("mutant compiles");
+    let oracle = fancy_matcher(REGEXP_RAW).expect("oracle compiles");
+
+    let mut caught_by_empty_regexp = false;
+    for t in &regexp_idiom_terminals() {
+        for input in corpus(&t.alphabet, t.max_len) {
+            let correct = fancy_prefix(&oracle, &input);
+            let wrong = fancy_prefix(&mutant, &input);
+            if correct == wrong {
+                continue;
+            }
+            // The divergence must be the canary: a leading `//` the real REGEXP rejects
+            // (None) but the bump-less mutant accepts as the empty literal.
+            if correct.is_none() && wrong.is_some() && input.starts_with("//") {
+                caught_by_empty_regexp = true;
+            }
+        }
+    }
+    assert!(
+        caught_by_empty_regexp,
+        "the drop-the-`+?`-bump mutant was NOT caught by a `//`-shaped input — the \
+         regexp idiom's empty-body guard would be undefended (a hole in the net)"
     );
 }
 

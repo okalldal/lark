@@ -450,6 +450,64 @@ pub fn string_idiom_terminals() -> Vec<GenTerminal> {
     out
 }
 
+/// The bundled `lark.REGEXP` pattern, verbatim — the Stage-B **regex-literal idiom**
+/// (`/ body / flags` with the internal `(?!\/)` empty-body guard). The recognizer
+/// (`recognize_regexp_idiom`) is exact, so this is the *only* pattern in the idiom's
+/// acceptance surface; the population below varies the corpus, not the pattern.
+pub const REGEXP_RAW: &str = r#"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*"#;
+
+/// The **regex-literal idiom** population (`lark.REGEXP`, Stage B). Unlike the other
+/// generators, the acceptance surface is a single exact shape, so the population varies
+/// the **exhaustive corpus** instead: slash/backslash-heavy alphabets (open/close + the
+/// `//` boundary + escape pairing), with and without flag letters (`i`, `m` — including
+/// the multi-flag suffix and the flag-vs-content ambiguity `x ∈ [imslux]` exercises),
+/// and a content char. These corpora drive the lazy close, the dangling-escaped-slash
+/// backtracking close (`/a\/b` → `/a\/`), the greedy flags suffix, and the `//` reject.
+pub fn regexp_idiom_terminals() -> Vec<GenTerminal> {
+    let alphabets: [(&str, &[char], usize); 3] = [
+        // slash + backslash + content + one flag letter, the canonical mix
+        ("core", &['/', '\\', 'a', 'i'], 6),
+        // pure delimiter/escape stress (every string is slash/backslash noise)
+        ("slashes", &['/', '\\', 'i'], 7),
+        // two flag letters + content: multi-flag suffixes (`/a/im`) and flag runs
+        ("flags", &['/', '\\', 'a', 'i', 'm'], 5),
+    ];
+    alphabets
+        .into_iter()
+        .map(|(label, alphabet, max_len)| GenTerminal {
+            name: format!("REGEXP_{label}"),
+            pattern: REGEXP_RAW.to_string(),
+            shape: ShapeClass::LeadingBoundary,
+            alphabet: alphabet.to_vec(),
+            max_len,
+        })
+        .collect()
+}
+
+/// **Near-miss regexp-idiom shapes the recognizer must NOT accept** — its reject
+/// surface. Each is the bundled idiom with exactly one pinned part changed: the
+/// delimiter, the guard, a body alternative, the quantifier, the close, or the flags
+/// suffix. None may lower (each would need its own proof; several are genuinely
+/// out-of-shape). The recognizer-level assertion lives in
+/// `src/lookaround/lower.rs::tests::regexp_idiom_recognizer_is_exact`; the route-level
+/// one in `tests/test_regexp_splice.rs`.
+pub fn regexp_idiom_reject_patterns() -> Vec<String> {
+    [
+        r"\#(?!\#)(\\\#|\\\\|[^\#])*?\#[imslux]*", // wrong delimiter
+        r"\/(?!x)(\\\/|\\\\|[^\/])*?\/[imslux]*",  // guard body is not the close
+        r"\/(?!\/)((?=a)\\\/|\\\\|[^\/])*?\/[imslux]*", // nested assertion in the body
+        r"\/(?!\/)(.*?|\\\\|[^\/])*?\/[imslux]*",  // an unrelated lazy `.*?` body arm
+        r"\/(?!\/)(\\\/|\\\\|[^\/])*\/[imslux]*",  // greedy body, not the lazy `*?`
+        r"\/(?!\/)(\\\/|\\\\|[^\/])*?[imslux]*",   // missing the close slash
+        r"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[a-z]*",    // different flags suffix
+        r"\/(?!\/)(\\\\|\\\/|[^\/])*?\/[imslux]*", // body alternatives reordered
+        r"\/(?!\/)(\\\/|\\\\|\\n|[^\/])*?\/[imslux]*", // extra body alternative
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
+}
+
 /// **Adversarial string-idiom shapes with a *non-literal* delimiter** — the recognizer's
 /// own acceptance surface (not just the classifier's). Each is structurally the string
 /// idiom `<q>(?!<q><q>).*?(?<!\\)(\\\\)*?<q>` but with `<q>` a regex construct that is
