@@ -767,6 +767,18 @@ mod tests {
         catch_unwind(AssertUnwindSafe(|| bake(grammar, opts).is_ok())).unwrap_or(false)
     }
 
+    /// Replays the full strip-mined Python-Lark bank through the shared
+    /// standalone `runtime` (#86), under the same XFAIL discipline as the other
+    /// banks. The `standalone_xfail.json` entries are **basic-lexer-incompatible**
+    /// grammars: their oracles were captured under the contextual lexer, and
+    /// Python's own *basic* lexer rejects/mis-types the same inputs the
+    /// basic-only standalone runtime does (verified directly — e.g. bank 105,
+    /// `!start: "a"i "a"`, where Python-basic errors on all four inputs). Bank
+    /// 105's `parse:105:1` joined the list when `"a"i` was reclassified
+    /// `PatternRe` → `PatternStr`-with-`i`: the old representation routed `"a"`
+    /// through an `unless` embed+retype Python never performs, which happened to
+    /// produce the contextual oracle's answer on that one input. Losing the
+    /// accidental pass is the cost of agreeing with Python's basic lexer.
     #[test]
     fn standalone_compliance_bank() {
         let Some(records) = load_json("bank.json") else {

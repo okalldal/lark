@@ -225,7 +225,11 @@ pub struct UnlessEntry {
 /// values in a hash map (the hot path — e.g. every `NAME` token probes it),
 /// case-insensitive keywords as anchored `(?i:…)` regexes, matched in
 /// definition order — the same semantics the keyword's own scanner pattern
-/// would have. When both could apply, the exact match wins.
+/// would have. When both could apply, the exact match wins. (Python's
+/// `UnlessCallback` is pure definition-order first-match; this diverges only
+/// when one regex terminal `unless`-matches both `"kw"i` and a later `"kw"` —
+/// on exact-cased input Python retypes to the `i` keyword, this table to the
+/// exact one. The hash map is what keeps the per-token probe O(1).)
 #[derive(Debug)]
 struct RetypeTable {
     exact: HashMap<String, SymbolId>,
