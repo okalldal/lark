@@ -72,6 +72,65 @@ fn test_single_maybe_unaffected() {
 }
 
 #[test]
+fn test_non_final_maybe_distributes_under_placeholders() {
+    // Issue #106, distilled from `python.lark`'s `parameters` rule: a non-final
+    // `[...]` under `maybe_placeholders` must be *distributed* into the parent's
+    // alternatives (Python's `_EMPTY` markers → `empty_indices`), not kept as a
+    // nullable helper rule. The helper form hides the following branch from the
+    // LR(0) closure: after `A ("," A)*`, the `,` that starts the *second*
+    // optional is reachable only through the first helper's ε-reduce, which the
+    // shift-over-reduce conflict resolution silently drops — so `a, *`
+    // (`def f(a, *b)` in python.lark) was a parse error although Python Lark
+    // accepts it. The distribution must also recurse: the first `[...]`'s
+    // present form ends in a `("," A)*` that lands mid-rule when spliced, so it
+    // distributes too (or `a, /, *` dies the same way one branch later).
+    //
+    // Expected shapes are Python Lark 1.3.1 (`lalr` and `earley` agree).
+    let grammar = "start: A (\",\" A)* [\",\" SLASH (\",\" A)*] [\",\" [STAR]]\n\
+                   SLASH: \"/\"\n\
+                   STAR: \"*\"\n\
+                   A: \"a\"\n\
+                   %ignore \" \"";
+    let cases = [
+        ("a", "a,_,_"),
+        ("a, a", "a,a,_,_"),
+        ("a, *", "a,_,*"),
+        ("a, a, *", "a,a,_,*"),
+        ("a, /", "a,/,_"),
+        ("a, /, a", "a,/,a,_"),
+        ("a, /, *", "a,/,*"),
+        ("a, /, a, *", "a,/,a,*"),
+        ("a,", "a,_,_"),
+        ("a, /, a,", "a,/,a,_"),
+    ];
+    for parser in [ParserAlgorithm::Lalr, ParserAlgorithm::Earley] {
+        let lark = Lark::new(
+            grammar,
+            LarkOptions {
+                parser: parser.clone(),
+                start: vec!["start".to_string()],
+                maybe_placeholders: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("grammar failed to load under {parser:?}: {e}"));
+        for (input, expected) in cases {
+            let tree = lark
+                .parse(input)
+                .unwrap_or_else(|e| panic!("{parser:?} must parse {input:?}: {e}"))
+                .as_tree()
+                .unwrap()
+                .clone();
+            assert_eq!(
+                shape(&tree.children),
+                expected,
+                "{parser:?}, input {input:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn test_oversized_negative_terminal_priority_saturates() {
     // `A.-99999999999999999999999` overflows i32; Lark (bignum priorities) accepts
     // it as an extremely low priority. We saturate to i32::MIN and still build/parse

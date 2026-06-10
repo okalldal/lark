@@ -51,7 +51,9 @@ fn main() {
         };
 
         if let Err(e) = parser.parse(&src) {
-            let rel = path.strip_prefix(lark_dir.parent().unwrap()).unwrap_or(path);
+            let rel = path
+                .strip_prefix(lark_dir.parent().unwrap())
+                .unwrap_or(path);
             eprintln!("PARSE ERROR {}: {}", rel.display(), e);
             errors += 1;
         }
