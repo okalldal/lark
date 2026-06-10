@@ -300,7 +300,7 @@ After each REDUCE, `apply_rule_options()` post-processes children:
 | Conflict detection | ✅ | S/R → shift; R/R → priority, else `GrammarError::Conflict`; matches Lark outcomes |
 | ParseTable (ACTION/GOTO) | ✅ | Shift/Reduce/Accept |
 | BasicLexer | ✅ | Single combined regex (leftmost-first, like Python `re`) + `unless` keyword retyping |
-| ContextualLexer | ✅ | Per-state `Scanner`; per-state `unless` retyping; always_accept for ignores |
+| ContextualLexer | ✅ | Per-state `Scanner`; per-state `unless` retyping; always_accept for ignores. States sharing a terminal set share one scanner (Python's `lexer_by_tokens` dedup, 4–5× on the wild bank) and scanners build lazily on first use; an eager full-terminal validation build (Python's `root_lexer` analog) keeps scope errors at construction time |
 | Terminal priority ordering | ✅ | (-priority, -pattern_len, name) |
 | Within-terminal alt ordering | ✅ | Longest-first (mirrors Python Lark) |
 | Tree assembly | ✅ | `expand1`, anon inlining |
