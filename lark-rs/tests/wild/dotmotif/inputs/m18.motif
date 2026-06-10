@@ -1,0 +1,9 @@
+
+        a(a1, b1) {
+            b1 -> a1
+            a1 -> b1 as ab
+            ab.length > ab.weight
+        }
+
+        a(A, B)
+        

@@ -1,0 +1,7 @@
+
+        for $foo in $foos {
+
+            ($fqdn, $ipv4) = $foo.split("|")
+
+            [ inet:dns:a=($fqdn, $ipv4) ]
+        } 

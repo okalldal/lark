@@ -1,0 +1,34 @@
+{
+  "name": "gersemi_cmake",
+  "description": "CMake language grammar from the gersemi formatter (the lark grammar its rust-backend is tested against). Upstream also passes an inline transformer; the bank drops it and freezes the raw tree.",
+  "source": {
+    "repo": "https://github.com/BlankSpruce/gersemi",
+    "ref": "HEAD",
+    "commit": "87d433786c01f1fbdd79cc3f10d1a9147bb68ba9",
+    "license": "MPL-2.0",
+    "grammar_files": {
+      "grammar/cmake.lark": "tests/old_parser/cmake.lark"
+    }
+  },
+  "entry_grammar": "grammar/cmake.lark",
+  "lark_options": {
+    "parser": "lalr",
+    "lexer": "contextual",
+    "start": "start",
+    "maybe_placeholders": false,
+    "propagate_positions": false,
+    "keep_all_tokens": false,
+    "regex_module": false,
+    "postlex": null
+  },
+  "inputs": {
+    "inputs/bracket_arguments_should_not_be_affected.in.cmake": "tests/formatter/bracket_arguments_should_not_be_affected.in.cmake",
+    "inputs/command_with_short_name.in.cmake": "tests/formatter/command_with_short_name.in.cmake",
+    "inputs/condition_syntax.in.cmake": "tests/formatter/condition_syntax.in.cmake",
+    "inputs/if_block.in.cmake": "tests/formatter/if_block.in.cmake",
+    "inputs/limit_line_length.in.cmake": "tests/formatter/limit_line_length.in.cmake",
+    "inputs/simple_project_commands.in.cmake": "tests/formatter/simple_project_commands.in.cmake",
+    "inputs/while_block.in.cmake": "tests/formatter/while_block.in.cmake",
+    "inputs/cmake_2_doc_example.cmake": "tests/parser/cmake_2_doc_example.cmake"
+  }
+}

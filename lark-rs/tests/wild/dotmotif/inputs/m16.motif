@@ -1,0 +1,7 @@
+
+            A -> B
+            B -> A
+            A === B
+            A.radius = 5
+            B.radius = 6
+            

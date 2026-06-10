@@ -1,0 +1,1 @@
+TestAllTypes{single_any: TestAllTypes{single_int32: 150}}.single_any

@@ -1,0 +1,1 @@
+test:comp +(:hehe<2 and :haha=test)

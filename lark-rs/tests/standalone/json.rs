@@ -6,7 +6,7 @@
 //
 // Source grammar:
 //   ?start: value
-//   
+//
 //   ?value: object
 //         | array
 //         | string
@@ -14,13 +14,13 @@
 //         | "true"             -> true
 //         | "false"            -> false
 //         | "null"             -> null
-//   
+//
 //   array  : "[" _WS? [value ("," _WS? value)*] "]"
 //   object : "{" _WS? [pair ("," _WS? pair)*] "}"
 //   pair   : string ":" _WS value
-//   
+//
 //   string : ESCAPED_STRING
-//   
+//
 //   %import common.ESCAPED_STRING
 //   %import common.SIGNED_NUMBER
 //   %import common.WS -> _WS

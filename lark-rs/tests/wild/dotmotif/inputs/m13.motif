@@ -1,0 +1,6 @@
+
+            A -> B
+            B -> A
+            A.size > 5
+            A.size = 5
+            

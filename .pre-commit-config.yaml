@@ -25,8 +25,11 @@ repos:
     - id: check-yaml
     - id: debug-statements
     - id: end-of-file-fixer
-      exclude: '(^tests/.*\.lark|\.svg)$'
+      exclude: '(^tests/.*\.lark$|^lark-rs/tests/wild/.*/(grammar|inputs)/|\.svg$)'
     - id: mixed-line-ending
+      # Same rationale as the fixers below: the wild-bank corpus is vendored
+      # byte-exact from upstream; a line-ending rewrite would corrupt it.
+      exclude: '(^lark-rs/tests/wild/.*/(grammar|inputs)/|\.svg$)'
     - id: requirements-txt-fixer
     - id: trailing-whitespace
-      exclude: '(^tests/.*\.lark|\.svg)$'
+      exclude: '(^tests/.*\.lark$|^lark-rs/tests/wild/.*/(grammar|inputs)/|\.svg$)'

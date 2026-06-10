@@ -1,0 +1,35 @@
+{
+  "name": "miniwdl_wdl",
+  "description": "Workflow Description Language (WDL) 1.0 grammar from miniwdl, start=\"document\". Upstream also passes lexer_callbacks={\"COMMENT\": ...} (a side-effect comment buffer); the bank drops it.",
+  "source": {
+    "repo": "https://github.com/chanzuckerberg/miniwdl",
+    "ref": "HEAD",
+    "commit": "55a52f6c9047c6e964f1c954d48fa5a6eaadb813",
+    "license": "MIT",
+    "grammar_files": {
+      "grammar/wdl_1_0.lark": "WDL/_grammar_old.py versions[\"1.0\"] (materialized)"
+    }
+  },
+  "entry_grammar": "grammar/wdl_1_0.lark",
+  "lark_options": {
+    "parser": "lalr",
+    "lexer": "contextual",
+    "start": "document",
+    "maybe_placeholders": false,
+    "propagate_positions": true,
+    "keep_all_tokens": false,
+    "regex_module": false,
+    "postlex": null
+  },
+  "inputs": {
+    "inputs/issue82.wdl": "test_corpi/contrived/issue82.wdl",
+    "inputs/scatter_collisions.wdl": "test_corpi/contrived/scatter_collisions.wdl",
+    "inputs/issue81.wdl": "test_corpi/contrived/issue81.wdl",
+    "inputs/incomplete.wdl": "test_corpi/contrived/incomplete.wdl",
+    "inputs/unverified_struct.wdl": "test_corpi/contrived/unverified_struct.wdl",
+    "inputs/tricky_outputs.wdl": "test_corpi/contrived/tricky_outputs.wdl",
+    "inputs/issue669.wdl": "test_corpi/contrived/issue669.wdl",
+    "inputs/contrived.wdl": "test_corpi/contrived/contrived.wdl"
+  },
+  "notes": "The grammar file is WDL/_grammar_old.py's versions[\"1.0\"] — the byte-exact concatenation productions_common1 + productions_1_0, exactly as upstream assembles it (the grammar lives in Python strings, not a .lark file)."
+}

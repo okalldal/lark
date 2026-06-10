@@ -1,0 +1,48 @@
+{
+  "name": "dotmotif",
+  "description": "DotMotif graph-motif query DSL from aplbrain/dotmotif. Upstream constructs Lark with ALL defaults — so this is a wild Earley + dynamic-lexer entry (like mistql).",
+  "source": {
+    "repo": "https://github.com/aplbrain/dotmotif",
+    "ref": "HEAD",
+    "commit": "fc4a9aef5f50ac7028ef92f046dc9431b74ae132",
+    "license": "Apache-2.0",
+    "grammar_files": {
+      "grammar/grammar.lark": "dotmotif/parsers/v2/grammar.lark"
+    }
+  },
+  "entry_grammar": "grammar/grammar.lark",
+  "lark_options": {
+    "parser": "earley",
+    "lexer": "dynamic",
+    "start": "start",
+    "maybe_placeholders": true,
+    "propagate_positions": false,
+    "keep_all_tokens": false,
+    "regex_module": false,
+    "postlex": null
+  },
+  "inputs": {
+    "inputs/m01.motif": "triple-quoted motif strings from dotmotif test files + README",
+    "inputs/m02.motif": "triple-quoted motif strings from dotmotif test files + README",
+    "inputs/m03.motif": "triple-quoted motif strings from dotmotif test files + README",
+    "inputs/m04.motif": "triple-quoted motif strings from dotmotif test files + README",
+    "inputs/m05.motif": "triple-quoted motif strings from dotmotif test files + README",
+    "inputs/m06.motif": "triple-quoted motif strings from dotmotif test files + README",
+    "inputs/m07.motif": "triple-quoted motif strings from dotmotif test files + README",
+    "inputs/m08.motif": "triple-quoted motif strings from dotmotif test files + README",
+    "inputs/m09.motif": "triple-quoted motif strings from dotmotif test files + README",
+    "inputs/m10.motif": "triple-quoted motif strings from dotmotif test files + README",
+    "inputs/m11.motif": "triple-quoted motif strings from dotmotif test files + README",
+    "inputs/m12.motif": "triple-quoted motif strings from dotmotif test files + README",
+    "inputs/m13.motif": "triple-quoted motif strings from dotmotif test files + README",
+    "inputs/m14.motif": "triple-quoted motif strings from dotmotif test files + README",
+    "inputs/m15.motif": "triple-quoted motif strings from dotmotif test files + README",
+    "inputs/m16.motif": "triple-quoted motif strings from dotmotif test files + README",
+    "inputs/m17.motif": "triple-quoted motif strings from dotmotif test files + README",
+    "inputs/m18.motif": "triple-quoted motif strings from dotmotif test files + README",
+    "inputs/m19.motif": "triple-quoted motif strings from dotmotif test files + README",
+    "inputs/m20.motif": "triple-quoted motif strings from dotmotif test files + README",
+    "inputs/m21.motif": "triple-quoted motif strings from dotmotif test files + README",
+    "inputs/m22.motif": "triple-quoted motif strings from dotmotif test files + README"
+  }
+}

@@ -1,0 +1,1 @@
+TestAllTypes{single_any: null}.single_any

@@ -1,0 +1,1 @@
+inet:fqdn#xxx.xxxxxx.xxxx.xx for $tag in $node.tags(xxx.xxxxxx.*.xx) { <- inet:dns:a +#xx <- meta:note [ +#foo]  ->inet:dns:a }

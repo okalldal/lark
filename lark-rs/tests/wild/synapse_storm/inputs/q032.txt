@@ -1,0 +1,1 @@
+[inet:ipv4=197.231.221.211 :asn=37560 :loc=lr.lo.voinjama :latlong="8.4219,-9.7478" :dns:rev=exit1.ipredator.se +#cno.anon.tor.exit = (2017/12/19, 2019/02/15) ]

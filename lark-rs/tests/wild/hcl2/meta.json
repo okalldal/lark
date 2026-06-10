@@ -1,0 +1,42 @@
+{
+  "name": "hcl2",
+  "description": "HCL2 (Terraform configuration language) parser. v4.3.5 is the last release before the custom PostLexer; the grammar is plain LALR.",
+  "source": {
+    "repo": "https://github.com/amplify-education/python-hcl2",
+    "ref": "v4.3.5",
+    "commit": "92f2ee22b26f81e72b43210f5f0e9e83a193cee3",
+    "license": "MIT",
+    "grammar_files": {
+      "grammar/hcl2.lark": "hcl2/hcl2.lark"
+    }
+  },
+  "entry_grammar": "grammar/hcl2.lark",
+  "lark_options": {
+    "parser": "lalr",
+    "lexer": "contextual",
+    "start": "start",
+    "maybe_placeholders": true,
+    "propagate_positions": true,
+    "keep_all_tokens": false,
+    "regex_module": false,
+    "postlex": null
+  },
+  "inputs": {
+    "inputs/backend.tf": "test/helpers/terraform-config/backend.tf",
+    "inputs/cloudwatch.tf": "test/helpers/terraform-config/cloudwatch.tf",
+    "inputs/data_sources.tf": "test/helpers/terraform-config/data_sources.tf",
+    "inputs/empty-heredoc.hcl2": "test/helpers/terraform-config/empty-heredoc.hcl2",
+    "inputs/iam.tf": "test/helpers/terraform-config/iam.tf",
+    "inputs/locals_embedded_condition.tf": "test/helpers/terraform-config/locals_embedded_condition.tf",
+    "inputs/locals_embedded_function.tf": "test/helpers/terraform-config/locals_embedded_function.tf",
+    "inputs/locals_embedded_interpolation.tf": "test/helpers/terraform-config/locals_embedded_interpolation.tf",
+    "inputs/locals_embedded_multi_function_nested.tf": "test/helpers/terraform-config/locals_embedded_multi_function_nested.tf",
+    "inputs/multiline_expressions.tf": "test/helpers/terraform-config/multiline_expressions.tf",
+    "inputs/provider_function.tf": "test/helpers/terraform-config/provider_function.tf",
+    "inputs/resource_keyword_attribute.tf": "test/helpers/terraform-config/resource_keyword_attribute.tf",
+    "inputs/route_table.tf": "test/helpers/terraform-config/route_table.tf",
+    "inputs/s3.tf": "test/helpers/terraform-config/s3.tf",
+    "inputs/variables.tf": "test/helpers/terraform-config/variables.tf",
+    "inputs/vars.auto.tfvars": "test/helpers/terraform-config/vars.auto.tfvars"
+  }
+}

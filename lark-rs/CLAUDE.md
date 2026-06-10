@@ -52,12 +52,13 @@ Oracle JSON files are committed so tests run without Python.
 ### Running Tests
 
 ```bash
-cargo test                          # all tests (~0.2 s)
+cargo test                          # all tests
 cargo test test_arithmetic_oracle   # arithmetic grammar vs oracle
 cargo test test_json_oracle         # JSON grammar vs oracle
 cargo test test_python_numbers      # Python number literals vs oracle
 cargo test test_json_corpus         # 293-file JSONTestSuite (requires submodule)
 cargo test test_earley              # Earley oracle + Earley compliance bank (Phase 2)
+cargo test --test test_wild         # wild-grammar bank (real-world grammars, tests/wild/)
 
 # Deterministic super-linearity gate (#56) — needs the work-counter feature.
 cargo test --features perf-counters --test test_earley_scaling
@@ -178,6 +179,10 @@ tests/
                       must reproduce
   test_oracle_coverage.rs  Meta-test: every grammar needs an oracle or quarantine
   test_json_corpus.rs 293-file JSONTestSuite corpus test
+  test_wild.rs        Wild-grammar bank replay (tests/wild/, XFAIL-gated) — real-world
+                      grammars+inputs vs Python-Lark oracles (digest-compared for big trees)
+  wild/               Wild-grammar bank: real-world grammars + inputs vendored verbatim
+                      from pinned upstream commits (see tests/wild/README.md)
   test_standalone.rs  Standalone parser gen (#42): `include!`s the committed
                       generated parsers + compares to the live oracle; freshness gate
   standalone/         Committed generated parsers (json.rs, arithmetic.rs) — the
@@ -191,11 +196,14 @@ tests/
                       earley_bank.json + earley_xfail.json (Earley basic lexer);
                       earley_dynamic_bank.json + earley_dynamic_xfail.json (dynamic lexer);
                       cyk_bank.json + cyk_xfail.json (CYK)
+    wild/             <project>.json + xfail.json — wild-bank oracles (tests/wild/)
   corpora/            Git submodules for external test corpora (JSONTestSuite)
 
 tools/
   generate_oracles.py        Runs Python Lark, writes fixtures/oracles/**/*.json
   extract_lark_compliance.py Instruments Python Lark's suite → compliance/bank.json
+  generate_wild_oracles.py   Replays tests/wild/ through Python Lark → oracles/wild/
+                             (needs `pip install regex` for synapse_storm)
 ```
 
 ### Grammar Loading Pipeline (`loader.rs`)
@@ -570,7 +578,69 @@ CYK bank is 124/124 = 100% (empty `cyk_xfail.json`).
 
 Enforcement: `tests/test_oracle_coverage.rs` fails the build if a committed grammar has
 neither an oracle nor a `QUARANTINE` entry; CI (`.github/workflows/lark-rs.yml`) also
-regenerates both oracle generators and fails if the committed JSON drifts.
+regenerates all three oracle generators and fails if the committed JSON drifts.
+
+---
+
+## Wild-Grammar Bank — Real-World Regression Net + Benchmarks
+
+`tests/wild/` vendors real-world Lark grammars + inputs strip-mined from open
+source projects (HCL2/Terraform, MapServer mapfiles, GraphQL SDL, PEP 508,
+MistQL, Synapse Storm, Vyper, Quil), each pinned to an upstream commit with its
+license and the *exact* Lark options upstream passes — see
+[`tests/wild/README.md`](tests/wild/README.md). `tools/generate_wild_oracles.py`
+freezes Python Lark's tree per input (full JSON for small trees; node/token
+counts + FNV-1a 64 digest of a canonical serialization for big ones, so the
+fixtures stay small); `tests/test_wild.rs` replays the bank under the same
+XFAIL-burndown discipline as the compliance banks
+(`LARK_WILD_WRITE_XFAIL=1` regenerates `oracles/wild/xfail.json`;
+`LARK_WILD_TRACE=1` prints per-project timing). `cargo bench --bench wild` runs
+the same bank as a recorded performance trend (build cost + corpus/largest-input
+throughput per project).
+
+Findings (updated 2026-06-10 after the L4 merge — the xfail set encodes them):
+
+The bank now splits into two categories. **Engine-scope refusals** — wild
+grammars L4 *deliberately* rejects (`docs/LOOKAROUND_SCOPE.md`), the measured
+real-world cost of dropping the backtracking engine (6 of 16 wild grammars):
+
+* **hcl2**: heredoc terminal uses a backreference (`<<(?P<heredoc>…)…(?P=heredoc)`).
+  (Its original R/R-conflict failure was *fixed* by the #106 optional-distribution work.)
+* **gersemi_cmake**: CMake bracket arguments use a backreference
+  (`(?P=equal_signs)` — the `[==[…]==]` matching-fence idiom).
+* **synapse_storm**: atomic groups `(?>…)` + recursive subpatterns `(?&NAME)`
+  (`regex`-module-only).
+* **mappyfile**: internal lookahead `(?![_a-zA-Z])` in `SIGNED_INT`.
+* **miniwdl_wdl**: internal lookahead `(?=[^>])` in `COMMAND2_FRAGMENT`.
+  (Its duplicate-alternative failure was *fixed* on master.)
+* **cel**: an upstream grammar **bug** — `BYTES_LIT` writes `{4-8}` for `{4,8}`;
+  backtracking engines silently treat the malformed quantifier as literal text,
+  the DFA engine rejects the pattern. Fixable upstream (candidate bug report);
+  the rest of the terminal looks lowerable.
+
+**Burndown candidates** — genuine lark-rs gaps:
+
+* **vyper does not build**: remaining unresolvable LALR R/R conflicts (the
+  #106 fix cleared pyquil's, not vyper's).
+* **dotmotif does not build**: its grammar puts `//` comment lines *between*
+  the `|` alternatives of a multi-line rule, which lark-rs's loader rejects
+  ("Unexpected token at top level: Or") — a grammar-loader syntax gap.
+* **matter_idl 5/8**: the three failing inputs all use the case-insensitive
+  anonymous keyword `"optional"i` (`member_attribute`); the token *after* the
+  type mis-lexes — same family as the standalone bank's `"a"i` xfail.
+
+**Fully passing**: pyquil (✅ *cleared by the #106 optional-distribution fix* —
+build + 6/6), lark_lark (the P0 baseline — lark.lark over the 12 real grammar
+files `examples/lark_grammar.py` parses upstream, incl. python.lark and a full
+Verilog grammar), pylogics_ltl (relative rule imports + trailing-lookahead
+terminals through the M1 lowering), mistql (Earley + dynamic lexer),
+tartiflette, poetry_markers, poetry_pep508 (file-relative `%import`) —
+108/257 inputs agree overall (the drop from 147 is the L4 refusals, which
+fail whole projects by design).
+
+Oracle note: embedded trees are capped at 55 levels (`EMBED_DEPTH_LIMIT`) —
+serde_json refuses JSON nested deeper than 128 and a tree level costs ~2 —
+deeper trees (CEL's non-collapsed cascade) are digest-verified only.
 
 ---
 

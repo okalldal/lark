@@ -33,6 +33,15 @@ OUT_DIR = LARK_RS_DIR / "tests" / "fixtures" / "oracles" / "compliance"
 # Import the local Python Lark (our oracle) and its test suite.
 sys.path.insert(0, str(REPO_ROOT))
 
+# Block the optional `regex` module BEFORE anything imports lark or its test
+# suite: the suite gates extra tests (regex=True grammars, conditional-pattern
+# LexError parity checks) on `import regex` succeeding, so with `regex`
+# installed the extracted banks would gain records and the freshness gate
+# (byte-identical regeneration everywhere) would depend on the local pip
+# environment. The wild bank (tools/generate_wild_oracles.py) is where
+# regex-module grammars are covered — there `regex` is a hard requirement.
+sys.modules["regex"] = None  # makes `import regex` raise ImportError
+
 from lark import Lark, Tree, Token  # noqa: E402
 
 RELATIVE_IMPORT = re.compile(r"%import\s*\.")

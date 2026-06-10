@@ -1,0 +1,4 @@
+
+            A -> B [weight=4, area<=10, area<=20]
+            X -> Y [weight=2]
+        

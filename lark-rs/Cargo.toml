@@ -125,3 +125,10 @@ harness = false
 [profile.release]
 opt-level = 3
 lto = true
+
+# Wild-grammar bank trend (build + parse over tests/wild). Same recorded-trend
+# discipline as benches/parse.rs; see benches/wild.rs.
+[[bench]]
+name = "wild"
+path = "benches/wild.rs"
+harness = false

@@ -1,0 +1,1 @@
+cel.block([msg.single_int64, msg.single_int32, cel.index(0) > 0, cel.index(1) > 0, cel.index(0) + cel.index(1), cel.index(3) ? cel.index(4) : 0, cel.index(2) ? cel.index(5) : 0], cel.index(6))

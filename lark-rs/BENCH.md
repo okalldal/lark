@@ -58,7 +58,24 @@ cargo bench --bench parse           # Rust LALR/Earley internal numbers + scalin
 python3 tools/bench_compare.py      # Python Lark on parse.rs's JSON/arith grammars
 cargo bench --bench vs_python_lark  # cross-engine JSON/Python/SQL/NL-CYK, prints the speedup
 cargo bench --bench lex_backends    # lexer: regex Scanner vs regex-automata DfaScanner (L1)
+cargo bench --bench wild            # wild-grammar bank: build + parse on real-world grammars
 ```
+
+`wild` runs the real-world bank in `tests/wild/` (HCL2, mapfiles, GraphQL SDL,
+PEP 508, MistQL, Storm, Vyper, Quil — see `tests/wild/README.md`) with each
+project's own upstream Lark options: per project it reports single-shot build
+cost plus corpus and largest-input parse throughput, and prints `SKIP` for
+grammars lark-rs cannot build yet (the wild xfail set). First numbers worth
+knowing (2026-06-10, dev box): wild LALR parse throughput lands at
+6–14 MB/s on file-sized inputs; the mistql Earley + dynamic-lexer corpus is
+~0.05 MB/s; and pyquil's corpus (tiny expression inputs, deep trees) shows the
+small-input per-parse overhead that is part of the wild profile, unlike the
+synthetic large-input workloads. The bench's input set self-updates as xfails
+burn down: matter_idl's 100 KB/341 KB large-bucket files join its corpus row
+the moment the `"optional"i` mis-lex is fixed. (Historical: pre-L4, mappyfile
+built in ~1.5 s release vs Python's 0.13 s — a build-cost datapoint that
+returns if its by-design refusal is ever revisited; cel benched ~0.3 MB/s on
+tiny inputs before its upstream `{4-8}` typo became an L4 build refusal.)
 
 `vs_python_lark` is the **cross-engine end-to-end comparison** (issue #50, the
 "10–100×" headline) and is the single command that reports the speedup ratio: it

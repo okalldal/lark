@@ -1,0 +1,15 @@
+
+                diedge(a, b) {
+                    a -> b
+                    b !> a
+                    a.type == "KCab-p"
+                }
+                diedge(A, B)
+                diedge(B, C)
+                diedge(C, D)
+
+                A !> C
+                C !> A
+                D !> B
+                B !> D
+                

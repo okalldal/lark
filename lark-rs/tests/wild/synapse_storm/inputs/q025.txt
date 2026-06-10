@@ -1,0 +1,1 @@
+[test:str=c] switch $woot { hehe: {[+#baz]} "haha hoho": {[+#faz]} "lolz:lulz": {[+#jaz]} }
