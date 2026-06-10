@@ -27,7 +27,13 @@ sets, deep EBNF nesting, postlex indentation, file-relative imports, the
                 (one exception: an upstream grammar *bug* may be patched in the
                 vendored copy, recorded in meta.json `local_patches` — we do not
                 file upstream bugs; the alternative is leaving the project
-                xfail'd. Precedent: cel's `{4-8}`-for-`{4,8}` quantifier typo.)
+                xfail'd. Precedent: cel's `{4-8}`-for-`{4,8}` quantifier typo.
+                A patch is a genuine language change — verify it at patch time
+                by byte-identical oracle regeneration, and RE-VERIFY against the
+                unpatched grammar whenever the project's inputs are refreshed:
+                the oracle generator parses the patched copy, so a new input
+                exercising the upstream reading would otherwise freeze a
+                non-upstream oracle silently.)
   inputs/       real inputs, vendored verbatim (or curated strings; the
                 meta.json inputs map records where each came from)
   LICENSE       the upstream project's license, vendored verbatim

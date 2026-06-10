@@ -419,6 +419,16 @@ is `_WS` in this grammar, not `WS`. Store and look up by alias.
 propagation). Conflict detection depends on its precision: SLR FOLLOW sets would
 over-report conflicts, so accurate `GrammarError::Conflict` reporting requires it.
 
+**Terminal regexes are Python-`re` dialect, by decision.** Where the two dialects
+assign *different meanings* to the same syntax, lark-rs normalizes toward Python's —
+Lark grammars are authored against Python `re`, and oracle fidelity is the project
+goal. The load-bearing case: `\<` / `\>` are literal `<` / `>` in Python but
+word-boundary assertions in the regex crate (outside a class `\<\>` silently matches
+*nothing* where Python matches `"<>"`; inside a class they are a compile error), so
+`PatternRe::new` (`normalize_python_escapes`) rewrites exactly those two escapes to
+bare chars. Flip side: a grammar author *expecting* the regex crate's word-boundary
+`\<`/`\>` is silently overridden — that is the intended trade.
+
 **`regex` crate has no lookahead or backreferences.** Some Python Lark grammars rely
 on lookaround (the bundled `python.lark`/`lark.lark` do: `STRING`'s
 `(?!"")…(?<!\\)(\\\\)*?` guards, `DEC_NUMBER`'s `(?![1-9])`, `lark.OP`/`REGEXP`).
