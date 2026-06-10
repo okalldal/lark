@@ -29,14 +29,21 @@ fail() { printf '\n\033[1;31m❌ %s\033[0m\n' "$1" >&2; exit 1; }
 note "Rust format: cargo fmt --check --all"
 ( cd "$LARK_RS_DIR" && cargo fmt --check --all ) || fail "cargo fmt --check failed — run 'cargo fmt --all' in lark-rs/"
 
-# 2. Rust test suite — identical to the CI "cargo test --all" step. This also runs
-#    the L0 lexer differential oracle (tests/test_scanner_differential.rs), which
-#    asserts the regex-crate Scanner and the regex-automata DFA backend lex the
-#    compliance bank + JSON corpus + Python files byte-identically
-#    (docs/LEXER_DFA_PLAN.md). It needs the JSONTestSuite submodule for full
-#    coverage (it skips that corpus gracefully if absent).
+# 2. Rust test suite — identical to the CI "cargo test --all" step. (The L0 lexer
+#    differential oracle needs the fancy-oracle feature and runs in step 2a.) It
+#    needs the JSONTestSuite submodule for full coverage (it skips that corpus
+#    gracefully if absent).
 note "Rust tests: cargo test --all"
 ( cd "$LARK_RS_DIR" && cargo test --all ) || fail "cargo test --all failed"
+
+# 2a. Fancy-oracle differential (docs/LOOKAROUND_SCOPE.md): the default build has
+#     zero fancy-regex code, so the L0 whole-lexer differential
+#     (tests/test_scanner_differential.rs) only runs under the TEST-ONLY
+#     fancy-oracle feature, which resurrects the Regex reference backend's fancy
+#     side-probes as the independent oracle. Matches the CI step of the same name.
+note "Fancy-oracle differential: cargo test -p lark-rs --features fancy-oracle"
+( cd "$LARK_RS_DIR" && cargo test -p lark-rs --features fancy-oracle ) \
+  || fail "fancy-oracle differential failed — the lowered engine diverged from the fancy reference"
 
 # 2b. Deterministic super-linearity gate (#56) — the scaling regression net only
 #     runs with the perf-counters feature, so it is a no-op in `cargo test --all`.

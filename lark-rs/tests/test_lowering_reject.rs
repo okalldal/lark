@@ -20,7 +20,57 @@ mod common;
 use common::lowering::{
     reject_cases, reject_path_mutants, supported_terminals, wrongly_accepted_rejects,
 };
-use lark_rs::{classify, lower_terminal, DefaultClassifier, Lowered, ShapeClass, Verdict};
+use lark_rs::{
+    classify, lower_terminal, DeclineReason, DefaultClassifier, Lowered, Rejection, Scope,
+    ShapeClass, Verdict,
+};
+
+/// The **decided two-category taxonomy** (`docs/LOOKAROUND_SCOPE.md`), pinned variant
+/// by variant so a re-mapping is a conscious, reviewed change — not a drive-by edit.
+/// General internal lookahead and variable-width lookbehind bodies are by-design
+/// non-goals (the audited delimited-token idioms are the sanctioned growth path for
+/// the former; Python `re` itself rejects the latter, so rejection is oracle parity).
+/// The NotYetImplemented entries are the promotion-tripwire set the scope scoreboard
+/// (`tests/test_lookaround_scope.rs`) exercises end-to-end.
+#[test]
+fn scope_taxonomy_mapping_is_the_decided_one() {
+    use DeclineReason as D;
+    use Rejection as R;
+    let out_of_scope_rejections = [
+        R::Backref,
+        R::Nested,
+        R::QuantifiedAssertion,
+        R::VariableWidthBehind,
+        R::Internal,
+    ];
+    for r in out_of_scope_rejections {
+        assert_eq!(r.scope(), Scope::OutOfScope, "{r:?}");
+    }
+    assert_eq!(R::Unbounded.scope(), Scope::NotYetImplemented);
+
+    let out_of_scope_declines = [
+        D::QuantifiedLookbehind,
+        D::UnboundedLookbehindBody,
+        D::ZeroWidthLookbehindBody,
+        D::InteriorLookahead,
+        D::ZeroWidthBranch,
+        D::BacktrackingOnlySyntax,
+    ];
+    for d in out_of_scope_declines {
+        assert_eq!(d.scope(), Scope::OutOfScope, "{d:?}");
+    }
+    let nyi_declines = [
+        D::VariableOffsetLookbehind,
+        D::NestedInGroup,
+        D::NonRealizableGuardedBase,
+        D::EmptyArmNotRealizable,
+        D::FrontendParse,
+        D::VerboseMode,
+    ];
+    for d in nyi_declines {
+        assert_eq!(d.scope(), Scope::NotYetImplemented, "{d:?}");
+    }
+}
 
 /// Layer 4: the reject corpus is fully active. Every adversarial pattern is rejected
 /// with the *expected* reason — no out-of-shape assertion is ever accepted.

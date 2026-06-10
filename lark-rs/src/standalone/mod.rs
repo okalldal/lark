@@ -70,8 +70,8 @@
 //!     `regex-automata` DFA scanner bundle or its guard side-tables. Closing this is
 //!     **L5** of the lexer DFA plan (serialize the plain + guarded DFAs, guard/lookbehind
 //!     tables, rank maps, start-byte prefilter, `unless`, and `%ignore`, and replace the
-//!     `ScannerPlan` path with it). L5 is blocked on L4 (dropping the runtime
-//!     `fancy-regex` side-probe). See `docs/LEXER_DFA_PLAN.md` (L5) and
+//!     `ScannerPlan` path with it). L4 (drop runtime `fancy-regex`) has landed, so L5
+//!     is unblocked. See `docs/LEXER_DFA_PLAN.md` (L5) and
 //!     `docs/LEXER_DFA_STATUS.md`.
 
 // Compiled + type-checked here so the embedded driver cannot rot, then `include_str!`d

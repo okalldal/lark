@@ -19,10 +19,10 @@ pub use grammar::{
 pub use lexer::{BasicLexer, ContextualLexer, DynamicMatcher, Lexer, LexerBackend, LexerConf};
 pub use lookaround::classify::{
     classify, lower_terminal, lower_terminal_dotall, route_terminal, route_terminal_dotall,
-    Classification, Classifier, DefaultClassifier, Lowered, LoweringRoute, Rejection, ShapeClass,
-    Verdict,
+    Classification, Classifier, DeclineReason, DefaultClassifier, LookaroundIssue, Lowered,
+    LoweringRoute, Rejection, Scope, ShapeClass, Verdict,
 };
-pub use lookaround::lower::{GuardSpec, LookbehindGuard, LoweredBranch};
+pub use lookaround::lower::{GuardSpec, LookbehindGuard, LowerDecline, LoweredBranch};
 pub use parsers::{
     basic_lexer_conf, lalr, EarleyParser, LexFailure, ParseTable, ParserConf, TokenSource,
 };
@@ -135,8 +135,11 @@ pub struct LarkOptions {
     /// Which combined-scanner engine the lexer builds (see [`LexerBackend`]). This
     /// has **no** Lark equivalent — it selects between byte-for-byte equivalent
     /// scanner implementations (`docs/LEXER_DFA_PLAN.md`) and exists so the L0
-    /// differential oracle can build the same grammar under both engines. Defaults
-    /// to the `regex-automata` DFA scanner.
+    /// differential oracle can build the same grammar under both engines (under
+    /// the TEST-ONLY `fancy-oracle` feature the `Regex` backend hosts the
+    /// historical fancy-regex reference probes). Both backends refuse the same
+    /// patterns with the same categorized errors (`docs/LOOKAROUND_SCOPE.md`).
+    /// Defaults to the `regex-automata` DFA scanner.
     pub lexer_backend: LexerBackend,
 }
 

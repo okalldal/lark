@@ -1,7 +1,14 @@
-//! Cost characterization of the lookaround terminals routed to `fancy-regex`
-//! (issue #40). A recorded trend printed to stdout — NOT a CI gate (see BENCH.md).
+//! Scan-cost characterization of the bundled lookaround terminals (issue #40) — a
+//! recorded trend printed to stdout, NOT a CI gate (see BENCH.md).
 //!
 //! Run with:  cargo bench --bench redos
+//!
+//! **Since L4 every bundled lookaround terminal is LOWERED into the regex-automata
+//! DFA** (no runtime fancy-regex exists — `docs/LOOKAROUND_SCOPE.md`), so this bench
+//! now characterizes the lowered path's linearity; the analysis below is the
+//! HISTORICAL fancy-era record it was written against, kept because the measured
+//! conclusion (no ReDoS on the shipped terminals) is the baseline the lowered
+//! numbers are read against.
 //!
 //! The bundled grammars are shipped *verbatim* from Python Lark; their lookaround
 //! terminals (which the linear `regex` crate cannot compile) are routed to

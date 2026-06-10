@@ -47,6 +47,15 @@ jobs:
       - name: Cargo test
         run: cargo test --all
 
+      # The fancy-oracle differential (docs/LOOKAROUND_SCOPE.md): the default build
+      # contains zero fancy-regex code, so the L0 whole-lexer differential
+      # (tests/test_scanner_differential.rs, required-features = ["fancy-oracle"])
+      # is skipped above and must run explicitly with the TEST-ONLY feature that
+      # resurrects the Regex reference backend's fancy side-probes. `-p lark-rs`,
+      # not `--all`: the workspace siblings do not define the feature.
+      - name: Fancy-oracle differential (test-only reference)
+        run: cargo test -p lark-rs --features fancy-oracle
+
       # Deterministic super-linearity gate (#56). The work counters in src/perf.rs
       # only exist under the `perf-counters` feature, so the scaling regression net
       # is a no-op in `cargo test --all` above and must be run explicitly here. It
