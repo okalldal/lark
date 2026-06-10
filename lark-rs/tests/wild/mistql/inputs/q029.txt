@@ -1,0 +1,1 @@
+[{filter: "hp"}, {filter: "lp"}] | filter filter == "lp"

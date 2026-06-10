@@ -1,0 +1,5 @@
+
+    for $iterkey in $foo.$"bar key".$'biz key' {
+        inet:ipv4=$foo.$"bar key".$'biz key'.$iterkey
+    }
+    

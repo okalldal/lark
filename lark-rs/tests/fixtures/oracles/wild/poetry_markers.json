@@ -1,0 +1,841 @@
+{
+  "name": "poetry_markers",
+  "cases": [
+    {
+      "input_file": "inputs/m01.txt",
+      "ok": true,
+      "node_count": 3,
+      "token_count": 3,
+      "canon_len": 101,
+      "fnv1a64": "4d5dd68c8975b1cb",
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "marker",
+            "children": [
+              {
+                "type": "tree",
+                "data": "item",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_NAME",
+                    "value": "python_version"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_OP",
+                    "value": ">="
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "ESCAPED_STRING",
+                    "value": "\"3.8\""
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "input_file": "inputs/m02.txt",
+      "ok": true,
+      "node_count": 4,
+      "token_count": 7,
+      "canon_len": 193,
+      "fnv1a64": "5d90189d22eaae46",
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "marker",
+            "children": [
+              {
+                "type": "tree",
+                "data": "item",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_NAME",
+                    "value": "python_version"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_OP",
+                    "value": ">="
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "ESCAPED_STRING",
+                    "value": "\"2.7\""
+                  }
+                ]
+              },
+              {
+                "type": "token",
+                "token_type": "BOOL_OP",
+                "value": "and"
+              },
+              {
+                "type": "tree",
+                "data": "item",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_NAME",
+                    "value": "python_version"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_OP",
+                    "value": "!="
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "ESCAPED_STRING",
+                    "value": "\"3.4\""
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "input_file": "inputs/m03.txt",
+      "ok": true,
+      "node_count": 4,
+      "token_count": 7,
+      "canon_len": 192,
+      "fnv1a64": "1c28d2d4e0e8ee3c",
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "marker",
+            "children": [
+              {
+                "type": "tree",
+                "data": "item",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_NAME",
+                    "value": "sys_platform"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_OP",
+                    "value": "=="
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "ESCAPED_STRING",
+                    "value": "\"win32\""
+                  }
+                ]
+              },
+              {
+                "type": "token",
+                "token_type": "BOOL_OP",
+                "value": "and"
+              },
+              {
+                "type": "tree",
+                "data": "item",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_NAME",
+                    "value": "python_version"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_OP",
+                    "value": "<"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "ESCAPED_STRING",
+                    "value": "\"3.6\""
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "input_file": "inputs/m04.txt",
+      "ok": true,
+      "node_count": 5,
+      "token_count": 11,
+      "canon_len": 270,
+      "fnv1a64": "a4c3df7af72336e4",
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "marker",
+            "children": [
+              {
+                "type": "tree",
+                "data": "item",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_NAME",
+                    "value": "os_name"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_OP",
+                    "value": "=="
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "ESCAPED_STRING",
+                    "value": "\"nt\""
+                  }
+                ]
+              },
+              {
+                "type": "token",
+                "token_type": "BOOL_OP",
+                "value": "or"
+              },
+              {
+                "type": "tree",
+                "data": "item",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_NAME",
+                    "value": "os_name"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_OP",
+                    "value": "=="
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "ESCAPED_STRING",
+                    "value": "\"posix\""
+                  }
+                ]
+              },
+              {
+                "type": "token",
+                "token_type": "BOOL_OP",
+                "value": "and"
+              },
+              {
+                "type": "tree",
+                "data": "item",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_NAME",
+                    "value": "sys_platform"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_OP",
+                    "value": "=="
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "ESCAPED_STRING",
+                    "value": "\"darwin\""
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "input_file": "inputs/m05.txt",
+      "ok": true,
+      "node_count": 4,
+      "token_count": 7,
+      "canon_len": 209,
+      "fnv1a64": "ab55a1d0634e3716",
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "marker",
+            "children": [
+              {
+                "type": "tree",
+                "data": "item",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_NAME",
+                    "value": "implementation_name"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_OP",
+                    "value": "=="
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "ESCAPED_STRING",
+                    "value": "\"cpython\""
+                  }
+                ]
+              },
+              {
+                "type": "token",
+                "token_type": "BOOL_OP",
+                "value": "and"
+              },
+              {
+                "type": "tree",
+                "data": "item",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_NAME",
+                    "value": "python_full_version"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_OP",
+                    "value": ">="
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "ESCAPED_STRING",
+                    "value": "\"3.8.1\""
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "input_file": "inputs/m06.txt",
+      "ok": true,
+      "node_count": 4,
+      "token_count": 7,
+      "canon_len": 203,
+      "fnv1a64": "312cd1edbbb80291",
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "marker",
+            "children": [
+              {
+                "type": "tree",
+                "data": "item",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_NAME",
+                    "value": "platform_machine"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_OP",
+                    "value": "=="
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "ESCAPED_STRING",
+                    "value": "\"x86_64\""
+                  }
+                ]
+              },
+              {
+                "type": "token",
+                "token_type": "BOOL_OP",
+                "value": "or"
+              },
+              {
+                "type": "tree",
+                "data": "item",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_NAME",
+                    "value": "platform_machine"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_OP",
+                    "value": "=="
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "ESCAPED_STRING",
+                    "value": "\"aarch64\""
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "input_file": "inputs/m07.txt",
+      "ok": true,
+      "node_count": 4,
+      "token_count": 7,
+      "canon_len": 180,
+      "fnv1a64": "58732f4e14e01d77",
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "marker",
+            "children": [
+              {
+                "type": "tree",
+                "data": "item",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_NAME",
+                    "value": "extra"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_OP",
+                    "value": "=="
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "ESCAPED_STRING",
+                    "value": "\"security\""
+                  }
+                ]
+              },
+              {
+                "type": "token",
+                "token_type": "BOOL_OP",
+                "value": "or"
+              },
+              {
+                "type": "tree",
+                "data": "item",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_NAME",
+                    "value": "extra"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_OP",
+                    "value": "=="
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "ESCAPED_STRING",
+                    "value": "\"socks\""
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "input_file": "inputs/m08.txt",
+      "ok": true,
+      "node_count": 6,
+      "token_count": 13,
+      "canon_len": 322,
+      "fnv1a64": "b588470fe6838b70",
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "marker",
+            "children": [
+              {
+                "type": "tree",
+                "data": "item",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_NAME",
+                    "value": "python_version"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_OP",
+                    "value": ">="
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "ESCAPED_STRING",
+                    "value": "\"3.10\""
+                  }
+                ]
+              },
+              {
+                "type": "token",
+                "token_type": "BOOL_OP",
+                "value": "and"
+              },
+              {
+                "type": "token",
+                "token_type": "L_PAREN",
+                "value": "("
+              },
+              {
+                "type": "tree",
+                "data": "marker",
+                "children": [
+                  {
+                    "type": "tree",
+                    "data": "item",
+                    "children": [
+                      {
+                        "type": "token",
+                        "token_type": "MARKER_NAME",
+                        "value": "sys_platform"
+                      },
+                      {
+                        "type": "token",
+                        "token_type": "MARKER_OP",
+                        "value": "=="
+                      },
+                      {
+                        "type": "token",
+                        "token_type": "ESCAPED_STRING",
+                        "value": "\"linux\""
+                      }
+                    ]
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "BOOL_OP",
+                    "value": "or"
+                  },
+                  {
+                    "type": "tree",
+                    "data": "item",
+                    "children": [
+                      {
+                        "type": "token",
+                        "token_type": "MARKER_NAME",
+                        "value": "sys_platform"
+                      },
+                      {
+                        "type": "token",
+                        "token_type": "MARKER_OP",
+                        "value": "=="
+                      },
+                      {
+                        "type": "token",
+                        "token_type": "ESCAPED_STRING",
+                        "value": "\"darwin\""
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "token",
+                "token_type": "R_PAREN",
+                "value": ")"
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "input_file": "inputs/m09.txt",
+      "ok": true,
+      "node_count": 3,
+      "token_count": 3,
+      "canon_len": 118,
+      "fnv1a64": "645acdf9ed8eebf8",
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "marker",
+            "children": [
+              {
+                "type": "tree",
+                "data": "item",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_NAME",
+                    "value": "platform_python_implementation"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_OP",
+                    "value": "!="
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "ESCAPED_STRING",
+                    "value": "\"PyPy\""
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "input_file": "inputs/m10.txt",
+      "ok": true,
+      "node_count": 3,
+      "token_count": 3,
+      "canon_len": 111,
+      "fnv1a64": "179ee89dacc8bca6",
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "marker",
+            "children": [
+              {
+                "type": "tree",
+                "data": "item",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_NAME",
+                    "value": "python_full_version"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_OP",
+                    "value": "<"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "ESCAPED_STRING",
+                    "value": "\"3.11.0a7\""
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "input_file": "inputs/m11.txt",
+      "ok": true,
+      "node_count": 4,
+      "token_count": 7,
+      "canon_len": 199,
+      "fnv1a64": "c9c35677c43cedbd",
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "marker",
+            "children": [
+              {
+                "type": "tree",
+                "data": "item",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_NAME",
+                    "value": "sys_platform"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_OP",
+                    "value": "!="
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "ESCAPED_STRING",
+                    "value": "\"cygwin\""
+                  }
+                ]
+              },
+              {
+                "type": "token",
+                "token_type": "BOOL_OP",
+                "value": "and"
+              },
+              {
+                "type": "tree",
+                "data": "item",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_NAME",
+                    "value": "platform_system"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_OP",
+                    "value": "!="
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "ESCAPED_STRING",
+                    "value": "\"Windows\""
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "input_file": "inputs/m12.txt",
+      "ok": true,
+      "node_count": 6,
+      "token_count": 13,
+      "canon_len": 310,
+      "fnv1a64": "46d491c3517d2375",
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "marker",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "L_PAREN",
+                "value": "("
+              },
+              {
+                "type": "tree",
+                "data": "marker",
+                "children": [
+                  {
+                    "type": "tree",
+                    "data": "item",
+                    "children": [
+                      {
+                        "type": "token",
+                        "token_type": "MARKER_NAME",
+                        "value": "python_version"
+                      },
+                      {
+                        "type": "token",
+                        "token_type": "MARKER_OP",
+                        "value": "<"
+                      },
+                      {
+                        "type": "token",
+                        "token_type": "ESCAPED_STRING",
+                        "value": "\"3.9\""
+                      }
+                    ]
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "BOOL_OP",
+                    "value": "and"
+                  },
+                  {
+                    "type": "tree",
+                    "data": "item",
+                    "children": [
+                      {
+                        "type": "token",
+                        "token_type": "MARKER_NAME",
+                        "value": "sys_platform"
+                      },
+                      {
+                        "type": "token",
+                        "token_type": "MARKER_OP",
+                        "value": "=="
+                      },
+                      {
+                        "type": "token",
+                        "token_type": "ESCAPED_STRING",
+                        "value": "\"linux\""
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "token",
+                "token_type": "R_PAREN",
+                "value": ")"
+              },
+              {
+                "type": "token",
+                "token_type": "BOOL_OP",
+                "value": "or"
+              },
+              {
+                "type": "tree",
+                "data": "item",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_NAME",
+                    "value": "extra"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "MARKER_OP",
+                    "value": "=="
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "ESCAPED_STRING",
+                    "value": "\"test\""
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

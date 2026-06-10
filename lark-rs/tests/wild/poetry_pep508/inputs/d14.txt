@@ -1,0 +1,1 @@
+zstandard ; platform_python_implementation == "CPython"

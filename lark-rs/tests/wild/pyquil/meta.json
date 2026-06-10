@@ -1,0 +1,32 @@
+{
+  "name": "pyquil",
+  "description": "Quil quantum-instruction-language grammar from pyQuil v3 (the last release before parsing moved to quil-rs), start=\"quil\".",
+  "source": {
+    "repo": "https://github.com/rigetti/pyquil",
+    "ref": "v3.5.4",
+    "commit": "673928a8383be487e8da6d90b8c7c1a20d9ab5e6",
+    "license": "Apache-2.0",
+    "grammar_files": {
+      "grammar/grammar.lark": "pyquil/_parser/grammar.lark"
+    }
+  },
+  "entry_grammar": "grammar/grammar.lark",
+  "lark_options": {
+    "parser": "lalr",
+    "lexer": "contextual",
+    "start": "quil",
+    "maybe_placeholders": true,
+    "propagate_positions": false,
+    "keep_all_tokens": false,
+    "regex_module": false,
+    "postlex": null
+  },
+  "inputs": {
+    "inputs/calibration_program_cz.quil": "test/unit/data/calibration_program_cz.quil",
+    "inputs/calibration_program_cz_cphase.quil": "test/unit/data/calibration_program_cz_cphase.quil",
+    "inputs/calibration_program_measure.quil": "test/unit/data/calibration_program_measure.quil",
+    "inputs/calibration_program_rx.quil": "test/unit/data/calibration_program_rx.quil",
+    "inputs/calibration_program_xy.quil": "test/unit/data/calibration_program_xy.quil",
+    "inputs/test1.quil": "test/unit/data/test1.quil"
+  }
+}

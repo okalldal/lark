@@ -1,0 +1,34 @@
+{
+  "name": "mappyfile",
+  "description": "MapServer Mapfile grammar (case-insensitive keywords, nested blocks).",
+  "source": {
+    "repo": "https://github.com/geographika/mappyfile",
+    "ref": "HEAD",
+    "commit": "faa485b38693183e5639e756510fbc1cd4fc9007",
+    "license": "MIT",
+    "grammar_files": {
+      "grammar/mapfile.lark": "mappyfile/mapfile.lark"
+    }
+  },
+  "entry_grammar": "grammar/mapfile.lark",
+  "lark_options": {
+    "parser": "lalr",
+    "lexer": "contextual",
+    "start": "start",
+    "maybe_placeholders": true,
+    "propagate_positions": false,
+    "keep_all_tokens": false,
+    "regex_module": false,
+    "postlex": null
+  },
+  "inputs": {
+    "inputs/map4.map": "tests/mapfiles/map4.map",
+    "inputs/map5.map": "tests/mapfiles/map5.map",
+    "inputs/map6.map": "tests/mapfiles/map6.map",
+    "inputs/map7.map": "tests/mapfiles/map7.map",
+    "inputs/itasca.map": "tests/mapfiles/itasca.map",
+    "inputs/itasca2.map": "tests/mapfiles/itasca2.map",
+    "inputs/large_map3.map": "tests/mapfiles/large_map3.map",
+    "inputs/large_map1.map": "tests/mapfiles/large_map1.map"
+  }
+}

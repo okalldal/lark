@@ -1,0 +1,1 @@
+{ spotCount: (events | filter type =~ "p[ae]t" | count), dog: "spot" }

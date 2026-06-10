@@ -1,0 +1,1 @@
+alerts | groupby processid | mapvalues (sequence type=="outofmemory" type=="connect" @) | filtervalues (count @) > 0 | keys

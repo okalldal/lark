@@ -1,0 +1,22 @@
+
+        /* A
+            multiline
+            comment */
+        [ inet:ipv4=1.2.3.4 ] // this is a comment
+        // and this too...
+
+        switch $foo {
+
+            // The bar case...
+
+            bar: {
+                [ +#hehe.haha ]
+            }
+
+            /*
+                The
+                baz
+                case
+            */
+            'baz faz': {}
+        } 

@@ -1,0 +1,1 @@
+media:news <(refs)- $bar -(#foo or #bar)

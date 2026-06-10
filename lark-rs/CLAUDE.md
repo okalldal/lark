@@ -52,12 +52,13 @@ Oracle JSON files are committed so tests run without Python.
 ### Running Tests
 
 ```bash
-cargo test                          # all tests (~0.2 s)
+cargo test                          # all tests
 cargo test test_arithmetic_oracle   # arithmetic grammar vs oracle
 cargo test test_json_oracle         # JSON grammar vs oracle
 cargo test test_python_numbers      # Python number literals vs oracle
 cargo test test_json_corpus         # 293-file JSONTestSuite (requires submodule)
 cargo test test_earley              # Earley oracle + Earley compliance bank (Phase 2)
+cargo test --test test_wild         # wild-grammar bank (real-world grammars, tests/wild/)
 
 # Deterministic super-linearity gate (#56) — needs the work-counter feature.
 cargo test --features perf-counters --test test_earley_scaling
@@ -174,6 +175,10 @@ tests/
                       must reproduce
   test_oracle_coverage.rs  Meta-test: every grammar needs an oracle or quarantine
   test_json_corpus.rs 293-file JSONTestSuite corpus test
+  test_wild.rs        Wild-grammar bank replay (tests/wild/, XFAIL-gated) — real-world
+                      grammars+inputs vs Python-Lark oracles (digest-compared for big trees)
+  wild/               Wild-grammar bank: real-world grammars + inputs vendored verbatim
+                      from pinned upstream commits (see tests/wild/README.md)
   test_standalone.rs  Standalone parser gen (#42): `include!`s the committed
                       generated parsers + compares to the live oracle; freshness gate
   standalone/         Committed generated parsers (json.rs, arithmetic.rs) — the
@@ -187,11 +192,14 @@ tests/
                       earley_bank.json + earley_xfail.json (Earley basic lexer);
                       earley_dynamic_bank.json + earley_dynamic_xfail.json (dynamic lexer);
                       cyk_bank.json + cyk_xfail.json (CYK)
+    wild/             <project>.json + xfail.json — wild-bank oracles (tests/wild/)
   corpora/            Git submodules for external test corpora (JSONTestSuite)
 
 tools/
   generate_oracles.py        Runs Python Lark, writes fixtures/oracles/**/*.json
   extract_lark_compliance.py Instruments Python Lark's suite → compliance/bank.json
+  generate_wild_oracles.py   Replays tests/wild/ through Python Lark → oracles/wild/
+                             (needs `pip install regex` for synapse_storm)
 ```
 
 ### Grammar Loading Pipeline (`loader.rs`)
@@ -568,7 +576,42 @@ CYK bank is 124/124 = 100% (empty `cyk_xfail.json`).
 
 Enforcement: `tests/test_oracle_coverage.rs` fails the build if a committed grammar has
 neither an oracle nor a `QUARANTINE` entry; CI (`.github/workflows/lark-rs.yml`) also
-regenerates both oracle generators and fails if the committed JSON drifts.
+regenerates all three oracle generators and fails if the committed JSON drifts.
+
+---
+
+## Wild-Grammar Bank — Real-World Regression Net + Benchmarks
+
+`tests/wild/` vendors real-world Lark grammars + inputs strip-mined from open
+source projects (HCL2/Terraform, MapServer mapfiles, GraphQL SDL, PEP 508,
+MistQL, Synapse Storm, Vyper, Quil), each pinned to an upstream commit with its
+license and the *exact* Lark options upstream passes — see
+[`tests/wild/README.md`](tests/wild/README.md). `tools/generate_wild_oracles.py`
+freezes Python Lark's tree per input (full JSON for small trees; node/token
+counts + FNV-1a 64 digest of a canonical serialization for big ones, so the
+fixtures stay small); `tests/test_wild.rs` replays the bank under the same
+XFAIL-burndown discipline as the compliance banks
+(`LARK_WILD_WRITE_XFAIL=1` regenerates `oracles/wild/xfail.json`;
+`LARK_WILD_TRACE=1` prints per-project timing). `cargo bench --bench wild` runs
+the same bank as a recorded performance trend (build cost + corpus/largest-input
+throughput per project).
+
+Initial findings (2026-06-10, the current xfail set — burndown candidates):
+
+* **hcl2 / pyquil / vyper do not build**: lark-rs reports unresolvable LALR
+  R/R conflicts on grammars Python Lark builds cleanly; the colliding pairs are
+  empty anonymous EBNF helpers (`__anon_maybe_*` / `__anon_opt_*` / `__anon_group_*`),
+  pointing at the optional-expansion strategy (Python duplicates rule bodies
+  for `?`/`[]`; lark-rs introduces nullable helper rules).
+* **synapse_storm does not build**: one terminal uses `regex`-module-only
+  syntax (atomic groups `(?>…)` + recursive subpatterns `(?&NAME)`) that
+  neither `regex` nor `fancy-regex` accepts.
+* **mappyfile builds but mis-lexes** every input (`Unexpected token STATUS`),
+  and its build is slow (~1.5 s release vs Python's 0.13 s) — both a
+  correctness and a build-cost target.
+* **Fully passing**: mistql (Earley + dynamic lexer), tartiflette,
+  poetry_markers, poetry_pep508 (file-relative `%import`) — 71/144 inputs
+  agree overall.
 
 ---
 

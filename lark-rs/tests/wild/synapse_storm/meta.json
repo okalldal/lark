@@ -1,0 +1,62 @@
+{
+  "name": "synapse_storm",
+  "description": "Storm query language from the Synapse intelligence-analysis platform. A very large LALR grammar; upstream loads it with regex=True (the `regex` module) and start=\"query\".",
+  "source": {
+    "repo": "https://github.com/vertexproject/synapse",
+    "ref": "HEAD",
+    "commit": "452fb90f166c287fed5bee5e38c32b6e94fdd910",
+    "license": "Apache-2.0",
+    "grammar_files": {
+      "grammar/storm.lark": "synapse/data/lark/storm.lark"
+    }
+  },
+  "entry_grammar": "grammar/storm.lark",
+  "lark_options": {
+    "parser": "lalr",
+    "lexer": "contextual",
+    "start": "query",
+    "maybe_placeholders": false,
+    "propagate_positions": true,
+    "keep_all_tokens": false,
+    "regex_module": true,
+    "postlex": null
+  },
+  "inputs": {
+    "inputs/q001.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q002.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q003.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q004.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q005.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q006.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q007.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q008.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q009.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q010.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q011.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q012.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q013.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q014.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q015.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q016.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q017.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q018.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q019.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q020.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q021.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q022.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q023.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q024.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q025.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q026.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q027.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q028.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q029.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q030.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q031.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q032.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q033.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q034.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q035.txt": "synapse/tests/test_lib_grammar.py Queries list",
+    "inputs/q036.txt": "synapse/tests/test_lib_grammar.py Queries list"
+  }
+}

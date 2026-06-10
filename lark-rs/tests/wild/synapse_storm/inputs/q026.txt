@@ -1,0 +1,1 @@
+test:str=pennywise | noderefs -d 3 --omit-traversal-tag=omit.nopiv --omit-traversal-tag=test

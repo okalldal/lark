@@ -75,7 +75,8 @@ command -v python3 >/dev/null 2>&1 || fail "python3 not installed"
   cd "$LARK_RS_DIR"
   python3 tools/generate_oracles.py >/dev/null
   python3 tools/extract_lark_compliance.py >/dev/null
-) || fail "oracle generators failed (is Python 'lark' installed? 'pip install lark')"
+  python3 tools/generate_wild_oracles.py >/dev/null
+) || fail "oracle generators failed (needs 'pip install lark regex' — regex backs the wild bank's synapse_storm grammar)"
 
 if ! ( cd "$REPO_ROOT" && git diff --quiet -- lark-rs/tests/fixtures/oracles ); then
   printf '\nCommitted oracles are stale — regeneration changed:\n' >&2

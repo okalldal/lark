@@ -1,0 +1,18 @@
+
+    [
+    inet:email:message="*"
+        :to=woot@woot.com
+        :from=visi@vertex.link
+        :replyto=root@root.com
+        :subject="hi there"
+        :date=2015
+        :body="there are mad sploitz here!"
+        :bytes="*"
+    ]
+
+    {[ inet:email:message:link=($node, https://www.vertex.link) ]}
+
+    {[ inet:email:message:attachment=($node, "*") ] -inet:email:message [ :name=sploit.exe ]}
+
+    {[ meta:source=($node, ('inet:email:header', ('to', 'Visi Kensho <visi@vertex.link>'))) ]}
+    

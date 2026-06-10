@@ -1,0 +1,17 @@
+
+        for $foo in $foos {
+
+            [ inet:ipv4=1.2.3.4 ]
+
+            switch $foo {
+                bar: { [ +#ohai ] break }
+                baz: { [ +#visi ] continue }
+                (far, faz): { [ +#multi.far ] continue }
+                ("gar", "gaz"): { [ +#multi.gar ] continue }
+                ('har', 'haz'): { [ +#multi.har ] continue }
+                ("kar", 'kaz', koo): { [ +#multi.kar ] continue }
+            }
+
+            [ inet:ipv4=5.6.7.8 ]
+            [ +#hehe ]
+        } 

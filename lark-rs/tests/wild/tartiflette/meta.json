@@ -1,0 +1,31 @@
+{
+  "name": "tartiflette",
+  "description": "GraphQL SDL grammar from the Tartiflette GraphQL server.",
+  "source": {
+    "repo": "https://github.com/dailymotion/tartiflette",
+    "ref": "HEAD",
+    "commit": "421c1e937f553d6a5bf2f30154022c0d77053cfb",
+    "license": "MIT",
+    "grammar_files": {
+      "grammar/graphql_sdl_grammar.lark": "tartiflette/language/parsers/lark/graphql_sdl_grammar.lark"
+    }
+  },
+  "entry_grammar": "grammar/graphql_sdl_grammar.lark",
+  "lark_options": {
+    "parser": "lalr",
+    "lexer": "contextual",
+    "start": "document",
+    "maybe_placeholders": true,
+    "propagate_positions": true,
+    "keep_all_tokens": false,
+    "regex_module": false,
+    "postlex": null
+  },
+  "inputs": {
+    "inputs/introspection.sdl": "tartiflette/schema/builtins/introspection.sdl",
+    "inputs/animals.sdl": "tests/functional/data/sdls/animals.sdl",
+    "inputs/libraries.sdl": "tests/functional/data/sdls/libraries.sdl",
+    "inputs/pets_schema.graphql": "tests/functional/reusable/pets/schema.graphql",
+    "inputs/coercion.sdl": "tests/functional/data/sdls/coercion.sdl"
+  }
+}

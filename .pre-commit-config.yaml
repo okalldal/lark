@@ -25,8 +25,8 @@ repos:
     - id: check-yaml
     - id: debug-statements
     - id: end-of-file-fixer
-      exclude: '(^tests/.*\.lark|\.svg)$'
+      exclude: '(^tests/.*\.lark$|^lark-rs/tests/wild/.*/(grammar|inputs)/|\.svg$)'
     - id: mixed-line-ending
     - id: requirements-txt-fixer
     - id: trailing-whitespace
-      exclude: '(^tests/.*\.lark|\.svg)$'
+      exclude: '(^tests/.*\.lark$|^lark-rs/tests/wild/.*/(grammar|inputs)/|\.svg$)'

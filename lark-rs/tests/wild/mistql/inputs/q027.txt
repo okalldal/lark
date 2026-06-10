@@ -1,0 +1,1 @@
+"my name is mister cool guy" =~ (regex "[a-z ]*")

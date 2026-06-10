@@ -92,11 +92,16 @@ jobs:
       # that the committed oracles are in sync with the current Python Lark.
       - name: Oracle freshness (committed oracles must match regeneration)
         run: |
+          # `regex` backs the wild bank's synapse_storm grammar, which upstream
+          # loads with regex=True (tools/generate_wild_oracles.py).
+          pip install regex
           python3 tools/generate_oracles.py
           python3 tools/extract_lark_compliance.py
+          python3 tools/generate_wild_oracles.py
           if ! git diff --quiet -- tests/fixtures/oracles; then
-            echo "::error::Committed oracles are stale. Run tools/generate_oracles.py"
-            echo "and tools/extract_lark_compliance.py, then commit the changes."
+            echo "::error::Committed oracles are stale. Run tools/generate_oracles.py,"
+            echo "tools/extract_lark_compliance.py, and tools/generate_wild_oracles.py,"
+            echo "then commit the changes."
             git --no-pager diff --stat -- tests/fixtures/oracles
             exit 1
           fi

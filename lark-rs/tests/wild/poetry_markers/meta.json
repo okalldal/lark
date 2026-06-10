@@ -1,0 +1,38 @@
+{
+  "name": "poetry_markers",
+  "description": "PEP 508 environment-marker grammar from poetry-core.",
+  "source": {
+    "repo": "https://github.com/python-poetry/poetry-core",
+    "ref": "HEAD",
+    "commit": "19dfc92be324d14b471e028204329e3f052d2fb6",
+    "license": "MIT",
+    "grammar_files": {
+      "grammar/markers.lark": "src/poetry/core/version/grammars/markers.lark"
+    }
+  },
+  "entry_grammar": "grammar/markers.lark",
+  "lark_options": {
+    "parser": "lalr",
+    "lexer": "contextual",
+    "start": "start",
+    "maybe_placeholders": true,
+    "propagate_positions": false,
+    "keep_all_tokens": false,
+    "regex_module": false,
+    "postlex": null
+  },
+  "inputs": {
+    "inputs/m01.txt": "real-world PEP 508 environment markers (curated)",
+    "inputs/m02.txt": "real-world PEP 508 environment markers (curated)",
+    "inputs/m03.txt": "real-world PEP 508 environment markers (curated)",
+    "inputs/m04.txt": "real-world PEP 508 environment markers (curated)",
+    "inputs/m05.txt": "real-world PEP 508 environment markers (curated)",
+    "inputs/m06.txt": "real-world PEP 508 environment markers (curated)",
+    "inputs/m07.txt": "real-world PEP 508 environment markers (curated)",
+    "inputs/m08.txt": "real-world PEP 508 environment markers (curated)",
+    "inputs/m09.txt": "real-world PEP 508 environment markers (curated)",
+    "inputs/m10.txt": "real-world PEP 508 environment markers (curated)",
+    "inputs/m11.txt": "real-world PEP 508 environment markers (curated)",
+    "inputs/m12.txt": "real-world PEP 508 environment markers (curated)"
+  }
+}

@@ -1,0 +1,33 @@
+{
+  "name": "vyper",
+  "description": "Vyper smart-contract language grammar (Python-like, significant whitespace via PythonIndenter postlex), start=\"module\".",
+  "source": {
+    "repo": "https://github.com/vyperlang/vyper",
+    "ref": "HEAD",
+    "commit": "82b09fac34c2303b94e163e7d395893d2c6e9530",
+    "license": "Apache-2.0",
+    "grammar_files": {
+      "grammar/grammar.lark": "vyper/ast/grammar.lark"
+    }
+  },
+  "entry_grammar": "grammar/grammar.lark",
+  "lark_options": {
+    "parser": "lalr",
+    "lexer": "contextual",
+    "start": "module",
+    "maybe_placeholders": true,
+    "propagate_positions": false,
+    "keep_all_tokens": false,
+    "regex_module": false,
+    "postlex": "PythonIndenter"
+  },
+  "inputs": {
+    "inputs/simple_open_auction.vy": "examples/auctions/simple_open_auction.vy",
+    "inputs/blind_auction.vy": "examples/auctions/blind_auction.vy",
+    "inputs/ballot.vy": "examples/voting/ballot.vy",
+    "inputs/ERC20.vy": "examples/tokens/ERC20.vy",
+    "inputs/ERC721.vy": "examples/tokens/ERC721.vy",
+    "inputs/wallet.vy": "examples/wallet/wallet.vy",
+    "inputs/company.vy": "examples/stock/company.vy"
+  }
+}

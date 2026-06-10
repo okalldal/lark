@@ -1,0 +1,41 @@
+{
+  "name": "poetry_pep508",
+  "description": "PEP 508 dependency-specification grammar from poetry-core. pep508.lark imports markers.lark relatively, exercising file-relative %import.",
+  "source": {
+    "repo": "https://github.com/python-poetry/poetry-core",
+    "ref": "HEAD",
+    "commit": "19dfc92be324d14b471e028204329e3f052d2fb6",
+    "license": "MIT",
+    "grammar_files": {
+      "grammar/pep508.lark": "src/poetry/core/version/grammars/pep508.lark",
+      "grammar/markers.lark": "src/poetry/core/version/grammars/markers.lark"
+    }
+  },
+  "entry_grammar": "grammar/pep508.lark",
+  "lark_options": {
+    "parser": "lalr",
+    "lexer": "contextual",
+    "start": "start",
+    "maybe_placeholders": true,
+    "propagate_positions": false,
+    "keep_all_tokens": false,
+    "regex_module": false,
+    "postlex": null
+  },
+  "inputs": {
+    "inputs/d01.txt": "real-world PEP 508 dependency specifiers (curated)",
+    "inputs/d02.txt": "real-world PEP 508 dependency specifiers (curated)",
+    "inputs/d03.txt": "real-world PEP 508 dependency specifiers (curated)",
+    "inputs/d04.txt": "real-world PEP 508 dependency specifiers (curated)",
+    "inputs/d05.txt": "real-world PEP 508 dependency specifiers (curated)",
+    "inputs/d06.txt": "real-world PEP 508 dependency specifiers (curated)",
+    "inputs/d07.txt": "real-world PEP 508 dependency specifiers (curated)",
+    "inputs/d08.txt": "real-world PEP 508 dependency specifiers (curated)",
+    "inputs/d09.txt": "real-world PEP 508 dependency specifiers (curated)",
+    "inputs/d10.txt": "real-world PEP 508 dependency specifiers (curated)",
+    "inputs/d11.txt": "real-world PEP 508 dependency specifiers (curated)",
+    "inputs/d12.txt": "real-world PEP 508 dependency specifiers (curated)",
+    "inputs/d13.txt": "real-world PEP 508 dependency specifiers (curated)",
+    "inputs/d14.txt": "real-world PEP 508 dependency specifiers (curated)"
+  }
+}
