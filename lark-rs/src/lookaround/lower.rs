@@ -168,6 +168,13 @@ pub fn lower_boundary_dotall(
     if let Some(idiom) = recognize_long_string_idiom(&node) {
         return Ok(idiom.lower(dotall));
     }
+    // The fourth audited delimited-token idiom: the **short-string** shape
+    // `<q>.+?(?<!\\)(\\\\)*?<q>` (single-char delimiter, *non-empty* lazy body) — the
+    // wild-bank dotmotif `FLEXIBLE_KEY`. Same escape-pair normalization family as
+    // STRING/LONG_STRING; see the section comment below for the first-item twist.
+    if let Some(idiom) = recognize_short_string_idiom(&node) {
+        return Ok(idiom.lower(dotall));
+    }
     let mut branches = Vec::new();
     match &node {
         Node::Alt(arms) => {
@@ -1405,6 +1412,157 @@ impl LongStringIdiom {
     }
 }
 
+// ─── The short-string idiom (the wild-bank dotmotif FLEXIBLE_KEY, idiom #4) ──────
+//
+// dotmotif's `FLEXIBLE_KEY` is `".+?(?<!\\)(\\\\)*?"|'.+?(?<!\\)(\\\\)*?'` — a
+// quote-delimited token with a **non-empty** lazy escaped body, whose `(?<!\\)`
+// lookbehind sits after the variable-width `.+?` (the no-fixed-offset position the
+// generic M3 path declines). It is the fourth audited **delimited-token idiom**, the
+// guardless single-delimiter sibling of the M4 STRING splice (the same `<q> body <q>`
+// family; LONG_STRING is the triple-quote sibling). The lowering is the same
+// escape-pair body normalization, with one twist the missing `(?!<q><q>)` guard forces:
+//
+//   **A close needs more body than its own escape run.** The body decomposes as
+//   `X·P`: `X` = the `.+?` chars (**≥ 1**, anything), `P` = the `(\\\\)*?` even
+//   backslash run, with `(?<!\\)` forcing `P` to cover the *entire* maximal trailing
+//   backslash run. So a `<q>` at body length `ℓ` with a maximal trailing backslash
+//   run of length `r` closes iff `r` is even **and `ℓ > r`** — and the lazy close
+//   fires at the *first* such `<q>`. A `<q>` where that fails is **consumed as a
+//   body char**: at `ℓ = r = 0` (`"""` is one 3-char token, the empty `""` is no
+//   token) and, the subtle case, after a **pure-pair body** (`ℓ = r > 0`: `"\\"` is
+//   no token — `X` would be empty — and `"\\""` is one 5-char token whose third
+//   quote is body). The exact lookaround-free equivalent tracks "body so far is pure
+//   backslash pairs" structurally:
+//
+//       <q>.+?(?<!\\)(\\\\)*?<q>
+//         →   <q> (?:\\\\)* (?:[^\\<nl>]|\\[^\\<nl>]) (?:[^<q>\\<nl>]|\\.)* <q>
+//
+//   — a greedy pure-pair run (the `ℓ = r` zone, where a `<q>` is consumed, never a
+//   close), then one **mandatory transition item** (any non-backslash char,
+//   *including a bare `<q>`*, or an escape pair whose second char is not a
+//   backslash — exactly the moves that make `ℓ > r` and keep it so), then
+//   LONG_STRING's escape-pair items with the delimiter excluded so the greedy `*`
+//   closes at the first free-standing `<q>` (the M4 close-exclusion argument; at
+//   every item boundary past the transition the trailing run is even and `ℓ > r`,
+//   so the first free `<q>` is exactly the original's lazy close). The pure-pair
+//   run and the transition pair are first-two-char disjoint, so the decomposition
+//   is deterministic and the lowered branch is unguarded — its leftmost-first match
+//   end is the plain engine's native semantics. `<nl>` (the `\n` exclusion, in the
+//   classes and the pair tails) is present iff the terminal is not DOTALL, exactly
+//   the STRING/LONG_STRING threading.
+//
+// Gated by the recognizer-exactness + behavior unit tests below, the generative
+// equivalence sweep vs the `fancy-regex` dev-oracle
+// (`tests/test_lowering_equivalence.rs`), and end-to-end by the wild bank's dotmotif
+// replay (23 real queries vs the Python-Lark oracle). The recognizer matches **only**
+// this exact shape — in particular the non-empty `.+?`: the *empty-capable* `.*?`
+// variant without a `(?!<q><q>)` guard closes at width 0 on `""` where this rewrite
+// would consume a char, so it must keep declining (reject-when-unsure) until someone
+// proves its own rewrite.
+
+/// A recognized short-string idiom: an optional bounded-width, assertion-free prefix
+/// followed by 1..n arms, each exactly `<q>.+?(?<!\\)(\\\\)*?<q>` for a
+/// single-character literal delimiter `<q>`.
+pub struct ShortStringIdiom {
+    /// The prefix regex source, or empty when there is none.
+    prefix: String,
+    /// The delimiter source of each arm (e.g. `"` then `'`), in source order.
+    delims: Vec<String>,
+}
+
+/// Recognize the [`ShortStringIdiom`] in a parsed terminal `node`, or `None`.
+/// Structural and exact — see the section comment above for why no variant is
+/// admitted.
+pub fn recognize_short_string_idiom(node: &Node) -> Option<ShortStringIdiom> {
+    let (prefix, arms_node) = split_prefix_and_arms(node)?;
+    let arm_nodes: Vec<&Node> = match arms_node {
+        Node::Alt(branches) => branches.iter().collect(),
+        other => vec![other],
+    };
+    let mut delims = Vec::new();
+    for arm in arm_nodes {
+        delims.push(match_short_string_arm(arm)?);
+    }
+    if delims.is_empty() {
+        return None;
+    }
+    Some(ShortStringIdiom { prefix, delims })
+}
+
+/// Match one arm `<q>.+?(?<!\\)(\\\\)*?<q>`, returning the delimiter source `<q>`, or
+/// `None` if the arm is not exactly that shape. The opening delimiter and the lazy
+/// non-empty body arrive merged in a single atom (no structural boundary between
+/// them), like the long-string arm's.
+fn match_short_string_arm(arm: &Node) -> Option<String> {
+    let parts = match arm {
+        Node::Concat(parts) => parts.as_slice(),
+        _ => return None,
+    };
+    if parts.len() != 4 {
+        return None;
+    }
+
+    // parts[0]: `<q>.+?` — the opening delimiter + the lazy *non-empty* any-body, one
+    // atom. The delimiter must be a single-character literal (the same contract as the
+    // STRING idiom's `literal_delimiter_source`, for the same reason: it is emitted
+    // both bare and inside a negated class below).
+    let delim = match &parts[0] {
+        Node::Atom(s) => {
+            let head = s.strip_suffix(".+?")?;
+            let head_node = Node::Atom(head.to_string());
+            literal_delimiter_source(&head_node)?
+        }
+        _ => return None,
+    };
+
+    // parts[1]: `(?<!\\)`, unquantified.
+    match &parts[1] {
+        Node::Assertion {
+            neg: true,
+            look: Look::Behind,
+            body,
+            quant,
+        } if quant.is_empty() && matches!(body.as_ref(), Node::Atom(s) if s == r"\\") => {}
+        _ => return None,
+    }
+
+    // parts[2]: `(\\\\)*?` — the lazy even-backslash run.
+    match &parts[2] {
+        Node::Group { open, body, quant }
+            if open == "("
+                && quant == "*?"
+                && matches!(body.as_ref(), Node::Atom(s) if s == r"\\\\") => {}
+        _ => return None,
+    }
+
+    // parts[3]: the closing delimiter, identical to the opening one.
+    if !matches!(&parts[3], Node::Atom(s) if *s == delim) {
+        return None;
+    }
+    Some(delim)
+}
+
+impl ShortStringIdiom {
+    /// Lower the idiom: one unguarded branch per arm — the exact rewrite the section
+    /// comment proves (pure-pair run, mandatory transition item, close-excluded
+    /// items). `dotall` controls whether the body classes admit a newline.
+    fn lower(&self, dotall: bool) -> Vec<LoweredBranch> {
+        let nl = if dotall { "" } else { r"\n" };
+        self.delims
+            .iter()
+            .map(|d| LoweredBranch {
+                regex: format!(
+                    "{p}{d}(?:\\\\\\\\)*(?:[^\\\\{nl}]|\\\\[^\\\\{nl}])(?:[^{d}\\\\{nl}]|\\\\.)*{d}",
+                    p = self.prefix
+                ),
+                leading: None,
+                trailing: None,
+                lookbehind: Vec::new(),
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1722,6 +1880,121 @@ mod tests {
                 "recognizer wrongly accepted near-miss {p:?}"
             );
         }
+    }
+
+    #[test]
+    fn short_string_idiom_lowers_to_unguarded_branches() {
+        const SHORT: &str = r#"(?:".+?(?<!\\)(\\\\)*?")|(?:'.+?(?<!\\)(\\\\)*?')"#;
+        // Non-DOTALL (the wild dotmotif case): the body classes exclude the newline.
+        let b = lower_boundary_dotall(SHORT, false).unwrap();
+        assert_eq!(b.len(), 2);
+        assert_eq!(
+            b[0].regex,
+            r#""(?:\\\\)*(?:[^\\\n]|\\[^\\\n])(?:[^"\\\n]|\\.)*""#
+        );
+        assert_eq!(
+            b[1].regex,
+            r#"'(?:\\\\)*(?:[^\\\n]|\\[^\\\n])(?:[^'\\\n]|\\.)*'"#
+        );
+        for br in &b {
+            assert!(
+                br.leading.is_none() && br.trailing.is_none() && br.lookbehind.is_empty(),
+                "the (?<!\\\\)(\\\\\\\\)*? is absorbed by the body normalization, not \
+                 carried as a guard"
+            );
+        }
+        // DOTALL: the classes admit a newline.
+        let b = lower_boundary_dotall(r#"".+?(?<!\\)(\\\\)*?""#, true).unwrap();
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].regex, r#""(?:\\\\)*(?:[^\\]|\\[^\\])(?:[^"\\]|\\.)*""#);
+    }
+
+    #[test]
+    fn short_string_idiom_recognizer_is_exact() {
+        // The wild dotmotif shape is recognized (both arms, single arm, either quote)…
+        for p in [
+            r#"(?:".+?(?<!\\)(\\\\)*?")|(?:'.+?(?<!\\)(\\\\)*?')"#,
+            r#"".+?(?<!\\)(\\\\)*?""#,
+            r#"'.+?(?<!\\)(\\\\)*?'"#,
+        ] {
+            let node = super::super::classify::unwrap_vacuous_groups(
+                super::super::parse(p).unwrap_or_else(|e| panic!("parse {p:?}: {e:?}")),
+            );
+            assert!(
+                recognize_short_string_idiom(&node).is_some(),
+                "recognizer must accept the wild short-string shape: {p:?}"
+            );
+        }
+        // …and every near-miss is not (each deviates in one pinned part). The headline
+        // near-miss is the empty-capable `.*?` body: without an opening guard it closes
+        // at width 0 on `""` where this rewrite would consume a char.
+        for p in [
+            r#"".*?(?<!\\)(\\\\)*?""#,  // empty-capable `.*?` body
+            r#"".+?(\\\\)*?""#,         // missing the lookbehind
+            r#"".+?(?<!x)(\\\\)*?""#,   // wrong lookbehind body
+            r#"".+?(?<=\\)(\\\\)*?""#,  // positive lookbehind
+            r#"".+(?<!\\)(\\\\)*?""#,   // greedy `.+` body
+            r#"".+?(?<!\\)(\\\\)*""#,   // greedy escape group
+            r#"".+?(?<!\\)(\\)*?""#,    // wrong escape-group body
+            r#"".+?(?<!\\)(\\\\)*?'"#,  // mismatched open/close
+            r#"ab.+?(?<!\\)(\\\\)*?b"#, // multi-char opener
+        ] {
+            let node = super::super::parse(p).unwrap_or_else(|e| panic!("parse {p:?}: {e:?}"));
+            assert!(
+                recognize_short_string_idiom(&node).is_none(),
+                "recognizer wrongly accepted near-miss {p:?}"
+            );
+        }
+    }
+
+    /// The short-string behavioral boundaries the rewrite's section comment proves,
+    /// pinned end-to-end against the `regex` crate on the lowered branch: the
+    /// quote-leading body (`"""` is one token), the first-close laziness, the
+    /// non-empty reject, and escape parity.
+    #[test]
+    fn short_string_lowered_branch_behavior() {
+        let b = lower_boundary_dotall(r#"".+?(?<!\\)(\\\\)*?""#, false).unwrap();
+        let re = regex::Regex::new(&format!("^(?:{})", b[0].regex)).unwrap();
+        let len_at = |s: &str| re.find(s).map(|m| m.end());
+        assert_eq!(
+            len_at(r#"""""#),
+            Some(3),
+            "quote-leading body: one 3-char token"
+        );
+        assert_eq!(
+            len_at(r#"""x""#),
+            Some(4),
+            "quote-leading body with content"
+        );
+        assert_eq!(len_at(r#""""""#), Some(3), "still the first close");
+        assert_eq!(len_at(r#""""#), None, "the empty body is rejected (`.+?`)");
+        assert_eq!(len_at(r#""a"b""#), Some(3), "lazy first close");
+        assert_eq!(len_at(r#""\"""#), Some(4), "escaped quote does not close");
+        assert_eq!(len_at(r#""\""#), None, "dangling escaped close");
+        assert_eq!(
+            len_at("\"a\nb\""),
+            None,
+            "non-DOTALL body excludes the newline"
+        );
+        // The pure-pair-body boundary the generative net caught in review: a close
+        // needs ℓ > r, so `"\\"` has no token (X would be empty) and `"\\""`'s third
+        // quote is *body*, closed by the fourth.
+        assert_eq!(len_at(r#""\\""#), None, "pure-pair body cannot close");
+        assert_eq!(
+            len_at(r#""\\"""#),
+            Some(5),
+            "quote after pure pairs is body"
+        );
+        assert_eq!(
+            len_at(r#""\\a""#),
+            Some(5),
+            "pairs then content closes normally"
+        );
+        assert_eq!(
+            len_at(r#""\\\\""#),
+            None,
+            "longer pure-pair body cannot close"
+        );
     }
 
     #[test]

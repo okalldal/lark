@@ -19,11 +19,23 @@ parity break is named below.
 
 Leading/trailing boundary lookahead of bounded width (M1/M2), fixed-offset bounded
 lookbehind (M3), the audited **delimited-token idioms** — `python.STRING` (M4),
-`lark.REGEXP`, `python.LONG_STRING` (Stage B) — and guarded bases proven
+`lark.REGEXP`, `python.LONG_STRING` (Stage B), and the **short-string** idiom
+`<q>.+?(?<!\\)(\\\\)*?<q>` (idiom #4, the wild-bank dotmotif `FLEXIBLE_KEY` — a
+single-char-delimited token with a non-empty lazy escaped body, lowered by the
+escape-pair normalization with a pure-pair-run/transition-item split; see the
+section comment in `src/lookaround/lower.rs`) — and guarded bases proven
 *leftmost-first ≡ longest* by the semantic realizability gate
 (`lower.rs::is_leftmost_longest`, the exact product-DFA decision that admits e.g.
 `python.DEC_NUMBER`'s `0(?:_?0)*` arm). Every bundled lookaround terminal lowers; the
 bundled grammars build with zero refusals.
+
+Positional analysis runs after the **vacuous-group splice**
+(`classify.rs::unwrap_vacuous_groups`): a bare unquantified `(?:…)` is spliced into
+its enclosing concatenation (`(?:X) ≡ X` exactly), so a boundary guard the loader's
+terminal-*reference* composition buried inside a wrapper — the wild-bank mappyfile
+`SIGNED_INT: ["-"|"+"] INT` shape, composed as `(?:\-|\+)?(?:[0-9]+(?![_a-zA-Z]))` —
+classifies as the trailing boundary it is and lowers via M1. Quantified, capturing,
+and flag-scoped groups stay opaque.
 
 ## Category 1 — OutOfScope (by-design non-goals)
 
@@ -51,7 +63,7 @@ building, the test fails loudly and demands the promotion protocol below.
 | Fixed-width lookbehind at variable offset | `\w+(?<!_)q` | `DeclineReason::VariableOffsetLookbehind` | Python accepts these (the body is fixed-width). Generalize M3's offset model (window-carrying over variable prefixes) or admit common shapes as idioms. The headline NYI case. |
 | Unbounded trailing lookahead | `[a-z]+(?=ab+)` | `Rejection::Unbounded` | Regular (classic lex trailing context); needs a reverse-scan/product mechanism. No current plan — demand-driven. |
 | Non-realizable guarded base | `(ab\|abc)(?!z)`, `ab??(?!c)` | `DeclineReason::NonRealizableGuardedBase` | The base prefers a shorter match than its longest, so the longest-accept accumulator cannot host it. The semantic gate already proves the provable cases; widening further means a preference-aware accumulator. |
-| Assertion in an interior group | `(a(?<!b))c` | `DeclineReason::NestedInGroup` | Needs group-aware peeling. (A *vacuous* whole-arm `(?:…)` wrapper is already unwrapped and lowers — that is a proven identity, not a special case.) |
+| Assertion in an interior group | `(a(?<!b))c` | `DeclineReason::NestedInGroup` | Needs group-aware peeling for **capturing/flag** groups. (A bare unquantified `(?:…)` is no longer this case at all: the vacuous-group splice normalizes it away everywhere — a proven identity, `(?:X) ≡ X` — which is how the wild mappyfile composition shape lowers.) |
 | VERBOSE-mode lookaround | `(?x:[0-9]+ (?![0-9]))`, or any lookaround pattern under `g_regex_flags = VERBOSE` | `DeclineReason::VerboseMode` | The analyzer's width/offset arithmetic is not verbose-aware; under `x` (whether from a whole-pattern wrapper or the global flag) whitespace/comments would be miscounted as literal width (a false-accept hazard). Needs a verbose-aware frontend. |
 | Analyzer parse gaps | — | `DeclineReason::FrontendParse` | Defensive catch-all (terminal loading gates on the same parser, so it is unreachable end-to-end today). Any instance found in the wild is a frontend bug to fix. |
 

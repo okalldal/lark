@@ -419,6 +419,16 @@ is `_WS` in this grammar, not `WS`. Store and look up by alias.
 propagation). Conflict detection depends on its precision: SLR FOLLOW sets would
 over-report conflicts, so accurate `GrammarError::Conflict` reporting requires it.
 
+**Terminal regexes are Python-`re` dialect, by decision.** Where the two dialects
+assign *different meanings* to the same syntax, lark-rs normalizes toward Python's —
+Lark grammars are authored against Python `re`, and oracle fidelity is the project
+goal. The load-bearing case: `\<` / `\>` are literal `<` / `>` in Python but
+word-boundary assertions in the regex crate (outside a class `\<\>` silently matches
+*nothing* where Python matches `"<>"`; inside a class they are a compile error), so
+`PatternRe::new` (`normalize_python_escapes`) rewrites exactly those two escapes to
+bare chars. Flip side: a grammar author *expecting* the regex crate's word-boundary
+`\<`/`\>` is silently overridden — that is the intended trade.
+
 **`regex` crate has no lookahead or backreferences.** Some Python Lark grammars rely
 on lookaround (the bundled `python.lark`/`lark.lark` do: `STRING`'s
 `(?!"")…(?<!\\)(\\\\)*?` guards, `DEC_NUMBER`'s `(?![1-9])`, `lark.OP`/`REGEXP`).
@@ -599,63 +609,80 @@ each failure's build/parse error). `cargo bench --bench wild` runs
 the same bank as a recorded performance trend (build cost + corpus/largest-input
 throughput per project).
 
-Findings (updated 2026-06-10 after the burndown round — the xfail set encodes
-them; each fixed root cause is pinned in distilled form by
-`tests/test_wild_gap_pins.rs`):
+Findings (updated 2026-06-10, post-L4 burndown round — the xfail set encodes them,
+and each fixed root cause is pinned in distilled form by `tests/test_wild_gap_pins.rs`):
+**189/257 inputs agree, 72 XFAIL, 4 grammars not building.** Every remaining failure
+is an **engine-scope refusal** — a backtracking/backreference construct the lexer-DFA
+routing *deliberately* rejects (`docs/LOOKAROUND_SCOPE.md`).
 
-Every remaining failure is an **engine-scope refusal** — wild grammars the
-lexer-DFA routing *deliberately* rejects (`docs/LOOKAROUND_SCOPE.md`), the
-measured real-world cost of dropping the backtracking engine (7 of 16 wild
-grammars):
+**Cleared by the burndown round** (the wild bank's first payoff):
+
+* **vyper** (build + 7/7): plain `(a|b)` groups now distribute into the parent's
+  alternatives at every position (Python's `SimplifyRule_Visitor`) instead of
+  materializing `__anon_group_*` helpers whose unit alternatives duplicated other
+  rules' RHS and collided as unresolvable reduce/reduce.
+* **matter_idl** (8/8) and **pyquil** (6/6, `test1.quil`'s `1/sqrt(2)` included):
+  a `"keyword"i` literal is now a `PatternStr` with the `i` flag attached (Python
+  keeps the type, only attaching the flag), so it joins the lexer's `unless`
+  keyword retyping — case-insensitively, via per-keyword `^(?i:…)$` matchers — and
+  sorts with string-pattern width. The embed rule mirrors Python's flag-subset
+  test: a `"kw"i` under a case-sensitive regex terminal stays in the alternation.
+  (This also made the basic lexer agree with Python's on the standalone bank's
+  `"a"i "a"` case — its accidental pass via a retype Python never does became an
+  honest basic-lexer-incompatible xfail, `standalone_xfail.json`.)
+* **cel 40/40** ✅: the upstream `{4-8}`-for-`{4,8}` quantifier typo in
+  `BYTES_LIT`/`STRING_LIT`/`MLSTRING_LIT` is **patched in the vendored copy**
+  (policy: we do not file upstream bugs — a wild grammar bug is either left
+  xfail'd or patched locally and recorded in `meta.json` `local_patches`; the
+  oracle trees were byte-identical before/after, so only lark-rs's build was
+  affected).
+* **dotmotif 22/22** ✅ (Earley + dynamic lexer): three independent gaps —
+  comment lines *between* the `|` alternatives of a multi-line rule (the loader
+  now lets a full-line comment swallow its leading newline, like lark.lark's
+  `COMMENT`), the **short-string idiom** `<q>.+?(?<!\\)(\\\\)*?<q>`
+  (`FLEXIBLE_KEY` — audited delimited-token idiom #4, `docs/LOOKAROUND_SCOPE.md`),
+  and the Python-dialect `\<`/`\>` escapes (`OPERATOR`'s `[\!=\>\<]`/`\<\>` —
+  Python reads literals, the regex crate reads word-boundary assertions; the
+  loader now normalizes the two divergent escapes to bare chars).
+* **mappyfile 8/8** ✅ (was an L4 internal-lookahead refusal): the
+  **vacuous-group splice** (`(?:X) ≡ X`, applied recursively/splicing in
+  `classify.rs::unwrap_vacuous_groups`) exposes the trailing guard the loader's
+  terminal-reference composition buried (`SIGNED_INT: ["-"|"+"] INT` →
+  `(?:\-|\+)?(?:[0-9]+(?![_a-zA-Z]))`), and the M1 path + semantic gate lower it.
+
+**Engine-scope refusals** — wild grammars L4 *deliberately* rejects
+(`docs/LOOKAROUND_SCOPE.md`), the measured real-world cost of dropping the
+backtracking engine (4 of 16 wild grammars, all non-building):
 
 * **hcl2**: heredoc terminal uses a backreference (`<<(?P<heredoc>…)…(?P=heredoc)`).
-  (Its original R/R-conflict failure was *fixed* by the #106 optional-distribution work.)
 * **gersemi_cmake**: CMake bracket arguments use a backreference
-  (`(?P=equal_signs)` — the `[==[…]==]` matching-fence idiom).
+  (`(?P=equal_signs)` — the `[==[…]==]` matching-fence idiom). hcl2 + gersemi are
+  one *family* (tag-echo fences: heredocs, Lua long brackets, Rust raw strings,
+  PostgreSQL dollar-quoting) — non-regular but exactly recognizable in linear
+  time; an audited **fence-recognizer primitive** is the named candidate growth
+  path if this scope is ever revisited.
 * **synapse_storm**: atomic groups `(?>…)` + recursive subpatterns `(?&NAME)`
-  (`regex`-module-only).
-* **mappyfile**: internal lookahead `(?![_a-zA-Z])` in `SIGNED_INT`.
-* **miniwdl_wdl**: internal lookahead `(?=[^>])` in `COMMAND2_FRAGMENT`.
-  (Its duplicate-alternative failure was *fixed* on master.)
-* **cel**: an upstream grammar **bug** — `BYTES_LIT` writes `{4-8}` for `{4,8}`;
-  backtracking engines silently treat the malformed quantifier as literal text,
-  the DFA engine rejects the pattern. Fixable upstream (candidate bug report);
-  the rest of the terminal looks lowerable.
-* **dotmotif**: `FLEXIBLE_KEY` is the escaped-string idiom with a *non-empty*
-  body (`".+?(?<!\\)(\\\\)*?"`) — a bounded lookbehind after a variable-width
-  prefix, today a `Scope::NotYetImplemented` refusal (a promotion tripwire:
-  it is one body-normalization away from the lowered `python.STRING` shape).
-  Its original failure — the loader rejecting `//` comment lines *between*
-  the `|` alternatives of a multi-line rule — is *fixed* (comment-only lines
-  now collapse into the newline run, like Python's `\s*`-prefixed COMMENT),
-  which unmasked this one.
+  (`regex`-module-only; context-free lookahead — the one genuine
+  backtracking-engine case in the bank).
+* **miniwdl_wdl**: width-1 internal lookahead inside a repetition
+  (`COMMAND1_FRAGMENT`'s `(?:\$(?=[^{])|~(?=[^{])|[^~$}])+`). Investigated for
+  idiom #5 and **deliberately not landed**: Python's greedy `(item)+` is a
+  *greedy-commit* loop (no backtracking across committed items), so the exact
+  lowering needs priority-aware arm disjointification — a longest-valid-accept
+  construction provably diverges (e.g. `\\'`: Python commits the `\\\\` arm and
+  stops at 2 chars where the longest decomposition reaches 3) — **and** the two
+  engines compose the `STRING1_CHAR` alternation in different arm orders
+  (lark-rs sorts by source length, putting `\\'` *after* the char class; Python
+  Lark puts it before), which is order-sensitive here. Both must be resolved
+  together; recorded so the next attempt starts from this analysis.
 
-The former **burndown candidates** are all ✅ fixed:
-
-* **vyper** (build + 7/7): plain `(a|b)` groups now distribute into the
-  parent's alternatives at every position (Python's `SimplifyRule_Visitor`)
-  instead of materializing `__anon_group_*` helpers whose unit alternatives
-  duplicated other rules' RHS and collided as unresolvable reduce/reduce.
-* **matter_idl** (8/8) and **pyquil** (6/6, `test1.quil`'s `1/sqrt(2)`
-  included): a `"keyword"i` literal is now a `PatternStr` with the `i` flag
-  attached (Python keeps the type, only attaching the flag), so it joins the
-  lexer's `unless` keyword retyping — case-insensitively, via per-keyword
-  `^(?i:…)$` matchers — and sorts with string-pattern width. The embed rule
-  mirrors Python's flag-subset test: a `"kw"i` under a case-sensitive regex
-  terminal stays in the alternation. (This also made the basic lexer agree
-  with Python's on the standalone bank's `"a"i "a"` case — its accidental
-  pass via a retype Python never does became an honest
-  basic-lexer-incompatible xfail, `standalone_xfail.json`.)
-
-**Fully passing**: vyper (build + 7/7, LALR + PythonIndenter postlex),
-matter_idl (8/8), pyquil (build + 6/6), lark_lark (the P0 baseline —
-lark.lark over the 12 real grammar files `examples/lark_grammar.py` parses
-upstream, incl. python.lark and a full Verilog grammar), pylogics_ltl
-(relative rule imports + trailing-lookahead terminals through the M1
-lowering), mistql (Earley + dynamic lexer), tartiflette, poetry_markers,
-poetry_pep508 (file-relative `%import`) — 119/257 inputs agree overall
-(every remaining failure is a lookaround/backtracking refusal, which fails
-whole projects by design).
+**Fully passing**: vyper (build + 7/7, LALR + PythonIndenter postlex), matter_idl
+(8/8), pyquil (build + 6/6), cel (40/40), dotmotif (22/22), mappyfile (8/8),
+lark_lark (the P0 baseline — lark.lark over the 12 real grammar files
+`examples/lark_grammar.py` parses upstream, incl. python.lark and a full Verilog
+grammar), pylogics_ltl (relative rule imports + trailing-lookahead terminals
+through the M1 lowering), mistql (Earley + dynamic lexer), tartiflette,
+poetry_markers, poetry_pep508 (file-relative `%import`).
 
 Oracle note: embedded trees are capped at 55 levels (`EMBED_DEPTH_LIMIT`) —
 serde_json refuses JSON nested deeper than 128 and a tree level costs ~2 —
