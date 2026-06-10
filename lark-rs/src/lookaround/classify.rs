@@ -425,31 +425,65 @@ impl Classification {
     }
 }
 
-/// Strip **semantically vacuous** group wrappers: a *bare* non-capturing,
+/// Strip **semantically vacuous** group wrappers everywhere: a *bare* non-capturing,
 /// unquantified group (`(?:X)` — never a flag-scoped `(?i:…)`, never a capturing
-/// `(…)`, never quantified) that constitutes an **entire pattern or an entire
-/// top-level alternation arm** is pure precedence syntax, so `(?:X) ≡ X` exactly —
-/// unwrapping is language-, priority-, and match-length-neutral. The grammar loader
-/// routinely produces this shape for terminal-algebra alternations
-/// (`T: "a" /(?!x)/ | "b"` compiles to `(?:a(?!x))|(?:b)`), so without this
-/// normalization a trailing boundary guard at an arm's end would be misread as a
-/// group-nested *internal* assertion and rejected — refusing grammars our own loader
-/// generates (and Python Lark accepts) for an already-audited lowerable shape.
+/// `(…)`, never quantified) is pure precedence syntax, so `(?:X) ≡ X` exactly —
+/// unwrapping is language-, priority-, and match-length-neutral **in any context**,
+/// with one precedence caveat handled below. The grammar loader routinely produces
+/// these wrappers: terminal-algebra alternations (`T: "a" /(?!x)/ | "b"` compiles to
+/// `(?:a(?!x))|(?:b)`) and — the wild-bank mappyfile shape — terminal *references*
+/// (`SIGNED_INT: ["-"|"+"] INT` compiles to `(?:\-|\+)?(?:[0-9]+(?![_a-zA-Z]))`,
+/// burying INT's trailing guard inside a bare group). Without this normalization
+/// those boundary guards read as group-nested *internal* assertions and are
+/// rejected — refusing grammars our own loader generates (and Python Lark accepts)
+/// for an already-audited lowerable shape.
 ///
-/// Deliberately **not** descended into: interior concat positions (`a(?:b(?!c))d`
-/// stays opaque — the group there is load-bearing for the positional analysis) and
-/// flag wrappers (PR #136's `unwrap_arms` hardening: peeling `(?i:…)` would silently
-/// drop flags; whole-pattern flag wrappers are stripped into the flag *bitset*
-/// upstream by `lexer::strip_whole_pattern_flag_wrapper`).
+/// The normalization is recursive and splices: a bare `(?:…)` in a concatenation is
+/// replaced by its body's parts inline. The **one precedence caveat**: a bare group
+/// whose body is an *alternation* keeps a `(?:…)` wrapper when it sits in a
+/// concatenation (splicing `a(?:b|c)d` to `ab|cd` would change the language); in
+/// every whole-node position the bare alternation is returned as-is.
+///
+/// Deliberately **not** unwrapped: flag wrappers (PR #136's `unwrap_arms` hardening:
+/// peeling `(?i:…)` would silently drop flags; whole-pattern flag wrappers are
+/// stripped into the flag *bitset* upstream by
+/// `lexer::strip_whole_pattern_flag_wrapper`), capturing groups (kept opaque so the
+/// idiom recognizers' pinned shapes stay byte-stable), quantified groups (the
+/// quantifier is load-bearing), and assertion *bodies* (guard sources are emitted
+/// verbatim; `(?:X) ≡ X` holds there too, but rewriting them buys nothing).
 pub(super) fn unwrap_vacuous_groups(node: Node) -> Node {
     match node {
         Node::Group { open, body, quant } if open == "(?:" && quant.is_empty() => {
             unwrap_vacuous_groups(*body)
         }
+        // Any other group: keep the wrapper, normalize inside it.
+        Node::Group { open, body, quant } => Node::Group {
+            open,
+            body: Box::new(unwrap_vacuous_groups(*body)),
+            quant,
+        },
         Node::Alt(arms) => Node::Alt(arms.into_iter().map(unwrap_vacuous_groups).collect()),
-        // A degenerate single-part concat is the same "entire arm" case.
-        Node::Concat(mut parts) if parts.len() == 1 => {
-            unwrap_vacuous_groups(parts.pop().expect("len checked"))
+        Node::Concat(parts) => {
+            let mut out: Vec<Node> = Vec::new();
+            for p in parts {
+                match unwrap_vacuous_groups(p) {
+                    // Splice an unwrapped concatenation into the parent.
+                    Node::Concat(sub) => out.extend(sub),
+                    // The precedence caveat: a bare alternation cannot be spliced
+                    // into a concatenation — re-wrap it (net effect: unchanged).
+                    alt @ Node::Alt(_) => out.push(Node::Group {
+                        open: "(?:".to_string(),
+                        body: Box::new(alt),
+                        quant: String::new(),
+                    }),
+                    other => out.push(other),
+                }
+            }
+            if out.len() == 1 {
+                out.pop().expect("len checked")
+            } else {
+                Node::Concat(out)
+            }
         }
         other => other,
     }
@@ -1243,6 +1277,51 @@ mod tests {
                 "{p:?} must still reject as Internal"
             );
         }
+    }
+
+    /// The vacuous-group splice (the wild-bank mappyfile shape): the loader wraps a
+    /// terminal *reference* in a bare `(?:…)`, burying the referenced terminal's
+    /// trailing guard inside a group. The normalization splices the bare group into
+    /// the enclosing concat, so the guard reads as a genuine trailing boundary and
+    /// the whole terminal lowers via M1 — while a guard inside a *quantified* or
+    /// *capturing* group stays internal/declined (the splice is `(?:X) ≡ X`, never a
+    /// position heuristic).
+    #[test]
+    fn vacuous_group_splice_exposes_composition_buried_boundary_guards() {
+        // mappyfile SIGNED_INT, exactly as lark-rs's loader composes
+        // `SIGNED_INT: ["-"|"+"] INT` with `INT: /[0-9]+(?![_a-zA-Z])/`.
+        let p = r"(?:\-|\+)?(?:[0-9]+(?![_a-zA-Z]))";
+        assert_eq!(
+            verdicts(p),
+            vec![Verdict::Supported(ShapeClass::TrailingBoundary)],
+            "the composition-buried trailing guard must classify as a boundary"
+        );
+        assert!(
+            matches!(lower_terminal("SIGNED_INT", p), Ok(Lowered::Branches(_))),
+            "and the whole terminal must lower"
+        );
+        // The same guard inside a *quantified* bare group is genuinely internal.
+        assert_eq!(
+            verdicts(r"(?:[0-9]+(?![_a-zA-Z]))+"),
+            vec![Verdict::Rejected(Rejection::Internal)]
+        );
+        // …and a capturing group is not spliced (kept opaque; the lowering declines
+        // it as NestedInGroup rather than reclassifying).
+        assert_eq!(
+            verdicts(r"a([0-9](?![0-9]))"),
+            vec![Verdict::Rejected(Rejection::Internal)]
+        );
+        // A mid-concat splice never *invents* a boundary: the assertion stays
+        // internal when real content follows the group.
+        assert_eq!(
+            verdicts(r"a(?:b(?!c))d"),
+            vec![Verdict::Rejected(Rejection::Internal)]
+        );
+        // But a bare group ending the pattern is the same trailing case.
+        assert_eq!(
+            verdicts(r"a(?:b(?!c))"),
+            vec![Verdict::Supported(ShapeClass::TrailingBoundary)]
+        );
     }
 
     /// The robustness requirement: the classifier never panics on arbitrary input —
