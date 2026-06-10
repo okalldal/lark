@@ -93,15 +93,25 @@ impl PatternRe {
         let full = format!("{}{}", flag_prefix, pattern);
         // Validate the regex early to surface grammar errors. A pattern the linear
         // `regex` crate rejects may still be a valid *lookaround* pattern (some
-        // bundled grammars use lookahead/lookbehind — issue #40); accept it if
-        // `fancy-regex` can compile it, since the lexer routes such terminals to the
-        // backtracking engine. Only a pattern neither engine accepts is a real error,
-        // reported with the (more familiar) `regex`-crate message.
+        // bundled grammars use lookahead/lookbehind — issue #40); accept it if the
+        // lookaround analyzer can parse it, and defer the verdict to the lexer-build
+        // routing, which either lowers it into the DFA or refuses it with the
+        // categorized scope error (`docs/LOOKAROUND_SCOPE.md`). A pattern neither
+        // accepts is a real error, reported with the (more familiar) `regex`-crate
+        // message plus a backtracking-syntax hint. Deliberately engine-independent:
+        // grammar-load outcomes are identical with and without the `fancy-oracle`
+        // test feature.
         if let Err(e) = Regex::new(&full) {
-            if fancy_regex::Regex::new(&full).is_err() {
+            // Parse the raw pattern (not `full`): the analyzer models the loader's
+            // baked flag wrapper via the same parse the routing strip uses.
+            if crate::lookaround::parse(&pattern).is_err() {
                 return Err(GrammarError::InvalidRegex {
                     pattern: pattern.clone(),
-                    reason: e.to_string(),
+                    reason: format!(
+                        "{e} (and the lookaround analyzer cannot parse it either; \
+                         note that backtracking-only syntax is not supported — see \
+                         docs/LOOKAROUND_SCOPE.md)"
+                    ),
                 });
             }
         }

@@ -112,29 +112,41 @@ C: /c/
     );
 }
 
-/// A **lazy** quantifier in a guarded body must keep leftmost-first (shortest)
-/// semantics, not longest. `T=/ab??(?!c)/` on `"ab"` is `"a"` (lazy `b??` prefers
-/// empty), never `"ab"`. A longest-accept accumulator over the guard's accept-set
-/// would pick `"ab"`; the lowering must decline a non-greedy-monotone base and route
-/// it to `fancy-regex`, so the two backends agree. (Pairs with the in-crate
-/// `dfa_lazy_guarded_base_routes_to_fancy_and_agrees`.)
+/// A **lazy** quantifier in a guarded body must never be mis-lowered to longest:
+/// `T=/ab??(?!c)/` on `"ab"` is `"a"` (lazy `b??` prefers empty), and a
+/// longest-accept accumulator over the guard's accept-set would wrongly pick `"ab"`.
+/// Since L4 the lowering's refusal is a **categorized build error** — the dangerous
+/// direction (silently lexing longest) is structurally impossible, and this pins it
+/// as the NotYetImplemented decline on the engine path. (Pairs with the in-crate
+/// `dfa_lazy_guarded_base_is_a_categorized_nyi_error`.)
 #[test]
-fn lazy_guarded_body_keeps_shortest_not_longest() {
-    let grammar = r#"
-start: (T | C)+
-T: /ab??(?!c)/
-C: /c/
-"#;
-    assert_backends_agree(grammar, &["ab", "a", "ac", "abc", "aca", "abca"]);
-
-    // A lazy body with a *positive* guard, beside a plain order-sensitive sibling.
-    let mixed = r#"
-start: (AB | T | C)+
-AB: /ab|abc/
-T: /a.??(?=c)/
-C: /c/
-"#;
-    assert_backends_agree(mixed, &["abc", "ab", "ac", "aXc", "abcc"]);
+fn lazy_guarded_body_is_refused_never_lowered_to_longest() {
+    use lark_rs::{DeclineReason, GrammarError, LookaroundIssue, Scope};
+    for grammar in [
+        "start: (T | C)+\nT: /ab??(?!c)/\nC: /c/\n",
+        // A lazy body with a *positive* guard, beside a plain order-sensitive sibling.
+        "start: (AB | T | C)+\nAB: /ab|abc/\nT: /a.??(?=c)/\nC: /c/\n",
+    ] {
+        let g = load_grammar(grammar, &["start".to_string()], false, false)
+            .expect("grammar loads; the scope verdict lands at lexer build");
+        let cg = lower(&g);
+        let conf = basic_lexer_conf(&cg, 0).with_backend(LexerBackend::Dfa);
+        match BasicLexer::new(&conf) {
+            Err(GrammarError::LookaroundScope { scope, issue, .. }) => {
+                assert_eq!(scope, Scope::NotYetImplemented);
+                assert_eq!(
+                    issue,
+                    LookaroundIssue::Declined(DeclineReason::NonRealizableGuardedBase)
+                );
+            }
+            Err(other) => panic!("expected the categorized NYI error, got {other:?}"),
+            Ok(_) => panic!(
+                "a lazy guarded base BUILT — either it was mis-lowered (the \
+                 longest-accept hazard) or it was promoted without moving this pin; \
+                 see docs/LOOKAROUND_SCOPE.md"
+            ),
+        }
+    }
 }
 
 /// The shorter branch winning is genuinely order-dependent: `/abc|ab/` (longer first)

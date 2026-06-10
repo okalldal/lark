@@ -30,6 +30,25 @@ pub enum GrammarError {
     ImportNotFound { path: String },
     #[error("Grammar has unresolvable LALR conflicts:\n{report}")]
     Conflict { report: String },
+    /// A lookaround terminal the lexer refused, categorized by the two-category scope
+    /// taxonomy (`docs/LOOKAROUND_SCOPE.md`): [`Scope::OutOfScope`] is a by-design
+    /// non-goal, [`Scope::NotYetImplemented`] a conservative rejection of an
+    /// in-principle-lowerable pattern. The typed fields are the scope scoreboard's
+    /// contract (`tests/test_lookaround_scope.rs`); `msg` is the user-facing text
+    /// built by `classify::scope_message`.
+    ///
+    /// [`Scope::OutOfScope`]: crate::lookaround::classify::Scope::OutOfScope
+    /// [`Scope::NotYetImplemented`]: crate::lookaround::classify::Scope::NotYetImplemented
+    #[error("{msg}")]
+    LookaroundScope {
+        /// The terminal's name.
+        terminal: String,
+        /// The offending assertion source (rejections) or the pattern (declines).
+        subject: String,
+        scope: crate::lookaround::classify::Scope,
+        issue: crate::lookaround::classify::LookaroundIssue,
+        msg: String,
+    },
     #[error("{msg}")]
     Other { msg: String },
 }

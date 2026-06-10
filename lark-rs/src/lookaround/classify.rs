@@ -9,25 +9,26 @@
 //! `python.LONG_STRING` delimited-token idioms — returns the lowered per-branch
 //! sub-patterns
 //! ([`super::lower`]). A per-instance lowering that cannot ride the engine (a
-//! variable-offset lookbehind, a non-realizable guarded base) is **declined** (routed to
-//! `fancy-regex`), and an out-of-shape assertion is reported as a permanent rejection
-//! `GrammarError`. No supported shape is *pending* any longer — all four lowerings are
+//! variable-offset lookbehind, a non-realizable guarded base) is **declined**, and an
+//! out-of-shape assertion is reported as a permanent rejection — both are categorized
+//! `GrammarError`s. No supported shape is *pending* any longer — all four lowerings are
 //! live. The classifier is the safety boundary: it decides, for each terminal pattern,
 //! whether the assertion(s) fall into a **supported shape** or an **unsupported** one —
 //! and it must never false-accept.
 //!
-//! **Caveat — "rejected" here is the classifier verdict, not yet the runtime outcome.**
-//! This entry point *reports* an unsupported assertion as a `GrammarError`. The
-//! decline-vs-reject split PR #131 flagged is now **typed**: [`route_terminal_dotall`]
-//! returns a [`LoweringRoute`] that distinguishes [`LoweringRoute::DeclinedToFancy`] (a
-//! transitional route to `fancy-regex`) from [`LoweringRoute::Unsupported`] (the final L4
-//! reject path). The `DfaScanner` build path matches that route directly — but as a
-//! **compatibility fallback** it still routes `Unsupported` to `fancy-regex` today (so an
-//! out-of-shape *user* assertion lexes rather than failing the build). L4 must flip only
-//! that one route to a build error (`docs/LEXER_DFA_PLAN.md`, "Runtime routing taxonomy").
-//! The classifier's *own* contract below is unaffected: it must still reject-when-unsure
-//! and never false-accept. The [`lower_terminal`] / [`lower_terminal_dotall`] API is
-//! retained as a thin `Result`-flattening of the route for existing callers.
+//! **Since L4 there is no fallback engine.** The decline-vs-reject split PR #131
+//! flagged is **typed**: [`route_terminal_dotall`] returns a [`LoweringRoute`] that
+//! distinguishes [`LoweringRoute::Declined`] (a conservative per-instance refusal,
+//! mostly [`Scope::NotYetImplemented`]) from [`LoweringRoute::Unsupported`] (an
+//! out-of-shape rejection, mostly [`Scope::OutOfScope`]) — and on the runtime path
+//! both are **categorized build errors** (`GrammarError::LookaroundScope`,
+//! `docs/LOOKAROUND_SCOPE.md`). The TEST-ONLY `fancy-oracle` cargo feature exists only
+//! to give the whole-lexer differential an independent reference for *lowered*
+//! patterns; it routes through this same seam first and must never change the
+//! accepted grammar set. The classifier's *own* contract below is unaffected: it must
+//! still reject-when-unsure and never false-accept. The [`lower_terminal`] /
+//! [`lower_terminal_dotall`] API is retained as a thin `Result`-flattening of the
+//! route for existing callers.
 //!
 //! ## The classifier's contract
 //!
@@ -61,8 +62,9 @@
 //! recognizer's job there is purely to let the *lowering* absorb them. The recognizer —
 //! never a position heuristic — is the single gate, so the dangerous direction
 //! (false-accept) stays closed. **Every bundled lookaround terminal now lowers**; the
-//! decline-to-fancy route remains only for per-instance cases (a variable-offset
-//! lookbehind outside the idiom, a non-realizable guarded base); see
+//! [`LoweringRoute::Declined`] route remains only for per-instance cases (a
+//! variable-offset lookbehind outside the idiom, a non-realizable guarded base) — a
+//! categorized NotYetImplemented build error since L4; see
 //! [`LEXER_DFA_STATUS.md`](../../docs/LEXER_DFA_STATUS.md).
 
 use super::{Look, Node};
@@ -98,6 +100,21 @@ impl ShapeClass {
     }
 }
 
+/// The two-category scope taxonomy every refused lookaround pattern falls into
+/// (`docs/LOOKAROUND_SCOPE.md`). The category is part of the build-error contract:
+/// the scope scoreboard (`tests/test_lookaround_scope.rs`) asserts it end-to-end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Scope {
+    /// A by-design non-goal: never lowered, permanently rejected at grammar build.
+    /// End-to-end tests assert these rejections as the contract.
+    OutOfScope,
+    /// In-principle lowerable, rejected conservatively today — never silently
+    /// mis-lowered. The scoreboard entries for this category are **promotion
+    /// tripwires**: if such a pattern starts lowering, the test fails loudly, and
+    /// promotion requires the Stage-B audit ladder (`docs/LEXER_DFA_PLAN.md`).
+    NotYetImplemented,
+}
+
 /// Why an assertion is out of the supported set (rejected at build time).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Rejection {
@@ -119,6 +136,28 @@ pub enum Rejection {
 }
 
 impl Rejection {
+    /// Which scope category this rejection belongs to (`docs/LOOKAROUND_SCOPE.md`).
+    /// Deliberately a non-wildcard match: adding a `Rejection` variant forces a
+    /// conscious category decision here, and the scoreboard's exhaustiveness
+    /// meta-test forces a matching scoreboard entry.
+    pub fn scope(self) -> Scope {
+        match self {
+            // Non-regular (backrefs) or degenerate/priority-entangled constructs,
+            // and the two shapes ruled out by design: general internal lookahead
+            // (the audited delimited-token idioms are the sanctioned growth path)
+            // and variable-width lookbehind bodies (Python `re` rejects those too,
+            // so rejection is oracle parity).
+            Rejection::Backref
+            | Rejection::Nested
+            | Rejection::QuantifiedAssertion
+            | Rejection::VariableWidthBehind
+            | Rejection::Internal => Scope::OutOfScope,
+            // Unbounded trailing-context lookahead is a regular-language construct
+            // (classic lex trailing context) — implementable, just not implemented.
+            Rejection::Unbounded => Scope::NotYetImplemented,
+        }
+    }
+
     /// A human-readable reason + a fix suggestion, for the build error.
     pub fn explain(self) -> &'static str {
         match self {
@@ -151,6 +190,144 @@ impl Rejection {
             Rejection::QuantifiedAssertion => {
                 "the assertion carries a quantifier (e.g. `(?=…)?`), which is \
                  degenerate and priority-entangled. Remove the quantifier."
+            }
+        }
+    }
+}
+
+/// Why the *lowering* refused a particular instance of a supported shape (or the
+/// frontend could not analyze the pattern at all) — the typed successor of the
+/// free-form decline string. Historically these routed to `fancy-regex` at runtime;
+/// since L4 they are **build errors**, categorized by [`DeclineReason::scope`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeclineReason {
+    /// `(?<=…){n}` — the lookbehind itself carries a quantifier (degenerate).
+    QuantifiedLookbehind,
+    /// A fixed-width lookbehind sitting after a variable-width prefix, outside a
+    /// recognized idiom — its offset from the match start is not fixed. The
+    /// headline NotYetImplemented case (Python `re` accepts these).
+    VariableOffsetLookbehind,
+    /// The lookbehind body has no fixed maximum width (defensive twin of
+    /// [`Rejection::VariableWidthBehind`] at the lowering layer).
+    UnboundedLookbehindBody,
+    /// The lookbehind body can match empty — degenerate (always/never satisfiable
+    /// at width 0).
+    ZeroWidthLookbehindBody,
+    /// An interior forward lookahead reached the lowering (defensive twin of
+    /// [`Rejection::Internal`]; the classifier rejects these first).
+    InteriorLookahead,
+    /// The branch is nothing but boundary assertions — a zero-width terminal
+    /// branch, which the lexer forbids.
+    ZeroWidthBranch,
+    /// An assertion is nested inside a group (or a flag wrapper the strip did not
+    /// unwrap), so it cannot be peeled to a fixed offset.
+    NestedInGroup,
+    /// A guarded branch's base is not greedy-monotone (order-sensitive alternation,
+    /// lazy/possessive quantifier), so the longest-accept accumulator cannot
+    /// reproduce its match length.
+    NonRealizableGuardedBase,
+    /// The string idiom's empty arm has a non-length-deterministic prefix, so its
+    /// trailing guard is not realizable.
+    EmptyArmNotRealizable,
+    /// The lookaround frontend could not parse the pattern at all.
+    FrontendParse,
+    /// The pattern is interpreted in VERBOSE (`x`) mode — a whole-pattern `(?x:…)`
+    /// wrapper or the global `g_regex_flags` VERBOSE bit. The frontend's
+    /// width/offset analysis is not verbose-aware (whitespace/comments would be
+    /// counted as literal width), so a wrapper is deliberately not stripped (see
+    /// `lexer::strip_whole_pattern_flag_wrapper`) and a verbose-mode pattern
+    /// containing any assertion is refused before classification.
+    VerboseMode,
+    /// The pattern has no lookaround at all but still fails to compile on the
+    /// `regex` crate — backtracking-only syntax such as a top-level backreference,
+    /// an atomic group, or a possessive quantifier.
+    BacktrackingOnlySyntax,
+}
+
+impl DeclineReason {
+    /// Which scope category this decline belongs to (`docs/LOOKAROUND_SCOPE.md`).
+    /// Non-wildcard match — a new variant forces a conscious category decision,
+    /// and the scoreboard's exhaustiveness meta-test forces a matching entry.
+    pub fn scope(self) -> Scope {
+        match self {
+            // Degenerate constructs and non-regular syntax: by-design non-goals.
+            DeclineReason::QuantifiedLookbehind
+            | DeclineReason::UnboundedLookbehindBody
+            | DeclineReason::ZeroWidthLookbehindBody
+            | DeclineReason::InteriorLookahead
+            | DeclineReason::ZeroWidthBranch
+            | DeclineReason::BacktrackingOnlySyntax => Scope::OutOfScope,
+            // Regular-language instances the machinery could be extended to host —
+            // rejected conservatively, promotion path documented.
+            DeclineReason::VariableOffsetLookbehind
+            | DeclineReason::NestedInGroup
+            | DeclineReason::NonRealizableGuardedBase
+            | DeclineReason::EmptyArmNotRealizable
+            | DeclineReason::FrontendParse
+            | DeclineReason::VerboseMode => Scope::NotYetImplemented,
+        }
+    }
+
+    /// One actionable sentence per reason, for the build error and the scope doc.
+    pub fn explain(self) -> &'static str {
+        match self {
+            DeclineReason::QuantifiedLookbehind => {
+                "the lookbehind carries a quantifier, which is degenerate. Remove \
+                 the quantifier."
+            }
+            DeclineReason::VariableOffsetLookbehind => {
+                "a fixed-width lookbehind sits after a variable-width prefix, so its \
+                 offset from the match start is not fixed. Restructure the terminal \
+                 so the lookbehind's position is fixed, or split the terminal."
+            }
+            DeclineReason::UnboundedLookbehindBody => {
+                "the lookbehind body has no fixed maximum width. Use a fixed-width \
+                 lookbehind (Python `re` requires this too)."
+            }
+            DeclineReason::ZeroWidthLookbehindBody => {
+                "the lookbehind body can match the empty string, which is \
+                 degenerate. Make the body's width at least 1."
+            }
+            DeclineReason::InteriorLookahead => {
+                "an interior (mid-pattern) lookahead is priority-entangled. Move \
+                 the assertion to a token boundary, or split the terminal."
+            }
+            DeclineReason::ZeroWidthBranch => {
+                "the branch consists only of boundary assertions, so it matches the \
+                 empty string; the lexer forbids zero-width terminals."
+            }
+            DeclineReason::NestedInGroup => {
+                "the assertion is nested inside a group, so it cannot be analyzed \
+                 at a fixed offset. Lift the assertion to the top level of the \
+                 pattern."
+            }
+            DeclineReason::NonRealizableGuardedBase => {
+                "the guarded base has an order-sensitive alternation or a lazy/\
+                 possessive quantifier, so its match length under a guard is not \
+                 reproducible by the longest-accept scan. Make the base \
+                 greedy-monotone, or split the terminal."
+            }
+            DeclineReason::EmptyArmNotRealizable => {
+                "the empty-string arm's prefix is not length-deterministic, so its \
+                 trailing guard cannot be realized."
+            }
+            DeclineReason::FrontendParse => {
+                "the lookaround analyzer could not parse the pattern. Simplify the \
+                 pattern, or report the construct so the analyzer can learn it."
+            }
+            DeclineReason::VerboseMode => {
+                "the pattern is interpreted in VERBOSE (`x`) mode — via a `(?x:…)` \
+                 flag group or a global `g_regex_flags` VERBOSE flag — which the \
+                 lookaround analyzer does not understand (whitespace/comments would \
+                 be miscounted as literal width). Rewrite the terminal without the \
+                 `x` flag, or drop VERBOSE from `g_regex_flags`."
+            }
+            DeclineReason::BacktrackingOnlySyntax => {
+                "the pattern uses backtracking-only syntax (e.g. a backreference, \
+                 an atomic group, or a possessive quantifier), which is not a \
+                 regular language and cannot run on a DFA. Rewrite the pattern \
+                 without it. (Note: this is a deliberate parity break with Python \
+                 Lark, which runs on a backtracking engine.)"
             }
         }
     }
@@ -248,12 +425,43 @@ impl Classification {
     }
 }
 
+/// Strip **semantically vacuous** group wrappers: a *bare* non-capturing,
+/// unquantified group (`(?:X)` — never a flag-scoped `(?i:…)`, never a capturing
+/// `(…)`, never quantified) that constitutes an **entire pattern or an entire
+/// top-level alternation arm** is pure precedence syntax, so `(?:X) ≡ X` exactly —
+/// unwrapping is language-, priority-, and match-length-neutral. The grammar loader
+/// routinely produces this shape for terminal-algebra alternations
+/// (`T: "a" /(?!x)/ | "b"` compiles to `(?:a(?!x))|(?:b)`), so without this
+/// normalization a trailing boundary guard at an arm's end would be misread as a
+/// group-nested *internal* assertion and rejected — refusing grammars our own loader
+/// generates (and Python Lark accepts) for an already-audited lowerable shape.
+///
+/// Deliberately **not** descended into: interior concat positions (`a(?:b(?!c))d`
+/// stays opaque — the group there is load-bearing for the positional analysis) and
+/// flag wrappers (PR #136's `unwrap_arms` hardening: peeling `(?i:…)` would silently
+/// drop flags; whole-pattern flag wrappers are stripped into the flag *bitset*
+/// upstream by `lexer::strip_whole_pattern_flag_wrapper`).
+pub(super) fn unwrap_vacuous_groups(node: Node) -> Node {
+    match node {
+        Node::Group { open, body, quant } if open == "(?:" && quant.is_empty() => {
+            unwrap_vacuous_groups(*body)
+        }
+        Node::Alt(arms) => Node::Alt(arms.into_iter().map(unwrap_vacuous_groups).collect()),
+        // A degenerate single-part concat is the same "entire arm" case.
+        Node::Concat(mut parts) if parts.len() == 1 => {
+            unwrap_vacuous_groups(parts.pop().expect("len checked"))
+        }
+        other => other,
+    }
+}
+
 /// Classify a terminal regex `pattern` into its per-assertion verdicts. Errors only
 /// on a pattern the front-end cannot parse (which the regex engines also reject).
 ///
 /// This is the swappable seam the mutation meta-test attacks: see [`Classifier`].
 pub fn classify(pattern: &str) -> Result<Classification, GrammarError> {
     let node = super::parse(pattern)?;
+    let node = unwrap_vacuous_groups(node);
     let mut assertions = Vec::new();
     walk_top_level(&node, &mut assertions);
     // Audited-idiom refinement (the recognizers are the single gate, never a position
@@ -330,30 +538,32 @@ pub enum Lowered {
 pub enum LoweringRoute {
     /// No lookaround assertion. A pattern that already compiled on the `regex` crate is
     /// handled by the plain DFA path *before* it reaches routing; a pattern that reaches
-    /// the route path and classifies `Plain` only does so because it is fancy-only for some
-    /// *other* reason (e.g. a top-level backreference outside any lookaround), and the
-    /// `DfaScanner` keeps the compatibility fallback for it.
+    /// the route path and classifies `Plain` only does so because the `regex` crate
+    /// rejected it for some *other* reason (e.g. a top-level backreference outside any
+    /// lookaround) — since L4 the routing seam turns this into the categorized
+    /// [`DeclineReason::BacktrackingOnlySyntax`] build error.
     Plain,
     /// A supported shape that lowered into lookaround-free per-branch sub-patterns — the
     /// DFA hosts it directly.
     Lowered(Vec<super::lower::LoweredBranch>),
-    /// A **supported-in-principle** terminal whose *particular instance* the lowering
-    /// declined (a variable-offset lookbehind outside a recognized idiom, a
-    /// non-greedy-monotone guarded base), **or** a pattern the lookaround frontend could
-    /// not parse. The runtime routes this to `fancy-regex` during the transition — a
-    /// correct fallback, never a mis-lowering. **No bundled terminal is here any more**:
-    /// `python.STRING` (M4 splice), `lark.REGEXP`, and `python.LONG_STRING` (the Stage-B
-    /// delimited-token idioms) all route [`Self::Lowered`]; only per-instance user
-    /// declines remain.
-    DeclinedToFancy {
-        /// A human-readable reason naming the terminal and why it declined.
-        reason: String,
+    /// A terminal the lowering **declined**: every assertion is a supported *shape*,
+    /// but this particular instance cannot ride the lowered engine (a variable-offset
+    /// lookbehind outside a recognized idiom, a non-greedy-monotone guarded base), or
+    /// the frontend could not analyze the pattern. Since L4 this is a **categorized
+    /// build error** ([`DeclineReason::scope`] — most declines are
+    /// [`Scope::NotYetImplemented`]); historically it routed to `fancy-regex`.
+    /// **No bundled terminal is here**: `python.STRING` (M4 splice), `lark.REGEXP`,
+    /// and `python.LONG_STRING` (the Stage-B delimited-token idioms) all route
+    /// [`Self::Lowered`].
+    Declined {
+        /// The typed reason — the scoreboard key.
+        reason: DeclineReason,
+        /// The scope-phrased build message naming the terminal and the cause.
+        message: String,
     },
     /// The classifier rejects this assertion as **out-of-shape** ([`Classification::first_rejection`]).
-    /// This is the final L4 reject path. The current compatibility policy may *still* route
-    /// it to `fancy-regex` until that policy is deliberately flipped (see `DfaScanner`'s
-    /// compatibility-fallback comment) — distinguishing it from [`Self::DeclinedToFancy`]
-    /// is exactly what lets L4 flip only this route to a build error.
+    /// Since L4 this is a **categorized build error** ([`Rejection::scope`] — most
+    /// rejections are [`Scope::OutOfScope`] by design).
     Unsupported {
         /// The offending assertion's exact source, e.g. `"(?=b)"`.
         assertion: String,
@@ -363,9 +573,11 @@ pub enum LoweringRoute {
         message: String,
     },
     /// Neither the lookaround frontend nor any regex engine can host the pattern — a
-    /// genuine build error. **Reserved:** the current router never constructs this (a
-    /// frontend-only parse failure prefers [`Self::DeclinedToFancy`] to preserve
-    /// `fancy-regex` compatibility), per the PR scope.
+    /// genuine build error. **Reserved:** the current router never constructs this. A
+    /// frontend-only parse failure routes [`Self::Declined`] with
+    /// [`DeclineReason::FrontendParse`] instead, because the frontend not parsing a
+    /// pattern is a frontend limitation, not proof the pattern is invalid — the
+    /// conservative direction is still a clean categorized refusal.
     Invalid {
         /// The build-error message.
         message: String,
@@ -397,16 +609,18 @@ pub fn route_terminal_with(
 ) -> LoweringRoute {
     let classification = match classifier.classify(pattern) {
         Ok(c) => c,
-        // The lookaround frontend could not parse the pattern. `fancy-regex` parses a
-        // superset of our shape grammar, so it may still accept and lex this terminal —
-        // prefer a *decline* to a hard `Invalid`, since turning a frontend limitation into
-        // a build error would regress a pattern that lexes today (`docs/LEXER_DFA_PLAN.md`,
-        // "Runtime routing taxonomy" — the classify-fails-but-fancy-accepts case).
+        // The lookaround frontend could not parse the pattern — a frontend
+        // limitation, not proof the pattern is out of scope, so it declines as
+        // NotYetImplemented (the conservative direction is still a clean reject,
+        // never a mis-lowering).
         Err(e) => {
-            return LoweringRoute::DeclinedToFancy {
-                reason: format!(
-                    "terminal `{name}`: the lookaround frontend could not parse the pattern \
-                     ({e}); routed to fancy-regex"
+            return LoweringRoute::Declined {
+                reason: DeclineReason::FrontendParse,
+                message: scope_message(
+                    name,
+                    pattern,
+                    LookaroundIssue::Declined(DeclineReason::FrontendParse),
+                    &format!("{} ({e})", DeclineReason::FrontendParse.explain()),
                 ),
             };
         }
@@ -423,18 +637,57 @@ pub fn route_terminal_with(
             message: unsupported_message(name, &info.source, rejection),
         };
     }
-    // Every assertion is a supported shape. Run the lowering; it may still **decline** a
-    // particular instance (a non-greedy-monotone guarded base, a lookbehind after a
-    // variable-width prefix outside a recognized idiom) by returning `Err` — that is a
-    // route-to-fancy, never a reject.
+    // Every assertion is a supported shape. Run the lowering; it may still **decline**
+    // a particular instance (a non-greedy-monotone guarded base, a lookbehind after a
+    // variable-width prefix outside a recognized idiom) with a typed reason — a clean
+    // categorized refusal, never a mis-lowering.
     match super::lower::lower_boundary_dotall(pattern, dotall) {
         Ok(branches) => LoweringRoute::Lowered(branches),
-        Err(e) => LoweringRoute::DeclinedToFancy {
-            reason: format!(
-                "terminal `{name}`: a supported shape declined this instance of lowering \
-                 ({e}); routed to fancy-regex"
+        Err(d) => LoweringRoute::Declined {
+            reason: d.reason,
+            message: scope_message(
+                name,
+                pattern,
+                LookaroundIssue::Declined(d.reason),
+                &d.detail,
             ),
         },
+    }
+}
+
+/// Why a lookaround terminal was refused, typed for the scope scoreboard — either the
+/// classifier rejected an out-of-shape assertion or the lowering declined the instance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LookaroundIssue {
+    Rejected(Rejection),
+    Declined(DeclineReason),
+}
+
+impl LookaroundIssue {
+    pub fn scope(self) -> Scope {
+        match self {
+            LookaroundIssue::Rejected(r) => r.scope(),
+            LookaroundIssue::Declined(d) => d.scope(),
+        }
+    }
+}
+
+/// **THE build-error message builder** — the single place the scope-phrased refusal
+/// text is produced, shared by the route arms, the flattened [`lower_terminal`] error,
+/// and the engine build path, so the wording (and the scoreboard's `msg_contains`
+/// pins) can never drift between sites. `subject` is the assertion source for a
+/// rejection, the whole pattern for a decline; `detail` is the site-specific cause.
+pub fn scope_message(name: &str, subject: &str, issue: LookaroundIssue, detail: &str) -> String {
+    match issue.scope() {
+        Scope::OutOfScope => format!(
+            "terminal `{name}`: lookaround in `{subject}` is not supported (by design): \
+             {detail} This is a permanent non-goal; see docs/LOOKAROUND_SCOPE.md."
+        ),
+        Scope::NotYetImplemented => format!(
+            "terminal `{name}`: lookaround in `{subject}` is not yet implemented: {detail} \
+             It is rejected conservatively rather than risk a mis-lex; see \
+             docs/LOOKAROUND_SCOPE.md for the promotion path."
+        ),
     }
 }
 
@@ -442,10 +695,10 @@ pub fn route_terminal_with(
 /// and shows the assertion source. Shared by the route's [`LoweringRoute::Unsupported`]
 /// arm and the flattened [`lower_terminal`] error so the two never drift.
 fn unsupported_message(name: &str, source: &str, rejection: Rejection) -> String {
-    format!(
-        "terminal `{name}`: lookaround assertion `{source}` is unsupported ({}); it \
-         cannot be lowered into the combined DFA (docs/LEXER_DFA_PLAN.md, \"What we \
-         support\").",
+    scope_message(
+        name,
+        source,
+        LookaroundIssue::Rejected(rejection),
         rejection.explain(),
     )
 }
@@ -461,7 +714,7 @@ fn unsupported_message(name: &str, source: &str, rejection: Rejection) -> String
 /// (`Err`). Either error names the terminal and the offending assertion.
 ///
 /// This is a thin compatibility flattening of [`route_terminal`]: the
-/// `DeclinedToFancy` / `Unsupported` / `Invalid` routes all collapse to `Err`, which is
+/// `Declined` / `Unsupported` / `Invalid` routes all collapse to `Err`, which is
 /// why a caller that only checks `Ok(Branches)` cannot tell a decline from a reject. The
 /// build path uses [`route_terminal_dotall`] directly to keep them apart.
 pub fn lower_terminal(name: &str, pattern: &str) -> Result<Lowered, GrammarError> {
@@ -489,13 +742,30 @@ pub fn lower_terminal_with(
     dotall: bool,
 ) -> Result<Lowered, GrammarError> {
     // Flatten the typed route back to the historical `Result`. A *decline* and an
-    // out-of-shape *reject* both collapse to `Err(GrammarError::Other)` here — the
-    // conflation `DfaScanner` now avoids by matching the route directly.
+    // out-of-shape *reject* both collapse to `Err` here (now the typed
+    // `GrammarError::LookaroundScope`, carrying the category) — the conflation
+    // `DfaScanner` avoids by matching the route directly.
     match route_terminal_with(classifier, name, pattern, dotall) {
         LoweringRoute::Plain => Ok(Lowered::Plain),
         LoweringRoute::Lowered(branches) => Ok(Lowered::Branches(branches)),
-        LoweringRoute::DeclinedToFancy { reason } => Err(GrammarError::Other { msg: reason }),
-        LoweringRoute::Unsupported { message, .. } => Err(GrammarError::Other { msg: message }),
+        LoweringRoute::Declined { reason, message } => Err(GrammarError::LookaroundScope {
+            terminal: name.to_string(),
+            subject: pattern.to_string(),
+            scope: reason.scope(),
+            issue: LookaroundIssue::Declined(reason),
+            msg: message,
+        }),
+        LoweringRoute::Unsupported {
+            assertion,
+            rejection,
+            message,
+        } => Err(GrammarError::LookaroundScope {
+            terminal: name.to_string(),
+            subject: assertion,
+            scope: rejection.scope(),
+            issue: LookaroundIssue::Rejected(rejection),
+            msg: message,
+        }),
         LoweringRoute::Invalid { message } => Err(GrammarError::Other { msg: message }),
     }
 }

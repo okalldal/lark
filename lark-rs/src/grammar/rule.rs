@@ -48,9 +48,12 @@ pub struct RuleOptions {
     pub keep_all_tokens: bool,
     /// Priority for disambiguation — higher wins.
     pub priority: i32,
-    /// When using `maybe_placeholders`, indices in expansion that came from `?` operators
-    /// and may be absent.
-    pub empty_indices: Vec<bool>,
+    /// Under `maybe_placeholders`, the `None` placeholders a *distributed* absent
+    /// `[...]` contributes to this alternative: entry `i` is the number of `None`
+    /// children inserted before expansion position `i` (entry `expansion.len()` is
+    /// trailing). Python Lark's `empty_indices`, in count-per-gap form. Empty for
+    /// rules with no inline placeholders (the common case).
+    pub nones_before: Vec<usize>,
     /// Number of `None` placeholder children this (empty `[...]`) production emits
     /// on reduce, under `maybe_placeholders`. 0 for ordinary rules.
     pub placeholder_count: usize,
@@ -62,7 +65,7 @@ impl Default for RuleOptions {
             expand1: false,
             keep_all_tokens: false,
             priority: 0,
-            empty_indices: Vec::new(),
+            nones_before: Vec::new(),
             placeholder_count: 0,
         }
     }

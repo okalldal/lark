@@ -1643,11 +1643,13 @@ impl<'a> Transformer<'a> {
         match packed.right {
             ForestRef::None => {} // ε production: no right child
             ForestRef::Tok(t) => {
+                self.push_nones_before(packed.rule, packed.right_pos, out);
                 if self.builder.keep_token(packed.rule, packed.right_pos) {
                     out.push(Child::Token(self.forest.tokens[t].clone()));
                 }
             }
             ForestRef::Node(rid) => {
+                self.push_nones_before(packed.rule, packed.right_pos, out);
                 if self.is_transparent_node(rid) {
                     // Splice the transparent child's children straight into `out`.
                     if self.splice_node(rid, out, visiting).is_none() {
@@ -1686,7 +1688,20 @@ impl<'a> Transformer<'a> {
         for _ in 0..self.grammar.rules[rule].options.placeholder_count {
             out.push(Child::None);
         }
+        // Trailing placeholders of a distributed absent `[...]` (the streaming
+        // mirror of `TreeBuilder::shape`'s trailing append).
+        let len = self.grammar.rules[rule].expansion.len();
+        self.push_nones_before(rule, len, out);
         Some(rule)
+    }
+
+    /// Push the `None` placeholders a distributed absent `[...]` left before
+    /// expansion position `gap` of `rule` (the streaming mirror of
+    /// `TreeBuilder::assemble`'s per-position insert).
+    fn push_nones_before(&self, rule: usize, gap: usize, out: &mut Vec<Child>) {
+        for _ in 0..self.builder.nones_at(rule, gap) {
+            out.push(Child::None);
+        }
     }
 
     /// Expand an intermediate node into the alternative child-lists it contributes

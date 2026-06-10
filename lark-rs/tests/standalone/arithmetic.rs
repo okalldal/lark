@@ -56,6 +56,9 @@ pub struct RuleData {
     pub keep_all: bool,
     pub filter_pos: &'static [bool],
     pub placeholder_count: u32,
+    /// `None` placeholders a distributed absent `[...]` left before each
+    /// expansion position (entry `len` is trailing); empty for ordinary rules.
+    pub nones_before: &'static [u32],
     pub is_start: bool,
 }
 
@@ -290,8 +293,15 @@ fn keep_token(rule: &RuleData, pos: usize) -> bool {
     rule.keep_all || !rule.filter_pos.get(pos).copied().unwrap_or(false)
 }
 
+fn nones_at(rule: &RuleData, gap: usize) -> u32 {
+    rule.nones_before.get(gap).copied().unwrap_or(0)
+}
+
 fn shape(rule: &RuleData, mut children: Vec<Child>) -> NodeValue {
     for _ in 0..rule.placeholder_count {
+        children.push(Child::None);
+    }
+    for _ in 0..nones_at(rule, rule.len as usize) {
         children.push(Child::None);
     }
     if rule.transparent {
@@ -318,6 +328,9 @@ fn assemble(data: &GrammarData, rule_idx: usize, child_values: Vec<NodeValue>) -
     let rule = &data.rules[rule_idx];
     let mut children: Vec<Child> = Vec::new();
     for (i, value) in child_values.into_iter().enumerate() {
+        for _ in 0..nones_at(rule, i) {
+            children.push(Child::None);
+        }
         match value {
             NodeValue::Token(t) => {
                 if keep_token(rule, i) {
@@ -446,20 +459,20 @@ static DATA: GrammarData = GrammarData {
         "atom",
     ],
     rules: &[
-        RuleData { origin: 11, len: 1, tree_name: "start", transparent: false, expand1: true, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
-        RuleData { origin: 12, len: 3, tree_name: "add", transparent: false, expand1: true, has_alias: true, keep_all: false, filter_pos: &[false, true, false], placeholder_count: 0, is_start: false },
-        RuleData { origin: 12, len: 3, tree_name: "sub", transparent: false, expand1: true, has_alias: true, keep_all: false, filter_pos: &[false, true, false], placeholder_count: 0, is_start: false },
-        RuleData { origin: 12, len: 1, tree_name: "expr", transparent: false, expand1: true, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
-        RuleData { origin: 13, len: 3, tree_name: "mul", transparent: false, expand1: true, has_alias: true, keep_all: false, filter_pos: &[false, true, false], placeholder_count: 0, is_start: false },
-        RuleData { origin: 13, len: 3, tree_name: "div", transparent: false, expand1: true, has_alias: true, keep_all: false, filter_pos: &[false, true, false], placeholder_count: 0, is_start: false },
-        RuleData { origin: 13, len: 1, tree_name: "term", transparent: false, expand1: true, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
-        RuleData { origin: 14, len: 2, tree_name: "pos", transparent: false, expand1: true, has_alias: true, keep_all: false, filter_pos: &[true, false], placeholder_count: 0, is_start: false },
-        RuleData { origin: 14, len: 2, tree_name: "neg", transparent: false, expand1: true, has_alias: true, keep_all: false, filter_pos: &[true, false], placeholder_count: 0, is_start: false },
-        RuleData { origin: 14, len: 1, tree_name: "factor", transparent: false, expand1: true, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
-        RuleData { origin: 15, len: 1, tree_name: "atom", transparent: false, expand1: true, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
-        RuleData { origin: 15, len: 1, tree_name: "atom", transparent: false, expand1: true, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: false },
-        RuleData { origin: 15, len: 3, tree_name: "atom", transparent: false, expand1: true, has_alias: false, keep_all: false, filter_pos: &[true, false, true], placeholder_count: 0, is_start: false },
-        RuleData { origin: 10, len: 1, tree_name: "$root_start", transparent: false, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, is_start: true },
+        RuleData { origin: 11, len: 1, tree_name: "start", transparent: false, expand1: true, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, nones_before: &[], is_start: false },
+        RuleData { origin: 12, len: 3, tree_name: "add", transparent: false, expand1: true, has_alias: true, keep_all: false, filter_pos: &[false, true, false], placeholder_count: 0, nones_before: &[], is_start: false },
+        RuleData { origin: 12, len: 3, tree_name: "sub", transparent: false, expand1: true, has_alias: true, keep_all: false, filter_pos: &[false, true, false], placeholder_count: 0, nones_before: &[], is_start: false },
+        RuleData { origin: 12, len: 1, tree_name: "expr", transparent: false, expand1: true, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, nones_before: &[], is_start: false },
+        RuleData { origin: 13, len: 3, tree_name: "mul", transparent: false, expand1: true, has_alias: true, keep_all: false, filter_pos: &[false, true, false], placeholder_count: 0, nones_before: &[], is_start: false },
+        RuleData { origin: 13, len: 3, tree_name: "div", transparent: false, expand1: true, has_alias: true, keep_all: false, filter_pos: &[false, true, false], placeholder_count: 0, nones_before: &[], is_start: false },
+        RuleData { origin: 13, len: 1, tree_name: "term", transparent: false, expand1: true, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, nones_before: &[], is_start: false },
+        RuleData { origin: 14, len: 2, tree_name: "pos", transparent: false, expand1: true, has_alias: true, keep_all: false, filter_pos: &[true, false], placeholder_count: 0, nones_before: &[], is_start: false },
+        RuleData { origin: 14, len: 2, tree_name: "neg", transparent: false, expand1: true, has_alias: true, keep_all: false, filter_pos: &[true, false], placeholder_count: 0, nones_before: &[], is_start: false },
+        RuleData { origin: 14, len: 1, tree_name: "factor", transparent: false, expand1: true, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, nones_before: &[], is_start: false },
+        RuleData { origin: 15, len: 1, tree_name: "atom", transparent: false, expand1: true, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, nones_before: &[], is_start: false },
+        RuleData { origin: 15, len: 1, tree_name: "atom", transparent: false, expand1: true, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, nones_before: &[], is_start: false },
+        RuleData { origin: 15, len: 3, tree_name: "atom", transparent: false, expand1: true, has_alias: false, keep_all: false, filter_pos: &[true, false, true], placeholder_count: 0, nones_before: &[], is_start: false },
+        RuleData { origin: 10, len: 1, tree_name: "$root_start", transparent: false, expand1: false, has_alias: false, keep_all: false, filter_pos: &[false], placeholder_count: 0, nones_before: &[], is_start: true },
     ],
     action: &[
         &[(1, Action::Shift(1)), (2, Action::Shift(2)), (4, Action::Shift(3)), (5, Action::Shift(4)), (6, Action::Shift(5))],

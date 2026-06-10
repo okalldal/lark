@@ -187,9 +187,10 @@ fn gen_json(records: usize, fields: usize) -> String {
 ///
 /// Both engines parse this byte-for-byte: it stays within what lark-rs *and*
 /// Python Lark accept. (Star-params after a positional in a `def` header — e.g.
-/// `def f(self, *a)` — is the one construct lark-rs's LALR table does not yet
-/// accept where Python Lark does, so def-site `*args`/`**kwargs` is exercised via
-/// the no-positional top-level `make`.)
+/// `def f(self, *a)` — used to be rejected by lark-rs, so def-site
+/// `*args`/`**kwargs` is exercised via the no-positional top-level `make`.
+/// Issue #106 fixed that; the generator is kept as-is so historical bench
+/// numbers stay comparable.)
 ///
 /// Mirrors `gen_python` in `vs_python_lark.py` line-for-line; keep them identical.
 fn gen_python(classes: usize) -> String {

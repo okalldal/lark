@@ -24,16 +24,16 @@ The per-terminal route table lives in [`LEXER_DFA_STATUS.md`](LEXER_DFA_STATUS.m
 | `lark.REGEXP` lowering — Stage-B regex-literal idiom (`recognize_regexp_idiom`) | **Landed** (2026-06-10). |
 | `python.LONG_STRING` lowering — Stage-B long-string idiom (`recognize_long_string_idiom`) | **Landed** (2026-06-10). |
 | Flag-wrapper strip — terminal `/…/is` flags reach the lowering (`strip_whole_pattern_flag_wrapper`) | **Landed** (2026-06-10, with the LONG_STRING idiom). The loader bakes terminal flags into the pattern as `(?is:…)` with `PatternRe.flags = 0`; before the strip, the wrapped `python.STRING` silently rode the `Unsupported` compatibility fallback and a wrapped LONG_STRING the decline route **on the engine path** (the route-level proofs all held — on the unwrapped constants), invisible to the differential because the fancy reference agreed. The engine now strips the wrapper into the flag bitset before routing and re-applies it to every lowered branch/guard, so the M4/Stage-B idioms genuinely engage at runtime; pinned by `lexer::tests::dfa_bundled_lookaround_terminals_lower_with_no_fancy_probe` (zero fancy side-probes). `g_regex_flags` DOTALL is likewise threaded into the lowering now (the global `(?s…)` prefix is prepended to lowered branches, so the lowering must see it). |
-| L4 — remove runtime `fancy-regex` | **Blocked on one gate**: the `Unsupported` compatibility-fallback policy flip. Every bundled lookaround terminal now lowers (decline-vs-reject contract **typed**; runtime fallback still preserved: Unsupported → fancy). |
-| L5 — bake a serialized DFA scanner bundle into standalone/C/WASM | **Blocked** — standalone still bakes the regex `ScannerPlan`. |
+| L4 — remove runtime `fancy-regex` | **Landed** (2026-06-10). Both refusal arms (`Unsupported` AND `Declined`) are **categorized build errors** under the two-category scope taxonomy (`docs/LOOKAROUND_SCOPE.md`: `OutOfScope` vs `NotYetImplemented`, scoreboarded end-to-end by `tests/test_lookaround_scope.rs`); `fancy-regex` is an optional dependency behind the default-OFF, TEST-ONLY `fancy-oracle` feature (the `Regex` reference backend's historical probes for the L0 differential) plus the permanent dev-dependency oracle. Default builds have zero fancy code (`cargo tree -e normal`). The flip exposed and fixed two latent gaps: the loader's group-wrapped alternation arms (now normalized by `unwrap_vacuous_groups` — `(?:X) ≡ X` for whole-pattern/arm wrappers) and `python.DEC_NUMBER`'s guarded arm (admitted by the exact `is_leftmost_longest` semantic realizability gate), both of which had silently ridden the fallback. The Earley dynamic lexer and `unless` retyping run on per-terminal lowered matchers (`LoweredTerminalMatcher`). |
+| L5 — bake a serialized DFA scanner bundle into standalone/C/WASM | **Unblocked by L4** — standalone still bakes the regex `ScannerPlan`; the scanner bundle is now fully serializable static data. |
 
-So the strategy has paid off for the common path and for **every bundled lookaround
-terminal** (`python.STRING`, `lark.REGEXP`, `python.LONG_STRING` — all lowered, on the
-real engine path), but the *bakeability* and *drop-`fancy-regex`* wins (L4/L5) are
-**not** realized yet: `fancy-regex` is still a runtime dependency because the
-`Unsupported` compatibility fallback still routes out-of-shape user lookaround to fancy
-instead of erroring (and per-instance declines still ride it), and the standalone
-generator still emits a regex-based `ScannerPlan`, not a serialized DFA.
+So the strategy has paid off for the common path, for **every bundled lookaround
+terminal** (`python.STRING`, `lark.REGEXP`, `python.LONG_STRING`, `python.DEC_NUMBER` —
+all lowered, on the real engine path), and for the **drop-`fancy-regex`** win itself:
+since L4 there is no runtime fallback engine — refusals are categorized build errors
+(`docs/LOOKAROUND_SCOPE.md`) and default builds carry zero fancy code. The remaining
+unrealized win is *bakeability* (L5): the standalone generator still emits a
+regex-based `ScannerPlan`, not the serialized DFA bundle.
 
 ## Runtime routing taxonomy
 
@@ -45,30 +45,29 @@ story:
   DFA. The overwhelming common case.
 * **Lowered** — a supported, *proven* bounded assertion (M1/M2/M3/M4). Lowered into plain
   DFA branches + guard side-tables; **no** `fancy-regex` at runtime for this terminal.
-* **Declined-to-fancy** — a per-instance lowering the realizability check declines (a
-  variable-offset lookbehind outside a recognized idiom, a non-greedy-monotone guarded
-  base), or a pattern the lookaround frontend cannot parse. The terminal still runs on
-  `fancy-regex` at runtime. **No bundled terminal is here any more** — STRING, REGEXP,
-  and LONG_STRING all lower via their idioms.
+* **Declined** — a per-instance lowering the realizability check declines (a
+  variable-offset lookbehind outside a recognized idiom, a base the `is_leftmost_longest`
+  semantic gate cannot prove), or a pattern the analyzer cannot handle. Since L4 a
+  **categorized build error**, typed by `classify::DeclineReason` and mostly
+  `Scope::NotYetImplemented` (`docs/LOOKAROUND_SCOPE.md`) — a clean refusal, never a
+  mis-lowering. **No bundled terminal is here** — STRING, REGEXP, LONG_STRING and
+  DEC_NUMBER all lower.
 * **Rejected** — an out-of-shape assertion (unbounded, internal/priority-entangled,
-  backref, nested, variable-width lookbehind). A loud build error, **permanently**.
-* **Invalid regex** — neither `regex` nor `fancy-regex` accepts the pattern. A build error.
+  backref, nested, variable-width lookbehind). A categorized build error, mostly
+  `Scope::OutOfScope` — **permanently** (the scoreboard asserts these as the contract).
+* **Invalid regex** — neither `regex` nor the lookaround analyzer accepts the pattern.
+  A build error at grammar load (`PatternRe::new`).
 
-**Design debt — route enum landed; runtime compatibility fallback still preserved.**
-The typed split is now in code: `classify::route_terminal_dotall` returns a
-`LoweringRoute` enum that separates `Plain` / `Lowered` / `DeclinedToFancy` / `Unsupported`
-/ `Invalid`, and `DfaScanner::build` matches it directly (the historical
-`lower_terminal_dotall` is retained as a thin `Result`-flattening for existing callers).
-The build path **no longer conflates** *declined* and *rejected* in the type — each route
-is a distinct, named arm. What is **deliberately unchanged** is the *runtime policy*: the
-`Unsupported` arm still routes to `fancy-regex` via a single auditable
-`push_fancy_fallback` seam, so an out-of-shape *user* lookaround keeps lexing today rather
-than erroring (preserving behaviour while lowering is incomplete). This is the
-*compatibility fallback*, now loud and isolated to one arm. **Before L4** that one arm must
-flip to a build error (or be gated behind an explicit compatibility mode); the
-`Lowered` / `DeclinedToFancy` / bundled-known-decline routes are unaffected by the flip.
-The transitional behaviour is pinned by
-`tests/test_lowering_routes.rs::unsupported_user_lookaround_currently_compat_falls_back_to_fancy`.
+**The policy is enforced (L4 landed).** The typed split is in code
+(`classify::route_terminal_dotall` → `LoweringRoute::{Plain, Lowered, Declined,
+Unsupported, Invalid}`) AND in the runtime policy: every refusal funnels through one
+auditable seam (`lexer::route_fancy_only_terminal`, the successor of the historical
+`push_fancy_fallback` compatibility seam) and becomes a categorized
+`GrammarError::LookaroundScope` carrying `Scope` + the typed reason. The contract is
+scoreboarded end-to-end by `tests/test_lookaround_scope.rs` (whose exhaustiveness
+meta-test forces every refusal variant to a scoreboard row or a documented defensive
+justification) and pinned on the engine path by
+`tests/test_lowering_routes.rs::unsupported_user_lookaround_is_now_a_categorized_build_error`.
 
 ## Goal
 
@@ -280,33 +279,48 @@ Two fallouts to carry forward, both gated by the differential oracle:
 
 **L3 has landed.** `LexerBackend::Dfa` is `#[default]`, so `LexerConf::new` /
 `LarkOptions` build the DFA scanner unless `LexerBackend::Regex` is explicitly chosen,
-with `fancy-regex` as the fallback for the *declined* lookaround terminals. The
-differential oracle is 0 divergences across the full bank + JSON + python/lark corpora,
-so the swap is correctness-identical, and it is faster on the all-plain common path. The
-remaining work is **not** the default flip; it is eliminating the fallback (L4).
+The differential oracle is 0 divergences across the full bank + JSON + python/lark
+corpora, so the swap is correctness-identical, and it is faster on the all-plain common
+path. The fallback has since been eliminated entirely (L4): refusals are categorized
+build errors, and the differential's fancy reference lives behind the TEST-ONLY
+`fancy-oracle` feature.
 
-### L4 — Remove `fancy-regex` from the runtime *(blocked)*
+### L4 — Remove `fancy-regex` from the runtime *(landed 2026-06-10)*
 
-Remove the `AnyRegex::Fancy` runtime routing **after every bundled lookaround terminal is
-either lowered or intentionally rejected by policy** — so the lexer is
-`regex-automata`-only. **Keep `fancy-regex` as a dev/test dependency**: it remains the
-independent match-length oracle the lowering is verified against. This is a standing
-decision, not a temporary state.
+The lexer is `regex-automata`-only. Both refusal arms are **categorized build errors**
+under the two-category scope taxonomy — see **`docs/LOOKAROUND_SCOPE.md`** (the policy
+document) and `tests/test_lookaround_scope.rs` (the machine-checked scoreboard):
 
-**Blocked on one gate** (the bundled-terminal gate cleared 2026-06-10 — STRING, REGEXP,
-and LONG_STRING all lower on the engine path, pinned by
-`dfa_bundled_lookaround_terminals_lower_with_no_fancy_probe`):
+* `Unsupported` (out-of-shape) → mostly `Scope::OutOfScope` — by-design non-goals,
+  asserted as the contract (general internal lookahead, with the audited
+  delimited-token idioms as the sanctioned growth path; variable-width lookbehind,
+  which Python `re` also rejects — parity; backrefs/backtracking-only syntax — the
+  named parity break; degenerates).
+* `Declined` (per-instance) → mostly `Scope::NotYetImplemented` — clean conservative
+  refusals that double as **promotion tripwires** (variable-offset lookbehind,
+  non-realizable guarded bases, VERBOSE mode — wrappers or global `g_regex_flags` —
+  interior-group assertions).
 
-The **decline-vs-reject contract** for *user* grammars is **typed but not yet
-enforced** (see "Runtime routing taxonomy"). The result type is split:
-`route_terminal_dotall` returns `LoweringRoute::{Plain, Lowered, DeclinedToFancy,
-Unsupported, Invalid}` and `DfaScanner` matches it directly. What remains for L4 is the
-*policy flip*: today the `Unsupported` arm still routes to `fancy-regex` via the
-compatibility fallback (so an unsupported user lookaround keeps lexing), and per-instance
-`DeclinedToFancy` user cases (a variable-offset lookbehind outside a recognized idiom, a
-non-realizable guarded base) also still ride the probe. Before L4 the `Unsupported` arm
-must produce a clear build error unless a compatibility mode is deliberately chosen, and
-a decision is needed for the per-instance declines (error vs. documented fancy support).
+What the flip surfaced and fixed (the same model-vs-reality class the flag-wrapper
+strip closed for STRING): the loader wraps terminal-algebra alternation arms in
+`(?:…)`, so arm-end trailing guards were misread as group-nested internal assertions —
+now normalized by `classify::unwrap_vacuous_groups` (`(?:X) ≡ X` for whole-pattern/arm
+bare wrappers, provably neutral); and `python.DEC_NUMBER`'s guarded arm base
+`0(?:_?0)*` failed both syntactic realizability fast paths — now admitted by
+`lower::is_leftmost_longest`, the **exact** semantic decision (LeftmostFirst × All
+product-DFA walk: leftmost-first ≡ longest on every input), audited by unit pins +
+exhaustive generative equivalence vs the fancy oracle + the stdlib oracles.
+
+Runtime seams that lost fancy: `DfaScanner` (side-probe deleted), the `Regex`
+reference `Scanner` (default build: lowered per-terminal side-probes;
+**`fancy-oracle` feature**: the historical `\G` fancy probes, TEST-ONLY, for the L0
+differential), the Earley `DynamicMatcher` (per-terminal `LoweredTerminalMatcher` —
+single-terminal `DfaScanner`s), `unless` retyping (anchored lowered branches +
+guards), and `PatternRe::new` (load-gate = `regex` ∪ lookaround-analyzer parse).
+**`fancy-regex` stays as a dev/test dependency forever** — the independent
+match-length oracle (this was always the standing decision) — plus the optional
+`fancy-oracle` feature for the whole-lexer reference. CI runs both matrices
+(`cargo test --all` and `cargo test -p lark-rs --features fancy-oracle`).
 
 ### L5 — Bake the scanner bundle static (the bakeability payoff) *(blocked)*
 
@@ -324,10 +338,10 @@ The bake target is **not** literally one serialized DFA. The implemented scanner
 
 Bake that bundle into the standalone / C / WASM runtimes, replacing the regex
 `ScannerPlan` alternation, starting with **Rust standalone** before C/WASM. Confirm the
-bundled `python`/`lark` grammars then generate standalone parsers. **Blocked on L4** (a
-bundle that still has a `fancy-regex` side-probe is not serializable static data) and on
-the standalone generator, which today still bakes the regex `ScannerPlan` (see
-`src/standalone/mod.rs`).
+bundled `python`/`lark` grammars then generate standalone parsers. **Unblocked: L4 has
+landed** (the bundle is fully serializable static data — no fancy side-probe exists);
+the remaining work is the standalone generator itself, which today still bakes the
+regex `ScannerPlan` (see `src/standalone/mod.rs`).
 
 ## How the lowering works
 

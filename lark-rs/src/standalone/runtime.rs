@@ -35,6 +35,9 @@ pub struct RuleData {
     pub keep_all: bool,
     pub filter_pos: &'static [bool],
     pub placeholder_count: u32,
+    /// `None` placeholders a distributed absent `[...]` left before each
+    /// expansion position (entry `len` is trailing); empty for ordinary rules.
+    pub nones_before: &'static [u32],
     pub is_start: bool,
 }
 
@@ -269,8 +272,15 @@ fn keep_token(rule: &RuleData, pos: usize) -> bool {
     rule.keep_all || !rule.filter_pos.get(pos).copied().unwrap_or(false)
 }
 
+fn nones_at(rule: &RuleData, gap: usize) -> u32 {
+    rule.nones_before.get(gap).copied().unwrap_or(0)
+}
+
 fn shape(rule: &RuleData, mut children: Vec<Child>) -> NodeValue {
     for _ in 0..rule.placeholder_count {
+        children.push(Child::None);
+    }
+    for _ in 0..nones_at(rule, rule.len as usize) {
         children.push(Child::None);
     }
     if rule.transparent {
@@ -297,6 +307,9 @@ fn assemble(data: &GrammarData, rule_idx: usize, child_values: Vec<NodeValue>) -
     let rule = &data.rules[rule_idx];
     let mut children: Vec<Child> = Vec::new();
     for (i, value) in child_values.into_iter().enumerate() {
+        for _ in 0..nones_at(rule, i) {
+            children.push(Child::None);
+        }
         match value {
             NodeValue::Token(t) => {
                 if keep_token(rule, i) {

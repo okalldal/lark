@@ -19,10 +19,10 @@ pub use grammar::{
 pub use lexer::{BasicLexer, ContextualLexer, DynamicMatcher, Lexer, LexerBackend, LexerConf};
 pub use lookaround::classify::{
     classify, lower_terminal, lower_terminal_dotall, route_terminal, route_terminal_dotall,
-    Classification, Classifier, DefaultClassifier, Lowered, LoweringRoute, Rejection, ShapeClass,
-    Verdict,
+    Classification, Classifier, DeclineReason, DefaultClassifier, LookaroundIssue, Lowered,
+    LoweringRoute, Rejection, Scope, ShapeClass, Verdict,
 };
-pub use lookaround::lower::{GuardSpec, LookbehindGuard, LoweredBranch};
+pub use lookaround::lower::{GuardSpec, LookbehindGuard, LowerDecline, LoweredBranch};
 pub use parsers::{
     basic_lexer_conf, lalr, EarleyParser, LexFailure, ParseTable, ParserConf, TokenSource,
 };
@@ -135,8 +135,11 @@ pub struct LarkOptions {
     /// Which combined-scanner engine the lexer builds (see [`LexerBackend`]). This
     /// has **no** Lark equivalent — it selects between byte-for-byte equivalent
     /// scanner implementations (`docs/LEXER_DFA_PLAN.md`) and exists so the L0
-    /// differential oracle can build the same grammar under both engines. Defaults
-    /// to the `regex-automata` DFA scanner.
+    /// differential oracle can build the same grammar under both engines (under
+    /// the TEST-ONLY `fancy-oracle` feature the `Regex` backend hosts the
+    /// historical fancy-regex reference probes). Both backends refuse the same
+    /// patterns with the same categorized errors (`docs/LOOKAROUND_SCOPE.md`).
+    /// Defaults to the `regex-automata` DFA scanner.
     pub lexer_backend: LexerBackend,
 }
 
@@ -486,31 +489,25 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "KNOWN GAP (reproduces): python.lark rejects star-params after a \
-                positional in a def header; run with --ignored to see it fail"]
+    #[ignore = "slow: builds python.lark's full LALR table; run with --ignored \
+                (the fix is pinned fast by \
+                test_non_final_maybe_distributes_under_placeholders)"]
     fn test_python_lark_star_param_after_positional() {
-        // Pre-existing LALR gap (issue #106) surfaced while swapping the cross-engine
-        // bench to the real `python.lark` (#79): a `def`/lambda parameter list with a
-        // positional parameter *before* a star-param — `def f(a, *b)` /
-        // `def f(a, **b)` — is rejected by lark-rs, although Python Lark 1.3.1
-        // accepts it (verified: `lalr`, `contextual`, `PythonIndenter`). The error
-        // is `UnexpectedToken { token: "*", expected: [NAME, MATCH, CASE, SLASH] }`
-        // — the state reached after `paramvalue ("," paramvalue)* ","` is missing
-        // the `["," [starparams | kwparams]]` branch's FIRST (`*`/`**`).
+        // Issue #106, fixed: a `def`/lambda parameter list with a positional
+        // parameter *before* a star-param — `def f(a, *b)` / `def f(a, **b)` —
+        // parses, as in Python Lark 1.3.1 (`lalr`, `contextual`, `PythonIndenter`).
         //
-        // It is *not* the `parameters` rule shape in isolation (a minimal grammar
-        // with the same `A ("," A)* ["," SLASH ...] ["," [B]]` skeleton parses
-        // fine in lark-rs); the trigger is some interaction in the full grammar —
-        // likely the `name`/`typedparam` rule indirection and/or the EBNF
-        // helper-dedup (#98) merging states such that this lookahead is dropped.
-        //
-        // Star-params with *no* preceding positional (`def f(*b)`, the second
-        // `parameters` alternative) and call-site unpacking (`f(a, *b, **c)`) both
-        // parse — so the cross-engine bench's `gen_python` works around this by
-        // exercising def-site `*args`/`**kwargs` only on a no-positional top-level
-        // function. This test asserts the *correct* (Python-Lark) behaviour, so it
-        // fails today; it is `#[ignore]`d to keep CI green and should flip to
-        // passing (drop the `#[ignore]`) once the gap is fixed.
+        // The cause was `parameters`' *non-final* `["," SLASH ("," paramvalue)*]`
+        // under `maybe_placeholders`: it was kept as a nullable Maybe helper
+        // (placeholder distribution wasn't supported inline), which hid the
+        // following `["," [starparams | kwparams]]` branch from the LR(0) closure
+        // — the post-comma state's shift-over-reduce resolution silently dropped
+        // the `*`/`**` lookahead (#97's dot-hiding disease, placeholder variant).
+        // Fixed by distributing `[...]` under `maybe_placeholders` like Python's
+        // `_EMPTY` markers (`RuleOptions::nones_before`), recursively. The fast
+        // distilled pin lives in `tests/test_placeholders_and_priority.rs`
+        // (`test_non_final_maybe_distributes_under_placeholders`); this test keeps
+        // the original end-to-end witness on the real grammar.
         let src = include_str!("grammars/python.lark");
         let l = Lark::new(
             src,
@@ -531,13 +528,20 @@ mod tests {
             },
         )
         .expect("python.lark must build under LALR");
-        // Forms that already parse (no positional before the star) — the contrast.
-        for ok in ["def f(*b): pass\n", "def f(**b): pass\n"] {
-            assert!(l.parse(ok).is_ok(), "expected {ok:?} to parse");
-        }
-        // The gap: a positional parameter before the star-param. Python Lark
-        // accepts both; lark-rs rejects both today.
-        for inp in ["def f(a, *b): pass\n", "def f(a, **b): pass\n"] {
+        // Every def-site parameter-list shape Python Lark accepts (trees verified
+        // byte-identical to Python Lark 1.3.1, including `None` placeholder
+        // positions).
+        for inp in [
+            "def f(*b): pass\n",
+            "def f(**b): pass\n",
+            "def f(a, *b): pass\n",
+            "def f(a, **b): pass\n",
+            "def f(a, /, b, *c): pass\n",
+            "def f(a, b=1, *args, **kwargs): pass\n",
+            "def f(a, *, b): pass\n",
+            "def f(a,): pass\n",
+            "lambda a, *b: a\n",
+        ] {
             assert!(
                 l.parse(inp).is_ok(),
                 "python.lark must parse {inp:?} (Python Lark does), got {:?}",

@@ -51,6 +51,9 @@ impl<'g> TreeBuilder<'g> {
         // corresponds to expansion symbol `i`, so its keep/drop is `filter_pos[i]`.
         let mut children: Vec<Child> = Vec::new();
         for (i, value) in child_values.into_iter().enumerate() {
+            for _ in 0..self.nones_at(rule_idx, i) {
+                children.push(Child::None);
+            }
             match value {
                 NodeValue::Token(t) => {
                     if self.keep_token(rule_idx, i) {
@@ -62,6 +65,18 @@ impl<'g> TreeBuilder<'g> {
             }
         }
         self.shape(rule_idx, children)
+    }
+
+    /// Number of `None` placeholders a distributed absent `[...]` left before
+    /// expansion position `gap` of `rule_idx` (position `expansion.len()` is
+    /// trailing — appended by [`shape`](Self::shape)). 0 for ordinary rules.
+    pub fn nones_at(&self, rule_idx: usize, gap: usize) -> usize {
+        self.rules[rule_idx]
+            .options
+            .nones_before
+            .get(gap)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Whether the token at expansion position `pos` of `rule_idx` is kept (not a
@@ -81,8 +96,12 @@ impl<'g> TreeBuilder<'g> {
         let rule = &self.rules[rule_idx];
 
         // maybe_placeholders: an empty `[...]` production emits one `None` per
-        // kept symbol of its widest alternative.
+        // kept symbol of its widest alternative; a distributed absent `[...]` at
+        // the end of this alternative appends its trailing placeholders.
         for _ in 0..rule.options.placeholder_count {
+            children.push(Child::None);
+        }
+        for _ in 0..self.nones_at(rule_idx, rule.expansion.len()) {
             children.push(Child::None);
         }
 

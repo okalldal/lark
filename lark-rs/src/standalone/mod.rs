@@ -70,8 +70,8 @@
 //!     `regex-automata` DFA scanner bundle or its guard side-tables. Closing this is
 //!     **L5** of the lexer DFA plan (serialize the plain + guarded DFAs, guard/lookbehind
 //!     tables, rank maps, start-byte prefilter, `unless`, and `%ignore`, and replace the
-//!     `ScannerPlan` path with it). L5 is blocked on L4 (dropping the runtime
-//!     `fancy-regex` side-probe). See `docs/LEXER_DFA_PLAN.md` (L5) and
+//!     `ScannerPlan` path with it). L4 (drop runtime `fancy-regex`) has landed, so L5
+//!     is unblocked. See `docs/LEXER_DFA_PLAN.md` (L5) and
 //!     `docs/LEXER_DFA_STATUS.md`.
 
 // Compiled + type-checked here so the embedded driver cannot rot, then `include_str!`d
@@ -101,6 +101,7 @@ struct BakedRule {
     keep_all: bool,
     filter_pos: Vec<bool>,
     placeholder_count: u32,
+    nones_before: Vec<u32>,
     is_start: bool,
 }
 
@@ -188,6 +189,7 @@ fn bake(grammar_src: &str, options: &LarkOptions) -> Result<Baked, LarkError> {
             keep_all: r.options.keep_all_tokens,
             filter_pos: r.filter_pos.clone(),
             placeholder_count: r.options.placeholder_count as u32,
+            nones_before: r.options.nones_before.iter().map(|&n| n as u32).collect(),
             is_start: r.is_start,
         })
         .collect();
@@ -355,9 +357,15 @@ fn emit_data(out: &mut String, baked: &Baked) {
             .map(|b| b.to_string())
             .collect::<Vec<_>>()
             .join(", ");
+        let nones: String = r
+            .nones_before
+            .iter()
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
         let _ = writeln!(
             out,
-            "        RuleData {{ origin: {}, len: {}, tree_name: {}, transparent: {}, expand1: {}, has_alias: {}, keep_all: {}, filter_pos: &[{}], placeholder_count: {}, is_start: {} }},",
+            "        RuleData {{ origin: {}, len: {}, tree_name: {}, transparent: {}, expand1: {}, has_alias: {}, keep_all: {}, filter_pos: &[{}], placeholder_count: {}, nones_before: &[{}], is_start: {} }},",
             r.origin,
             r.len,
             lit(&r.tree_name),
@@ -367,6 +375,7 @@ fn emit_data(out: &mut String, baked: &Baked) {
             r.keep_all,
             filter,
             r.placeholder_count,
+            nones,
             r.is_start,
         );
     }
@@ -480,6 +489,7 @@ mod tests {
                 keep_all: false,
                 filter_pos: &[true], // a literal "a" is filtered out of the tree
                 placeholder_count: 0,
+                nones_before: &[],
                 is_start: false,
             },
             RuleData {
@@ -492,6 +502,7 @@ mod tests {
                 keep_all: false,
                 filter_pos: &[false],
                 placeholder_count: 0,
+                nones_before: &[],
                 is_start: true,
             },
         ],
@@ -625,6 +636,7 @@ mod tests {
                 keep_all: r.keep_all,
                 filter_pos: &*Box::leak(r.filter_pos.clone().into_boxed_slice()),
                 placeholder_count: r.placeholder_count,
+                nones_before: &*Box::leak(r.nones_before.clone().into_boxed_slice()),
                 is_start: r.is_start,
             })
             .collect();
