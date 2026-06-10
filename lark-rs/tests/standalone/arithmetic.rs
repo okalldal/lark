@@ -83,8 +83,9 @@ pub struct GrammarData {
     pub global_prefix: &'static str,
     /// `(terminal id, inline regex)` in alternation order — the combined scanner.
     pub scan_groups: &'static [(u32, &'static str)],
-    /// `unless` keyword retype: regex-terminal id → `(matched value, keyword id)`.
-    pub unless: &'static [(u32, &'static [(&'static str, u32)])],
+    /// `unless` keyword retype: regex-terminal id → `(keyword value,
+    /// case-insensitive, keyword id)`, in definition order.
+    pub unless: &'static [(u32, &'static [(&'static str, bool, u32)])],
     /// `%ignore` terminal ids, discarded after matching.
     pub ignore: &'static [u32],
 }
@@ -178,7 +179,9 @@ struct Scanner {
     re: Regex,
     /// (terminal id, capture-group index), in alternation order.
     groups: Vec<(u32, usize)>,
-    unless: HashMap<u32, HashMap<String, u32>>,
+    /// Keyword retype per regex terminal: exact values hashed, `"..."i`
+    /// keywords as anchored case-insensitive regexes (definition order).
+    unless: HashMap<u32, (HashMap<String, u32>, Vec<(Regex, u32)>)>,
 }
 
 impl Scanner {
@@ -201,11 +204,17 @@ impl Scanner {
             .iter()
             .map(|(id, _)| (*id, name_to_idx[&format!("g{}", id)]))
             .collect();
-        let mut unless: HashMap<u32, HashMap<String, u32>> = HashMap::new();
+        let mut unless: HashMap<u32, (HashMap<String, u32>, Vec<(Regex, u32)>)> = HashMap::new();
         for (re_id, entries) in data.unless {
-            let m = unless.entry(*re_id).or_default();
-            for (value, kw_id) in *entries {
-                m.insert(value.to_string(), *kw_id);
+            let slot = unless.entry(*re_id).or_default();
+            for (value, ci, kw_id) in *entries {
+                if *ci {
+                    let src = format!("^(?i:{})$", regex::escape(value));
+                    let re = Regex::new(&src).expect("baked unless regex is valid");
+                    slot.1.push((re, *kw_id));
+                } else {
+                    slot.0.entry(value.to_string()).or_insert(*kw_id);
+                }
             }
         }
         Scanner { re, groups, unless }
@@ -225,8 +234,13 @@ impl Scanner {
                 let ty = self
                     .unless
                     .get(id)
-                    .and_then(|m| m.get(value))
-                    .copied()
+                    .and_then(|(exact, ci)| {
+                        exact.get(value).copied().or_else(|| {
+                            ci.iter()
+                                .find(|(re, _)| re.is_match(value))
+                                .map(|(_, k)| *k)
+                        })
+                    })
                     .unwrap_or(*id);
                 return Some((ty, value));
             }

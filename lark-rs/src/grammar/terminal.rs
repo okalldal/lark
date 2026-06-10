@@ -31,6 +31,7 @@ impl Pattern {
     /// `as_regex_str`, which drops the separately-stored flags entirely.
     pub fn to_inline_regex(&self) -> String {
         match self {
+            Pattern::Str(p) if p.ci => format!("(?i:{})", p.escaped),
             Pattern::Str(p) => p.escaped.clone(),
             Pattern::Re(p) => {
                 let letters = flag_letters(p.flags);
@@ -46,7 +47,11 @@ impl Pattern {
 
 impl PartialEq for Pattern {
     fn eq(&self, other: &Self) -> bool {
-        self.as_regex_str() == other.as_regex_str()
+        match (self, other) {
+            // `"a"` and `"a"i` share an escaped form but are distinct patterns.
+            (Pattern::Str(a), Pattern::Str(b)) => a.value == b.value && a.ci == b.ci,
+            _ => self.as_regex_str() == other.as_regex_str(),
+        }
     }
 }
 impl Eq for Pattern {}
@@ -57,18 +62,38 @@ impl std::hash::Hash for Pattern {
     }
 }
 
+/// A string-literal pattern — Python Lark's `PatternStr`, including the
+/// case-insensitive form (`"literal"i`), which Python keeps as a `PatternStr`
+/// with the `i` flag attached rather than converting to a regex. Keeping the
+/// type here too is what lets a `"keyword"i` literal participate in the
+/// lexer's `unless` keyword retyping and sort with string-pattern width
+/// semantics, exactly like its case-sensitive sibling.
 #[derive(Debug, Clone)]
 pub struct PatternStr {
     pub value: String,
     /// regex-escaped form used when building the combined lexer regex
     pub escaped: String,
+    /// case-insensitive (`"..."i`): inlined as `(?i:escaped)`.
+    pub ci: bool,
 }
 
 impl PatternStr {
     pub fn new(value: impl Into<String>) -> Self {
         let value = value.into();
         let escaped = regex::escape(&value);
-        PatternStr { value, escaped }
+        PatternStr {
+            value,
+            escaped,
+            ci: false,
+        }
+    }
+
+    /// A case-insensitive string literal (`"..."i`).
+    pub fn new_ci(value: impl Into<String>) -> Self {
+        PatternStr {
+            ci: true,
+            ..Self::new(value)
+        }
     }
 }
 

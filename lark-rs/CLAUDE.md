@@ -300,7 +300,7 @@ After each REDUCE, `apply_rule_options()` post-processes children:
 | Conflict detection | ✅ | S/R → shift; R/R → priority, else `GrammarError::Conflict`; matches Lark outcomes |
 | ParseTable (ACTION/GOTO) | ✅ | Shift/Reduce/Accept |
 | BasicLexer | ✅ | Single combined regex (leftmost-first, like Python `re`) + `unless` keyword retyping |
-| ContextualLexer | ✅ | Per-state `Scanner`; per-state `unless` retyping; always_accept for ignores |
+| ContextualLexer | ✅ | Per-state `Scanner`; per-state `unless` retyping; always_accept for ignores. States sharing a terminal set share one scanner (Python's `lexer_by_tokens` dedup, 4–5× on the wild bank) and scanners build lazily on first use; an eager full-terminal validation build (Python's `root_lexer` analog) keeps scope errors at construction time |
 | Terminal priority ordering | ✅ | (-priority, -pattern_len, name) |
 | Within-terminal alt ordering | ✅ | Longest-first (mirrors Python Lark) |
 | Tree assembly | ✅ | `expand1`, anon inlining |
@@ -369,7 +369,7 @@ lost once `%ignore` drops whitespace — `string_lookaround_free_rewrite_is_not_
 The DFA plan supersedes that rewrite framing (it lowers in the lexer rather than editing
 grammars), but the behavioral findings stay pinned in `tests/test_lookaround.rs`. Pinned by
 `tests/test_stdlib.rs` (oracles in `fixtures/oracles/stdlib/`). SQL/C/Lua are *not* bundled — upstream distributes them as separate packages, not under `lark/grammars/` |
-| Standalone parser gen | ✅ (Rust) | `lark-rs generate-parser --grammar foo.lark --output parser.rs` (`src/bin/generate_parser.rs`) emits a self-contained Rust LALR parser depending only on `regex` + std, not on lark-rs (#42). `src/standalone/mod.rs` runs the normal pipeline once and bakes the `ParseTable` (sparse ACTION/GOTO), per-rule tree-shaping flags, the symbol-name table, and the `ScannerPlan` (alternation order + `unless` retype) into one `static DATA: GrammarData`. The driver (basic lexer + LALR + tree-shaping) lives in `src/standalone/runtime.rs` — a **real compiled, type-checked, unit-tested module** that is `include_str!`d into each generated parser, not a hand-copied text blob. Both drift vectors are shared by construction: the lexer recipe is the **same** `lexer::scanner_plan` the in-process `Scanner::build` uses, and the driver is the one compiled module. So a generated parser is byte-identical to lark-rs — pinned two ways: `test_standalone.rs` (committed `tests/standalone/*.rs` fixtures `include!`d + run vs the live oracle, plus a determinism/freshness gate), **and** a compliance-bank replay (`standalone::tests::standalone_compliance_bank`, #86) that runs the shared `runtime` over the **full strip-mined Python-Lark bank** — 509/512 cases agree with the captured oracle (the 3 XFAILs in `standalone_xfail.json` are basic-lexer-incompatible grammars, e.g. `"a"i "a"`, allow-listed via `LARK_STANDALONE_WRITE_XFAIL=1` with the same burndown discipline as the LALR/Earley banks). Value is dependency footprint + Python-`standalone` parity, **not** throughput (still table-interpreted) or `no_std` (runtime regex compile); see the module docs. Limitations: LALR + basic lexer only, no postlex (rejected with a clear error); a grammar with **lookaround terminals** (the bundled `python`/`lark`) is not standalone-able since the baked runtime is pure-`regex`. Follow-ups: Python standalone; the L5 serialized-DFA bake (which makes the lookaround grammars standalone-able); unify the `ParseTable→Rust` emitter with `include_lark!` (#49) |
+| Standalone parser gen | ✅ (Rust) | `lark-rs generate-parser --grammar foo.lark --output parser.rs` (`src/bin/generate_parser.rs`) emits a self-contained Rust LALR parser depending only on `regex` + std, not on lark-rs (#42). `src/standalone/mod.rs` runs the normal pipeline once and bakes the `ParseTable` (sparse ACTION/GOTO), per-rule tree-shaping flags, the symbol-name table, and the `ScannerPlan` (alternation order + `unless` retype) into one `static DATA: GrammarData`. The driver (basic lexer + LALR + tree-shaping) lives in `src/standalone/runtime.rs` — a **real compiled, type-checked, unit-tested module** that is `include_str!`d into each generated parser, not a hand-copied text blob. Both drift vectors are shared by construction: the lexer recipe is the **same** `lexer::scanner_plan` the in-process `Scanner::build` uses, and the driver is the one compiled module. So a generated parser is byte-identical to lark-rs — pinned two ways: `test_standalone.rs` (committed `tests/standalone/*.rs` fixtures `include!`d + run vs the live oracle, plus a determinism/freshness gate), **and** a compliance-bank replay (`standalone::tests::standalone_compliance_bank`, #86) that runs the shared `runtime` over the **full strip-mined Python-Lark bank** — 508/512 cases agree with the captured oracle (the 4 XFAILs in `standalone_xfail.json` are basic-lexer-incompatible grammars, e.g. `"a"i "a"`, whose contextual-captured oracles Python's own *basic* lexer cannot reproduce either — verified; allow-listed via `LARK_STANDALONE_WRITE_XFAIL=1` with the same burndown discipline as the LALR/Earley banks). Value is dependency footprint + Python-`standalone` parity, **not** throughput (still table-interpreted) or `no_std` (runtime regex compile); see the module docs. Limitations: LALR + basic lexer only, no postlex (rejected with a clear error); a grammar with **lookaround terminals** (the bundled `python`/`lark`) is not standalone-able since the baked runtime is pure-`regex`. Follow-ups: Python standalone; the L5 serialized-DFA bake (which makes the lookaround grammars standalone-able); unify the `ParseTable→Rust` emitter with `include_lark!` (#49) |
 | Error recovery | ✅ | Panic-mode **single-token-deletion** recovery on the LALR backend (#43). `Lark::parse_with_recovery` (built-in strategy) and `parse_on_error` (custom handler) mirror Python Lark's `on_error` callback — which, with `on_error=lambda e: True`, *is* delete-and-resume (its `interactive_parser.resume_parse()` has already pulled the bad token off the lexer). Same LALR tables ⇒ the surviving stream builds the **same tree**, so it is oracle-gated: `tests/test_recovery.rs` asserts tree + deletion-count parity vs Python (`recovery/cases.json`). Returns a `RecoveredTree { tree, errors }` — the partial tree plus the recovered errors (the "error nodes"; an LR value stack has no slot to splice them inline without a yacc-style `error` production, which Lark's grammar syntax lacks, so they sit alongside, exactly as Python's recovery does). Recovery lexes with the basic/global lexer so out-of-context-but-valid tokens are deletable; a `$END` error returns a best-effort partial instead of aborting (Python re-raises). Plan: [`docs/PHASE_3_RECOVERY_PLAN.md`](docs/PHASE_3_RECOVERY_PLAN.md). Follow-ups: character-level recovery, Earley/CYK/postlex recovery |
 | CYK parser | ✅ | `parser='cyk'` (#44). Faithful port of Python Lark's `cyk.py`: CNF conversion (TERM lifts non-solitary terminals into `__T_` wrappers, BIN binarizes >2-symbol rules via `__SP_` splits, UNIT eliminates non-terminal unit rules recording the skipped chain) + an O(n³) DP that keeps the lightest derivation per span/non-terminal, then a CNF revert that feeds the shared `TreeBuilder` — so an unambiguous parse is byte-identical to LALR/Earley. lark-rs's nullable `*`/`?`/`+` helpers are transparent, so a reachability prune + ε-removal pass (duplicate each rule over its nullable occurrences; refill omitted transparent positions with an empty splice) reproduces Python's ε-free EBNF expansion without changing the tree; a nullable *non-transparent* rule is a genuine ε-rule CYK can't model and is rejected at build time, matching Python. Uses the basic lexer (no parser-state lexer, like Earley). Pinned by `test_cyk_compliance.rs` — the CYK bank (TestCykBasic) is **124/124 = 100%** oracle agreement (0 XFAIL) — plus inline parity/ambiguity/EBNF unit tests in `cyk.rs`. **#87: a deterministic cubic-envelope scaling gate** (`test_cyk_scaling.rs`) keys on the `cyk_table_steps` work counter and asserts the table fill stays flat per n³ on a densely ambiguous grammar (`s: s s \| "a"`), so a complexity regression in the CNF conversion or DP is caught — the CYK analog of the Earley scaling net |
 
@@ -604,15 +604,32 @@ counts + FNV-1a 64 digest of a canonical serialization for big ones, so the
 fixtures stay small); `tests/test_wild.rs` replays the bank under the same
 XFAIL-burndown discipline as the compliance banks
 (`LARK_WILD_WRITE_XFAIL=1` regenerates `oracles/wild/xfail.json`;
-`LARK_WILD_TRACE=1` prints per-project timing). `cargo bench --bench wild` runs
+`LARK_WILD_TRACE=1` prints per-project timing; `LARK_WILD_DETAILS=1` prints
+each failure's build/parse error). `cargo bench --bench wild` runs
 the same bank as a recorded performance trend (build cost + corpus/largest-input
 throughput per project).
 
-Findings (updated 2026-06-10, post-L4 burndown round — the xfail set encodes them;
-170/257 inputs agree, 92 XFAIL, 5 grammars not building):
+Findings (updated 2026-06-10, post-L4 burndown round — the xfail set encodes them,
+and each fixed root cause is pinned in distilled form by `tests/test_wild_gap_pins.rs`):
+**189/257 inputs agree, 72 XFAIL, 4 grammars not building.** Every remaining failure
+is an **engine-scope refusal** — a backtracking/backreference construct the lexer-DFA
+routing *deliberately* rejects (`docs/LOOKAROUND_SCOPE.md`).
 
 **Cleared by the burndown round** (the wild bank's first payoff):
 
+* **vyper** (build + 7/7): plain `(a|b)` groups now distribute into the parent's
+  alternatives at every position (Python's `SimplifyRule_Visitor`) instead of
+  materializing `__anon_group_*` helpers whose unit alternatives duplicated other
+  rules' RHS and collided as unresolvable reduce/reduce.
+* **matter_idl** (8/8) and **pyquil** (6/6, `test1.quil`'s `1/sqrt(2)` included):
+  a `"keyword"i` literal is now a `PatternStr` with the `i` flag attached (Python
+  keeps the type, only attaching the flag), so it joins the lexer's `unless`
+  keyword retyping — case-insensitively, via per-keyword `^(?i:…)$` matchers — and
+  sorts with string-pattern width. The embed rule mirrors Python's flag-subset
+  test: a `"kw"i` under a case-sensitive regex terminal stays in the alternation.
+  (This also made the basic lexer agree with Python's on the standalone bank's
+  `"a"i "a"` case — its accidental pass via a retype Python never does became an
+  honest basic-lexer-incompatible xfail, `standalone_xfail.json`.)
 * **cel 40/40** ✅: the upstream `{4-8}`-for-`{4,8}` quantifier typo in
   `BYTES_LIT`/`STRING_LIT`/`MLSTRING_LIT` is **patched in the vendored copy**
   (policy: we do not file upstream bugs — a wild grammar bug is either left
@@ -627,7 +644,7 @@ Findings (updated 2026-06-10, post-L4 burndown round — the xfail set encodes t
   and the Python-dialect `\<`/`\>` escapes (`OPERATOR`'s `[\!=\>\<]`/`\<\>` —
   Python reads literals, the regex crate reads word-boundary assertions; the
   loader now normalizes the two divergent escapes to bare chars).
-* **mappyfile builds** (was an L4 internal-lookahead refusal): the
+* **mappyfile 8/8** ✅ (was an L4 internal-lookahead refusal): the
   **vacuous-group splice** (`(?:X) ≡ X`, applied recursively/splicing in
   `classify.rs::unwrap_vacuous_groups`) exposes the trailing guard the loader's
   terminal-reference composition buried (`SIGNED_INT: ["-"|"+"] INT` →
@@ -635,7 +652,7 @@ Findings (updated 2026-06-10, post-L4 burndown round — the xfail set encodes t
 
 **Engine-scope refusals** — wild grammars L4 *deliberately* rejects
 (`docs/LOOKAROUND_SCOPE.md`), the measured real-world cost of dropping the
-backtracking engine (now 4 of 16 wild grammars):
+backtracking engine (4 of 16 wild grammars, all non-building):
 
 * **hcl2**: heredoc terminal uses a backreference (`<<(?P<heredoc>…)…(?P=heredoc)`).
 * **gersemi_cmake**: CMake bracket arguments use a backreference
@@ -659,26 +676,13 @@ backtracking engine (now 4 of 16 wild grammars):
   Lark puts it before), which is order-sensitive here. Both must be resolved
   together; recorded so the next attempt starts from this analysis.
 
-**Burndown candidates** — genuine lark-rs gaps:
-
-* **vyper does not build**: remaining unresolvable LALR R/R conflicts (the
-  #106 fix cleared pyquil's, not vyper's).
-* **mappyfile 0/8**: builds (above) but the inputs still mis-parse — a
-  contextual-lexer divergence around `UNQUOTED_STRING_SPACE` (Python lexes whole
-  attribute lines as one token where lark-rs splits; upstream also leans on an
-  interactive-parser-generated `%declare UNQUOTED_STRING_VALUE`). Needs a
-  state-by-state contextual-lexer comparison.
-* **matter_idl 5/8**: the three failing inputs all use the case-insensitive
-  anonymous keyword `"optional"i` (`member_attribute`); the token *after* the
-  type mis-lexes — same family as the standalone bank's `"a"i` xfail.
-* **pyquil 5/6**: `inputs/test1.quil` (`DEFGATE CPHASE(%theta):` — the
-  parenthesized-parameter line) fails where the other five inputs agree.
-
-**Fully passing**: cel, dotmotif, lark_lark (the P0 baseline — lark.lark over
-the 12 real grammar files `examples/lark_grammar.py` parses upstream, incl.
-python.lark and a full Verilog grammar), pylogics_ltl (relative rule imports +
-trailing-lookahead terminals through the M1 lowering), mistql (Earley + dynamic
-lexer), tartiflette, poetry_markers, poetry_pep508 (file-relative `%import`).
+**Fully passing**: vyper (build + 7/7, LALR + PythonIndenter postlex), matter_idl
+(8/8), pyquil (build + 6/6), cel (40/40), dotmotif (22/22), mappyfile (8/8),
+lark_lark (the P0 baseline — lark.lark over the 12 real grammar files
+`examples/lark_grammar.py` parses upstream, incl. python.lark and a full Verilog
+grammar), pylogics_ltl (relative rule imports + trailing-lookahead terminals
+through the M1 lowering), mistql (Earley + dynamic lexer), tartiflette,
+poetry_markers, poetry_pep508 (file-relative `%import`).
 
 Oracle note: embedded trees are capped at 55 levels (`EMBED_DEPTH_LIMIT`) —
 serde_json refuses JSON nested deeper than 128 and a tree level costs ~2 —

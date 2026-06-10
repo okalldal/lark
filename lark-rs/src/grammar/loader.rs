@@ -291,6 +291,28 @@ impl<'a> Lexer<'a> {
                 }
                 Dispatch::Newline(n) => {
                     self.advance(n);
+                    // Comment-only lines collapse into the surrounding newline
+                    // run: Python Lark's COMMENT terminal starts with `\s*`, so
+                    // it swallows the newline+indent *before* the comment and
+                    // the whole region lexes as one `_NL`. Without this, a
+                    // `//`-comment line between the `|` alternatives of a
+                    // multi-line rule emits two Newline tokens and the parser
+                    // drops the continuation (wild bank: dotmotif).
+                    loop {
+                        let rest = self.rest();
+                        if rest.starts_with("//") || rest.starts_with('#') {
+                            let line_end = rest.find('\n').unwrap_or(rest.len());
+                            self.advance(line_end);
+                        } else {
+                            break;
+                        }
+                        let run = self
+                            .rest()
+                            .bytes()
+                            .take_while(|&b| b == b'\n' || b == b'\r' || b == b' ' || b == b'\t')
+                            .count();
+                        self.advance(run);
+                    }
                     return Ok(Some(Tok::Newline));
                 }
                 Dispatch::Comment(n) => {
@@ -1188,6 +1210,16 @@ enum Slot {
         present: Vec<CompiledAlt>,
         absent_nones: usize,
     },
+    /// A plain `(a|b)` group distributed into the parent: one alternative per
+    /// arm, with **no** absent/ε arm (the group is not nullable). Python Lark
+    /// never materializes a helper rule for an inline group —
+    /// `SimplifyRule_Visitor.expansion` cartesian-products it into the parent
+    /// at *every* position — and the helper form is not behaviour-preserving
+    /// under LALR: a helper arm that duplicates another rule's RHS (e.g.
+    /// `(atom_expr | list)` next to `?atom: ... | list`) makes two unit rules
+    /// over one symbol, which collide as an unresolvable reduce/reduce where
+    /// Python sees only a silently-resolved shift/reduce (wild bank: vyper).
+    Choices(Vec<CompiledAlt>),
 }
 
 /// Structural identity of an anonymous EBNF helper: its kind, the enclosing
@@ -1513,6 +1545,8 @@ impl GrammarCompiler {
                     present.push((Vec::new(), vec![absent_nones]));
                     present
                 }
+                // A distributed plain group: its arms fan out as-is, no ε arm.
+                Slot::Choices(arms) => arms,
             };
             let mut next = Vec::with_capacity(acc.len() * choices.len());
             for (psyms, pgaps) in &acc {
@@ -1548,11 +1582,22 @@ impl GrammarCompiler {
         parent: &str,
         is_last: bool,
     ) -> Result<Slot, GrammarError> {
+        // A plain `(a|b)` group distributes into the parent at *every* position
+        // (Python never gives an inline group a helper rule — see
+        // `Slot::Choices`) unless it carries an alias (an alias names a subtree
+        // that inline distribution would lose, so those fall back to the helper
+        // form).
+        if let Expr::Group(alts) = &expr {
+            if !Self::expr_contains_alias(&expr) {
+                if let Some(arms) = self.distributable_alternatives(alts.clone(), parent)? {
+                    return Ok(Slot::Choices(arms));
+                }
+            }
+        }
         // Only a *leading* (non-final) nullable distributes, and only when it
-        // carries no alias (an alias names a subtree that inline distribution
-        // would lose, so those fall back to the helper form). `try_distribute`
-        // never compiles anything on its `None` path, so the fall-through
-        // `compile_expr` below compiles the position exactly once.
+        // carries no alias. `try_distribute` never compiles anything on its
+        // `None` path, so the fall-through `compile_expr` below compiles the
+        // position exactly once.
         if !is_last && !Self::expr_contains_alias(&expr) {
             if let Some(slot) = self.try_distribute(&expr, parent)? {
                 return Ok(slot);
@@ -1765,12 +1810,11 @@ impl GrammarCompiler {
         // check (issue #35).
         let (pat, name_hint, string_type) = match &lit {
             LiteralVal::Str(s, ci) => {
-                let mut flags = 0;
-                if *ci {
-                    flags |= flags::IGNORECASE;
-                }
+                // Case-insensitive literals stay `PatternStr` (Python attaches
+                // the flag without changing the pattern type), so they keep
+                // string-pattern ordering and join `unless` keyword retyping.
                 let pat = if *ci {
-                    Pattern::Re(PatternRe::new(&regex::escape(s), flags)?)
+                    Pattern::Str(PatternStr::new_ci(s.as_str()))
                 } else {
                     Pattern::Str(PatternStr::new(s.as_str()))
                 };
@@ -2212,13 +2256,14 @@ impl GrammarCompiler {
             Self::term_is_str(&t.name, &by_name, &imported_str, &mut str_memo);
         }
 
-        // The recoverable literal value of each already-known string terminal, so a
-        // reference to an imported `PatternStr` resolves to a `PatternStr` too.
-        let imported_val: HashMap<String, String> = self
+        // The recoverable literal value (and case-insensitivity) of each
+        // already-known string terminal, so a reference to an imported
+        // `PatternStr` resolves to a `PatternStr` too.
+        let imported_val: HashMap<String, (String, bool)> = self
             .terminals
             .iter()
             .filter_map(|t| match &t.pattern {
-                Pattern::Str(p) => Some((t.name.clone(), p.value.clone())),
+                Pattern::Str(p) => Some((t.name.clone(), (p.value.clone(), p.ci))),
                 _ => None,
             })
             .collect();
@@ -2226,15 +2271,17 @@ impl GrammarCompiler {
         // Register in source order so terminal ordering stays stable. A terminal
         // already defined via `%import` is not redefined (import wins).
         //
-        // A terminal that reduces to a single *case-sensitive* string literal is
-        // compiled to `Pattern::Str`, exactly like an inline `"literal"` and like
-        // Python Lark's `PatternStr`. This is what lets a named keyword terminal
-        // (`ASYNC: "async"`) join the keyword `unless` retyping in the contextual
-        // lexer — otherwise it is a `Pattern::Re` that ties with, and loses to, an
-        // overlapping identifier regex (`NAME`), so `async` would lex as `NAME`.
-        // Everything else (regex, concatenation, alternation, range, repetition, or
-        // a case-insensitive literal) stays `Pattern::Re`.
-        let mut strval_memo: HashMap<String, Option<String>> = HashMap::new();
+        // A terminal that reduces to a single string literal — case-sensitive or
+        // `"..."i` — is compiled to `Pattern::Str`, exactly like an inline
+        // `"literal"` and like Python Lark's `PatternStr` (which keeps the type
+        // for case-insensitive literals, only attaching the flag). This is what
+        // lets a named keyword terminal (`ASYNC: "async"`) join the keyword
+        // `unless` retyping in the contextual lexer — otherwise it is a
+        // `Pattern::Re` that ties with, and loses to, an overlapping identifier
+        // regex (`NAME`), so `async` would lex as `NAME`. Everything else
+        // (regex, concatenation, alternation, range, repetition) stays
+        // `Pattern::Re`.
+        let mut strval_memo: HashMap<String, Option<(String, bool)>> = HashMap::new();
         for t in &raw_terms {
             if self.terminals.iter().any(|td| td.name == t.name) {
                 continue;
@@ -2242,7 +2289,8 @@ impl GrammarCompiler {
             let string_type = str_memo.get(&t.name).copied().unwrap_or(false);
             let pat = match Self::term_str_value(&t.name, &by_name, &imported_val, &mut strval_memo)
             {
-                Some(value) => Pattern::Str(PatternStr::new(&value)),
+                Some((value, false)) => Pattern::Str(PatternStr::new(&value)),
+                Some((value, true)) => Pattern::Str(PatternStr::new_ci(&value)),
                 None => Pattern::Re(PatternRe::new(memo[&t.name].as_str(), 0)?),
             };
             self.terminals
@@ -2251,20 +2299,19 @@ impl GrammarCompiler {
         Ok(())
     }
 
-    /// The plain string value iff this terminal compiles to a `PatternStr` whose
-    /// value lark-rs can recover — a single **case-sensitive** string literal,
-    /// possibly through a single-alternative group or a reference to another such
-    /// terminal. Returns `None` for anything else (regex, concatenation,
-    /// alternation, range, repetition, or a *case-insensitive* literal, which
-    /// lark-rs — like its inline-literal path — represents as a `PatternRe`).
-    /// Parallels [`term_is_str`]; memoized; assumes the acyclic grammar the regex
-    /// pass already validated.
+    /// The string value (and case-insensitivity) iff this terminal compiles to
+    /// a `PatternStr` whose value lark-rs can recover — a single string literal
+    /// (case-sensitive or `"..."i`), possibly through a single-alternative group
+    /// or a reference to another such terminal. Returns `None` for anything else
+    /// (regex, concatenation, alternation, range, repetition). Parallels
+    /// [`term_is_str`]; memoized; assumes the acyclic grammar the regex pass
+    /// already validated.
     fn term_str_value(
         name: &str,
         by_name: &HashMap<&str, &RawTerm>,
-        imported_val: &HashMap<String, String>,
-        memo: &mut HashMap<String, Option<String>>,
-    ) -> Option<String> {
+        imported_val: &HashMap<String, (String, bool)>,
+        memo: &mut HashMap<String, Option<(String, bool)>>,
+    ) -> Option<(String, bool)> {
         if let Some(v) = memo.get(name) {
             return v.clone();
         }
@@ -2284,15 +2331,15 @@ impl GrammarCompiler {
     fn alts_str_value(
         alts: &[AliasedExpansion],
         by_name: &HashMap<&str, &RawTerm>,
-        imported_val: &HashMap<String, String>,
-        memo: &mut HashMap<String, Option<String>>,
-    ) -> Option<String> {
+        imported_val: &HashMap<String, (String, bool)>,
+        memo: &mut HashMap<String, Option<(String, bool)>>,
+    ) -> Option<(String, bool)> {
         if alts.len() != 1 {
             return None;
         }
         let expansion = &alts[0].expansion;
         match expansion.len() {
-            0 => Some(String::new()), // empty PatternStr('')
+            0 => Some((String::new(), false)), // empty PatternStr('')
             1 => Self::expr_str_value(&expansion[0], by_name, imported_val, memo),
             _ => None, // concatenation → joined PatternRe
         }
@@ -2302,14 +2349,11 @@ impl GrammarCompiler {
     fn expr_str_value(
         expr: &Expr,
         by_name: &HashMap<&str, &RawTerm>,
-        imported_val: &HashMap<String, String>,
-        memo: &mut HashMap<String, Option<String>>,
-    ) -> Option<String> {
+        imported_val: &HashMap<String, (String, bool)>,
+        memo: &mut HashMap<String, Option<(String, bool)>>,
+    ) -> Option<(String, bool)> {
         match expr {
-            Expr::Value(Value::Literal(LiteralVal::Str(s, false))) => Some(s.clone()),
-            // A case-insensitive literal keeps Python's `str` type but lark-rs has
-            // no case-insensitive `PatternStr`, so it stays a `PatternRe`.
-            Expr::Value(Value::Literal(LiteralVal::Str(_, true))) => None,
+            Expr::Value(Value::Literal(LiteralVal::Str(s, ci))) => Some((s.clone(), *ci)),
             Expr::Value(Value::Terminal(referenced)) => {
                 Self::term_str_value(referenced, by_name, imported_val, memo)
             }
@@ -3161,6 +3205,7 @@ fn terminal_name_hint(s: &str) -> Option<String> {
 fn patterns_equivalent(a: &Pattern, b: &Pattern) -> bool {
     fn flags_of(p: &Pattern) -> u32 {
         match p {
+            Pattern::Str(s) if s.ci => flags::IGNORECASE,
             Pattern::Str(_) => 0,
             Pattern::Re(r) => r.flags,
         }
