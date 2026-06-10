@@ -16,6 +16,8 @@
 //! Same XFAIL discipline as the compliance bank: known failures live in
 //! `tests/fixtures/oracles/wild/xfail.json`, the build fails only on
 //! *regressions*, and `LARK_WILD_WRITE_XFAIL=1` regenerates the allow-list.
+//! `LARK_WILD_DETAILS=1` prints every failure's build/parse error (XFAIL'd
+//! ones included), for diagnosing the entries the allow-list encodes.
 
 mod common;
 
@@ -296,6 +298,11 @@ fn test_wild_bank() {
         })
         .unwrap_or_default();
 
+    if std::env::var("LARK_WILD_DETAILS").is_ok() {
+        for d in &details {
+            eprintln!("DETAIL {d}");
+        }
+    }
     let n_build_fail = failures.iter().filter(|f| f.starts_with("build:")).count();
     let n_input_fail = failures.iter().filter(|f| !f.starts_with("build:")).count();
     eprintln!(

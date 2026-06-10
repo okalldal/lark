@@ -594,15 +594,19 @@ counts + FNV-1a 64 digest of a canonical serialization for big ones, so the
 fixtures stay small); `tests/test_wild.rs` replays the bank under the same
 XFAIL-burndown discipline as the compliance banks
 (`LARK_WILD_WRITE_XFAIL=1` regenerates `oracles/wild/xfail.json`;
-`LARK_WILD_TRACE=1` prints per-project timing). `cargo bench --bench wild` runs
+`LARK_WILD_TRACE=1` prints per-project timing; `LARK_WILD_DETAILS=1` prints
+each failure's build/parse error). `cargo bench --bench wild` runs
 the same bank as a recorded performance trend (build cost + corpus/largest-input
 throughput per project).
 
-Findings (updated 2026-06-10 after the L4 merge — the xfail set encodes them):
+Findings (updated 2026-06-10 after the burndown round — the xfail set encodes
+them; each fixed root cause is pinned in distilled form by
+`tests/test_wild_gap_pins.rs`):
 
-The bank now splits into two categories. **Engine-scope refusals** — wild
-grammars L4 *deliberately* rejects (`docs/LOOKAROUND_SCOPE.md`), the measured
-real-world cost of dropping the backtracking engine (6 of 16 wild grammars):
+Every remaining failure is an **engine-scope refusal** — wild grammars the
+lexer-DFA routing *deliberately* rejects (`docs/LOOKAROUND_SCOPE.md`), the
+measured real-world cost of dropping the backtracking engine (7 of 16 wild
+grammars):
 
 * **hcl2**: heredoc terminal uses a backreference (`<<(?P<heredoc>…)…(?P=heredoc)`).
   (Its original R/R-conflict failure was *fixed* by the #106 optional-distribution work.)
@@ -617,26 +621,41 @@ real-world cost of dropping the backtracking engine (6 of 16 wild grammars):
   backtracking engines silently treat the malformed quantifier as literal text,
   the DFA engine rejects the pattern. Fixable upstream (candidate bug report);
   the rest of the terminal looks lowerable.
+* **dotmotif**: `FLEXIBLE_KEY` is the escaped-string idiom with a *non-empty*
+  body (`".+?(?<!\\)(\\\\)*?"`) — a bounded lookbehind after a variable-width
+  prefix, today a `Scope::NotYetImplemented` refusal (a promotion tripwire:
+  it is one body-normalization away from the lowered `python.STRING` shape).
+  Its original failure — the loader rejecting `//` comment lines *between*
+  the `|` alternatives of a multi-line rule — is *fixed* (comment-only lines
+  now collapse into the newline run, like Python's `\s*`-prefixed COMMENT),
+  which unmasked this one.
 
-**Burndown candidates** — genuine lark-rs gaps:
+The former **burndown candidates** are all ✅ fixed:
 
-* **vyper does not build**: remaining unresolvable LALR R/R conflicts (the
-  #106 fix cleared pyquil's, not vyper's).
-* **dotmotif does not build**: its grammar puts `//` comment lines *between*
-  the `|` alternatives of a multi-line rule, which lark-rs's loader rejects
-  ("Unexpected token at top level: Or") — a grammar-loader syntax gap.
-* **matter_idl 5/8**: the three failing inputs all use the case-insensitive
-  anonymous keyword `"optional"i` (`member_attribute`); the token *after* the
-  type mis-lexes — same family as the standalone bank's `"a"i` xfail.
+* **vyper** (build + 7/7): plain `(a|b)` groups now distribute into the
+  parent's alternatives at every position (Python's `SimplifyRule_Visitor`)
+  instead of materializing `__anon_group_*` helpers whose unit alternatives
+  duplicated other rules' RHS and collided as unresolvable reduce/reduce.
+* **matter_idl** (8/8) and **pyquil** (6/6, `test1.quil`'s `1/sqrt(2)`
+  included): a `"keyword"i` literal is now a `PatternStr` with the `i` flag
+  attached (Python keeps the type, only attaching the flag), so it joins the
+  lexer's `unless` keyword retyping — case-insensitively, via per-keyword
+  `^(?i:…)$` matchers — and sorts with string-pattern width. The embed rule
+  mirrors Python's flag-subset test: a `"kw"i` under a case-sensitive regex
+  terminal stays in the alternation. (This also made the basic lexer agree
+  with Python's on the standalone bank's `"a"i "a"` case — its accidental
+  pass via a retype Python never does became an honest
+  basic-lexer-incompatible xfail, `standalone_xfail.json`.)
 
-**Fully passing**: pyquil (✅ *cleared by the #106 optional-distribution fix* —
-build + 6/6), lark_lark (the P0 baseline — lark.lark over the 12 real grammar
-files `examples/lark_grammar.py` parses upstream, incl. python.lark and a full
-Verilog grammar), pylogics_ltl (relative rule imports + trailing-lookahead
-terminals through the M1 lowering), mistql (Earley + dynamic lexer),
-tartiflette, poetry_markers, poetry_pep508 (file-relative `%import`) —
-108/257 inputs agree overall (the drop from 147 is the L4 refusals, which
-fail whole projects by design).
+**Fully passing**: vyper (build + 7/7, LALR + PythonIndenter postlex),
+matter_idl (8/8), pyquil (build + 6/6), lark_lark (the P0 baseline —
+lark.lark over the 12 real grammar files `examples/lark_grammar.py` parses
+upstream, incl. python.lark and a full Verilog grammar), pylogics_ltl
+(relative rule imports + trailing-lookahead terminals through the M1
+lowering), mistql (Earley + dynamic lexer), tartiflette, poetry_markers,
+poetry_pep508 (file-relative `%import`) — 119/257 inputs agree overall
+(every remaining failure is a lookaround/backtracking refusal, which fails
+whole projects by design).
 
 Oracle note: embedded trees are capped at 55 levels (`EMBED_DEPTH_LIMIT`) —
 serde_json refuses JSON nested deeper than 128 and a tree level costs ~2 —
