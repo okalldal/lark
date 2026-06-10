@@ -122,7 +122,7 @@ struct Baked {
     start_default: String,
     global_prefix: String,
     scan_groups: Vec<(u32, String)>,
-    unless: Vec<(u32, Vec<(String, u32)>)>,
+    unless: Vec<(u32, Vec<(String, bool, u32)>)>,
     ignore: Vec<u32>,
 }
 
@@ -235,13 +235,17 @@ fn bake(grammar_src: &str, options: &LarkOptions) -> Result<Baked, LarkError> {
         .map(|(id, rx)| (id.0, rx.clone()))
         .collect();
 
-    let mut unless: Vec<(u32, Vec<(String, u32)>)> = plan
+    // Entries keep their definition order — case-insensitive keywords are
+    // retyped first-match-wins, so the order is semantic; only the outer list
+    // is sorted (by regex-terminal id) for a deterministic bake.
+    let mut unless: Vec<(u32, Vec<(String, bool, u32)>)> = plan
         .unless
         .iter()
-        .map(|(re_id, m)| {
-            let mut entries: Vec<(String, u32)> =
-                m.iter().map(|(v, kw)| (v.clone(), kw.0)).collect();
-            entries.sort();
+        .map(|(re_id, entries)| {
+            let entries: Vec<(String, bool, u32)> = entries
+                .iter()
+                .map(|e| (e.value.clone(), e.ci, e.keyword.0))
+                .collect();
             (re_id.0, entries)
         })
         .collect();
@@ -441,15 +445,15 @@ fn emit_data(out: &mut String, baked: &Baked) {
     }
     out.push_str("    ],\n");
 
-    // unless: already sorted by regex id (inner by matched value) in `bake`.
+    // unless: sorted by regex id in `bake`; entries stay in definition order.
     out.push_str("    unless: &[\n");
     for (re_id, entries) in &baked.unless {
         let _ = write!(out, "        ({re_id}, &[");
-        for (i, (v, kw)) in entries.iter().enumerate() {
+        for (i, (v, ci, kw)) in entries.iter().enumerate() {
             if i > 0 {
                 out.push_str(", ");
             }
-            let _ = write!(out, "({}, {})", lit(v), kw);
+            let _ = write!(out, "({}, {}, {})", lit(v), ci, kw);
         }
         out.push_str("]),\n");
     }
@@ -680,12 +684,14 @@ mod tests {
             .iter()
             .map(|(id, rx)| (*id, leak_str(rx)))
             .collect();
-        let unless: Vec<(u32, &'static [(&'static str, u32)])> = b
+        let unless: Vec<(u32, &'static [(&'static str, bool, u32)])> = b
             .unless
             .iter()
             .map(|(id, entries)| {
-                let entries: Vec<(&'static str, u32)> =
-                    entries.iter().map(|(v, kw)| (leak_str(v), *kw)).collect();
+                let entries: Vec<(&'static str, bool, u32)> = entries
+                    .iter()
+                    .map(|(v, ci, kw)| (leak_str(v), *ci, *kw))
+                    .collect();
                 (*id, &*Box::leak(entries.into_boxed_slice()))
             })
             .collect();
@@ -761,6 +767,18 @@ mod tests {
         catch_unwind(AssertUnwindSafe(|| bake(grammar, opts).is_ok())).unwrap_or(false)
     }
 
+    /// Replays the full strip-mined Python-Lark bank through the shared
+    /// standalone `runtime` (#86), under the same XFAIL discipline as the other
+    /// banks. The `standalone_xfail.json` entries are **basic-lexer-incompatible**
+    /// grammars: their oracles were captured under the contextual lexer, and
+    /// Python's own *basic* lexer rejects/mis-types the same inputs the
+    /// basic-only standalone runtime does (verified directly — e.g. bank 105,
+    /// `!start: "a"i "a"`, where Python-basic errors on all four inputs). Bank
+    /// 105's `parse:105:1` joined the list when `"a"i` was reclassified
+    /// `PatternRe` → `PatternStr`-with-`i`: the old representation routed `"a"`
+    /// through an `unless` embed+retype Python never performs, which happened to
+    /// produce the contextual oracle's answer on that one input. Losing the
+    /// accidental pass is the cost of agreeing with Python's basic lexer.
     #[test]
     fn standalone_compliance_bank() {
         let Some(records) = load_json("bank.json") else {

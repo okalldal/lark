@@ -204,8 +204,75 @@ pub struct ScannerPlan {
     pub global_prefix: String,
     /// `(terminal id, inline regex source)`, in alternation order.
     pub groups: Vec<(SymbolId, String)>,
-    /// regex-terminal-id → (matched-text → keyword-terminal-id).
-    pub unless: HashMap<SymbolId, HashMap<String, SymbolId>>,
+    /// regex-terminal-id → its `unless` keyword candidates, in definition order.
+    pub unless: HashMap<SymbolId, Vec<UnlessEntry>>,
+}
+
+/// One `unless` keyword candidate of a regex terminal: a string terminal the
+/// regex fully matches, retyped after the fact (Python's `UnlessCallback`).
+#[derive(Debug, Clone)]
+pub struct UnlessEntry {
+    /// The keyword's literal value, case-exact as written in the grammar.
+    pub value: String,
+    /// Case-insensitive retype: a `"..."i` keyword (or any keyword under a
+    /// global `IGNORECASE`), matched like Python's flag-carrying unless scanner.
+    pub ci: bool,
+    /// The keyword terminal to retype to.
+    pub keyword: SymbolId,
+}
+
+/// Compiled retype table for one regex terminal's `unless` keywords: exact
+/// values in a hash map (the hot path — e.g. every `NAME` token probes it),
+/// case-insensitive keywords as anchored `(?i:…)` regexes, matched in
+/// definition order — the same semantics the keyword's own scanner pattern
+/// would have. When both could apply, the exact match wins. (Python's
+/// `UnlessCallback` is pure definition-order first-match; this diverges only
+/// when one regex terminal `unless`-matches both `"kw"i` and a later `"kw"` —
+/// on exact-cased input Python retypes to the `i` keyword, this table to the
+/// exact one. The hash map is what keeps the per-token probe O(1).)
+#[derive(Debug)]
+struct RetypeTable {
+    exact: HashMap<String, SymbolId>,
+    ci: Vec<(Regex, SymbolId)>,
+}
+
+impl RetypeTable {
+    fn build(entries: &[UnlessEntry]) -> Result<Self, GrammarError> {
+        let mut exact = HashMap::new();
+        let mut ci = Vec::new();
+        for e in entries {
+            if e.ci {
+                let src = format!("^(?i:{})$", regex::escape(&e.value));
+                let re = Regex::new(&src).map_err(|err| GrammarError::InvalidRegex {
+                    pattern: src.clone(),
+                    reason: err.to_string(),
+                })?;
+                ci.push((re, e.keyword));
+            } else {
+                exact.entry(e.value.clone()).or_insert(e.keyword);
+            }
+        }
+        Ok(RetypeTable { exact, ci })
+    }
+
+    fn retype(&self, text: &str) -> Option<SymbolId> {
+        if let Some(&k) = self.exact.get(text) {
+            return Some(k);
+        }
+        self.ci
+            .iter()
+            .find(|(re, _)| re.is_match(text))
+            .map(|(_, k)| *k)
+    }
+
+    /// Build the per-regex-terminal retype tables from a plan's unless map.
+    fn build_all(
+        plan: &HashMap<SymbolId, Vec<UnlessEntry>>,
+    ) -> Result<HashMap<SymbolId, RetypeTable>, GrammarError> {
+        plan.iter()
+            .map(|(id, entries)| Ok((*id, RetypeTable::build(entries)?)))
+            .collect()
+    }
 }
 
 /// Compute the [`ScannerPlan`] for a candidate terminal set, applying exactly the
@@ -225,8 +292,7 @@ pub fn scanner_plan(
 
     // unless: embed string terminals fully matched by a same-priority regex
     // terminal, and record the retype.
-    let unless = compute_unless(&terms, global_flags)?;
-    let embedded: HashSet<SymbolId> = unless.values().flat_map(|m| m.values().copied()).collect();
+    let (unless, embedded) = compute_unless(&terms, global_flags)?;
 
     // Scanner terminals = everything not embedded, sorted Python-style.
     let mut scan: Vec<(SymbolId, &TerminalDef)> = terms
@@ -288,8 +354,8 @@ struct Scanner {
     /// that matches is the lowest-rank side candidate. Empty for the overwhelming
     /// common case (no lookaround).
     side: Vec<(usize, SymbolId, SideProbe)>,
-    /// regex-terminal-id → (matched-text → keyword-terminal-id).
-    unless: HashMap<SymbolId, HashMap<String, SymbolId>>,
+    /// regex-terminal-id → compiled keyword retype table.
+    unless: HashMap<SymbolId, RetypeTable>,
     /// Reused match-location scratch, sized for `re`. `RefCell` because the hot
     /// `match_at` runs behind `&self` (the contextual lexer's per-token path).
     locs: Option<RefCell<CaptureLocations>>,
@@ -310,7 +376,7 @@ impl Scanner {
         // generator (`scanner_plan`) so a baked scanner is byte-identical to this
         // runtime one.
         let plan = scanner_plan(terminals, global_flags)?;
-        let unless = plan.unless;
+        let unless = RetypeTable::build_all(&plan.unless)?;
         let prefix = plan.global_prefix;
 
         // Split the plan's (rank-ordered) terminals into *plain* terminals — which
@@ -452,8 +518,7 @@ impl Scanner {
         let ty = self
             .unless
             .get(&id)
-            .and_then(|m| m.get(value))
-            .copied()
+            .and_then(|m| m.retype(value))
             .unwrap_or(id);
         Some((ty, value))
     }
@@ -523,7 +588,7 @@ struct DfaScanner {
     /// `None` disables it (always run the engines).
     start_bytes: Option<Box<[bool; 256]>>,
     /// regex-terminal-id → (matched-text → keyword-terminal-id) — identical retype.
-    unless: HashMap<SymbolId, HashMap<String, SymbolId>>,
+    unless: HashMap<SymbolId, RetypeTable>,
 }
 
 /// Leftmost-first DFA over the unguarded sub-patterns. Sub-patterns are ordered by
@@ -968,7 +1033,7 @@ impl DfaScanner {
         global_flags: u32,
     ) -> Result<DfaScanner, GrammarError> {
         let plan = scanner_plan(terminals, global_flags)?;
-        let unless = plan.unless;
+        let unless = RetypeTable::build_all(&plan.unless)?;
         let prefix = plan.global_prefix;
         let by_id: HashMap<SymbolId, &TerminalDef> =
             terminals.iter().map(|(id, t)| (*id, *t)).collect();
@@ -1166,8 +1231,7 @@ impl DfaScanner {
         let ty = self
             .unless
             .get(&id)
-            .and_then(|m| m.get(value))
-            .copied()
+            .and_then(|m| m.retype(value))
             .unwrap_or(id);
         Some((ty, value))
     }
@@ -1317,12 +1381,24 @@ impl ScannerBackend {
 }
 
 /// For each regex terminal, find the same-priority string terminals it fully
-/// matches; those strings are embedded (dropped from the alternation) and
-/// retyped after the fact. Mirrors Python Lark's `_create_unless`.
+/// matches; those become retype candidates, applied after the fact. Mirrors
+/// Python Lark's `_create_unless`, including its two case-insensitivity rules:
+///
+///   * a keyword is **embedded** (dropped from the alternation, the regex
+///     terminal matches in its stead) only when its flags are a subset of the
+///     regex terminal's (`strtok.pattern.flags <= retok.pattern.flags`) — a
+///     `"kw"i` under a case-sensitive regex stays in the alternation, since
+///     the regex cannot match every casing the keyword accepts;
+///   * the retype test itself honours the keyword's own flags (Python builds
+///     the `UnlessCallback` scanner from the keywords' patterns), so a `NAME`
+///     match retypes to a `"kw"i` keyword on *any* casing.
+///
+/// Also returns the embedded-keyword id set for the alternation filter.
+#[allow(clippy::type_complexity)]
 fn compute_unless(
     terms: &[(SymbolId, &TerminalDef)],
     global_flags: u32,
-) -> Result<HashMap<SymbolId, HashMap<String, SymbolId>>, GrammarError> {
+) -> Result<(HashMap<SymbolId, Vec<UnlessEntry>>, HashSet<SymbolId>), GrammarError> {
     let res: Vec<&(SymbolId, &TerminalDef)> = terms
         .iter()
         .filter(|(_, t)| matches!(t.pattern, Pattern::Re(_)))
@@ -1332,7 +1408,7 @@ fn compute_unless(
         .filter(|(_, t)| matches!(t.pattern, Pattern::Str(_)))
         .collect();
     if res.is_empty() || strs.is_empty() {
-        return Ok(HashMap::new());
+        return Ok((HashMap::new(), HashSet::new()));
     }
 
     // The whole-string ("full match") membership test for one regex terminal: the
@@ -1370,7 +1446,9 @@ fn compute_unless(
     }
 
     let prefix = global_flag_prefix(global_flags);
-    let mut unless: HashMap<SymbolId, HashMap<String, SymbolId>> = HashMap::new();
+    let global_ci = global_flags & crate::grammar::terminal::flags::IGNORECASE != 0;
+    let mut unless: HashMap<SymbolId, Vec<UnlessEntry>> = HashMap::new();
+    let mut embedded: HashSet<SymbolId> = HashSet::new();
     for (re_id, re_t) in &res {
         let full_src = format!("{}^(?:{})$", prefix, re_t.pattern.to_inline_regex());
         let full = match Regex::new(&full_src) {
@@ -1421,19 +1499,45 @@ fn compute_unless(
             if s_t.priority != re_t.priority {
                 continue;
             }
-            let value = match &s_t.pattern {
-                Pattern::Str(p) => &p.value,
+            let pat = match &s_t.pattern {
+                Pattern::Str(p) => p,
                 Pattern::Re(_) => continue,
             };
-            if full.is_full(value) {
-                unless
-                    .entry(*re_id)
-                    .or_default()
-                    .insert(value.clone(), *s_id);
+            // Membership is tested on the case-exact value (Python matches
+            // `strtok.pattern.value` against the regex without the keyword's
+            // own flags).
+            if full.is_full(&pat.value) {
+                unless.entry(*re_id).or_default().push(UnlessEntry {
+                    value: pat.value.clone(),
+                    // Under a global IGNORECASE every keyword retypes
+                    // case-insensitively (Python passes `g_regex_flags` into
+                    // the unless scanner).
+                    ci: pat.ci || global_ci,
+                    keyword: *s_id,
+                });
+                // Python: `if strtok.pattern.flags <= retok.pattern.flags:
+                // embedded_strs.add(strtok)`. A case-sensitive keyword has no
+                // flags, so it always embeds; a `"kw"i` embeds only under an
+                // IGNORECASE regex terminal. (A named regex terminal's
+                // grammar-level flags are baked into its pattern source, so
+                // its `flags` field reads 0 here — the conservative outcome
+                // is keeping the keyword in the alternation, which is
+                // behaviour-preserving: the keyword's own `(?i:…)` group
+                // simply competes alongside the regex, and the retype map
+                // covers the case where the regex wins.)
+                let re_flags = match &re_t.pattern {
+                    Pattern::Re(r) => r.flags,
+                    Pattern::Str(_) => 0,
+                };
+                let re_ci =
+                    re_flags & crate::grammar::terminal::flags::IGNORECASE != 0 || global_ci;
+                if !pat.ci || re_ci {
+                    embedded.insert(*s_id);
+                }
             }
         }
     }
-    Ok(unless)
+    Ok((unless, embedded))
 }
 
 /// The leading inline-flag group (`(?i)`, `(?im)`, …) for Lark's `g_regex_flags`,
