@@ -15,7 +15,7 @@
 
 use lark_rs::{
     basic_lexer_conf, load_grammar, lower, route_terminal, route_terminal_dotall, BasicLexer,
-    Lexer, LexerBackend, LoweringRoute, Rejection,
+    DeclineReason, Lexer, LexerBackend, LoweringRoute, Rejection,
 };
 
 /// The bundled `python.STRING` pattern, verbatim — lowers via the M4 opening-guard splice.
@@ -79,7 +79,7 @@ fn python_string_routes_to_lowered() {
 /// long-string idiom: two **unguarded** lookaround-free branches (one per quote arm,
 /// prefix duplicated), the `(?<!\\)(\\\\)*?` escape-parity close absorbed by the
 /// escape-pair body normalization, the lazy `*?` kept. It is in particular no longer
-/// `DeclinedToFancy` — that route was its pre-idiom outcome — and was never
+/// `Declined` — that route was its pre-idiom outcome — and was never
 /// `Unsupported`.
 #[test]
 fn python_long_string_routes_to_lowered() {
@@ -123,24 +123,28 @@ fn python_long_string_routes_to_lowered() {
 
 /// A **per-instance decline is still constructible** — the route LONG_STRING vacated. A
 /// variable-offset lookbehind outside any recognized idiom (`\w+(?<!_)x`) routes to
-/// [`LoweringRoute::DeclinedToFancy`]: every assertion is a *supported shape* (bounded
-/// lookbehind), so it is not `Unsupported`; the lowering declines this instance because
-/// the offset is not fixed — a transitional route to `fancy-regex`, not a reject.
+/// [`LoweringRoute::Declined`] with the **typed reason**
+/// [`DeclineReason::VariableOffsetLookbehind`]: every assertion is a *supported shape*
+/// (bounded lookbehind), so it is not `Unsupported`; the lowering declines this instance
+/// because the offset is not fixed — a clean categorized refusal, not a reject.
 #[test]
-fn variable_offset_lookbehind_routes_to_declined_to_fancy() {
-    let route = route_terminal("VAROFF", r"\w+(?<!_)x");
-    assert!(
-        matches!(route, LoweringRoute::DeclinedToFancy { .. }),
-        "a variable-offset lookbehind must decline to fancy, got {route:?}"
-    );
-    assert!(!matches!(route, LoweringRoute::Lowered(_)));
-    assert!(!matches!(route, LoweringRoute::Unsupported { .. }));
+fn variable_offset_lookbehind_routes_to_declined() {
+    match route_terminal("VAROFF", r"\w+(?<!_)x") {
+        LoweringRoute::Declined { reason, message } => {
+            assert_eq!(reason, DeclineReason::VariableOffsetLookbehind);
+            assert!(
+                message.contains("VAROFF") && message.contains("not yet implemented"),
+                "the message names the terminal and the NYI category: {message}"
+            );
+        }
+        other => panic!("a variable-offset lookbehind must be Declined, got {other:?}"),
+    }
 }
 
 /// `lark.REGEXP` now routes to [`LoweringRoute::Lowered`] via the Stage-B regex-literal
 /// idiom: a **single unguarded** lookaround-free branch (the `(?!\/)` reduces to a
 /// non-empty body, `*?` → `+?`). It is in particular no longer `Unsupported(Internal)` —
-/// that route was its pre-idiom verdict — and not `DeclinedToFancy`.
+/// that route was its pre-idiom verdict — and not `Declined`.
 #[test]
 fn lark_regexp_routes_to_lowered() {
     match route_terminal("REGEXP", REGEXP_RAW) {
@@ -243,7 +247,7 @@ fn route_flattens_to_lower_terminal_api() {
         lower_terminal("TRAIL", "[0-9]+(?![0-9])"),
         Ok(Lowered::Branches(_))
     ));
-    // DeclinedToFancy, Unsupported both flatten to Err. (LONG_STRING lowers now, so the
+    // Declined, Unsupported both flatten to Err. (LONG_STRING lowers now, so the
     // decline leg uses a per-instance variable-offset lookbehind instead.)
     assert!(lower_terminal("VAROFF", r"\w+(?<!_)x").is_err());
     assert!(lower_terminal("INT", "a(?=b)c").is_err());

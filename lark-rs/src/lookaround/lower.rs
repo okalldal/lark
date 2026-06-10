@@ -44,8 +44,23 @@
 //!     window-carrying it over arbitrary prefixes (`docs/LEXER_DFA_PLAN.md`, Stage B).
 //!     The generic decline remains for every non-idiom variable-offset instance.
 
+use super::classify::DeclineReason;
 use super::{Look, Node};
-use crate::error::GrammarError;
+
+/// A typed **decline**: every assertion in the pattern is a supported shape, but this
+/// particular instance cannot ride the lowered engine (or the frontend could not
+/// analyze it). The router turns this into [`LoweringRoute::Declined`] and, since L4,
+/// the build path turns that into a categorized `GrammarError::LookaroundScope`
+/// ([`DeclineReason::scope`]) — historically it routed to `fancy-regex`.
+///
+/// [`LoweringRoute::Declined`]: super::classify::LoweringRoute::Declined
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LowerDecline {
+    pub reason: DeclineReason,
+    /// The site-specific cause, naming the pattern — feeds the build message's
+    /// `detail` slot (`classify::scope_message`).
+    pub detail: String,
+}
 
 /// One lowered top-level alternation branch of a terminal: a lookaround-free base
 /// regex plus optional leading / trailing guards.
@@ -103,7 +118,7 @@ pub struct LookbehindGuard {
 ///
 /// [`LeadingBoundary`]: super::classify::ShapeClass::LeadingBoundary
 /// [`TrailingBoundary`]: super::classify::ShapeClass::TrailingBoundary
-pub fn lower_boundary(pattern: &str) -> Result<Vec<LoweredBranch>, GrammarError> {
+pub fn lower_boundary(pattern: &str) -> Result<Vec<LoweredBranch>, LowerDecline> {
     lower_boundary_dotall(pattern, false)
 }
 
@@ -124,8 +139,14 @@ pub fn lower_boundary(pattern: &str) -> Result<Vec<LoweredBranch>, GrammarError>
 pub fn lower_boundary_dotall(
     pattern: &str,
     dotall: bool,
-) -> Result<Vec<LoweredBranch>, GrammarError> {
-    let node = super::parse(pattern)?;
+) -> Result<Vec<LoweredBranch>, LowerDecline> {
+    // The router has already classified this pattern with the same parser, so a parse
+    // failure here is unreachable in the engine path; map it defensively to the same
+    // typed decline the router would have produced.
+    let node = super::parse(pattern).map_err(|e| LowerDecline {
+        reason: DeclineReason::FrontendParse,
+        detail: format!("the lookaround analyzer could not parse `{pattern}` ({e})"),
+    })?;
     if let Some(idiom) = recognize_string_idiom(&node) {
         return idiom.lower(pattern, dotall);
     }
@@ -156,7 +177,7 @@ pub fn lower_boundary_dotall(
 }
 
 /// Backwards-compatible alias used by the trailing-only call sites and the harness.
-pub fn lower_trailing(pattern: &str) -> Result<Vec<LoweredBranch>, GrammarError> {
+pub fn lower_trailing(pattern: &str) -> Result<Vec<LoweredBranch>, LowerDecline> {
     lower_boundary(pattern)
 }
 
@@ -164,7 +185,7 @@ pub fn lower_trailing(pattern: &str) -> Result<Vec<LoweredBranch>, GrammarError>
 /// a trailing lookahead off the end into forward guards, peel every interior
 /// bounded-lookbehind into a fixed-offset backward guard; whatever remains is the base
 /// regex.
-fn lower_branch(pattern: &str, branch: &Node, dotall: bool) -> Result<LoweredBranch, GrammarError> {
+fn lower_branch(pattern: &str, branch: &Node, dotall: bool) -> Result<LoweredBranch, LowerDecline> {
     // Normalize the branch to a slice of concat parts so we can peel both ends.
     let parts: Vec<Node> = match branch {
         Node::Concat(parts) => parts.clone(),
@@ -223,20 +244,33 @@ fn lower_branch(pattern: &str, branch: &Node, dotall: bool) -> Result<LoweredBra
                 quant,
             } => {
                 if !quant.is_empty() {
-                    return Err(decline(pattern, "the lookbehind carries a quantifier"));
+                    return Err(decline(
+                        pattern,
+                        DeclineReason::QuantifiedLookbehind,
+                        "the lookbehind carries a quantifier",
+                    ));
                 }
                 let off = offset.ok_or_else(|| {
                     decline(
                         pattern,
+                        DeclineReason::VariableOffsetLookbehind,
                         "a bounded lookbehind sits after a variable-width prefix, so its \
                          offset from the match start is not fixed",
                     )
                 })?;
                 let w = max_width_chars(body).ok_or_else(|| {
-                    decline(pattern, "the lookbehind body has no fixed maximum width")
+                    decline(
+                        pattern,
+                        DeclineReason::UnboundedLookbehindBody,
+                        "the lookbehind body has no fixed maximum width",
+                    )
                 })?;
                 if w == 0 {
-                    return Err(decline(pattern, "the lookbehind body is zero-width"));
+                    return Err(decline(
+                        pattern,
+                        DeclineReason::ZeroWidthLookbehindBody,
+                        "the lookbehind body is zero-width",
+                    ));
                 }
                 lookbehind.push(LookbehindGuard {
                     neg: *neg,
@@ -249,7 +283,13 @@ fn lower_branch(pattern: &str, branch: &Node, dotall: bool) -> Result<LoweredBra
             // classifier rejects; it should never reach here, but decline defensively.
             Node::Assertion {
                 look: Look::Ahead, ..
-            } => return Err(decline(pattern, "an interior forward lookahead")),
+            } => {
+                return Err(decline(
+                    pattern,
+                    DeclineReason::InteriorLookahead,
+                    "an interior forward lookahead",
+                ))
+            }
             other => {
                 offset = match offset {
                     Some(cur) => fixed_width_chars(other).map(|w| cur + w),
@@ -275,6 +315,7 @@ fn lower_branch(pattern: &str, branch: &Node, dotall: bool) -> Result<LoweredBra
     if base.has_assertion() {
         return Err(decline(
             pattern,
+            DeclineReason::NestedInGroup,
             "a lookaround assertion is nested inside a group (or behind a flag \
              wrapper), so it cannot be peeled to a fixed offset",
         ));
@@ -290,14 +331,14 @@ fn lower_branch(pattern: &str, branch: &Node, dotall: bool) -> Result<LoweredBra
     // rides must still be greedy-monotone for the accumulator to pick Python's length.)
     let guarded = leading.is_some() || trailing.is_some() || !lookbehind.is_empty();
     if guarded && !is_guard_realizable(&regex, dotall) {
-        return Err(GrammarError::Other {
-            msg: format!(
-                "terminal pattern `{pattern}`: a guarded branch's base is not \
-                 guard-realizable (it has an order-sensitive alternation or a lazy/\
-                 possessive quantifier and is not prefix-free), so its match-length \
-                 under the guard is not reproducible by the longest-accept accumulator."
-            ),
-        });
+        return Err(decline(
+            pattern,
+            DeclineReason::NonRealizableGuardedBase,
+            "a guarded branch's base is not guard-realizable (it has an \
+             order-sensitive alternation or a lazy/possessive quantifier and is not \
+             prefix-free), so its match-length under the guard is not reproducible by \
+             the longest-accept accumulator",
+        ));
     }
     Ok(LoweredBranch {
         regex,
@@ -307,25 +348,23 @@ fn lower_branch(pattern: &str, branch: &Node, dotall: bool) -> Result<LoweredBra
     })
 }
 
-/// A "decline to fancy" error: the assertion is a supported *shape* but this instance
-/// cannot ride the lowered engine (e.g. a variable-offset lookbehind), so the caller
-/// routes the whole terminal to `fancy-regex`. Distinct from a permanent rejection.
-fn decline(pattern: &str, why: &str) -> GrammarError {
-    GrammarError::Other {
-        msg: format!(
-            "terminal pattern `{pattern}`: {why}, so it cannot be lowered into the \
-             combined DFA and is routed to fancy-regex."
-        ),
+/// A typed decline: the assertion is a supported *shape* but this instance cannot
+/// ride the lowered engine (e.g. a variable-offset lookbehind). Distinct from a
+/// permanent classifier rejection; categorized by [`DeclineReason::scope`].
+fn decline(pattern: &str, reason: DeclineReason, why: &str) -> LowerDecline {
+    LowerDecline {
+        reason,
+        detail: format!("in pattern `{pattern}`, {why}."),
     }
 }
 
-fn zero_width(pattern: &str) -> GrammarError {
-    GrammarError::Other {
-        msg: format!(
-            "terminal pattern `{pattern}` lowers to a zero-width branch (a bare \
-             boundary assertion); the lexer forbids zero-width terminals."
-        ),
-    }
+fn zero_width(pattern: &str) -> LowerDecline {
+    decline(
+        pattern,
+        DeclineReason::ZeroWidthBranch,
+        "the pattern lowers to a zero-width branch (a bare boundary assertion) and \
+         the lexer forbids zero-width terminals",
+    )
 }
 
 /// Whether a guarded branch's base is **greedy-monotone**: its leftmost-first match
@@ -803,7 +842,7 @@ impl StringIdiom {
     /// and an empty trailing-guarded branch). `dotall` controls whether the body class
     /// admits a newline (excluded iff not DOTALL). Declines (the conservative direction)
     /// if an empty arm's base is not guard-realizable.
-    fn lower(&self, pattern: &str, dotall: bool) -> Result<Vec<LoweredBranch>, GrammarError> {
+    fn lower(&self, pattern: &str, dotall: bool) -> Result<Vec<LoweredBranch>, LowerDecline> {
         let nl = if dotall { "" } else { r"\n" };
         let mut branches = Vec::new();
         for d in &self.delims {
@@ -826,9 +865,10 @@ impl StringIdiom {
             if !is_guard_realizable(&empty, dotall) {
                 return Err(decline(
                     pattern,
+                    DeclineReason::EmptyArmNotRealizable,
                     "the empty-string arm's base is not guard-realizable (prefix not \
                      length-deterministic), so the trailing-guard accumulator cannot \
-                     reproduce fancy's match",
+                     reproduce the original match",
                 ));
             }
             branches.push(LoweredBranch {

@@ -825,7 +825,7 @@ fn build_combined_dfa(
 /// transitional `fancy-regex` compatibility fallback is auditable in one place. Compiles
 /// `inline` as a per-position-anchored (`\G`) fancy candidate and records it in the
 /// rank-sorted `fancy` side-probe list. Every `LoweringRoute` arm in [`DfaScanner::build`]
-/// that does not lower into the DFA — `DeclinedToFancy`, the compatibility `Unsupported`
+/// that does not lower into the DFA — `Declined`, the compatibility `Unsupported`
 /// fallback, and the defensive `Plain` arm — calls exactly this.
 fn push_fancy_fallback(
     fancy: &mut Vec<(usize, SymbolId, AnyRegex)>,
@@ -946,14 +946,14 @@ impl DfaScanner {
                     // A supported shape that lowered — the DFA hosts it. The lowering only ever
                     // returns `Branches` it can faithfully realize (a non-realizable guarded
                     // base, a variable-offset lookbehind, or a not-yet-lowered idiom comes back
-                    // as `DeclinedToFancy`, below).
+                    // as `Declined`, below).
                     LoweringRoute::Lowered(branches) => branches,
                     // A supported-in-principle terminal whose instance was declined (a
                     // variable-offset lookbehind outside a recognized idiom, a
                     // non-greedy-monotone base) or a pattern the frontend could not parse:
                     // route to fancy-regex exactly as today. (No bundled terminal is here —
                     // STRING/REGEXP/LONG_STRING all lower via their idioms, `Lowered` above.)
-                    LoweringRoute::DeclinedToFancy { .. } => {
+                    LoweringRoute::Declined { .. } => {
                         push_fancy_fallback(&mut fancy, &prefix, inline, rank, *id)?;
                         continue;
                     }

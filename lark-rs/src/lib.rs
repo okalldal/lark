@@ -19,10 +19,10 @@ pub use grammar::{
 pub use lexer::{BasicLexer, ContextualLexer, DynamicMatcher, Lexer, LexerBackend, LexerConf};
 pub use lookaround::classify::{
     classify, lower_terminal, lower_terminal_dotall, route_terminal, route_terminal_dotall,
-    Classification, Classifier, DefaultClassifier, Lowered, LoweringRoute, Rejection, ShapeClass,
-    Verdict,
+    Classification, Classifier, DeclineReason, DefaultClassifier, LookaroundIssue, Lowered,
+    LoweringRoute, Rejection, Scope, ShapeClass, Verdict,
 };
-pub use lookaround::lower::{GuardSpec, LookbehindGuard, LoweredBranch};
+pub use lookaround::lower::{GuardSpec, LookbehindGuard, LowerDecline, LoweredBranch};
 pub use parsers::{
     basic_lexer_conf, lalr, EarleyParser, LexFailure, ParseTable, ParserConf, TokenSource,
 };
