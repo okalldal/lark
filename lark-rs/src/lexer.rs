@@ -869,9 +869,11 @@ impl DfaScanner {
                     // as `DeclinedToFancy`, below).
                     LoweringRoute::Lowered(branches) => branches,
                     // A supported-in-principle terminal whose instance was declined
-                    // (`python.LONG_STRING`, `lark.REGEXP`, a variable-offset lookbehind, a
+                    // (`python.LONG_STRING`, a variable-offset lookbehind, a
                     // non-greedy-monotone base) or a pattern the frontend could not parse:
-                    // route to fancy-regex exactly as today.
+                    // route to fancy-regex exactly as today. (`lark.REGEXP` is *not* here —
+                    // its internal `(?!\/)` is `Unsupported`, below; it reaches the same
+                    // fancy seam through the Unsupported compatibility fallback.)
                     LoweringRoute::DeclinedToFancy { .. } => {
                         push_fancy_fallback(&mut fancy, &prefix, inline, rank, *id)?;
                         continue;
@@ -884,10 +886,11 @@ impl DfaScanner {
                         push_fancy_fallback(&mut fancy, &prefix, inline, rank, *id)?;
                         continue;
                     }
-                    // Unreachable: a plain terminal was already handled by the `!is_fancy()`
-                    // branch above (a plain pattern compiles on the `regex` crate, so it never
-                    // reaches this lowering arm). Handle defensively — route to fancy rather
-                    // than panicking.
+                    // A terminal with no lookaround assertion. The common plain case was
+                    // already handled by the `!is_fancy()` branch above; reaching here means
+                    // the pattern is fancy-only for some *other* reason (e.g. a top-level
+                    // backreference outside any lookaround), so keep the compatibility
+                    // fallback — route to fancy rather than panicking.
                     LoweringRoute::Plain => {
                         push_fancy_fallback(&mut fancy, &prefix, inline, rank, *id)?;
                         continue;

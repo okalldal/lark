@@ -309,17 +309,22 @@ pub enum Lowered {
 /// flattens this back to `Result` for existing callers and tests.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoweringRoute {
-    /// No lookaround at all — the terminal is already a plain regular language and needs
-    /// no lowering (it goes straight to the DFA).
+    /// No lookaround assertion. A pattern that already compiled on the `regex` crate is
+    /// handled by the plain DFA path *before* it reaches routing; a pattern that reaches
+    /// the route path and classifies `Plain` only does so because it is fancy-only for some
+    /// *other* reason (e.g. a top-level backreference outside any lookaround), and the
+    /// `DfaScanner` keeps the compatibility fallback for it.
     Plain,
     /// A supported shape that lowered into lookaround-free per-branch sub-patterns — the
     /// DFA hosts it directly.
     Lowered(Vec<super::lower::LoweredBranch>),
     /// A **supported-in-principle** terminal whose *particular instance* the lowering
     /// declined (a variable-offset lookbehind, a non-greedy-monotone guarded base, a
-    /// bundled idiom not yet lowered such as `python.LONG_STRING` / `lark.REGEXP`), **or**
-    /// a pattern the lookaround frontend could not parse. The runtime routes this to
-    /// `fancy-regex` during the transition — a correct fallback, never a mis-lowering.
+    /// bundled idiom not yet lowered such as `python.LONG_STRING`), **or** a pattern the
+    /// lookaround frontend could not parse. The runtime routes this to `fancy-regex` during
+    /// the transition — a correct fallback, never a mis-lowering. (Note `lark.REGEXP` is
+    /// *not* here: its internal `(?!\/)` makes it [`Self::Unsupported`]; it reaches the same
+    /// fancy runtime seam through the `Unsupported` compatibility fallback.)
     DeclinedToFancy {
         /// A human-readable reason naming the terminal and why it declined.
         reason: String,

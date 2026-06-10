@@ -9,8 +9,9 @@
 //! makes an unsupported assertion suddenly lower (or a declined idiom reject) is caught.
 //!
 //! The companion `lower_terminal` API tests (the flattened `Result` view) stay in
-//! `test_lowering_reject.rs`; the runtime compatibility fallback is pinned in
-//! `test_string_splice.rs`.
+//! `test_lowering_reject.rs`. The runtime compatibility fallback is pinned both here
+//! (`unsupported_user_lookaround_currently_compat_falls_back_to_fancy`, the direct pin) and
+//! by the bundled-terminal status tripwire in `test_string_splice.rs`.
 
 use lark_rs::{
     basic_lexer_conf, load_grammar, lower, route_terminal, route_terminal_dotall, BasicLexer,
