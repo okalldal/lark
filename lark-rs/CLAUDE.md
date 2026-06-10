@@ -440,13 +440,19 @@ correctness-identical, and it is faster on the all-plain common path
 (`benches/lex_backends`, `BENCH.md`); `LexerBackend::Regex` stays selectable and the
 differential keeps both engines gated against each other.
 
-**Current routing (master).** Under the default `Dfa` backend each terminal takes one of:
-*plain* (no lookaround → the DFA), *lowered* (a supported bounded assertion → DFA branches
-+ guard tables, M1/M2/M3/M4 — `STRING`/`OP`/`DEC_NUMBER` and fixed-offset lookbehind are
-here), *declined-to-fancy* (`python.LONG_STRING`, `lark.REGEXP`, or a per-instance decline
-→ still on `fancy-regex` at runtime), or *rejected* (out-of-shape → build error). Because
-two bundled terminals still decline, **`fancy-regex` remains a runtime dependency and L4
-(drop it) + L5 (bake the scanner static) are blocked**; see
+**Current routing (master).** Under the default `Dfa` backend each terminal takes one of a
+**typed** `classify::LoweringRoute` (`route_terminal_dotall`, matched directly by
+`DfaScanner::build`): *Plain* (no lookaround → the DFA), *Lowered* (a supported bounded
+assertion → DFA branches + guard tables, M1/M2/M3/M4 — `STRING`/`OP`/`DEC_NUMBER` and
+fixed-offset lookbehind are here), *DeclinedToFancy* (`python.LONG_STRING`, or a per-instance
+decline → still on `fancy-regex` at runtime), or *Unsupported* (out-of-shape — `lark.REGEXP`'s
+internal `(?!\/)` and user internal/unbounded/backref/etc. lookaround). The decline-vs-reject
+split PR #131 flagged is now in the type; what is **transitional** is the runtime policy: the
+*Unsupported* arm still routes to `fancy-regex` via a single auditable `push_fancy_fallback`
+compatibility seam, so an out-of-shape user assertion lexes today rather than erroring — L4
+must flip only that arm to a build error. Because two bundled terminals still decline,
+**`fancy-regex` remains a runtime dependency and L4 (drop it) + L5 (bake the scanner static)
+are blocked**; see
 `docs/LEXER_DFA_STATUS.md` for the per-terminal table and `docs/LEXER_DFA_PLAN.md` for the
 phase status. Detection of a *declined* terminal is automatic (a pattern is sent to
 `fancy-regex` only when the `regex` crate rejects it), so user grammars with lookaround
