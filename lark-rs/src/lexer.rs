@@ -1867,7 +1867,7 @@ impl LazyScanner {
         global_flags: u32,
         backend: LexerBackend,
     ) -> &ScannerBackend {
-        if self.cell.get().is_none() {
+        self.cell.get_or_init(|| {
             let terms: Vec<(SymbolId, &TerminalDef)> = self
                 .term_ids
                 .iter()
@@ -1877,13 +1877,11 @@ impl LazyScanner {
             // full-set validation build in `ContextualLexer::new`, and a subset
             // alternation introduces no new failure mode (`compute_unless` pairs
             // and DFA patterns are each a subset of the validated full set).
-            let built = ScannerBackend::build(&terms, global_flags, backend).expect(
+            ScannerBackend::build(&terms, global_flags, backend).expect(
                 "per-state scanner build failed after the full-terminal validation \
                  build succeeded — this is a lark-rs bug",
-            );
-            let _ = self.cell.set(built);
-        }
-        self.cell.get().unwrap()
+            )
+        })
     }
 }
 
@@ -1904,7 +1902,18 @@ impl ContextualLexer {
         // use, and a grammar whose terminals the lexer refuses (the categorized
         // lookaround scope errors, `docs/LOOKAROUND_SCOPE.md`) must still fail at
         // construction time, not mid-parse. Python Lark's `ContextualLexer` does
-        // the same: its eager `root_lexer` init validates every terminal.
+        // the same: its eager `root_lexer` init validates every terminal. Pinned by
+        // `tests/test_lookaround_scope.rs::scoreboard_rejects_every_case_with_its_category`
+        // (every scope case through `Lark::new` on LALR × contextual).
+        //
+        // This refuses exactly what the per-state builds would have refused: the
+        // loader prunes terminals no rule or `%ignore` references (its
+        // `_remove_unused` port), so `conf.terminals` is precisely the union of
+        // the state sets plus `always_accept` — there is no "unused but broken"
+        // terminal this build newly rejects. The one genuinely new failure
+        // surface is a combined-build resource limit (one automaton over the
+        // union where the old code built only per-state subsets), which matches
+        // the basic lexer's existing behavior on the same set.
         {
             let all: Vec<(SymbolId, &TerminalDef)> =
                 conf.terminals.iter().map(|(id, t)| (*id, t)).collect();
