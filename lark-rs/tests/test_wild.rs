@@ -134,7 +134,9 @@ fn meta_options(meta: &Value, project_dir: &PathBuf) -> Option<LarkOptions> {
                 'm' => flags::MULTILINE,
                 's' => flags::DOTALL,
                 'x' => flags::VERBOSE,
-                _ => 0,
+                // Surface an unknown letter as "options not representable"
+                // instead of silently dropping the flag.
+                _ => return None,
             };
         }
     }
@@ -162,21 +164,32 @@ fn try_build(grammar: &str, opts: LarkOptions) -> Result<Lark, String> {
     }
 }
 
-fn try_parse(lark: &Lark, input: &str) -> Option<ParseTree> {
+/// A parse attempt's outcome. A panic is tracked separately from a clean
+/// `Err`: the oracle may *expect* a parse error, but a panic is never correct,
+/// so it must not be able to hide behind an expected-error case.
+enum ParseOutcome {
+    Tree(ParseTree),
+    Error,
+    Panic,
+}
+
+fn try_parse(lark: &Lark, input: &str) -> ParseOutcome {
     match catch_unwind(AssertUnwindSafe(|| lark.parse(input))) {
-        Ok(Ok(tree)) => Some(tree),
-        _ => None,
+        Ok(Ok(tree)) => ParseOutcome::Tree(tree),
+        Ok(Err(_)) => ParseOutcome::Error,
+        Err(_) => ParseOutcome::Panic,
     }
 }
 
 /// Compare a parse result against one oracle case. `Ok(())` on agreement.
-fn case_matches(parsed: &Option<ParseTree>, case: &Value) -> Result<(), String> {
+fn case_matches(parsed: &ParseOutcome, case: &Value) -> Result<(), String> {
     let oracle_ok = case["ok"].as_bool().unwrap_or(false);
     match (oracle_ok, parsed) {
-        (false, None) => Ok(()),
-        (false, Some(_)) => Err("parsed but oracle expects a parse error".into()),
-        (true, None) => Err("parse error but oracle expects a tree".into()),
-        (true, Some(tree)) => {
+        (_, ParseOutcome::Panic) => Err("panicked during parse".into()),
+        (false, ParseOutcome::Error) => Ok(()),
+        (false, ParseOutcome::Tree(_)) => Err("parsed but oracle expects a parse error".into()),
+        (true, ParseOutcome::Error) => Err("parse error but oracle expects a tree".into()),
+        (true, ParseOutcome::Tree(tree)) => {
             // The embedded tree (when present) gives the readable diagnostic;
             // the digest is the authoritative check either way.
             if case.get("tree").is_some_and(|t| !t.is_null()) {
@@ -258,8 +271,15 @@ fn test_wild_bank() {
                 .unwrap_or_else(|e| panic!("read {input_rel}: {e}"));
             let parsed = try_parse(&lark, &input);
             if let Err(e) = case_matches(&parsed, case) {
-                failures.insert(format!("parse:{name}:{input_rel}"));
-                details.push(format!("parse:{name}:{input_rel}: {e}"));
+                // Panics get their own key namespace so an existing `parse:`
+                // xfail entry can never mask an input that *newly* panics.
+                let kind = if matches!(parsed, ParseOutcome::Panic) {
+                    "panic"
+                } else {
+                    "parse"
+                };
+                failures.insert(format!("{kind}:{name}:{input_rel}"));
+                details.push(format!("{kind}:{name}:{input_rel}: {e}"));
             }
         }
         if trace {
@@ -277,10 +297,11 @@ fn test_wild_bank() {
         .unwrap_or_default();
 
     let n_build_fail = failures.iter().filter(|f| f.starts_with("build:")).count();
+    let n_input_fail = failures.iter().filter(|f| !f.starts_with("build:")).count();
     eprintln!(
         "wild bank: {}/{total} inputs agree with oracle across {} projects \
          ({n_build_fail} grammars not building); {} known-XFAIL",
-        total - failures.iter().filter(|f| f.starts_with("parse:")).count(),
+        total - n_input_fail,
         projects.len(),
         xfail.len()
     );

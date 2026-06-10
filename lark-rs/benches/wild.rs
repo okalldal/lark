@@ -47,21 +47,37 @@ fn meta_options(meta: &Value) -> Option<LarkOptions> {
             Some(_) => return None,
             None => None,
         },
-        g_regex_flags: opts["g_regex_flags"].as_str().map_or(0, |letters| {
-            use lark_rs::grammar::terminal::flags;
-            letters.chars().fold(0, |acc, ch| {
-                acc | match ch {
-                    'i' => flags::IGNORECASE,
-                    'm' => flags::MULTILINE,
-                    's' => flags::DOTALL,
-                    'x' => flags::VERBOSE,
-                    _ => 0,
+        g_regex_flags: match opts["g_regex_flags"].as_str() {
+            None => 0,
+            Some(letters) => {
+                use lark_rs::grammar::terminal::flags;
+                let mut acc = 0;
+                for ch in letters.chars() {
+                    acc |= match ch {
+                        'i' => flags::IGNORECASE,
+                        'm' => flags::MULTILINE,
+                        's' => flags::DOTALL,
+                        'x' => flags::VERBOSE,
+                        // Unknown letter → options not representable.
+                        _ => return None,
+                    };
                 }
-            })
-        }),
+                acc
+            }
+        },
         base_path: None, // set per project below
         ..Default::default()
     })
+}
+
+/// Parse with panics contained, like test_wild.rs's harness: wild inputs DO
+/// panic, and a panicking input must drop out of the corpus (or fail one
+/// row), never abort the whole bench. `catch_unwind` is free on the
+/// non-panic path, so using it inside the measured closures is safe.
+fn try_parse(lark: &Lark, input: &str) -> Option<lark_rs::tree::ParseTree> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| lark.parse(input)))
+        .ok()
+        .and_then(Result::ok)
 }
 
 struct Stat {
@@ -81,7 +97,7 @@ fn measure<F: FnMut()>(mut f: F) -> Stat {
         if t.elapsed() >= Duration::from_millis(1) || iters >= 1 << 22 {
             break;
         }
-        iters = (iters * 2).max(1);
+        iters *= 2;
     }
     let mut samples: Vec<f64> = Vec::new();
     let overall = Instant::now();
@@ -146,7 +162,7 @@ fn bench_project(pdir: &Path) {
                 std::fs::read_to_string(pdir.join(rel)).unwrap(),
             )
         })
-        .filter(|(_, text)| lark.parse(text).is_ok())
+        .filter(|(_, text)| try_parse(&lark, text).is_some())
         .collect();
     if inputs.is_empty() {
         println!("SKIP\t{name}\tno input parses (see wild xfail.json)");
@@ -157,7 +173,7 @@ fn bench_project(pdir: &Path) {
     let corpus_bytes: usize = inputs.iter().map(|(_, t)| t.len()).sum();
     let stat = measure(|| {
         for (_, text) in &inputs {
-            black_box(lark.parse(black_box(text)).unwrap());
+            black_box(try_parse(&lark, black_box(text)).expect("filtered input parses"));
         }
     });
     let mb_per_s = corpus_bytes as f64 / stat.median_ns * 1e3;
@@ -173,7 +189,7 @@ fn bench_project(pdir: &Path) {
 
     let (largest_rel, largest) = inputs.last().unwrap();
     let stat = measure(|| {
-        black_box(lark.parse(black_box(largest)).unwrap());
+        black_box(try_parse(&lark, black_box(largest)).expect("filtered input parses"));
     });
     let mb_per_s = largest.len() as f64 / stat.median_ns * 1e3;
     println!(

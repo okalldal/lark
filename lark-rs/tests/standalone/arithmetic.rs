@@ -7,25 +7,25 @@
 // Source grammar:
 //   // Arithmetic grammar for testing operator precedence, unary ops, and parentheses.
 //   // Mirrors what Lark's test_parser.py uses for LALR precedence tests.
-//   
+//
 //   ?start : expr
-//   
+//
 //   ?expr  : expr "+" term  -> add
 //          | expr "-" term  -> sub
 //          | term
-//   
+//
 //   ?term  : term "*" factor -> mul
 //          | term "/" factor -> div
 //          | factor
-//   
+//
 //   ?factor : "+" factor    -> pos
 //           | "-" factor    -> neg
 //           | atom
-//   
+//
 //   ?atom  : NUMBER
 //          | NAME
 //          | "(" expr ")"
-//   
+//
 //   %import common.NUMBER
 //   %import common.CNAME -> NAME
 //   %import common.WS_INLINE

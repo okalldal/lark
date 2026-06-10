@@ -327,8 +327,15 @@ fn emit_header(out: &mut String, grammar_src: &str) {
          // Source grammar:\n",
     );
     for line in grammar_src.lines() {
-        out.push_str("//   ");
-        out.push_str(line);
+        // Trim so a blank grammar line emits `//`, not `//   ` — trailing
+        // whitespace trips the repo's pre-commit fixers on the committed
+        // fixture parsers.
+        out.push_str(if line.trim_end().is_empty() {
+            "//"
+        } else {
+            "//   "
+        });
+        out.push_str(line.trim_end());
         out.push('\n');
     }
     // Everything lives in an inner module carrying an *outer* `#[allow]` — an

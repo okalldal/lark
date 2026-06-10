@@ -50,6 +50,12 @@ ORACLES_DIR = LARK_RS_DIR / "tests" / "fixtures" / "oracles" / "wild"
 # Use the repo checkout of Python Lark as the oracle, like generate_oracles.py.
 sys.path.insert(0, str(LARK_RS_DIR.parent))
 
+# canon()/counts()/tree_to_dict() recurse one Python frame (or more) per tree
+# level, and wild trees genuinely nest 100+ levels (CEL's non-collapsed
+# precedence cascade) — headroom over the default 1000 so growth in the bank
+# fails loudly in our code, never as a RecursionError inside a helper.
+sys.setrecursionlimit(100_000)
+
 from lark import Lark, Tree, Token  # noqa: E402
 
 EMBED_LIMIT = 16_384  # canonical bytes; smaller trees also embed full JSON
@@ -189,6 +195,13 @@ def main():
     if not projects:
         print("no wild projects found — nothing to do")
         return
+    # Remove orphaned oracles whose project directory is gone — nothing else
+    # would catch them (the freshness gate only diffs regenerated files).
+    keep = {f"{p.name}.json" for p in projects} | {"xfail.json"}
+    for stale in sorted(ORACLES_DIR.glob("*.json")):
+        if stale.name not in keep:
+            stale.unlink()
+            print(f"  removed orphaned {stale.relative_to(LARK_RS_DIR)}")
     for pdir in projects:
         result = generate_project(pdir)
         out = ORACLES_DIR / f"{result['name']}.json"
