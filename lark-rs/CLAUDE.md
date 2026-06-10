@@ -66,6 +66,10 @@ cargo test --features perf-counters --test test_cyk_scaling
 # Lexer linear-scan gate (#104) and dense-DFA build-cost gate (lookaround lowering).
 cargo test --features perf-counters --test test_lexer_scaling
 cargo test --features perf-counters --test test_lexer_dfa_build_scaling
+
+# L0 whole-lexer differential (the fancy-regex reference backend is TEST-ONLY,
+# behind the default-off `fancy-oracle` feature — docs/LOOKAROUND_SCOPE.md).
+cargo test -p lark-rs --features fancy-oracle
 ```
 
 **Perf regression net (`perf-counters` feature).** Suspected super-linearities are
@@ -357,7 +361,7 @@ lost once `%ignore` drops whitespace — `string_lookaround_free_rewrite_is_not_
 The DFA plan supersedes that rewrite framing (it lowers in the lexer rather than editing
 grammars), but the behavioral findings stay pinned in `tests/test_lookaround.rs`. Pinned by
 `tests/test_stdlib.rs` (oracles in `fixtures/oracles/stdlib/`). SQL/C/Lua are *not* bundled — upstream distributes them as separate packages, not under `lark/grammars/` |
-| Standalone parser gen | ✅ (Rust) | `lark-rs generate-parser --grammar foo.lark --output parser.rs` (`src/bin/generate_parser.rs`) emits a self-contained Rust LALR parser depending only on `regex` + std, not on lark-rs (#42). `src/standalone/mod.rs` runs the normal pipeline once and bakes the `ParseTable` (sparse ACTION/GOTO), per-rule tree-shaping flags, the symbol-name table, and the `ScannerPlan` (alternation order + `unless` retype) into one `static DATA: GrammarData`. The driver (basic lexer + LALR + tree-shaping) lives in `src/standalone/runtime.rs` — a **real compiled, type-checked, unit-tested module** that is `include_str!`d into each generated parser, not a hand-copied text blob. Both drift vectors are shared by construction: the lexer recipe is the **same** `lexer::scanner_plan` the in-process `Scanner::build` uses, and the driver is the one compiled module. So a generated parser is byte-identical to lark-rs — pinned two ways: `test_standalone.rs` (committed `tests/standalone/*.rs` fixtures `include!`d + run vs the live oracle, plus a determinism/freshness gate), **and** a compliance-bank replay (`standalone::tests::standalone_compliance_bank`, #86) that runs the shared `runtime` over the **full strip-mined Python-Lark bank** — 509/512 cases agree with the captured oracle (the 3 XFAILs in `standalone_xfail.json` are basic-lexer-incompatible grammars, e.g. `"a"i "a"`, allow-listed via `LARK_STANDALONE_WRITE_XFAIL=1` with the same burndown discipline as the LALR/Earley banks). Value is dependency footprint + Python-`standalone` parity, **not** throughput (still table-interpreted) or `no_std` (runtime regex compile); see the module docs. Limitations: LALR + basic lexer only, no postlex (rejected with a clear error); a grammar with **lookaround terminals** (the bundled `python`/`lark`) is not standalone-able since the baked runtime is pure-`regex`. Follow-ups: Python standalone; `fancy-regex` in the emitted runtime; unify the `ParseTable→Rust` emitter with `include_lark!` (#49) |
+| Standalone parser gen | ✅ (Rust) | `lark-rs generate-parser --grammar foo.lark --output parser.rs` (`src/bin/generate_parser.rs`) emits a self-contained Rust LALR parser depending only on `regex` + std, not on lark-rs (#42). `src/standalone/mod.rs` runs the normal pipeline once and bakes the `ParseTable` (sparse ACTION/GOTO), per-rule tree-shaping flags, the symbol-name table, and the `ScannerPlan` (alternation order + `unless` retype) into one `static DATA: GrammarData`. The driver (basic lexer + LALR + tree-shaping) lives in `src/standalone/runtime.rs` — a **real compiled, type-checked, unit-tested module** that is `include_str!`d into each generated parser, not a hand-copied text blob. Both drift vectors are shared by construction: the lexer recipe is the **same** `lexer::scanner_plan` the in-process `Scanner::build` uses, and the driver is the one compiled module. So a generated parser is byte-identical to lark-rs — pinned two ways: `test_standalone.rs` (committed `tests/standalone/*.rs` fixtures `include!`d + run vs the live oracle, plus a determinism/freshness gate), **and** a compliance-bank replay (`standalone::tests::standalone_compliance_bank`, #86) that runs the shared `runtime` over the **full strip-mined Python-Lark bank** — 509/512 cases agree with the captured oracle (the 3 XFAILs in `standalone_xfail.json` are basic-lexer-incompatible grammars, e.g. `"a"i "a"`, allow-listed via `LARK_STANDALONE_WRITE_XFAIL=1` with the same burndown discipline as the LALR/Earley banks). Value is dependency footprint + Python-`standalone` parity, **not** throughput (still table-interpreted) or `no_std` (runtime regex compile); see the module docs. Limitations: LALR + basic lexer only, no postlex (rejected with a clear error); a grammar with **lookaround terminals** (the bundled `python`/`lark`) is not standalone-able since the baked runtime is pure-`regex`. Follow-ups: Python standalone; the L5 serialized-DFA bake (which makes the lookaround grammars standalone-able); unify the `ParseTable→Rust` emitter with `include_lark!` (#49) |
 | Error recovery | ✅ | Panic-mode **single-token-deletion** recovery on the LALR backend (#43). `Lark::parse_with_recovery` (built-in strategy) and `parse_on_error` (custom handler) mirror Python Lark's `on_error` callback — which, with `on_error=lambda e: True`, *is* delete-and-resume (its `interactive_parser.resume_parse()` has already pulled the bad token off the lexer). Same LALR tables ⇒ the surviving stream builds the **same tree**, so it is oracle-gated: `tests/test_recovery.rs` asserts tree + deletion-count parity vs Python (`recovery/cases.json`). Returns a `RecoveredTree { tree, errors }` — the partial tree plus the recovered errors (the "error nodes"; an LR value stack has no slot to splice them inline without a yacc-style `error` production, which Lark's grammar syntax lacks, so they sit alongside, exactly as Python's recovery does). Recovery lexes with the basic/global lexer so out-of-context-but-valid tokens are deletable; a `$END` error returns a best-effort partial instead of aborting (Python re-raises). Plan: [`docs/PHASE_3_RECOVERY_PLAN.md`](docs/PHASE_3_RECOVERY_PLAN.md). Follow-ups: character-level recovery, Earley/CYK/postlex recovery |
 | CYK parser | ✅ | `parser='cyk'` (#44). Faithful port of Python Lark's `cyk.py`: CNF conversion (TERM lifts non-solitary terminals into `__T_` wrappers, BIN binarizes >2-symbol rules via `__SP_` splits, UNIT eliminates non-terminal unit rules recording the skipped chain) + an O(n³) DP that keeps the lightest derivation per span/non-terminal, then a CNF revert that feeds the shared `TreeBuilder` — so an unambiguous parse is byte-identical to LALR/Earley. lark-rs's nullable `*`/`?`/`+` helpers are transparent, so a reachability prune + ε-removal pass (duplicate each rule over its nullable occurrences; refill omitted transparent positions with an empty splice) reproduces Python's ε-free EBNF expansion without changing the tree; a nullable *non-transparent* rule is a genuine ε-rule CYK can't model and is rejected at build time, matching Python. Uses the basic lexer (no parser-state lexer, like Earley). Pinned by `test_cyk_compliance.rs` — the CYK bank (TestCykBasic) is **124/124 = 100%** oracle agreement (0 XFAIL) — plus inline parity/ambiguity/EBNF unit tests in `cyk.rs`. **#87: a deterministic cubic-envelope scaling gate** (`test_cyk_scaling.rs`) keys on the `cyk_table_steps` work counter and asserts the table fill stays flat per n³ on a densely ambiguous grammar (`s: s s \| "a"`), so a complexity regression in the CNF conversion or DP is caught — the CYK analog of the Earley scaling net |
 
@@ -466,28 +470,29 @@ correctness-identical, and it is faster on the all-plain common path
 (`benches/lex_backends`, `BENCH.md`); `LexerBackend::Regex` stays selectable and the
 differential keeps both engines gated against each other.
 
-**Current routing (master).** Under the default `Dfa` backend each terminal takes one of a
-**typed** `classify::LoweringRoute` (`route_terminal_dotall`, matched directly by
-`DfaScanner::build` after the flag-wrapper strip): *Plain* (no lookaround → the DFA),
-*Lowered* (a supported bounded
-assertion → DFA branches + guard tables, M1/M2/M3/M4 + the Stage-B REGEXP/LONG_STRING
-idioms — every bundled lookaround terminal and fixed-offset lookbehind are here),
-*DeclinedToFancy* (a per-instance
-decline — a variable-offset lookbehind outside a recognized idiom, a non-realizable
-guarded base → still on `fancy-regex` at runtime), or *Unsupported* (out-of-shape — user
-internal/unbounded/backref/etc. lookaround). The decline-vs-reject
-split PR #131 flagged is now in the type; what is **transitional** is the runtime policy: the
-*Unsupported* arm still routes to `fancy-regex` via a single auditable `push_fancy_fallback`
-compatibility seam, so an out-of-shape user assertion lexes today rather than erroring — L4
-must flip only that arm to a build error. Because of that fallback (and the per-instance
-declines),
-**`fancy-regex` remains a runtime dependency and L4 (drop it) + L5 (bake the scanner static)
-are blocked on the policy flip alone**; see
-`docs/LEXER_DFA_STATUS.md` for the per-terminal table and `docs/LEXER_DFA_PLAN.md` for the
-phase status. Detection of a *declined* terminal is automatic (a pattern is sent to
-`fancy-regex` only when the `regex` crate rejects it), so user grammars with lookaround
-still work. **No backreferences** are used by any bundled grammar (and `fancy-regex` would
-support them if needed).
+**Current routing (master) — L4 landed, no fallback engine.** Each terminal takes one of a
+**typed** `classify::LoweringRoute` (`route_terminal_dotall`, matched by the single
+refusal seam `lexer::route_fancy_only_terminal` after the flag-wrapper strip + the
+vacuous-`(?:…)`-wrapper normalization): *Plain* (no lookaround → the DFA), *Lowered* (a
+supported bounded assertion → DFA branches + guard tables — M1/M2/M3/M4, the Stage-B
+REGEXP/LONG_STRING idioms, and guarded bases proven by the exact `is_leftmost_longest`
+semantic gate, e.g. `python.DEC_NUMBER`; **every bundled lookaround terminal is here**),
+or a **categorized build error** (`GrammarError::LookaroundScope`) under the
+two-category scope taxonomy of **`docs/LOOKAROUND_SCOPE.md`**: *Unsupported* →
+`Scope::OutOfScope` (by-design non-goals: general internal lookahead — the audited
+idioms are the named growth path; variable-width lookbehind — Python `re` rejects it
+too; backrefs/backtracking-only syntax — the named parity break) and *Declined* →
+`Scope::NotYetImplemented` (clean conservative refusals that double as promotion
+tripwires: variable-offset lookbehind, non-realizable guarded bases, VERBOSE wrappers).
+The contract is scoreboarded end-to-end by `tests/test_lookaround_scope.rs` (with an
+exhaustiveness meta-test over every refusal variant) and enforced identically on every
+engine path — the combined scanners, the Earley dynamic `DynamicMatcher` (per-terminal
+`LoweredTerminalMatcher`s), and `unless` retyping. **`fancy-regex` is NOT a runtime
+dependency**: default builds carry zero fancy code (`cargo tree -e normal`); it remains
+a dev-dependency oracle plus the default-OFF TEST-ONLY `fancy-oracle` feature (the
+`Regex` reference backend's historical probes for the L0 differential, run in CI as
+`cargo test -p lark-rs --features fancy-oracle`). L5 (bake the scanner static) is now
+unblocked; see `docs/LEXER_DFA_STATUS.md` / `docs/LEXER_DFA_PLAN.md`.
 
 > **Historical (lookaround-*elimination* plan, superseded by the DFA plan).** The earlier
 > `docs/LOOKAROUND_ELIMINATION_PLAN.md` (now Phase 1 of the DFA plan) classified terminals
@@ -503,22 +508,18 @@ support them if needed).
 > LONG_STRING idiom's body normalization. The behavioral findings are still pinned by
 > `tests/test_lookaround.rs`.
 
-**The declined terminals' per-position scan is anchored with `\G`.** A fancy terminal is
-tried at each offset with `find_from_pos`, which is an *unanchored forward search* — left
-as-is it scans ahead to the next match, so a *sparse* fancy-routed terminal (historically
-the bundled `STRING` / `lark.REGEXP` / `LONG_STRING`, all lowered now; today the seam
-carries only per-instance user declines, the `Unsupported` compat fallback, and the whole
-`Regex` reference backend) is O(n²) over the input (a 124 KB
-Python file took ~177 s before this was fixed; the pure-`regex` JSON/SQL scanners were
-unaffected). Prepending `\G` (start-of-search anchor) at `Scanner::build` makes the search
-fail immediately when nothing matches at `pos`, restoring linear-per-byte lexing; it is
-behaviour-preserving because the match is already required to start exactly at `pos`.
-Measured cost (`cargo bench --bench redos`): the fancy-routed terminals stay **linear**
-— `fancy-regex` runs their ambiguous bodies on the linear engine and only backtracks around
-the fixed leading assertion, so there is no ReDoS; only a constant-factor tax. One terminal
-— `common.lark`'s `ESCAPED_STRING` — keeps its hand-written lookaround-free adaptation
-(it's the hottest terminal in the library and already linear on the pure `regex` engine);
-it is the single standing exception to "verbatim upstream."
+**The historical `\G` anchoring lives on only in the `fancy-oracle` test feature.** A
+fancy terminal probed at each offset with `find_from_pos` is an *unanchored forward
+search* — left as-is a sparse fancy-routed terminal was O(n²) over the input (a 124 KB
+Python file took ~177 s before the `\G` start-of-search anchor was prepended at build,
+restoring linear-per-byte lexing). Since L4 no runtime fancy probe exists; the `\G`
+probe survives solely as the reference behavior of the `Regex` backend under the
+TEST-ONLY `fancy-oracle` feature (the L0 differential's independent oracle), where the
+anchoring is still load-bearing. The lowered DFA path is linear by construction
+(`cargo bench --bench redos` characterizes it; `test_lexer_scaling` gates it). One
+terminal — `common.lark`'s `ESCAPED_STRING` — keeps its hand-written lookaround-free
+adaptation (it's the hottest terminal in the library and was already linear on the pure
+`regex` engine); it is the single standing exception to "verbatim upstream."
 
 ---
 

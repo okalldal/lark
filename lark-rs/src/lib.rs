@@ -135,8 +135,11 @@ pub struct LarkOptions {
     /// Which combined-scanner engine the lexer builds (see [`LexerBackend`]). This
     /// has **no** Lark equivalent — it selects between byte-for-byte equivalent
     /// scanner implementations (`docs/LEXER_DFA_PLAN.md`) and exists so the L0
-    /// differential oracle can build the same grammar under both engines. Defaults
-    /// to the `regex-automata` DFA scanner.
+    /// differential oracle can build the same grammar under both engines (under
+    /// the TEST-ONLY `fancy-oracle` feature the `Regex` backend hosts the
+    /// historical fancy-regex reference probes). Both backends refuse the same
+    /// patterns with the same categorized errors (`docs/LOOKAROUND_SCOPE.md`).
+    /// Defaults to the `regex-automata` DFA scanner.
     pub lexer_backend: LexerBackend,
 }
 

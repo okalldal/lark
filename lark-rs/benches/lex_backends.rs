@@ -204,11 +204,10 @@ fn main() {
 
     // --- Python: mixed plain + lookaround terminals ------------------------------
     // Historically STRING/LONG_STRING/DEC_NUMBER routed to fancy-regex in BOTH
-    // backends (a shared side-probe; the recorded ratio was ~1.0 here). Since the
-    // M4/Stage-B idioms + the flag-wrapper strip landed, the Dfa side lexes
-    // python.lark fully LOWERED (zero fancy probes) while the Regex reference still
-    // pays them — this workload now measures lowered-vs-fancy, and the ratio is
-    // expected to move in the Dfa backend's favor on the next recorded run (BENCH.md).
+    // backends (a shared side-probe; the recorded ratio was ~1.0 here). The Dfa side
+    // lexes python.lark fully LOWERED; under this bench's required `fancy-oracle`
+    // feature the Regex reference still pays the historical fancy probes — so this
+    // workload measures lowered-vs-fancy (BENCH.md).
     println!("Python (python.lark — mixed plain + lookaround terminals):");
     let py_grammar = std::fs::read_to_string(manifest_dir().join("src/grammars/python.lark"));
     match py_grammar {

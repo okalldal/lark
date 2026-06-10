@@ -41,83 +41,44 @@ use crate::grammar::intern::SymbolId;
 use crate::grammar::terminal::{Pattern, TerminalDef};
 use crate::tree::Token;
 
-// ─── AnyRegex: a per-terminal regex that may need lookaround ──────────────────
+// ─── SideProbe: a per-terminal matcher for a regex-crate-rejected terminal ────
 //
 // The combined scanner is built on the linear-time `regex` crate, which has no
-// lookahead/lookbehind. A few bundled-grammar terminals (issue #40) use bounded
-// lookaround; those are compiled to `fancy-regex` instead and matched one terminal
-// at a time. `AnyRegex` hides the choice behind a uniform anchored-match API so the
-// caller never branches on the engine. Because `regex`'s language is a subset of
-// `fancy-regex`'s, a pattern is only ever sent to `fancy-regex` when `regex`
-// rejects it — every ordinary terminal keeps the fast engine.
+// lookahead/lookbehind. A terminal the `regex` crate rejects either LOWERS into its
+// own single-terminal DFA ([`LoweredTerminalMatcher`], the default build) or — under
+// the TEST-ONLY `fancy-oracle` feature — is matched by the historical `\G`-anchored
+// `fancy-regex` probe, so the `Regex` reference backend stays an independent oracle
+// for the whole-lexer differential. There is no runtime fallback engine: a terminal
+// the lowering refuses fails the grammar build with the categorized scope error
+// (`docs/LOOKAROUND_SCOPE.md`), identically with and without the feature... except
+// that under the feature the *reference* Scanner can still host it (which is the
+// point of a reference).
 
-enum AnyRegex {
-    Plain(Regex),
+enum SideProbe {
+    /// The lowered single-terminal DFA — the default build (and the engine whose
+    /// semantics the combined `DfaScanner` shares by construction).
+    Lowered(LoweredTerminalMatcher),
+    /// TEST-ONLY historical reference: the per-position `\G`-anchored fancy probe.
+    /// (`\G` makes `find_from_pos` fail immediately when nothing matches at `pos`
+    /// instead of forward-scanning — the linearity fix; see the module docs.)
+    #[cfg(feature = "fancy-oracle")]
     Fancy(fancy_regex::Regex),
 }
 
-impl AnyRegex {
-    /// Compile `src`, preferring the linear `regex` engine and only falling back to
-    /// `fancy-regex` for patterns `regex` cannot express (lookaround). An error from
-    /// *both* engines surfaces the `regex`-crate message (the familiar one).
-    fn compile(src: &str) -> Result<AnyRegex, GrammarError> {
-        match Regex::new(src) {
-            Ok(re) => Ok(AnyRegex::Plain(re)),
-            Err(plain_err) => match fancy_regex::Regex::new(src) {
-                Ok(re) => Ok(AnyRegex::Fancy(re)),
-                Err(_) => Err(GrammarError::InvalidRegex {
-                    pattern: src.to_string(),
-                    reason: plain_err.to_string(),
-                }),
-            },
-        }
-    }
-
-    /// Whether this pattern needed the backtracking engine (i.e. uses lookaround).
-    fn is_fancy(&self) -> bool {
-        matches!(self, AnyRegex::Fancy(_))
-    }
-
+impl SideProbe {
     /// End offset of a non-empty match beginning *exactly* at `pos`, or `None`.
     /// The full `text` (not a suffix) is passed so a lookbehind can see the bytes
     /// before `pos`.
     fn match_end_at(&self, text: &str, pos: usize) -> Option<usize> {
         match self {
-            AnyRegex::Plain(re) => {
-                let m = re.find_at(text, pos);
-                record_scan_skip(pos, m.as_ref().map(|m| m.start()));
-                let m = m?;
-                (m.start() == pos && m.end() > pos).then_some(m.end())
-            }
-            AnyRegex::Fancy(re) => {
+            SideProbe::Lowered(m) => m.match_end_at(text, pos),
+            #[cfg(feature = "fancy-oracle")]
+            SideProbe::Fancy(re) => {
                 let m = re.find_from_pos(text, pos).ok().flatten();
                 record_scan_skip(pos, m.as_ref().map(|m| m.start()));
                 let m = m?;
                 (m.start() == pos && m.end() > pos).then_some(m.end())
             }
-        }
-    }
-
-    /// End offset of a non-empty match anchored at the start of `sub`, or `None`.
-    fn match_end_in(&self, sub: &str) -> Option<usize> {
-        match self {
-            AnyRegex::Plain(re) => {
-                let m = re.find(sub)?;
-                (m.start() == 0 && m.end() > 0).then_some(m.end())
-            }
-            AnyRegex::Fancy(re) => {
-                let m = re.find(sub).ok()??;
-                (m.start() == 0 && m.end() > 0).then_some(m.end())
-            }
-        }
-    }
-
-    /// Whether the pattern matches `text` in full (used by `unless` retyping, where
-    /// `src` is already anchored with `^…$`).
-    fn is_full_match(&self, text: &str) -> bool {
-        match self {
-            AnyRegex::Plain(re) => re.is_match(text),
-            AnyRegex::Fancy(re) => re.is_match(text).unwrap_or(false),
         }
     }
 }
@@ -204,8 +165,11 @@ impl LexerConf {
     /// Select the combined-scanner backend (builder-style). The default is the
     /// `regex-automata` [`DfaScanner`]; choosing [`LexerBackend::Regex`] swaps back
     /// to the original `regex`-crate [`Scanner`] without changing any lexing
-    /// semantics (both run the lookaround-free terminals; lookaround routes to the
-    /// `fancy-regex` side-probe in either case).
+    /// semantics. Both refuse the same patterns with the same categorized scope
+    /// errors (`docs/LOOKAROUND_SCOPE.md`); a lowered lookaround terminal rides the
+    /// shared DFA branches there and a per-terminal [`SideProbe`] here (the
+    /// TEST-ONLY `fancy-oracle` feature swaps the probe for the historical fancy
+    /// reference).
     pub fn with_backend(mut self, backend: LexerBackend) -> Self {
         self.backend = backend;
         self
@@ -313,10 +277,12 @@ struct Scanner {
     /// compared against a fancy match by who Python's combined alternation would
     /// reach first.
     groups: Vec<(SymbolId, usize, usize)>,
-    /// Lookaround terminals (`fancy-regex`), each matched individually. Stored in
-    /// ascending `rank` order, so the first one that matches is the lowest-rank
-    /// fancy candidate. Empty for the overwhelming common case (no lookaround).
-    fancy: Vec<(usize, SymbolId, AnyRegex)>,
+    /// Lookaround terminals, each matched individually by its [`SideProbe`]
+    /// (lowered by default; the historical fancy probe under the TEST-ONLY
+    /// `fancy-oracle` feature). Stored in ascending `rank` order, so the first one
+    /// that matches is the lowest-rank side candidate. Empty for the overwhelming
+    /// common case (no lookaround).
+    side: Vec<(usize, SymbolId, SideProbe)>,
     /// regex-terminal-id → (matched-text → keyword-terminal-id).
     unless: HashMap<SymbolId, HashMap<String, SymbolId>>,
     /// Reused match-location scratch, sized for `re`. `RefCell` because the hot
@@ -344,32 +310,55 @@ impl Scanner {
 
         // Split the plan's (rank-ordered) terminals into *plain* terminals — which
         // go into the single fast combined `regex` alternation — and *lookaround*
-        // terminals, which the `regex` crate cannot compile and so are matched
-        // individually via `fancy-regex` (issue #40). `rank` is the index in the
-        // plan's sorted order: Python builds the alternation in this order and takes
-        // the first branch that matches, so the lowest rank wins ties. We preserve it
-        // to merge the two engines' candidates at match time.
+        // terminals (the `regex` crate rejects them), which are matched individually
+        // via a [`SideProbe`]. `rank` is the index in the plan's sorted order: Python
+        // builds the alternation in this order and takes the first branch that
+        // matches, so the lowest rank wins ties. We preserve it to merge the two
+        // engines' candidates at match time.
+        #[cfg_attr(feature = "fancy-oracle", allow(unused_variables))]
+        let by_id: HashMap<SymbolId, &TerminalDef> =
+            terminals.iter().map(|(id, t)| (*id, *t)).collect();
         let mut parts = Vec::new();
         let mut group_names = Vec::new();
-        let mut fancy: Vec<(usize, SymbolId, AnyRegex)> = Vec::new();
+        let mut side: Vec<(usize, SymbolId, SideProbe)> = Vec::new();
         for (rank, (id, inline)) in plan.groups.iter().enumerate() {
             // `to_inline_regex` (used by `scanner_plan`) keeps per-terminal flags
             // (e.g. `(?i:…)` for a case-insensitive terminal) scoped to this group.
-            let compiled = AnyRegex::compile(&format!("{prefix}{inline}"))?;
-            if compiled.is_fancy() {
-                // Anchor the per-position fancy match to `pos` with `\G` (start-of-
-                // search anchor). Without it, `fancy-regex`'s `find_from_pos` scans
-                // *forward* to the next match, so trying a sparse lookaround terminal
-                // (e.g. python.lark's `STRING`) at every position is O(n²) over the
-                // input. `\G` makes the search fail immediately when nothing matches
-                // at `pos`. Recompiled separately because the `regex` crate cannot
-                // parse `\G`, so this pattern stays on the `fancy-regex` engine.
-                let anchored = AnyRegex::compile(&format!("{prefix}\\G{inline}"))?;
-                fancy.push((rank, *id, anchored));
-            } else {
-                let group = format!("g{}", id.0);
-                parts.push(format!("(?P<{group}>{inline})"));
-                group_names.push((*id, group, rank));
+            match Regex::new(&format!("{prefix}{inline}")) {
+                Ok(_) => {
+                    let group = format!("g{}", id.0);
+                    parts.push(format!("(?P<{group}>{inline})"));
+                    group_names.push((*id, group, rank));
+                }
+                #[cfg(feature = "fancy-oracle")]
+                Err(_) => {
+                    // The historical reference behavior: EVERY regex-rejected
+                    // terminal rides the `\G`-anchored fancy probe (`\G` anchors
+                    // `find_from_pos` to `pos` so a sparse terminal stays linear;
+                    // the `regex` crate cannot parse `\G`, so this pattern lives on
+                    // the fancy engine only). This is what makes the feature build
+                    // an independent oracle for the differential.
+                    let src = format!("{prefix}\\G{inline}");
+                    let anchored =
+                        fancy_regex::Regex::new(&src).map_err(|e| GrammarError::InvalidRegex {
+                            pattern: src.clone(),
+                            reason: e.to_string(),
+                        })?;
+                    side.push((rank, *id, SideProbe::Fancy(anchored)));
+                }
+                #[cfg(not(feature = "fancy-oracle"))]
+                Err(e) => {
+                    // Default build: lower the terminal through THE refusal seam —
+                    // its own single-terminal DFA, or the categorized scope error
+                    // (identical to the `DfaScanner` backend's policy).
+                    let m = LoweredTerminalMatcher::build(
+                        *id,
+                        by_id[id],
+                        global_flags,
+                        &e.to_string(),
+                    )?;
+                    side.push((rank, *id, SideProbe::Lowered(m)));
+                }
             }
         }
 
@@ -403,7 +392,7 @@ impl Scanner {
         Ok(Scanner {
             re,
             groups,
-            fancy,
+            side,
             unless,
             locs,
         })
@@ -416,8 +405,8 @@ impl Scanner {
     /// The winner is the lowest-`rank` terminal that matches at `pos` — exactly the
     /// branch Python's combined `(A)|(B)|…` alternation reaches first. We get the
     /// lowest-rank *plain* terminal from the combined regex and the lowest-rank
-    /// *fancy* terminal from the (rank-sorted) lookaround list, then keep whichever
-    /// has the smaller rank.
+    /// *side-probe* terminal from the (rank-sorted) lookaround list, then keep
+    /// whichever has the smaller rank.
     fn match_at<'t>(&self, text: &'t str, pos: usize) -> Option<(SymbolId, &'t str)> {
         // Lowest-rank plain candidate.
         let mut best: Option<(usize, SymbolId, &'t str)> = None;
@@ -438,9 +427,9 @@ impl Scanner {
                 }
             }
         }
-        // Lowest-rank fancy candidate (the list is rank-sorted, so the first match
+        // Lowest-rank side candidate (the list is rank-sorted, so the first match
         // wins); keep it only if it out-ranks the plain candidate.
-        for (rank, id, re) in &self.fancy {
+        for (rank, id, re) in &self.side {
             if best.is_some_and(|(b, _, _)| *rank > b) {
                 break;
             }
@@ -728,8 +717,9 @@ fn strip_whole_pattern_flag_wrapper(raw: &str, flags: u32) -> (String, u32) {
                 // stripped `(?x:…)` body would have its whitespace/comments counted
                 // as literal width while the re-wrapped branch ignores them — a
                 // fixed-offset lookbehind could lower with a wrong offset (a
-                // false-accept). Left wrapped, the pattern declines/rejects to the
-                // fancy fallback exactly as before — the reject-when-unsure
+                // false-accept). Left wrapped, the pattern is refused with the
+                // honest categorized NYI error (`DeclineReason::VerboseWrapper`,
+                // via `is_verbose_wrapped_lookaround`) — the reject-when-unsure
                 // direction. Pinned by
                 // `verbose_flag_wrapper_is_not_stripped_into_lowering`.
                 //
@@ -1113,7 +1103,7 @@ impl DfaScanner {
     /// Match a single token starting exactly at `pos` — the same contract as
     /// [`Scanner::match_at`], so the two are byte-for-byte interchangeable. Consults the
     /// leftmost-first **plain** engine and the all-matches **guarded** engine and keeps
-    /// the lower `(rank, branch_order)` candidate, then merges the `fancy` side-probes.
+    /// the lower `(rank, branch_order)` candidate.
     fn match_at<'t>(&self, text: &'t str, pos: usize) -> Option<(SymbolId, &'t str)> {
         let mut best: Option<(usize, usize, SymbolId, &'t str)> = None;
         let runnable = match &self.start_bytes {

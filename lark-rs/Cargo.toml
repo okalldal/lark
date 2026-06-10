@@ -26,23 +26,27 @@ exclude = ["python"]
 # with `--features perf-counters` to read `lark_rs::perf` (the noise-free
 # super-linearity regression net, `tests/test_earley_scaling.rs`).
 perf-counters = []
+# TEST-ONLY (not a user escape hatch): re-enables the `Regex` reference backend's
+# historical `fancy-regex` side-probes so the whole-lexer differential
+# (tests/test_scanner_differential.rs) has an independent oracle. Default OFF; the
+# refusal policy (docs/LOOKAROUND_SCOPE.md) is identical either way — the feature
+# only changes what the *reference* Scanner can host, never what a grammar build
+# accepts.
+fancy-oracle = ["dep:fancy-regex"]
 
 [dependencies]
 regex = "1.10"
-# Backtracking-regex overlay for lookaround terminals (lookahead/lookbehind) which the
-# linear-time `regex` crate cannot compile (issue #40). This is a RUNTIME dependency
-# *today*: the lexer DFA plan has lowered every bundled lookaround terminal into the
-# `regex-automata` DFA (STRING/REGEXP/LONG_STRING via the M4/Stage-B idioms), but the
-# side-probe is still live for per-instance *declines* in user grammars (a
-# variable-offset lookbehind outside a recognized idiom, a non-realizable guarded base)
-# and the `Unsupported` compatibility fallback. Dropping it from the runtime is **L4**,
-# which needs two policy decisions: flip the `Unsupported` fallback to a build error,
-# AND decide the per-instance `DeclinedToFancy` cases (error vs. documented fancy
-# support). `fancy-regex` stays thereafter as a permanent **dev/test oracle** only — the
-# independent match-length reference the lowering is verified against
-# (`docs/LEXER_DFA_PLAN.md`, L4 + Verification). Because `regex` is a subset, a pattern
-# that compiles with `regex` is never handed to `fancy-regex`.
-fancy-regex = "0.18"
+# `fancy-regex` is **NOT a runtime dependency** (L4, `docs/LEXER_DFA_PLAN.md`): every
+# terminal either compiles on the linear `regex` crate, lowers into the
+# `regex-automata` DFA, or fails the grammar build with the categorized scope error
+# (`docs/LOOKAROUND_SCOPE.md`). It remains in two test-only roles: a [dev-dependencies]
+# per-pattern oracle (equivalence/proof tests), and — behind the default-OFF
+# `fancy-oracle` feature below — the historical fancy side-probes of the `Regex`
+# reference backend, so the whole-lexer differential keeps an independent reference.
+# It is not a user escape hatch; default builds contain zero fancy-regex code
+# (`cargo tree -e normal` shows no fancy-regex), and grammar-build outcomes are
+# identical with and without the feature.
+fancy-regex = { version = "0.18", optional = true }
 # Dense-DFA support for the strict-mode regex-collision check (issue #35): the
 # `regex` crate has no intersection/emptiness test, so we drop to its automata
 # layer and run a product construction over two terminals' DFAs.
@@ -71,6 +75,14 @@ regex-automata = "0.4"
 name = "json_parser"
 path = "examples/json_parser.rs"
 
+# The L0 whole-lexer differential needs the fancy-oracle reference backend (the
+# `Regex` backend's historical fancy side-probes) — meaningless against the lowered
+# probes, which share the machinery under test. CI runs it via
+# `cargo test -p lark-rs --features fancy-oracle` (plain `cargo test` skips it).
+[[test]]
+name = "test_scanner_differential"
+required-features = ["fancy-oracle"]
+
 # Recorded-trend perf baseline (LALR), not a CI gate. `harness = false` runs the
 # file's own `main()` directly, so no benchmarking crate is needed. Invoke with
 # `cargo bench --bench parse`; see benches/parse.rs.
@@ -90,15 +102,17 @@ harness = false
 # Lexing throughput: the regex-crate Scanner vs the regex-automata DfaScanner
 # (docs/LEXER_DFA_PLAN.md, phase L1). Times the lexer in isolation under each
 # backend over JSON / expr / Python workloads and prints the dfa/regex ratio.
-# Recorded trend, not a CI gate — see BENCH.md.
+# Recorded trend, not a CI gate — see BENCH.md. Requires the fancy-oracle feature
+# so the Regex backend it measures is the historical fancy-probe reference.
 [[bench]]
 name = "lex_backends"
 path = "benches/lex_backends.rs"
 harness = false
+required-features = ["fancy-oracle"]
 
-# Two-tier ReDoS cost of the lookaround terminals routed to `fancy-regex` (#40):
-# the benign linear `python.STRING` vs the pathological super-linear `lark.REGEXP`.
-# The artifact for the lookaround-rewrite follow-up. Recorded trend, not a CI gate.
+# Scan-cost characterization of the (now fully LOWERED) bundled lookaround
+# terminals — historically the two-tier fancy-regex ReDoS artifact (#40); today it
+# pins that the lowered DFA path stays linear. Recorded trend, not a CI gate.
 [[bench]]
 name = "redos"
 path = "benches/redos.rs"
