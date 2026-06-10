@@ -72,6 +72,144 @@ fn test_single_maybe_unaffected() {
 }
 
 #[test]
+fn test_non_final_maybe_distributes_under_placeholders() {
+    // Issue #106, distilled from `python.lark`'s `parameters` rule: a non-final
+    // `[...]` under `maybe_placeholders` must be *distributed* into the parent's
+    // alternatives (Python's `_EMPTY` markers → `empty_indices`), not kept as a
+    // nullable helper rule. The helper form hides the following branch from the
+    // LR(0) closure: after `A ("," A)*`, the `,` that starts the *second*
+    // optional is reachable only through the first helper's ε-reduce, which the
+    // shift-over-reduce conflict resolution silently drops — so `a, *`
+    // (`def f(a, *b)` in python.lark) was a parse error although Python Lark
+    // accepts it. The distribution must also recurse: the first `[...]`'s
+    // present form ends in a `("," A)*` that lands mid-rule when spliced, so it
+    // distributes too (or `a, /, *` dies the same way one branch later).
+    //
+    // Expected shapes are Python Lark 1.3.1 (`lalr` and `earley` agree; CYK is
+    // run too — same `assemble` path — as cheap cross-backend insurance).
+    let grammar = "start: A (\",\" A)* [\",\" SLASH (\",\" A)*] [\",\" [STAR]]\n\
+                   SLASH: \"/\"\n\
+                   STAR: \"*\"\n\
+                   A: \"a\"\n\
+                   %ignore \" \"";
+    let cases = [
+        ("a", "a,_,_"),
+        ("a, a", "a,a,_,_"),
+        ("a, *", "a,_,*"),
+        ("a, a, *", "a,a,_,*"),
+        ("a, /", "a,/,_"),
+        ("a, /, a", "a,/,a,_"),
+        ("a, /, *", "a,/,*"),
+        ("a, /, a, *", "a,/,a,*"),
+        ("a,", "a,_,_"),
+        ("a, /, a,", "a,/,a,_"),
+    ];
+    for parser in [
+        ParserAlgorithm::Lalr,
+        ParserAlgorithm::Earley,
+        ParserAlgorithm::Cyk,
+    ] {
+        let lark = Lark::new(
+            grammar,
+            LarkOptions {
+                parser: parser.clone(),
+                start: vec!["start".to_string()],
+                maybe_placeholders: true,
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("grammar failed to load under {parser:?}: {e}"));
+        for (input, expected) in cases {
+            let tree = lark
+                .parse(input)
+                .unwrap_or_else(|e| panic!("{parser:?} must parse {input:?}: {e}"))
+                .as_tree()
+                .unwrap()
+                .clone();
+            assert_eq!(
+                shape(&tree.children),
+                expected,
+                "{parser:?}, input {input:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_duplicate_alternatives_match_python_lark() {
+    // Python Lark's two-stage duplicate handling, mirrored by
+    // `dedup_and_check_alts` (every outcome below verified against Python Lark
+    // 1.3.1 under both `lalr` and `earley`, `maybe_placeholders=True`):
+    //
+    //  1. Alternatives identical *including* placeholder positions and alias are
+    //     silently deduped (Python's AST-level `dedup_list`), so `a: X | X`
+    //     loads, and the coinciding absent arms of `a: [A] C | [B] C` collapse
+    //     instead of colliding as reduce/reduce under LALR.
+    //  2. Surviving duplicates of the same expansion (placeholder positions or
+    //     alias differ — Python's `Rule.__eq__` compares origin + expansion
+    //     only) are a load error, "Rules defined twice" — on *every* backend,
+    //     so Earley no longer silently resolves what Python refuses to load.
+    let build = |g: &str, parser: ParserAlgorithm| {
+        Lark::new(
+            g,
+            LarkOptions {
+                parser,
+                start: vec!["start".to_string()],
+                maybe_placeholders: true,
+                ..Default::default()
+            },
+        )
+    };
+    for parser in [ParserAlgorithm::Lalr, ParserAlgorithm::Earley] {
+        // Colliding expansion of optionals: the two `A B` arms differ only in
+        // where the absent `[A]`'s None goes. Python: GrammarError at load.
+        let g = "start: [A] [A] B\nA: \"a\"\nB: \"b\"\n%ignore \" \"";
+        let err = build(g, parser.clone()).err().unwrap_or_else(|| {
+            panic!("{parser:?}: `[A] [A] B` must be a load error (Python Lark rejects it)")
+        });
+        assert!(
+            err.to_string().contains("Rules defined twice"),
+            "{parser:?}: expected Python's diagnostic, got: {err}"
+        );
+
+        // Same expansion under different aliases: also "Rules defined twice".
+        let g = "start: A -> p | A -> q\nA: \"a\"";
+        assert!(
+            build(g, parser.clone())
+                .err()
+                .is_some_and(|e| e.to_string().contains("Rules defined twice")),
+            "{parser:?}: `A -> p | A -> q` must be a load error"
+        );
+
+        // Cross-alternative coinciding absent arms dedup silently: both
+        // alternatives contribute an identical `C`-with-leading-None arm.
+        // Python accepts and parses; `c` → [None, c].
+        let g = "start: [A] C | [B] C\nA: \"a\"\nB: \"b\"\nC: \"c\"\n%ignore \" \"";
+        let l = build(g, parser.clone())
+            .unwrap_or_else(|e| panic!("{parser:?}: `[A] C | [B] C` must load (Python does): {e}"));
+        for (input, expected) in [("c", "_,c"), ("a c", "a,c"), ("b c", "b,c")] {
+            let tree = l
+                .parse(input)
+                .unwrap_or_else(|e| panic!("{parser:?} must parse {input:?}: {e}"))
+                .as_tree()
+                .unwrap()
+                .clone();
+            assert_eq!(
+                shape(&tree.children),
+                expected,
+                "{parser:?}, input {input:?}"
+            );
+        }
+
+        // A literal duplicate alternative dedups silently, exactly as Python.
+        let g = "start: A | A\nA: \"a\"";
+        let l = build(g, parser.clone())
+            .unwrap_or_else(|e| panic!("{parser:?}: `A | A` must load (Python dedups): {e}"));
+        assert!(l.parse("a").is_ok(), "{parser:?}: `a` must parse");
+    }
+}
+
+#[test]
 fn test_oversized_negative_terminal_priority_saturates() {
     // `A.-99999999999999999999999` overflows i32; Lark (bignum priorities) accepts
     // it as an extremely low priority. We saturate to i32::MIN and still build/parse
