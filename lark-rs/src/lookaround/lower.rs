@@ -423,7 +423,8 @@ fn atom_has_lazy(atom: &str) -> bool {
 ///     *not* greedy-monotone (it has alternation) yet is unambiguous in length because the
 ///     fixed `""` suffix immediately following pins the prefix length.
 ///
-/// Conservative: a base meeting neither is declined (routed to `fancy-regex`). `dotall`
+/// Conservative: a base meeting neither (nor the exact [`is_leftmost_longest`] decision)
+/// is declined — since L4 a categorized NotYetImplemented build error. `dotall`
 /// is the terminal's `s` flag — it changes what `.` matches and so the base's language,
 /// so the prefix-free check must evaluate the base under the same flag the engine wraps.
 fn is_guard_realizable(base: &str, dotall: bool) -> bool {
@@ -1455,7 +1456,16 @@ mod tests {
         // alternation, lazy quantifier) is declined with the typed
         // NonRealizableGuardedBase reason (reject-when-unsure) rather than
         // mis-lowered via the longest-accept accumulator.
-        for pat in ["(ab|abc)(?!z)", "ab??(?!c)", "(?!z)(ab|abc)", r"a.*?(?=c)"] {
+        for pat in [
+            "(ab|abc)(?!z)",
+            "ab??(?!c)",
+            "(?!z)(ab|abc)",
+            r"a.*?(?=c)",
+            // The non-nullable all-greedy optional chain, end-to-end through the
+            // lowering: the semantic gate's product walk (not the nullability
+            // guard) is what declines its guarded base.
+            "x(?:a)?(?:ab)?(?!z)",
+        ] {
             assert_eq!(
                 lower_boundary(pat).unwrap_err().reason,
                 DeclineReason::NonRealizableGuardedBase,
@@ -1490,6 +1500,20 @@ mod tests {
         // (len 2). Greedy-only syntax is NOT sufficient; the semantic gate must
         // catch it.
         assert!(!is_leftmost_longest("(?:a)?(?:ab)?", false));
+        // The same shape made NON-nullable by a required head: the conservative
+        // nullability guard cannot shadow the product walk here, so this pins the
+        // walk itself catching the optional-chain preference inversion ("xab":
+        // leftmost-first takes "xa", skipping the first optional gives "xab").
+        assert!(!is_leftmost_longest("x(?:a)?(?:ab)?", false));
+        // A deeper all-greedy chain where TWO present optionals must be skipped to
+        // unlock the longest match ("xabc": leftmost-first "xab" vs longest
+        // "xabc") — only the exhaustive product reaches that preference branch.
+        assert!(!is_leftmost_longest("x(?:a)?(?:b)?(?:abc)?", false));
+        // The positive twin: an optional chain whose arms start on disjoint
+        // letters in both case wraps, so skipping an earlier optional can never
+        // lengthen the match — all-greedy preference IS descending by length and
+        // the gate must keep admitting it (no over-rejection of every chain).
+        assert!(is_leftmost_longest("x(?:ab)?(?:b)?", false));
         // Case-folding direction: leftmost-longest holds case-sensitively (the `Ab`
         // arm can never overlap a consumed `a`) but breaks under `(?i)` — the gate
         // requires BOTH wraps to pass, so this must decline.

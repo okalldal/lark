@@ -425,10 +425,6 @@ impl Classification {
     }
 }
 
-/// Classify a terminal regex `pattern` into its per-assertion verdicts. Errors only
-/// on a pattern the front-end cannot parse (which the regex engines also reject).
-///
-/// This is the swappable seam the mutation meta-test attacks: see [`Classifier`].
 /// Strip **semantically vacuous** group wrappers: a *bare* non-capturing,
 /// unquantified group (`(?:X)` — never a flag-scoped `(?i:…)`, never a capturing
 /// `(…)`, never quantified) that constitutes an **entire pattern or an entire
@@ -459,6 +455,10 @@ pub(super) fn unwrap_vacuous_groups(node: Node) -> Node {
     }
 }
 
+/// Classify a terminal regex `pattern` into its per-assertion verdicts. Errors only
+/// on a pattern the front-end cannot parse (which the regex engines also reject).
+///
+/// This is the swappable seam the mutation meta-test attacks: see [`Classifier`].
 pub fn classify(pattern: &str) -> Result<Classification, GrammarError> {
     let node = super::parse(pattern)?;
     let node = unwrap_vacuous_groups(node);

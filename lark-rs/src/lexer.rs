@@ -57,7 +57,11 @@ use crate::tree::Token;
 
 enum SideProbe {
     /// The lowered single-terminal DFA — the default build (and the engine whose
-    /// semantics the combined `DfaScanner` shares by construction).
+    /// semantics the combined `DfaScanner` shares by construction). Under
+    /// `fancy-oracle` every lowered terminal gets a [`Self::Fancy`] probe instead,
+    /// so this variant is never constructed there — it exists so the
+    /// single-variant default build is the same type.
+    #[cfg_attr(feature = "fancy-oracle", allow(dead_code))]
     Lowered(LoweredTerminalMatcher),
     /// TEST-ONLY historical reference: the per-position `\G`-anchored fancy probe.
     /// (`\G` makes `find_from_pos` fail immediately when nothing matches at `pos`
