@@ -483,7 +483,8 @@ two-category scope taxonomy of **`docs/LOOKAROUND_SCOPE.md`**: *Unsupported* →
 idioms are the named growth path; variable-width lookbehind — Python `re` rejects it
 too; backrefs/backtracking-only syntax — the named parity break) and *Declined* →
 `Scope::NotYetImplemented` (clean conservative refusals that double as promotion
-tripwires: variable-offset lookbehind, non-realizable guarded bases, VERBOSE wrappers).
+tripwires: variable-offset lookbehind, non-realizable guarded bases, VERBOSE mode —
+whether a `(?x:…)` wrapper or global `g_regex_flags`).
 The contract is scoreboarded end-to-end by `tests/test_lookaround_scope.rs` (with an
 exhaustiveness meta-test over every refusal variant) and enforced identically on every
 engine path — the combined scanners, the Earley dynamic `DynamicMatcher` (per-terminal

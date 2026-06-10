@@ -28,10 +28,14 @@ exclude = ["python"]
 perf-counters = []
 # TEST-ONLY (not a user escape hatch): re-enables the `Regex` reference backend's
 # historical `fancy-regex` side-probes so the whole-lexer differential
-# (tests/test_scanner_differential.rs) has an independent oracle. Default OFF; the
-# refusal policy (docs/LOOKAROUND_SCOPE.md) is identical either way — the feature
-# only changes what the *reference* Scanner can host, never what a grammar build
-# accepts.
+# (tests/test_scanner_differential.rs) has an independent oracle. Default OFF, and
+# grammar-build outcomes are identical either way BY CONSTRUCTION: the feature build
+# routes every regex-rejected terminal through the same refusal seam
+# (`lexer::route_fancy_only_terminal`, docs/LOOKAROUND_SCOPE.md) before building a
+# probe, so it can never widen the accepted grammar set — it only swaps the matcher
+# used for terminals that LOWER (pinned by
+# `lexer::tests::global_verbose_flag_refuses_lookaround_lowering`, which runs under
+# both builds).
 fancy-oracle = ["dep:fancy-regex"]
 
 [dependencies]

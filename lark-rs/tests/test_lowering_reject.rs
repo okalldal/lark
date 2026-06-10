@@ -65,7 +65,7 @@ fn scope_taxonomy_mapping_is_the_decided_one() {
         D::NonRealizableGuardedBase,
         D::EmptyArmNotRealizable,
         D::FrontendParse,
-        D::VerboseWrapper,
+        D::VerboseMode,
     ];
     for d in nyi_declines {
         assert_eq!(d.scope(), Scope::NotYetImplemented, "{d:?}");

@@ -38,6 +38,10 @@ use lark_rs::{
 struct ScopeCase {
     name: &'static str,
     grammar: &'static str,
+    /// `LarkOptions::g_regex_flags` for the build — non-zero only for the
+    /// global-VERBOSE case (the verbose hazard has two spellings: a `(?x:…)`
+    /// wrapper in the grammar, and this option).
+    g_regex_flags: u32,
     scope: Scope,
     issue: LookaroundIssue,
     /// Substrings the user-facing message must contain (the terminal name and the
@@ -56,6 +60,7 @@ fn scoreboard() -> Vec<ScopeCase> {
         ScopeCase {
             name: "internal_lookahead",
             grammar: "start: T \"x\"\nT: /a(?=b)c/\n",
+            g_regex_flags: 0,
             scope: Scope::OutOfScope,
             issue: Rejected(R::Internal),
             msg_contains: &["(?=b)", "not supported (by design)"],
@@ -68,6 +73,7 @@ fn scoreboard() -> Vec<ScopeCase> {
             // by `test_lookaround.rs::block_comment_match_length_equivalence`.)
             name: "internal_lookahead_in_quantified_group",
             grammar: "start: T \"x\"\nT: /\\/\\*(\\*(?!\\/)|[^*])*\\*\\//\n",
+            g_regex_flags: 0,
             scope: Scope::OutOfScope,
             issue: Rejected(R::Internal),
             msg_contains: &["not supported (by design)"],
@@ -75,6 +81,7 @@ fn scoreboard() -> Vec<ScopeCase> {
         ScopeCase {
             name: "backref_in_assertion",
             grammar: "start: T \"x\"\nT: /(a)(?=\\1)b/\n",
+            g_regex_flags: 0,
             scope: Scope::OutOfScope,
             issue: Rejected(R::Backref),
             msg_contains: &["backreference"],
@@ -82,6 +89,7 @@ fn scoreboard() -> Vec<ScopeCase> {
         ScopeCase {
             name: "nested_assertion",
             grammar: "start: T \"x\"\nT: /(?=(?!a)b)c/\n",
+            g_regex_flags: 0,
             scope: Scope::OutOfScope,
             issue: Rejected(R::Nested),
             msg_contains: &["nested"],
@@ -89,6 +97,7 @@ fn scoreboard() -> Vec<ScopeCase> {
         ScopeCase {
             name: "quantified_assertion",
             grammar: "start: T \"x\"\nT: /a(?=b)?/\n",
+            g_regex_flags: 0,
             scope: Scope::OutOfScope,
             issue: Rejected(R::QuantifiedAssertion),
             msg_contains: &["quantifier"],
@@ -99,6 +108,7 @@ fn scoreboard() -> Vec<ScopeCase> {
             // not a break.
             name: "variable_width_lookbehind",
             grammar: "start: T \"x\"\nT: /(?<!a*)b/\n",
+            g_regex_flags: 0,
             scope: Scope::OutOfScope,
             issue: Rejected(R::VariableWidthBehind),
             msg_contains: &["lookbehind"],
@@ -108,6 +118,7 @@ fn scoreboard() -> Vec<ScopeCase> {
             // break class with Python Lark's backtracking engine).
             name: "top_level_backref",
             grammar: "start: T \"x\"\nT: /(a)\\1b/\n",
+            g_regex_flags: 0,
             scope: Scope::OutOfScope,
             issue: Declined(D::BacktrackingOnlySyntax),
             msg_contains: &["backtracking-only", "parity"],
@@ -115,6 +126,7 @@ fn scoreboard() -> Vec<ScopeCase> {
         ScopeCase {
             name: "zero_width_lookbehind_body",
             grammar: "start: T \"x\"\nT: /a(?<=())b/\n",
+            g_regex_flags: 0,
             scope: Scope::OutOfScope,
             issue: Declined(D::ZeroWidthLookbehindBody),
             msg_contains: &["zero-width"],
@@ -122,6 +134,7 @@ fn scoreboard() -> Vec<ScopeCase> {
         ScopeCase {
             name: "assertion_only_zero_width_branch",
             grammar: "start: T \"x\"\nT: /(?!a)/\n",
+            g_regex_flags: 0,
             scope: Scope::OutOfScope,
             issue: Declined(D::ZeroWidthBranch),
             msg_contains: &["zero-width"],
@@ -132,6 +145,7 @@ fn scoreboard() -> Vec<ScopeCase> {
             // reverse-scan or product construction. NYI, no current plan.
             name: "unbounded_trailing_lookahead",
             grammar: "start: T \"x\"\nT: /[a-z]+(?=ab+)/\n",
+            g_regex_flags: 0,
             scope: Scope::NotYetImplemented,
             issue: Rejected(R::Unbounded),
             msg_contains: &["not yet implemented"],
@@ -142,6 +156,7 @@ fn scoreboard() -> Vec<ScopeCase> {
             // NYI case.
             name: "variable_offset_lookbehind",
             grammar: "start: T \"x\"\nT: /\\w+(?<!_)q/\n",
+            g_regex_flags: 0,
             scope: Scope::NotYetImplemented,
             issue: Declined(D::VariableOffsetLookbehind),
             msg_contains: &["variable-width prefix"],
@@ -152,6 +167,7 @@ fn scoreboard() -> Vec<ScopeCase> {
             // tractable cases and declines exactly these.
             name: "order_sensitive_guarded_base",
             grammar: "start: T \"x\"\nT: /(ab|abc)(?!z)/\n",
+            g_regex_flags: 0,
             scope: Scope::NotYetImplemented,
             issue: Declined(D::NonRealizableGuardedBase),
             msg_contains: &["guard-realizable"],
@@ -159,6 +175,7 @@ fn scoreboard() -> Vec<ScopeCase> {
         ScopeCase {
             name: "lazy_guarded_base",
             grammar: "start: T \"x\"\nT: /ab??(?!c)/\n",
+            g_regex_flags: 0,
             scope: Scope::NotYetImplemented,
             issue: Declined(D::NonRealizableGuardedBase),
             msg_contains: &["guard-realizable"],
@@ -168,6 +185,7 @@ fn scoreboard() -> Vec<ScopeCase> {
             // wrapper, which IS unwrapped and lowers) — needs group-aware peeling.
             name: "lookbehind_in_interior_group",
             grammar: "start: T \"x\"\nT: /(a(?<!b))c/\n",
+            g_regex_flags: 0,
             scope: Scope::NotYetImplemented,
             issue: Declined(D::NestedInGroup),
             msg_contains: &["nested inside a group"],
@@ -178,19 +196,38 @@ fn scoreboard() -> Vec<ScopeCase> {
             // as literal width — a false-accept hazard).
             name: "verbose_wrapped_lookaround",
             grammar: "start: T \"x\"\nT: /(?x:[0-9]+ (?![0-9]))/\n",
+            g_regex_flags: 0,
             scope: Scope::NotYetImplemented,
-            issue: Declined(D::VerboseWrapper),
+            issue: Declined(D::VerboseMode),
+            msg_contains: &["VERBOSE"],
+        },
+        ScopeCase {
+            // The same hazard's OTHER spelling (PR #137 review, blocker 1): no
+            // wrapper in the grammar — `g_regex_flags = VERBOSE` puts the whole
+            // scanner under `(?x)` while the analyzer would count the pattern's
+            // whitespace as literal width. Must refuse identically.
+            name: "verbose_global_lookaround",
+            grammar: "start: T \"x\"\nT: /[0-9]+ (?![0-9])/\n",
+            g_regex_flags: lark_rs::grammar::terminal::flags::VERBOSE,
+            scope: Scope::NotYetImplemented,
+            issue: Declined(D::VerboseMode),
             msg_contains: &["VERBOSE"],
         },
     ]
 }
 
-fn build(grammar: &str, parser: ParserAlgorithm, lexer: LexerType) -> Result<Lark, LarkError> {
+fn build(
+    grammar: &str,
+    g_regex_flags: u32,
+    parser: ParserAlgorithm,
+    lexer: LexerType,
+) -> Result<Lark, LarkError> {
     Lark::new(
         grammar,
         LarkOptions {
             parser,
             lexer,
+            g_regex_flags,
             start: vec!["start".to_string()],
             ..Default::default()
         },
@@ -198,7 +235,7 @@ fn build(grammar: &str, parser: ParserAlgorithm, lexer: LexerType) -> Result<Lar
 }
 
 fn assert_case(case: &ScopeCase, parser: ParserAlgorithm, lexer: LexerType, tag: &str) {
-    match build(case.grammar, parser, lexer) {
+    match build(case.grammar, case.g_regex_flags, parser, lexer) {
         Err(LarkError::Grammar(GrammarError::LookaroundScope {
             terminal,
             scope,
@@ -340,7 +377,9 @@ fn every_refusal_variant_is_scored() {
                  loadable pattern reaches routing unparsable — kept as the \
                  conservative catch-all",
             ),
-            DeclineReason::VerboseWrapper => Cases(&["verbose_wrapped_lookaround"]),
+            DeclineReason::VerboseMode => {
+                Cases(&["verbose_wrapped_lookaround", "verbose_global_lookaround"])
+            }
             DeclineReason::BacktrackingOnlySyntax => Cases(&["top_level_backref"]),
         }
     };
@@ -364,7 +403,7 @@ fn every_refusal_variant_is_scored() {
         DeclineReason::NonRealizableGuardedBase,
         DeclineReason::EmptyArmNotRealizable,
         DeclineReason::FrontendParse,
-        DeclineReason::VerboseWrapper,
+        DeclineReason::VerboseMode,
         DeclineReason::BacktrackingOnlySyntax,
     ];
 

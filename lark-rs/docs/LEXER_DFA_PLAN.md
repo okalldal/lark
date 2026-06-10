@@ -298,7 +298,8 @@ document) and `tests/test_lookaround_scope.rs` (the machine-checked scoreboard):
   named parity break; degenerates).
 * `Declined` (per-instance) → mostly `Scope::NotYetImplemented` — clean conservative
   refusals that double as **promotion tripwires** (variable-offset lookbehind,
-  non-realizable guarded bases, VERBOSE wrappers, interior-group assertions).
+  non-realizable guarded bases, VERBOSE mode — wrappers or global `g_regex_flags` —
+  interior-group assertions).
 
 What the flip surfaced and fixed (the same model-vs-reality class the flag-wrapper
 strip closed for STRING): the loader wraps terminal-algebra alternation arms in

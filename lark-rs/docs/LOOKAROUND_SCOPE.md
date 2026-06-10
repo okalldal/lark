@@ -52,7 +52,7 @@ building, the test fails loudly and demands the promotion protocol below.
 | Unbounded trailing lookahead | `[a-z]+(?=ab+)` | `Rejection::Unbounded` | Regular (classic lex trailing context); needs a reverse-scan/product mechanism. No current plan — demand-driven. |
 | Non-realizable guarded base | `(ab\|abc)(?!z)`, `ab??(?!c)` | `DeclineReason::NonRealizableGuardedBase` | The base prefers a shorter match than its longest, so the longest-accept accumulator cannot host it. The semantic gate already proves the provable cases; widening further means a preference-aware accumulator. |
 | Assertion in an interior group | `(a(?<!b))c` | `DeclineReason::NestedInGroup` | Needs group-aware peeling. (A *vacuous* whole-arm `(?:…)` wrapper is already unwrapped and lowers — that is a proven identity, not a special case.) |
-| VERBOSE-wrapped lookaround | `(?x:[0-9]+ (?![0-9]))` | `DeclineReason::VerboseWrapper` | The analyzer's width/offset arithmetic is not verbose-aware; stripping `x` would miscount whitespace as literal width (a false-accept hazard). Needs a verbose-aware frontend. |
+| VERBOSE-mode lookaround | `(?x:[0-9]+ (?![0-9]))`, or any lookaround pattern under `g_regex_flags = VERBOSE` | `DeclineReason::VerboseMode` | The analyzer's width/offset arithmetic is not verbose-aware; under `x` (whether from a whole-pattern wrapper or the global flag) whitespace/comments would be miscounted as literal width (a false-accept hazard). Needs a verbose-aware frontend. |
 | Analyzer parse gaps | — | `DeclineReason::FrontendParse` | Defensive catch-all (terminal loading gates on the same parser, so it is unreachable end-to-end today). Any instance found in the wild is a frontend bug to fix. |
 
 ## The promotion protocol (NYI → supported)
@@ -76,4 +76,7 @@ a dev-dependency as the independent per-pattern oracle (equivalence/proof tests)
 the `fancy-oracle` cargo feature (default **off**, CI/test-only) resurrects the
 historical fancy side-probes of the `Regex` reference backend so the whole-lexer
 differential keeps an independent reference. Default builds contain zero fancy-regex
-code; grammar-build outcomes are identical with and without the feature.
+code, and grammar-build outcomes are identical with and without the feature **by
+construction**: the feature build routes every regex-rejected terminal through the
+same refusal seam first, and only a terminal that *lowers* gets a fancy reference
+probe — the feature swaps matchers, never the accepted grammar set.

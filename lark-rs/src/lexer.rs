@@ -48,11 +48,12 @@ use crate::tree::Token;
 // own single-terminal DFA ([`LoweredTerminalMatcher`], the default build) or — under
 // the TEST-ONLY `fancy-oracle` feature — is matched by the historical `\G`-anchored
 // `fancy-regex` probe, so the `Regex` reference backend stays an independent oracle
-// for the whole-lexer differential. There is no runtime fallback engine: a terminal
-// the lowering refuses fails the grammar build with the categorized scope error
-// (`docs/LOOKAROUND_SCOPE.md`), identically with and without the feature... except
-// that under the feature the *reference* Scanner can still host it (which is the
-// point of a reference).
+// for the whole-lexer differential. There is no runtime fallback engine, and the
+// feature never widens the accepted grammar set: BOTH builds route every
+// regex-rejected terminal through THE refusal seam (`route_fancy_only_terminal`)
+// first, so a terminal the lowering refuses fails the grammar build with the same
+// categorized scope error (`docs/LOOKAROUND_SCOPE.md`) with and without the feature.
+// The feature only swaps the *matcher* for terminals that lower.
 
 enum SideProbe {
     /// The lowered single-terminal DFA — the default build (and the engine whose
@@ -315,7 +316,6 @@ impl Scanner {
         // builds the alternation in this order and takes the first branch that
         // matches, so the lowest rank wins ties. We preserve it to merge the two
         // engines' candidates at match time.
-        #[cfg_attr(feature = "fancy-oracle", allow(unused_variables))]
         let by_id: HashMap<SymbolId, &TerminalDef> =
             terminals.iter().map(|(id, t)| (*id, *t)).collect();
         let mut parts = Vec::new();
@@ -331,13 +331,18 @@ impl Scanner {
                     group_names.push((*id, group, rank));
                 }
                 #[cfg(feature = "fancy-oracle")]
-                Err(_) => {
-                    // The historical reference behavior: EVERY regex-rejected
-                    // terminal rides the `\G`-anchored fancy probe (`\G` anchors
-                    // `find_from_pos` to `pos` so a sparse terminal stays linear;
-                    // the `regex` crate cannot parse `\G`, so this pattern lives on
-                    // the fancy engine only). This is what makes the feature build
-                    // an independent oracle for the differential.
+                Err(e) => {
+                    // Acceptance is decided by THE refusal seam FIRST, exactly as the
+                    // default build below decides it — so the TEST-ONLY feature can
+                    // never change what a grammar build accepts (the Cargo.toml
+                    // contract). Only a terminal that *lowers* proceeds to the probe.
+                    route_fancy_only_terminal(by_id[id], global_flags, &e.to_string())?;
+                    // The historical reference matcher for the lowered terminal: the
+                    // `\G`-anchored fancy probe (`\G` anchors `find_from_pos` to
+                    // `pos` so a sparse terminal stays linear; the `regex` crate
+                    // cannot parse `\G`, so this pattern lives on the fancy engine
+                    // only). This is what makes the feature build an independent
+                    // oracle for the differential.
                     let src = format!("{prefix}\\G{inline}");
                     let anchored =
                         fancy_regex::Regex::new(&src).map_err(|e| GrammarError::InvalidRegex {
@@ -718,7 +723,7 @@ fn strip_whole_pattern_flag_wrapper(raw: &str, flags: u32) -> (String, u32) {
                 // as literal width while the re-wrapped branch ignores them — a
                 // fixed-offset lookbehind could lower with a wrong offset (a
                 // false-accept). Left wrapped, the pattern is refused with the
-                // honest categorized NYI error (`DeclineReason::VerboseWrapper`,
+                // honest categorized NYI error (`DeclineReason::VerboseMode`,
                 // via `is_verbose_wrapped_lookaround`) — the reject-when-unsure
                 // direction. Pinned by
                 // `verbose_flag_wrapper_is_not_stripped_into_lowering`.
@@ -739,7 +744,7 @@ fn strip_whole_pattern_flag_wrapper(raw: &str, flags: u32) -> (String, u32) {
 /// [`strip_whole_pattern_flag_wrapper`] deliberately refuses to strip (the lookaround
 /// analyzer's width/offset arithmetic is not verbose-aware). Detected *before*
 /// classification so the refusal surfaces as the honest
-/// [`DeclineReason::VerboseWrapper`] (NotYetImplemented) instead of the classifier
+/// [`DeclineReason::VerboseMode`] (NotYetImplemented) instead of the classifier
 /// mislabeling the group-nested assertion as out-of-scope internal lookahead. An
 /// `x`-wrapped pattern with **no** assertion never reaches the routing seam (the
 /// `regex` crate supports verbose mode and compiles it plain), and one that is
@@ -758,6 +763,17 @@ fn is_verbose_wrapped_lookaround(raw: &str) -> bool {
         && letters.chars().all(|c| matches!(c, 'i' | 'm' | 's' | 'x'))
         && letters.contains('x')
         && body.has_assertion()
+}
+
+/// True when the lookaround frontend parses `raw` and finds any assertion in it.
+/// Used by the routing seam's verbose-mode gate: under VERBOSE the analyzer's
+/// width/offset arithmetic would be wrong, and the only route that could *lower*
+/// such a pattern is one with assertions — so refusing exactly these closes the
+/// false-accept class. A pattern the frontend cannot parse returns `false` and is
+/// still refused downstream (`DeclineReason::FrontendParse` / `LoweringRoute::Plain`'s
+/// `BacktrackingOnlySyntax` triage), never lowered.
+fn pattern_contains_assertion(raw: &str) -> bool {
+    crate::lookaround::parse(raw).is_ok_and(|n| n.has_assertion())
 }
 
 /// **THE single refusal seam** (L4): route one `regex`-crate-rejected terminal through
@@ -797,11 +813,19 @@ fn route_fancy_only_terminal(
     // every lowered branch/guard with the returned `flags`.
     let (raw, flags) = strip_whole_pattern_flag_wrapper(raw, flags);
     let raw = raw.as_str();
-    // A `(?x:…)`-wrapped lookaround pattern: the strip refused it (VERBOSE bodies are
-    // not analyzable), so refuse it here with the honest NYI reason, before the
-    // classifier can mislabel the group-nested assertion.
-    if is_verbose_wrapped_lookaround(raw) {
-        let reason = DeclineReason::VerboseWrapper;
+    // VERBOSE mode makes the lookaround analyzer's arithmetic wrong (whitespace and
+    // comments are counted as literal width while the compiled branch ignores them —
+    // the false-accept class), in either of its two spellings:
+    //   * a whole-pattern `(?x:…)` wrapper — the strip refused it (VERBOSE bodies
+    //     are not analyzable), caught before the classifier can mislabel the
+    //     group-nested assertion as internal lookahead;
+    //   * the global `g_regex_flags` VERBOSE bit (or a terminal-level `x` flag bit) —
+    //     the raw pattern looks plain to the analyzer but compiles under `(?x)`,
+    //     so any pattern containing an assertion must be refused before routing.
+    // Both refuse with the honest categorized NYI reason.
+    let verbose_mode = ((flags | global_flags) & crate::grammar::terminal::flags::VERBOSE) != 0;
+    if is_verbose_wrapped_lookaround(raw) || (verbose_mode && pattern_contains_assertion(raw)) {
+        let reason = DeclineReason::VerboseMode;
         return Err(GrammarError::LookaroundScope {
             terminal: def.name.clone(),
             subject: raw.to_string(),
@@ -2392,7 +2416,7 @@ mod tests {
     /// while the re-wrapped branch ignores it — a fixed-offset lookbehind could lower
     /// with a wrong offset (a false-accept). An `x`-wrapped lookaround terminal must
     /// never lower: the strip leaves the wrapper alone, and since L4 the build refuses
-    /// it with the honest categorized NotYetImplemented `VerboseWrapper` error (not the
+    /// it with the honest categorized NotYetImplemented `VerboseMode` error (not the
     /// classifier's mislabel of the group-nested assertion as out-of-scope internal
     /// lookahead).
     #[test]
@@ -2404,7 +2428,7 @@ mod tests {
         assert_dfa_scope_error(
             &terms,
             Scope::NotYetImplemented,
-            LookaroundIssue::Declined(DeclineReason::VerboseWrapper),
+            LookaroundIssue::Declined(DeclineReason::VerboseMode),
         );
         // The helper itself: an `x` anywhere in the wrapper letters refuses the strip
         // wholesale; the plain `i`/`s` strips still work.
@@ -2422,6 +2446,55 @@ mod tests {
             strip_whole_pattern_flag_wrapper("(?is:a)", 0),
             ("a".to_string(), f)
         );
+    }
+
+    /// **The global-VERBOSE conservatism pin** (PR #137 review, blocker 1). The
+    /// verbose false-accept hazard is not only the explicit `(?x:…)` wrapper:
+    /// `g_regex_flags = VERBOSE` compiles every terminal under a global `(?x)`
+    /// prefix while the lookaround analyzer still counts whitespace/comments as
+    /// literal width — the exact same class. The routing seam must refuse any
+    /// lookaround pattern under global VERBOSE with the same categorized NYI
+    /// `VerboseMode` error, on BOTH combined-scanner builds (and, via the seam,
+    /// every other engine path). A verbose *plain* pattern never reaches the seam
+    /// (the `regex` crate compiles `(?x)` natively) and must keep building.
+    #[test]
+    fn global_verbose_flag_refuses_lookaround_lowering() {
+        use crate::grammar::terminal::flags;
+        use crate::lookaround::classify::{DeclineReason, LookaroundIssue, Scope};
+        // No wrapper: the pattern looks analyzable, but under (?x) the space before
+        // the guard is ignored at runtime while the analyzer would count it.
+        let terms = [re_term(1, "VG", r"[0-9]+ (?![0-9])", 0)];
+        let refs: Vec<(SymbolId, &TerminalDef)> = terms.iter().map(|(i, t)| (*i, t)).collect();
+        let assert_refused = |result: Result<(), GrammarError>, engine: &str| match result {
+            Err(GrammarError::LookaroundScope { scope, issue, .. }) => {
+                assert_eq!(scope, Scope::NotYetImplemented, "{engine}");
+                assert_eq!(
+                    issue,
+                    LookaroundIssue::Declined(DeclineReason::VerboseMode),
+                    "{engine}"
+                );
+            }
+            Err(other) => panic!("{engine}: expected the VerboseMode scope error, got {other:?}"),
+            Ok(()) => panic!(
+                "{engine}: a global-VERBOSE lookaround terminal built — the false-accept class"
+            ),
+        };
+        assert_refused(
+            DfaScanner::build(&refs, flags::VERBOSE).map(drop),
+            "DfaScanner",
+        );
+        // The Regex backend refuses identically — including under the TEST-ONLY
+        // `fancy-oracle` feature, whose build routes the same seam first (PR #137
+        // review, blocker 2: the feature must never widen the accepted grammar set).
+        assert_refused(Scanner::build(&refs, flags::VERBOSE).map(drop), "Scanner");
+        // Without an assertion there is no hazard: a verbose plain pattern compiles
+        // on the `regex` crate and never reaches the routing seam.
+        let plain = [re_term(1, "VP", r"[0-9]+ [a-z]+", 0)];
+        let prefs: Vec<(SymbolId, &TerminalDef)> = plain.iter().map(|(i, t)| (*i, t)).collect();
+        DfaScanner::build(&prefs, flags::VERBOSE)
+            .expect("a plain pattern under global VERBOSE builds (the regex crate handles `x`)");
+        Scanner::build(&prefs, flags::VERBOSE)
+            .expect("a plain pattern under global VERBOSE builds (the regex crate handles `x`)");
     }
 
     #[test]
