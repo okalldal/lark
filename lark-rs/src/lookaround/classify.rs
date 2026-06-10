@@ -4,8 +4,9 @@
 //!
 //! [`lower_terminal`] is the entry point the build path calls. It classifies a
 //! terminal and, for every supported shape whose lowering has landed — M1
-//! trailing-boundary, M2 leading-boundary, M3 fixed-offset bounded-lookbehind, and the
-//! M4 `python.STRING` opening-guard splice — returns the lowered per-branch sub-patterns
+//! trailing-boundary, M2 leading-boundary, M3 fixed-offset bounded-lookbehind, the
+//! M4 `python.STRING` opening-guard splice, and the Stage-B `lark.REGEXP`
+//! regex-literal idiom — returns the lowered per-branch sub-patterns
 //! ([`super::lower`]). A per-instance lowering that cannot ride the engine (a
 //! variable-offset lookbehind, a non-realizable guarded base) is **declined** (routed to
 //! `fancy-regex`), and an out-of-shape assertion is reported as a permanent rejection
@@ -47,14 +48,16 @@
 //! backreference, a nested assertion, or a variable-width lookbehind.
 //!
 //! The recognized idioms are **narrow gates, not general internal-lookahead support.**
-//! `python.STRING`'s `(?!"")` sits *after a variable-width prefix + the opening quote* —
-//! a position the top-level walk sees as `Internal`. It lowers only because
-//! [`super::lower::recognize_string_idiom`] matches that *exact* terminal shape and
+//! `python.STRING`'s `(?!"")` sits *after a variable-width prefix + the opening quote*,
+//! and `lark.REGEXP`'s `(?!\/)` sits *between the opening slash and the lazy body* —
+//! positions the top-level walk sees as `Internal`. Each lowers only because its exact
+//! recognizer ([`super::lower::recognize_string_idiom`] /
+//! [`super::lower::recognize_regexp_idiom`]) matches that *precise* terminal shape and
 //! re-tags its interior lookaheads as `Leading`; outside a recognized idiom a deeper
 //! lookahead stays `Internal` (reject). The recognizer — never a position heuristic — is
-//! the single gate, so the dangerous direction (false-accept) stays closed. Two bundled
-//! lookaround terminals are *not* lowered yet and **decline to `fancy-regex`**:
-//! `python.LONG_STRING` (multi-char `"""` close) and `lark.REGEXP` (internal `(?!\/)`);
+//! the single gate, so the dangerous direction (false-accept) stays closed. One bundled
+//! lookaround terminal is *not* lowered yet and **declines to `fancy-regex`**:
+//! `python.LONG_STRING` (multi-char `"""` close);
 //! see [`LEXER_DFA_STATUS.md`](../../docs/LEXER_DFA_STATUS.md).
 
 use super::{Look, Node};
@@ -248,17 +251,23 @@ pub fn classify(pattern: &str) -> Result<Classification, GrammarError> {
     let node = super::parse(pattern)?;
     let mut assertions = Vec::new();
     walk_top_level(&node, &mut assertions);
-    // String-literal opening-guard idiom refinement (python.STRING): a leading
-    // `(?!"")` after a variable-width prefix + the opening quote is seen by the
-    // top-level walk as `Internal` (it is nested inside the arms group, after a
-    // bounded prefix). It is, however, a *supported* leading boundary the
-    // [`super::lower::recognize_string_idiom`] splice lowers. So **only when the whole
-    // terminal is a recognized, lowerable idiom**, re-tag its interior `(?=)/(?!)`
-    // lookaheads as `Leading`. Outside a recognized idiom the verdict is unchanged, so
-    // a genuinely-internal lookahead (`a(?=b)c`, the verilog `(?!/)` inside a `*`) stays
-    // `Internal` (rejected) — the recognizer is the single gate, never a position
-    // heuristic that could false-accept.
-    if super::lower::recognize_string_idiom(&node).is_some() {
+    // Audited-idiom refinement (the recognizers are the single gate, never a position
+    // heuristic that could false-accept):
+    //   * **python.STRING** ([`super::lower::recognize_string_idiom`]): a leading
+    //     `(?!"")` after a variable-width prefix + the opening quote is seen by the
+    //     top-level walk as `Internal` (it is nested inside the arms group, after a
+    //     bounded prefix) but is a *supported* leading boundary the splice lowers.
+    //   * **lark.REGEXP** ([`super::lower::recognize_regexp_idiom`]): the `(?!\/)`
+    //     between the opening slash and the lazy body is likewise `Internal` to the
+    //     walk, but inside the exact recognized idiom it reduces to a non-empty-body
+    //     condition the delimited-token lowering absorbs.
+    // So **only when the whole terminal is a recognized, lowerable idiom**, re-tag its
+    // interior `(?=)/(?!)` lookaheads as `Leading`. Outside a recognized idiom the
+    // verdict is unchanged, so a genuinely-internal lookahead (`a(?=b)c`, the verilog
+    // `(?!/)` inside a `*`) stays `Internal` (rejected).
+    if super::lower::recognize_string_idiom(&node).is_some()
+        || super::lower::recognize_regexp_idiom(&node).is_some()
+    {
         for a in &mut assertions {
             if a.look == Look::Ahead && a.position == Position::Internal {
                 a.position = Position::Leading;
@@ -322,9 +331,10 @@ pub enum LoweringRoute {
     /// declined (a variable-offset lookbehind, a non-greedy-monotone guarded base, a
     /// bundled idiom not yet lowered such as `python.LONG_STRING`), **or** a pattern the
     /// lookaround frontend could not parse. The runtime routes this to `fancy-regex` during
-    /// the transition — a correct fallback, never a mis-lowering. (Note `lark.REGEXP` is
-    /// *not* here: its internal `(?!\/)` makes it [`Self::Unsupported`]; it reaches the same
-    /// fancy runtime seam through the `Unsupported` compatibility fallback.)
+    /// the transition — a correct fallback, never a mis-lowering. (`lark.REGEXP` used to
+    /// reach the fancy seam as `Unsupported(Internal)`; it now lowers via the Stage-B
+    /// regex-literal idiom — [`super::lower::recognize_regexp_idiom`] — so it is
+    /// [`Self::Lowered`], not here.)
     DeclinedToFancy {
         /// A human-readable reason naming the terminal and why it declined.
         reason: String,
@@ -914,6 +924,45 @@ mod tests {
                 .is_some_and(|(_, r)| r == Rejection::Internal),
             "a bare internal lookahead must still reject as Internal"
         );
+    }
+
+    /// `lark.REGEXP`'s `(?!\/)` is now a **supported** leading boundary, but *only*
+    /// inside the exact recognized regex-literal idiom
+    /// ([`super::lower::recognize_regexp_idiom`]) — the same recognizer-is-the-gate
+    /// discipline as the STRING splice. The identical `(?!\/)` in any other position
+    /// (the verilog block-comment shape, a bare mid-concat use) stays `Internal`
+    /// (rejected).
+    #[test]
+    fn regexp_idiom_guard_is_supported_via_exact_recognizer() {
+        let regexp = r"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*";
+        let c = classify(regexp).unwrap();
+        assert!(
+            c.first_rejection().is_none(),
+            "REGEXP must have no rejected assertion now: {:?}",
+            c.first_rejection()
+        );
+        assert_eq!(
+            c.assertions
+                .iter()
+                .map(AssertionInfo::verdict)
+                .collect::<Vec<_>>(),
+            vec![Verdict::Supported(ShapeClass::LeadingBoundary)],
+            "exactly the one (?!\\/) guard, re-tagged Leading inside the idiom"
+        );
+
+        // The same `(?!\/)` OUTSIDE the recognized idiom is still rejected as Internal.
+        for p in [
+            r"\/\*(\*(?!\/)|[^*])*\*\/",              // verilog MULTILINE_COMMENT
+            r"\/(?!\/)(\\\/|\\\\|[^\/])*\/[imslux]*", // greedy near-miss of the idiom
+        ] {
+            assert!(
+                classify(p)
+                    .unwrap()
+                    .first_rejection()
+                    .is_some_and(|(_, r)| r == Rejection::Internal),
+                "{p:?} must still reject as Internal"
+            );
+        }
     }
 
     /// The robustness requirement: the classifier never panics on arbitrary input —

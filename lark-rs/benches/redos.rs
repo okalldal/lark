@@ -66,6 +66,9 @@ fn main() {
     // lark.REGEXP — ambiguous alternation under a lazy star + (?!/) lookahead, on an
     // UNTERMINATED literal with a backslash run (the ReDoS-prone shape). Stays linear
     // because the alternation carries no lookaround and runs on the linear engine.
+    // (Since the Stage-B regex-literal idiom landed, the default Dfa backend lowers
+    // REGEXP into the plain DFA, so this now measures the lowered path; the fancy
+    // routing this bench was written to characterize is historical for REGEXP.)
     println!("\nlark.REGEXP — unterminated /\\\\\\\\... (the ReDoS-prone shape; expect ~linear):");
     let regexp = build("start: REGEXP\n%import lark.REGEXP");
     for n in [16usize, 64, 256, 1_024, 4_096, 16_384] {

@@ -26,9 +26,10 @@ const STRING_RAW: &str =
 /// lowering **declines** it.
 const LONG_STRING_RAW: &str =
     r#"([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')"#;
-/// The bundled `lark.REGEXP`: its `(?!\/)` is neither the first nor the last element of the
-/// match, so the classifier rejects it as `Internal` (an out-of-shape `Unsupported` route —
-/// the DfaScanner's compatibility fallback still sends it to `fancy-regex` at runtime).
+/// The bundled `lark.REGEXP`: its `(?!\/)` is internal to the top-level walk, but the
+/// whole terminal is the exact Stage-B **regex-literal idiom**
+/// (`recognize_regexp_idiom`), which lowers it — the guard reduces to a non-empty-body
+/// condition (`*?` → `+?`), one unguarded lookaround-free branch.
 const REGEXP_RAW: &str = r#"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*"#;
 
 /// A plain terminal (no lookaround) routes to [`LoweringRoute::Plain`].
@@ -89,27 +90,45 @@ fn python_long_string_routes_to_declined_to_fancy() {
     assert!(!matches!(route, LoweringRoute::Unsupported { .. }));
 }
 
-/// `lark.REGEXP`'s `(?!\/)` is a genuinely *internal* lookahead, so the classifier rejects
-/// it: the route is [`LoweringRoute::Unsupported`] with [`Rejection::Internal`]. This is an
-/// honest finding the typed split surfaces — the prose "declined-to-fancy" label describes
-/// the **runtime** outcome (the DfaScanner compatibility fallback still routes Unsupported
-/// to `fancy-regex`), not the classifier verdict. Either way it is **not** lowered.
+/// `lark.REGEXP` now routes to [`LoweringRoute::Lowered`] via the Stage-B regex-literal
+/// idiom: a **single unguarded** lookaround-free branch (the `(?!\/)` reduces to a
+/// non-empty body, `*?` → `+?`). It is in particular no longer `Unsupported(Internal)` —
+/// that route was its pre-idiom verdict — and not `DeclinedToFancy`.
 #[test]
-fn lark_regexp_routes_to_unsupported_internal() {
+fn lark_regexp_routes_to_lowered() {
     match route_terminal("REGEXP", REGEXP_RAW) {
-        LoweringRoute::Unsupported {
-            rejection,
-            assertion,
-            ..
-        } => {
-            assert_eq!(rejection, Rejection::Internal);
+        LoweringRoute::Lowered(branches) => {
+            assert_eq!(
+                branches.len(),
+                1,
+                "the regexp idiom lowers to exactly one branch, got {branches:#?}"
+            );
+            let b = &branches[0];
+            assert_eq!(b.regex, r"\/(\\\/|\\\\|[^\/])+?\/[imslux]*");
             assert!(
-                assertion.contains("(?!"),
-                "the unsupported assertion must be REGEXP's `(?!\\/)`, got {assertion:?}"
+                b.leading.is_none() && b.trailing.is_none() && b.lookbehind.is_empty(),
+                "the branch is unguarded — the guard is absorbed, not carried"
             );
         }
-        other => {
-            panic!("lark.REGEXP's internal `(?!\\/)` must be Unsupported(Internal), got {other:?}")
+        other => panic!("lark.REGEXP must now lower via the regex-literal idiom, got {other:?}"),
+    }
+}
+
+/// The identical `(?!\/)` **outside** the recognized idiom is still out-of-shape: the
+/// verilog block-comment pattern (the guard nested inside a `(…)*`) and a greedy
+/// near-miss of the idiom both stay [`LoweringRoute::Unsupported`] with
+/// [`Rejection::Internal`] — the recognizer is the gate, not the assertion's spelling.
+#[test]
+fn forbid_slash_outside_the_idiom_still_routes_to_unsupported_internal() {
+    for (name, pat) in [
+        ("MULTILINE_COMMENT", r"\/\*(\*(?!\/)|[^*])*\*\/"),
+        ("GREEDY_NEAR_MISS", r"\/(?!\/)(\\\/|\\\\|[^\/])*\/[imslux]*"),
+    ] {
+        match route_terminal(name, pat) {
+            LoweringRoute::Unsupported { rejection, .. } => {
+                assert_eq!(rejection, Rejection::Internal, "{name}");
+            }
+            other => panic!("{name} must stay Unsupported(Internal), got {other:?}"),
         }
     }
 }

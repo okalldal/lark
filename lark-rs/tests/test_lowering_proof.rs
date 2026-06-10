@@ -395,6 +395,47 @@ fn route1_proof_string_idiom_real_nested_shape() {
     }
 }
 
+// ─── The REGEXP regex-literal idiom — real bundled shape (Stage B) ──────────────
+//
+// `lark.REGEXP`'s `(?!\/)` between the opening slash and the lazy body lowers via the
+// exact `recognize_regexp_idiom` rewrite: the guard reduces to a non-empty-body bump
+// (`*?` → `+?`), one unguarded lookaround-free branch. As with STRING, the **brute**
+// Route-1 enumeration is infeasible for this content-bearing body: its base DFA has
+// ~10 byte-class representatives and a double-digit state count, so the
+// `|alphabet|^(n+W+2)` corpus is ~10^12+ strings. The committed realization is the same
+// **state-pruned** decision procedure STRING uses (`prove_route1_pruned`): one shortest
+// witness per reachable base-DFA state × every lookahead suffix of length ≤ W+1 (the
+// guard width W=1), with `fancy-regex` running the *original* lookaround pattern as the
+// independent oracle. The guard's entire decision surface is the one char after the
+// opening slash, so the witness-per-state × suffix sweep covers every input shape the
+// rewrite could get wrong; the slash/backslash-heavy generative corpora
+// (`test_lowering_equivalence.rs::regexp_idiom_lowered_equals_fancy`, exhaustive to
+// length 7) and the scanner differential population corroborate over the deeper
+// lazy-close / dangling-escape / flags interactions.
+
+/// The committed Route-1 (state-pruned) proof for the regex-literal idiom on the **real
+/// bundled `lark.REGEXP` shape**. The representative must (a) genuinely classify as a
+/// supported leading boundary (the re-tagged idiom guard), (b) lower to branches (not
+/// decline), and (c) be proven match-length-identical to `fancy-regex` by the
+/// state-pruned decision procedure.
+#[test]
+fn route1_proof_regexp_idiom_real_shape() {
+    let pattern = common::lowering::REGEXP_RAW;
+    let c = classify(pattern).unwrap_or_else(|e| panic!("classify REGEXP errored: {e}"));
+    assert!(
+        c.assertions
+            .iter()
+            .any(|a| a.verdict() == Verdict::Supported(ShapeClass::LeadingBoundary)),
+        "REGEXP must classify with a supported leading boundary (the idiom guard)"
+    );
+    assert!(
+        lower_boundary(pattern).is_ok(),
+        "REGEXP must lower (not decline) for the proof to be non-vacuous"
+    );
+    prove_route1_pruned("REGEXP_IDIOM", pattern)
+        .unwrap_or_else(|cex| panic!("Route-1 (state-pruned) failed for REGEXP: {cex}"));
+}
+
 /// Active now: the proof-obligation registry is the per-shape contract. Every
 /// supported shape has at least one committed representative, and each representative
 /// genuinely classifies as its shape (so the obligation targets the right thing).
