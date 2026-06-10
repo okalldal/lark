@@ -124,7 +124,22 @@ fn meta_options(meta: &Value, project_dir: &PathBuf) -> Option<LarkOptions> {
         Some(_) => return None,
         None => None,
     };
+    // Canonical `imsx` letters, like the compliance bank records them.
+    let mut g_regex_flags = 0u32;
+    if let Some(letters) = opts["g_regex_flags"].as_str() {
+        use lark_rs::grammar::terminal::flags;
+        for ch in letters.chars() {
+            g_regex_flags |= match ch {
+                'i' => flags::IGNORECASE,
+                'm' => flags::MULTILINE,
+                's' => flags::DOTALL,
+                'x' => flags::VERBOSE,
+                _ => 0,
+            };
+        }
+    }
     Some(LarkOptions {
+        g_regex_flags,
         start: vec![opts["start"].as_str()?.to_string()],
         parser,
         lexer,
@@ -195,14 +210,17 @@ fn test_wild_bank() {
     projects.sort();
     assert!(!projects.is_empty(), "wild bank is empty");
 
-    // Silence panic backtraces from expected-to-fail grammars/inputs.
-    std::panic::set_hook(Box::new(|_| {}));
+    // Silence panic backtraces from expected-to-fail grammars/inputs
+    // (LARK_WILD_TRACE=1 keeps them visible for debugging).
+    let trace = std::env::var("LARK_WILD_TRACE").is_ok();
+    if !trace {
+        std::panic::set_hook(Box::new(|_| {}));
+    }
 
     let mut failures: BTreeSet<String> = BTreeSet::new();
     let mut details: Vec<String> = Vec::new();
     let mut total = 0usize;
 
-    let trace = std::env::var("LARK_WILD_TRACE").is_ok();
     for pdir in &projects {
         let project_t0 = std::time::Instant::now();
         let meta = load_json(&pdir.join("meta.json")).expect("meta.json parses");

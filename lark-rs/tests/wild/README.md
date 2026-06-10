@@ -33,15 +33,25 @@ sets, deep EBNF nesting, postlex indentation, file-relative imports, the
 
 | project        | language                  | engine             | source |
 |----------------|---------------------------|--------------------|--------|
+| cel            | Common Expression Language | LALR (g_regex_flags) | cloud-custodian/cel-python |
+| gersemi_cmake  | CMake                     | LALR               | BlankSpruce/gersemi |
 | hcl2           | Terraform HCL2            | LALR               | amplify-education/python-hcl2 @ v4.3.5 |
 | mappyfile      | MapServer mapfiles        | LALR               | geographika/mappyfile |
+| miniwdl_wdl    | Workflow Description Lang 1.0 | LALR           | chanzuckerberg/miniwdl |
 | mistql         | MistQL JSON queries       | **Earley/dynamic** | evinism/mistql |
 | poetry_markers | PEP 508 env markers       | LALR               | python-poetry/poetry-core |
 | poetry_pep508  | PEP 508 dependency specs  | LALR (relative %import) | python-poetry/poetry-core |
+| pylogics_ltl   | Linear Temporal Logic     | LALR (relative %import, lookahead terminals) | whitemech/pylogics |
 | pyquil         | Quil (quantum ISA)        | LALR               | rigetti/pyquil @ v3.5.4 |
 | synapse_storm  | Storm query language      | LALR (regex=True)  | vertexproject/synapse |
 | tartiflette    | GraphQL SDL               | LALR               | dailymotion/tartiflette |
 | vyper          | Vyper contracts           | LALR + PythonIndenter postlex | vyperlang/vyper |
+
+Three projects record extra context in `meta.json` `description`/`notes`:
+upstream cel/miniwdl pass `lexer_callbacks` (dropped — the oracle and replay
+both parse without them), gersemi an inline transformer (dropped, raw tree
+frozen), and miniwdl's grammar is materialized byte-exactly from the Python
+string `versions["1.0"]` since upstream ships no .lark file.
 
 ## Adding a project
 

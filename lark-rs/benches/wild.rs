@@ -47,6 +47,18 @@ fn meta_options(meta: &Value) -> Option<LarkOptions> {
             Some(_) => return None,
             None => None,
         },
+        g_regex_flags: opts["g_regex_flags"].as_str().map_or(0, |letters| {
+            use lark_rs::grammar::terminal::flags;
+            letters.chars().fold(0, |acc, ch| {
+                acc | match ch {
+                    'i' => flags::IGNORECASE,
+                    'm' => flags::MULTILINE,
+                    's' => flags::DOTALL,
+                    'x' => flags::VERBOSE,
+                    _ => 0,
+                }
+            })
+        }),
         base_path: None, // set per project below
         ..Default::default()
     })

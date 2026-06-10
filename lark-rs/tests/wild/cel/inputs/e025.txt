@@ -1,0 +1,1 @@
+has(TestAllTypes{standalone_message: TestAllTypes.NestedMessage{bb: 123}}.standalone_message)

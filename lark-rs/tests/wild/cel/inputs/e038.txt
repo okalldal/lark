@@ -1,0 +1,1 @@
+cel.block([msg.oneof_type, cel.index(0).payload, cel.index(1).oneof_type, cel.index(2).payload, cel.index(3).oneof_type, cel.index(4).payload, cel.index(5).oneof_type, cel.index(6).payload, cel.index(7).single_bool, true || cel.index(8), cel.index(4).child, cel.index(10).child, cel.index(11).payload, cel.index(12).single_bool], cel.index(9) || cel.index(13))

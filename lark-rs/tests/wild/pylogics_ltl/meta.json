@@ -1,0 +1,42 @@
+{
+  "name": "pylogics_ltl",
+  "description": "Linear Temporal Logic (LTLf) grammar from pylogics. ltl.lark imports terminals AND rules from pl.lark via relative %import; the temporal operator terminals use trailing lookahead (F(?=[ \"(])), exercising the M1 boundary-guard lowering.",
+  "source": {
+    "repo": "https://github.com/whitemech/pylogics",
+    "ref": "HEAD",
+    "commit": "3f5f317aa4aaf0f8df488a94e329ad62906c40d4",
+    "license": "MIT",
+    "grammar_files": {
+      "grammar/ltl.lark": "pylogics/parsers/ltl.lark",
+      "grammar/pl.lark": "pylogics/parsers/pl.lark"
+    }
+  },
+  "entry_grammar": "grammar/ltl.lark",
+  "lark_options": {
+    "parser": "lalr",
+    "lexer": "contextual",
+    "start": "start",
+    "maybe_placeholders": true,
+    "propagate_positions": false,
+    "keep_all_tokens": false,
+    "regex_module": false,
+    "postlex": null
+  },
+  "inputs": {
+    "inputs/f01.txt": "docs/parsing.md + docs/introduction.md parse_ltl examples",
+    "inputs/f02.txt": "docs/parsing.md + docs/introduction.md parse_ltl examples",
+    "inputs/f03.txt": "docs/parsing.md + docs/introduction.md parse_ltl examples",
+    "inputs/f04.txt": "docs/parsing.md + docs/introduction.md parse_ltl examples",
+    "inputs/f05.txt": "docs/parsing.md + docs/introduction.md parse_ltl examples",
+    "inputs/f06.txt": "docs/parsing.md + docs/introduction.md parse_ltl examples",
+    "inputs/f07.txt": "docs/parsing.md + docs/introduction.md parse_ltl examples",
+    "inputs/f08.txt": "docs/parsing.md + docs/introduction.md parse_ltl examples",
+    "inputs/f09.txt": "docs/parsing.md + docs/introduction.md parse_ltl examples",
+    "inputs/f10.txt": "docs/parsing.md + docs/introduction.md parse_ltl examples",
+    "inputs/f11.txt": "docs/parsing.md + docs/introduction.md parse_ltl examples",
+    "inputs/f12.txt": "docs/parsing.md + docs/introduction.md parse_ltl examples",
+    "inputs/f13.txt": "docs/parsing.md + docs/introduction.md parse_ltl examples",
+    "inputs/f14.txt": "docs/parsing.md + docs/introduction.md parse_ltl examples",
+    "inputs/f15.txt": "docs/parsing.md + docs/introduction.md parse_ltl examples"
+  }
+}

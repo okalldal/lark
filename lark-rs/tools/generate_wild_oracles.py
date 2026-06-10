@@ -54,6 +54,12 @@ from lark import Lark, Tree, Token  # noqa: E402
 
 EMBED_LIMIT = 16_384  # canonical bytes; smaller trees also embed full JSON
 
+# Don't embed trees deeper than this: each tree level costs ~2 levels of JSON
+# nesting and serde_json refuses documents deeper than 128 (Python has no such
+# limit, so e.g. CEL's non-collapsed precedence cascade nests 100+ levels).
+# Deep trees are still verified — by digest.
+EMBED_DEPTH_LIMIT = 55
+
 US = "\x1f"
 
 
@@ -76,6 +82,12 @@ def fnv1a64(data: bytes) -> str:
         h ^= b
         h = (h * 0x100000001B3) & 0xFFFFFFFFFFFFFFFF
     return f"{h:016x}"
+
+
+def tree_depth(node):
+    if isinstance(node, Tree):
+        return 1 + max((tree_depth(c) for c in node.children), default=0)
+    return 1
 
 
 def counts(node):
@@ -115,6 +127,15 @@ def build_parser(pdir: Path, meta: dict) -> Lark:
         propagate_positions=opts["propagate_positions"],
         keep_all_tokens=opts["keep_all_tokens"],
     )
+    if opts.get("g_regex_flags"):
+        # Canonical `imsx` letters, like the compliance bank records them.
+        import re as _re
+
+        letter_flags = {"i": _re.I, "m": _re.M, "s": _re.S, "x": _re.X}
+        flags = 0
+        for ch in opts["g_regex_flags"]:
+            flags |= letter_flags[ch]
+        kwargs["g_regex_flags"] = flags
     if opts.get("regex_module"):
         kwargs["regex"] = True  # upstream loads this grammar with the regex module
     if opts.get("postlex") == "PythonIndenter":
@@ -156,7 +177,7 @@ def generate_project(pdir: Path) -> dict:
             "canon_len": len(c.encode("utf-8")),
             "fnv1a64": fnv1a64(c.encode("utf-8")),
         }
-        if case["canon_len"] <= EMBED_LIMIT:
+        if case["canon_len"] <= EMBED_LIMIT and tree_depth(tree) <= EMBED_DEPTH_LIMIT:
             case["tree"] = tree_to_dict(tree)
         cases.append(case)
     return {"name": name, "cases": cases}

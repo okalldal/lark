@@ -1,0 +1,1 @@
+proto.getExt(msg, cel.expr.conformance.proto2.repeated_test_all_types) == [cel.expr.conformance.proto2.TestAllTypes{single_int64: 1}, cel.expr.conformance.proto2.TestAllTypes{single_bool: true}]

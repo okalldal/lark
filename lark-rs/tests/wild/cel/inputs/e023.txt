@@ -1,0 +1,1 @@
+TestAllTypes{standalone_enum: TestAllTypes.NestedEnum(1)}

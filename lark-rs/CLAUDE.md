@@ -603,15 +603,28 @@ Initial findings (2026-06-10, the current xfail set — burndown candidates):
   empty anonymous EBNF helpers (`__anon_maybe_*` / `__anon_opt_*` / `__anon_group_*`),
   pointing at the optional-expansion strategy (Python duplicates rule bodies
   for `?`/`[]`; lark-rs introduces nullable helper rules).
+* **miniwdl_wdl does not build**: WDL's grammar contains a literally
+  *duplicated alternative* (`document: version? document_element* | version?
+  document_element*`) which Python Lark tolerates; lark-rs lowers both and
+  reports the rule R/R-colliding with itself — a duplicate-alternative
+  deduplication gap.
 * **synapse_storm does not build**: one terminal uses `regex`-module-only
   syntax (atomic groups `(?>…)` + recursive subpatterns `(?&NAME)`) that
   neither `regex` nor `fancy-regex` accepts.
 * **mappyfile builds but mis-lexes** every input (`Unexpected token STATUS`),
   and its build is slow (~1.5 s release vs Python's 0.13 s) — both a
   correctness and a build-cost target.
-* **Fully passing**: mistql (Earley + dynamic lexer), tartiflette,
-  poetry_markers, poetry_pep508 (file-relative `%import`) — 71/144 inputs
-  agree overall.
+* **gersemi_cmake builds but diverges** on 4 of 8 inputs (different child
+  counts under `start`) — a tree-shaping divergence to localize.
+* **Fully passing**: cel (40 conformance-suite expressions, incl.
+  `g_regex_flags` MULTILINE and 100+-level precedence cascades), pylogics_ltl
+  (relative rule imports + trailing-lookahead terminals through the M1
+  lowering), mistql (Earley + dynamic lexer), tartiflette, poetry_markers,
+  poetry_pep508 (file-relative `%import`) — 130/215 inputs agree overall.
+
+Oracle note: embedded trees are capped at 55 levels (`EMBED_DEPTH_LIMIT`) —
+serde_json refuses JSON nested deeper than 128 and a tree level costs ~2 —
+deeper trees (CEL's non-collapsed cascade) are digest-verified only.
 
 ---
 

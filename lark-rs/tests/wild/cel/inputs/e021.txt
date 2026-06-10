@@ -1,0 +1,1 @@
+TestAllTypes{single_value: 7e23}.single_value

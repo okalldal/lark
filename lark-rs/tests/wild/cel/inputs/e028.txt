@@ -1,0 +1,1 @@
+cel.block([msg.oneof_type, cel.index(0).payload, cel.index(1).map_int32_int64, cel.index(2)[0], cel.index(2)[1], cel.index(3) + cel.index(4), cel.index(2)[2], cel.index(5) + cel.index(6)], cel.index(7))

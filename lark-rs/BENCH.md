@@ -68,7 +68,10 @@ cost plus corpus and largest-input parse throughput, and prints `SKIP` for
 grammars lark-rs cannot build yet (the wild xfail set). First numbers worth
 knowing (2026-06-10, dev box): mappyfile **builds in ~1.5 s** release (Python
 Lark: 0.13 s) — a build-cost target; wild LALR parse throughput lands at
-9–14 MB/s; the mistql Earley + dynamic-lexer corpus is ~0.05 MB/s.
+6–14 MB/s on file-sized inputs; the mistql Earley + dynamic-lexer corpus is
+~0.05 MB/s; and the cel corpus (tiny expression inputs, deep non-collapsed
+trees) reports only ~0.3 MB/s — small-input per-parse overhead is part of the
+wild profile, unlike the synthetic large-input workloads.
 
 `vs_python_lark` is the **cross-engine end-to-end comparison** (issue #50, the
 "10–100×" headline) and is the single command that reports the speedup ratio: it
