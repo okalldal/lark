@@ -35,13 +35,14 @@
 //!     [`LookbehindGuard`] carrying its char-offset and the body's width window; the
 //!     driver checks the ≤`W` chars ending at that offset against `S`. The offset is
 //!     fixed only when every base element *before* the lookbehind is fixed-width — a
-//!     lookbehind after a variable-width prefix (`python.LONG_STRING`'s
-//!     `.*?(?<!\\)`) has no fixed offset and is **declined** here (routed to
-//!     `fancy-regex`), the reject-when-unsure direction. Lowering `python.LONG_STRING`
-//!     is **not** a generic variable-offset-lookbehind milestone: the next step is an
-//!     audited **delimited-token** long-string idiom (a sibling of the `python.STRING`
-//!     splice below — a small `"""`/`'''` delimiter automaton over an escaped body),
-//!     not a window-carry over arbitrary prefixes (`docs/LEXER_DFA_PLAN.md`, Stage B).
+//!     lookbehind after a variable-width prefix (`.*?(?<!\\)` outside a recognized
+//!     idiom) has no fixed offset and is **declined** here (routed to `fancy-regex`),
+//!     the reject-when-unsure direction. `python.LONG_STRING` — historically the case
+//!     this declined — now lowers via the audited **delimited-token** long-string idiom
+//!     ([`recognize_long_string_idiom`] below, a sibling of the `python.STRING` splice),
+//!     which *absorbs* the lookbehind by escape-pair body normalization rather than
+//!     window-carrying it over arbitrary prefixes (`docs/LEXER_DFA_PLAN.md`, Stage B).
+//!     The generic decline remains for every non-idiom variable-offset instance.
 
 use super::{Look, Node};
 use crate::error::GrammarError;
@@ -134,6 +135,13 @@ pub fn lower_boundary_dotall(
     // flags, exactly as the original does).
     if let Some(idiom) = recognize_regexp_idiom(&node) {
         return Ok(idiom.lower());
+    }
+    // The third audited delimited-token idiom (Stage B): the bundled `python.LONG_STRING`
+    // long-string shape. `dotall` is threaded exactly as the string idiom's — the lowered
+    // body class admits a newline iff the terminal's `.` would. The branches are
+    // unguarded, so no realizability gate is involved.
+    if let Some(idiom) = recognize_long_string_idiom(&node) {
+        return Ok(idiom.lower(dotall));
     }
     let mut branches = Vec::new();
     match &node {
@@ -260,8 +268,8 @@ fn lower_branch(pattern: &str, branch: &Node, dotall: bool) -> Result<LoweredBra
         return Err(zero_width(pattern));
     }
     // If the base *still* carries a lookaround assertion, it was nested inside a group
-    // (or behind a flag wrapper `(?s:…)` the loader bakes in — e.g. `python.LONG_STRING`
-    // arrives as `(?s:…(?<!\\)…)`), so we could not peel it to a fixed offset. Decline
+    // (or behind a flag wrapper — a user-written `(?s:…(?<!x)…)` reaches here with the
+    // assertion buried in the group), so we could not peel it to a fixed offset. Decline
     // (route to fancy) rather than hand a lookaround-bearing base to the DFA builder,
     // which cannot parse it — the reject-when-unsure direction.
     if base.has_assertion() {
@@ -877,12 +885,23 @@ fn split_prefix_and_arms(node: &Node) -> Option<(String, &Node)> {
 
 /// Peel a single capturing/non-capturing group wrapper to reach the arms `Alt` (or a
 /// bare single arm). Returns the inner node iff it is an `Alt` or a `Concat` (one arm).
+///
+/// **Only `(` and `(?:` opens are peeled — never a flag-scoped `(?i:`/`(?s:` wrapper.**
+/// Peeling a flag wrapper would silently discard its flags: the lowering would emit a
+/// branch whose body class reflects the *caller's* `dotall` while the original pattern
+/// ran under the wrapper's — the exact dotall mis-lowering the
+/// `g_regex_flags_dotall_long_string` seam fixture pins. The engine strips a
+/// whole-pattern flag wrapper back into the flag bitset *before* routing
+/// (`strip_whole_pattern_flag_wrapper` in `crate::lexer`), so a wrapper reaching here
+/// is out-of-idiom and must decline (reject-when-unsure).
 fn unwrap_arms(node: &Node) -> Option<&Node> {
     match node {
-        Node::Group { body, quant, .. } if quant.is_empty() => match body.as_ref() {
-            inner @ (Node::Alt(_) | Node::Concat(_)) => Some(inner),
-            _ => None,
-        },
+        Node::Group { open, body, quant } if quant.is_empty() && (open == "(" || open == "(?:") => {
+            match body.as_ref() {
+                inner @ (Node::Alt(_) | Node::Concat(_)) => Some(inner),
+                _ => None,
+            }
+        }
         inner @ (Node::Alt(_) | Node::Concat(_)) => Some(inner),
         _ => None,
     }
@@ -1087,6 +1106,149 @@ impl RegexpIdiom {
     }
 }
 
+// ─── The long-string idiom (the bundled python.LONG_STRING, Stage B) ─────────────
+//
+// `python.LONG_STRING` is `([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')`
+// with `/is` flags — a `<prefix> <qqq> body <qqq>` delimited token whose `(?<!\\)`
+// lookbehind sits after the variable-width `.*?`, the no-fixed-offset position the
+// generic M3 path declines. It is the third audited **delimited-token idiom**
+// (`docs/LEXER_DFA_PLAN.md`, Stage B), after the M4 STRING splice and the REGEXP
+// regex-literal idiom. The lowering is the escape-pair body normalization:
+//
+//   **The `(?<!\\)(\\\\)*?` is absorbed by forced escape pairing.** Rewrite the lazy
+//   escaped body to lazy escape-pair items:
+//
+//       .*?(?<!\\)(\\\\)*?<qqq>   →   (?:[^\\<nl>]|\\.)*?<qqq>
+//
+//   (`<nl>` = `\n` iff the terminal is not DOTALL, exactly the string idiom's
+//   threading.) A backslash can only be consumed as the start of a `\\.` pair (the
+//   class excludes it), so item segmentation is forced and an item *boundary* exists
+//   exactly at the positions where the maximal preceding backslash run has even
+//   length — which is precisely the `(?<!\\)(\\\\)*?` close condition. The lazy `*?`
+//   is **kept**: both sides close at the *first* even-parity `<qqq>`. This is the
+//   committed Type-A finding `tests/test_lookaround.rs::long_string_match_length_equivalence`
+//   pins (`LONG_ORIG ≡ LONG_NEW` over an exhaustive corpus with quotes, backslashes,
+//   newlines, and the `r` prefix). Unlike the STRING splice, the delimiter quote is
+//   *not* excluded from the body class — a lone `"` (or `""`) inside the body does not
+//   close; laziness picks the first full `<qqq>`, so no multi-char delimiter automaton
+//   is needed.
+//
+// The per-arm branches are **unguarded** (prefix duplicated per branch, arms in source
+// order) and join the leftmost-first plain engine, whose native lazy/priority semantics
+// reproduce the match end — the REGEXP precedent, so no guard machinery and no
+// realizability question. The per-arm split is itself verified: leftmost-first across
+// the two prefix-duplicated branches ≡ the original single pattern under `(?is)`
+// (0 divergences over 2,015,539 inputs, lengths 0–8 over `" ' \ a \n r`), and the
+// non-DOTALL `[^\\\n]` variant ≡ the unflagged original (0 divergences over 349,525
+// inputs). Gated by the route pins (`tests/test_lowering_routes.rs`), the hand canaries
+// (`tests/test_long_string_splice.rs`), the generative equivalence + parity/two-quote/
+// greedy mutants (`tests/test_lowering_equivalence.rs`), the state-pruned Route-1 proof
+// (`tests/test_lowering_proof.rs`), and the scanner-differential population.
+//
+// The recognizer matches **only** the exact bundled arm shape — delimiters `"""` or
+// `'''` only, open == close, the lazy `.*?`, the `(?<!\\)` lookbehind, and the lazy
+// `(\\\\)*?` escape group are all pinned; the optional prefix rides the same
+// [`split_prefix_and_arms`] gate the string idiom uses (bounded, assertion-free).
+// Anything else returns `None` and falls through to the generic path (which declines
+// the variable-offset lookbehind), the reject-when-unsure direction.
+
+/// A recognized long-string idiom: an optional bounded-width, assertion-free prefix
+/// followed by 1..n arms, each exactly `<qqq>.*?(?<!\\)(\\\\)*?<qqq>` for a
+/// triple-quote delimiter `<qqq>` ∈ {`"""`, `'''`}.
+pub struct LongStringIdiom {
+    /// The prefix regex source (e.g. `([ubf]?r?|r[ubf])`), or empty when there is none.
+    prefix: String,
+    /// The triple-quote delimiter of each arm (`"""` / `'''`), in source order.
+    delims: Vec<String>,
+}
+
+/// Recognize the [`LongStringIdiom`] in a parsed terminal `node`, or `None`. Structural
+/// and exact — see the section comment above for why no variant is admitted.
+pub fn recognize_long_string_idiom(node: &Node) -> Option<LongStringIdiom> {
+    let (prefix, arms_node) = split_prefix_and_arms(node)?;
+    let arm_nodes: Vec<&Node> = match arms_node {
+        Node::Alt(branches) => branches.iter().collect(),
+        other => vec![other],
+    };
+    let mut delims = Vec::new();
+    for arm in arm_nodes {
+        delims.push(match_long_string_arm(arm)?);
+    }
+    if delims.is_empty() {
+        return None;
+    }
+    Some(LongStringIdiom { prefix, delims })
+}
+
+/// Match one arm `<qqq>.*?(?<!\\)(\\\\)*?<qqq>`, returning the triple-quote delimiter
+/// `<qqq>`, or `None` if the arm is not exactly that shape. The opening delimiter and
+/// the lazy `.*?` arrive merged in a single atom (no structural boundary between them).
+fn match_long_string_arm(arm: &Node) -> Option<String> {
+    let parts = match arm {
+        Node::Concat(parts) => parts.as_slice(),
+        _ => return None,
+    };
+    if parts.len() != 4 {
+        return None;
+    }
+
+    // parts[0]: `<qqq>.*?` — the opening triple quote + the lazy any-body, one atom.
+    // Only the two bundled delimiters are admitted.
+    let delim = match &parts[0] {
+        Node::Atom(s) if s == "\"\"\".*?" => "\"\"\"".to_string(),
+        Node::Atom(s) if s == "'''.*?" => "'''".to_string(),
+        _ => return None,
+    };
+
+    // parts[1]: `(?<!\\)`, unquantified.
+    match &parts[1] {
+        Node::Assertion {
+            neg: true,
+            look: Look::Behind,
+            body,
+            quant,
+        } if quant.is_empty() && matches!(body.as_ref(), Node::Atom(s) if s == r"\\") => {}
+        _ => return None,
+    }
+
+    // parts[2]: `(\\\\)*?` — the lazy even-backslash run.
+    match &parts[2] {
+        Node::Group { open, body, quant }
+            if open == "("
+                && quant == "*?"
+                && matches!(body.as_ref(), Node::Atom(s) if s == r"\\\\") => {}
+        _ => return None,
+    }
+
+    // parts[3]: the closing delimiter, identical to the opening one.
+    if !matches!(&parts[3], Node::Atom(s) if *s == delim) {
+        return None;
+    }
+    Some(delim)
+}
+
+impl LongStringIdiom {
+    /// Lower the idiom: normalize each arm's lazy escaped body to lazy escape-pair
+    /// items (absorbing the `(?<!\\)(\\\\)*?` — the exact rewrite the section comment
+    /// proves), keeping the lazy close. One unguarded branch per arm, prefix duplicated;
+    /// `dotall` controls whether the body class admits a newline (excluded iff not
+    /// DOTALL, so the class tracks what the original `.` matches under the terminal's
+    /// flags; the `\\.` pair's second char tracks it natively via the engine's flag
+    /// wrap).
+    fn lower(&self, dotall: bool) -> Vec<LoweredBranch> {
+        let nl = if dotall { "" } else { r"\n" };
+        self.delims
+            .iter()
+            .map(|d| LoweredBranch {
+                regex: format!("{p}{d}(?:[^\\\\{nl}]|\\\\.)*?{d}", p = self.prefix),
+                leading: None,
+                trailing: None,
+                lookbehind: Vec::new(),
+            })
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1282,12 +1444,73 @@ mod tests {
     }
 
     #[test]
+    fn long_string_idiom_lowers_to_two_unguarded_branches() {
+        const LONG: &str =
+            r#"([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')"#;
+        // DOTALL (the bundled `/is` case): the body class admits a newline.
+        let b = lower_boundary_dotall(LONG, true).unwrap();
+        assert_eq!(b.len(), 2);
+        assert_eq!(b[0].regex, r#"([ubf]?r?|r[ubf])"""(?:[^\\]|\\.)*?""""#);
+        assert_eq!(b[1].regex, r#"([ubf]?r?|r[ubf])'''(?:[^\\]|\\.)*?'''"#);
+        for br in &b {
+            assert!(
+                br.leading.is_none() && br.trailing.is_none() && br.lookbehind.is_empty(),
+                "the (?<!\\\\)(\\\\\\\\)*? is absorbed by the body normalization, not \
+                 carried as a guard"
+            );
+        }
+        // Non-DOTALL: the body class must exclude the newline the original `.` excludes.
+        let b = lower_boundary_dotall(LONG, false).unwrap();
+        assert_eq!(b[0].regex, r#"([ubf]?r?|r[ubf])"""(?:[^\\\n]|\\.)*?""""#);
+        assert_eq!(b[1].regex, r#"([ubf]?r?|r[ubf])'''(?:[^\\\n]|\\.)*?'''"#);
+        // The prefix-less single-arm form (the `newline_dotall_body` fixture's shape)
+        // lowers too, to one branch.
+        let b = lower_boundary_dotall(r#"""".*?(?<!\\)(\\\\)*?""""#, true).unwrap();
+        assert_eq!(b.len(), 1);
+        assert_eq!(b[0].regex, r#""""(?:[^\\]|\\.)*?""""#);
+    }
+
+    #[test]
+    fn long_string_idiom_recognizer_is_exact() {
+        // The bundled shape is recognized…
+        for p in [
+            r#"([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')"#,
+            r#"""".*?(?<!\\)(\\\\)*?""""#,
+            r#"('''.*?(?<!\\)(\\\\)*?''')"#,
+        ] {
+            let node = super::super::parse(p).unwrap_or_else(|e| panic!("parse {p:?}: {e:?}"));
+            assert!(
+                recognize_long_string_idiom(&node).is_some(),
+                "recognizer must accept the bundled long-string shape: {p:?}"
+            );
+        }
+        // …and every near-miss is not (each deviates in one pinned part).
+        for p in [
+            r#"(r?)("".*?(?<!\\)(\\\\)*?"")"#, // two-quote delimiter
+            r#"""".*?(?<!\\)(\\\\)*?'''"#,     // mismatched open/close
+            r#"""".*?(\\\\)*?""""#,            // missing the lookbehind
+            r#"""".*?(?<!x)(\\\\)*?""""#,      // wrong lookbehind body
+            r#"""".*?(?<=\\)(\\\\)*?""""#,     // positive lookbehind
+            r#"""".*(?<!\\)(\\\\)*?""""#,      // greedy `.*` body
+            r#"""".*?(?<!\\)(\\\\)*""""#,      // greedy escape group
+            r#"""".*?(?<!\\)(\\)*?""""#,       // wrong escape-group body
+            r"\/\/\/.*?(?<!\\)(\\\\)*?\/\/\/", // tripled non-quote delimiter
+        ] {
+            let node = super::super::parse(p).unwrap_or_else(|e| panic!("parse {p:?}: {e:?}"));
+            assert!(
+                recognize_long_string_idiom(&node).is_none(),
+                "recognizer wrongly accepted near-miss {p:?}"
+            );
+        }
+    }
+
+    #[test]
     fn declines_lookbehind_after_variable_prefix() {
         // A lookbehind after a variable-width prefix (`\w+`, `.*?`) has no fixed offset
-        // — declined (routed to fancy), the reject-when-unsure direction. This is the
-        // python.LONG_STRING `.*?(?<!\\)` case, which the audited delimited-token
-        // long-string idiom (Stage B) is the planned route for — not a generic
-        // variable-offset window-carry.
+        // — declined (routed to fancy), the reject-when-unsure direction. The audited
+        // long-string idiom now lowers the *complete* bundled shape, but only the exact
+        // shape: this truncated near-miss (no closing `"""`) is not the idiom and must
+        // still decline — never a generic variable-offset window-carry.
         assert!(lower_boundary(r"\w+(?<!_)x").is_err());
         assert!(lower_boundary(r#"""".*?(?<!\\)(\\\\)*?"#).is_err());
     }

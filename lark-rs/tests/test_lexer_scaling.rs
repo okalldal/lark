@@ -7,9 +7,10 @@
 //! `fancy-regex` searches (`captures_read_at`, `find_from_pos`) are **leftmost**,
 //! not anchored: when a terminal does *not* match at `pos` they scan forward toward
 //! the next possible match and the result is then rejected by a `start() == pos`
-//! check. A low-rank lookaround terminal on the `fancy-regex` side-probe — e.g. the
-//! bundled `python.LONG_STRING` today (historically `python.STRING` / `lark.REGEXP`,
-//! before their lowerings landed) — is tried at *every* token boundary, so each failing attempt
+//! check. A low-rank lookaround terminal on the `fancy-regex` side-probe — historically
+//! the bundled `python.STRING` / `lark.REGEXP` / `python.LONG_STRING`, before their
+//! lowerings landed; today only per-instance declines and unsupported user lookaround
+//! ride it — is tried at *every* token boundary, so each failing attempt
 //! forward-scans O(remaining input). Over `n` tokens that is **O(n²)** lexing, even
 //! though every token is unambiguous. Anchoring the per-position search (so it only
 //! ever looks at `pos`) collapses it back to linear.
@@ -45,8 +46,9 @@ use lark_rs::{Lark, LarkOptions, LexerType, ParserAlgorithm};
 /// `WORD`'s, so the `(-priority, -pattern_len, name)` sort tries it first at every
 /// position. Over a run of bare words `STR` does not match at any word position, so
 /// an unanchored search scans ahead to the sole (trailing) string — the O(n²) shape.
-/// This mirrors the bundled fancy-routed lookaround terminals (today
-/// `python.LONG_STRING`; historically `python.STRING` / `lark.REGEXP`)
+/// This mirrors the historically fancy-routed bundled lookaround terminals
+/// (`python.STRING` / `lark.REGEXP` / `python.LONG_STRING`, all lowered now — the
+/// class this models survives in per-instance user declines)
 /// exactly, without depending on the stdlib grammars' internals.
 const LOOKAROUND_GRAMMAR: &str = r#"
     start: (WORD | STR)+

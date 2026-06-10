@@ -336,6 +336,13 @@ common path *improves*, it does not regress). On a grammar dominated by the
 backends share that probe, so the ratio is ~1.0 — the swap neither helps nor hurts
 the part it doesn't touch.
 
+> **Staleness note (2026-06-10).** The "shared probe, ratio ~1.0" premise above (and
+> the `python_8k` row's reading below) describes the recorded runs of 2026-06-08/09.
+> Since the Stage-B idioms + the flag-wrapper strip landed, the **Dfa** backend lexes
+> `python.lark` fully lowered (zero fancy side-probes) while the `Regex` reference
+> still pays them — the workload now measures lowered-vs-fancy, and the python ratio
+> is expected to move in the Dfa backend's favor on the next recorded run.
+
 ### Reference run
 
 Machine-specific — **only ratios travel**; capture fresh numbers on your own box.

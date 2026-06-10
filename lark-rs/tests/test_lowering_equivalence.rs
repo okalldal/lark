@@ -17,9 +17,9 @@ mod common;
 
 use common::lowering::{
     boundary_mutations, corpus, fancy_matcher, fancy_prefix, has_guard, has_lookbehind,
-    lookbehind_mutations, lowered_prefix, mutant_lookbehind_matcher, mutant_matcher,
-    regexp_idiom_terminals, string_idiom_terminals, supported_terminals, BoundaryMutation,
-    GenTerminal, REGEXP_RAW,
+    long_string_idiom_terminals, lookbehind_mutations, lowered_prefix, mutant_lookbehind_matcher,
+    mutant_matcher, regexp_idiom_terminals, string_idiom_terminals, supported_terminals,
+    BoundaryMutation, GenTerminal, REGEXP_RAW,
 };
 use lark_rs::ShapeClass;
 
@@ -315,6 +315,105 @@ fn dropping_the_nonempty_body_bump_is_caught_by_the_empty_regexp() {
         "the drop-the-`+?`-bump mutant was NOT caught by a `//`-shaped input — the \
          regexp idiom's empty-body guard would be undefended (a hole in the net)"
     );
+}
+
+/// The **long-string idiom** (`python.LONG_STRING`, Stage B): the lowered match-length
+/// must equal the `fancy-regex` oracle over every exhaustive corpus — which includes the
+/// empty `""""""`, overlapping quote runs, lone quotes inside the body, escape parity
+/// (`"""\"""` rejected, `"""\\"""` accepted), the prefixes, and (in the `LONG_nl`
+/// population) the non-dotall newline exclusion. `lowered_prefix` returning `Err` (a
+/// declined terminal) is surfaced as a divergence, so a LONG_STRING that *failed* to
+/// lower fails loudly rather than passing vacuously.
+#[test]
+fn long_string_idiom_lowered_equals_fancy() {
+    let terms = long_string_idiom_terminals();
+    assert!(
+        !terms.is_empty(),
+        "no long-string-idiom terminals generated"
+    );
+    let mut failures = Vec::new();
+    for t in &terms {
+        if let Some(d) = equivalence_divergence(t) {
+            failures.push(d);
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "long-string-idiom generative-equivalence divergence(s):\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+/// **The parity-blind body mutant.** The `(?<!\\)(\\\\)*?` close-parity logic is
+/// absorbed into the `\\.` escape-pair item; a lowering that *forgot* the pairing (body
+/// `(?:.)*?` — any chars, no forced escape pairs) would close at an odd-parity `"""`
+/// the oracle rejects. The meta-test asserts this mutant is **caught**, and that a
+/// witness has exactly the escaped-close shape (a `\` immediately before the closing
+/// quote run) — so the parity canary genuinely defends the idiom.
+#[test]
+fn parity_blind_body_is_caught_by_the_odd_escape_close() {
+    // The wrong lowering of the prefix-less dq arm: pairing dropped, laziness kept.
+    let mutant = fancy_matcher(r#""""(?:.)*?""""#).expect("mutant compiles");
+    let oracle = fancy_matcher(r#"(""".*?(?<!\\)(\\\\)*?""")"#).expect("oracle compiles");
+
+    let mut caught_by_odd_escape = false;
+    for t in &long_string_idiom_terminals() {
+        if !t.alphabet.contains(&'"') || !t.alphabet.contains(&'\\') {
+            continue;
+        }
+        for input in corpus(&t.alphabet, t.max_len) {
+            let correct = fancy_prefix(&oracle, &input);
+            let wrong = fancy_prefix(&mutant, &input);
+            if correct == wrong {
+                continue;
+            }
+            // The load-bearing divergence: the oracle rejects (or closes later than) a
+            // `"""…\"""` whose close is escaped, while the parity-blind mutant accepts it.
+            if wrong.is_some() && input.contains(r#"\""""#) {
+                caught_by_odd_escape = true;
+            }
+        }
+    }
+    assert!(
+        caught_by_odd_escape,
+        "the parity-blind mutant was NOT caught by an escaped-close input — the \
+         escape-pair normalization would be undefended (a hole in the net)"
+    );
+}
+
+/// **The two-quote-close mutant** (an off-by-one delimiter: `""` instead of `"""`). It
+/// closes the empty long string at 4 chars (`""""` of `""""""`) where the oracle needs
+/// 6 — caught on a quote run, pinning the multi-char delimiter handling.
+#[test]
+fn two_quote_close_is_caught_by_the_empty_long_string() {
+    let mutant = fancy_matcher(r#""""(?:[^"\\]|\\.)*?"""#).expect("mutant compiles");
+    let oracle = fancy_matcher(r#"(""".*?(?<!\\)(\\\\)*?""")"#).expect("oracle compiles");
+    let correct = fancy_prefix(&oracle, "\"\"\"\"\"\"");
+    let wrong = fancy_prefix(&mutant, "\"\"\"\"\"\"");
+    assert_eq!(
+        correct,
+        Some(6),
+        "the oracle takes the full empty long string"
+    );
+    assert!(
+        wrong.is_some() && wrong < correct,
+        "the two-quote-close mutant must under-close on the quote run (got {wrong:?})"
+    );
+}
+
+/// **The greedy-body mutant** (`*` instead of `*?`). The laziness is load-bearing: on an
+/// 8-quote run the lazy close takes the first valid `"""` (6 chars, the empty string),
+/// the greedy one swallows to the last (8 chars) — caught, pinning that the lowering
+/// must keep the lazy quantifier.
+#[test]
+fn greedy_body_is_caught_by_the_long_quote_run() {
+    let mutant = fancy_matcher(r#""""(?:[^\\]|\\.)*""""#).expect("mutant compiles");
+    let oracle = fancy_matcher(r#"(""".*?(?<!\\)(\\\\)*?""")"#).expect("oracle compiles");
+    let run = "\"\"\"\"\"\"\"\""; // 8 quotes
+    let correct = fancy_prefix(&oracle, run);
+    let wrong = fancy_prefix(&mutant, run);
+    assert_eq!(correct, Some(6), "lazy close takes the first valid triple");
+    assert_eq!(wrong, Some(8), "the greedy mutant swallows the whole run");
 }
 
 /// Active **now**: the oracle, the generators, and the exhaustive corpus all work,

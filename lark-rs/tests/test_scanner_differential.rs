@@ -33,8 +33,8 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 
 use common::lowering::{
-    corpus, regexp_idiom_terminals, string_idiom_terminals, supported_terminals, GenTerminal,
-    REGEXP_RAW,
+    corpus, long_string_idiom_terminals, regexp_idiom_terminals, string_idiom_terminals,
+    supported_terminals, GenTerminal, LONG_STRING_RAW, REGEXP_RAW,
 };
 use lark_rs::grammar::terminal::flags;
 use lark_rs::{
@@ -139,9 +139,9 @@ struct Differential {
     /// `fancy-regex`, exactly as the Regex backend does): a non-greedy-monotone guarded
     /// base, a variable-offset lookbehind, an internal lookahead. Both backends agree
     /// trivially on these, so they are tracked as a **pending** (routed-to-fancy) skip
-    /// rather than a lowered comparison. With M1/M2/M3 landed, the generated population
-    /// is all lowerable, so this is 0 there; it stays meaningful for the bundled
-    /// terminals the variable-offset / STRING-splice milestone still declines.
+    /// rather than a lowered comparison. With every shape and bundled idiom landed
+    /// (M1–M4 + the Stage-B REGEXP/LONG_STRING idioms) the whole generated population
+    /// lowers, so this is 0 today; it stays live for any future generated decline.
     pending: usize,
     /// Lookaround grammars actually *compared* (their lowering landed) — a
     /// **dedicated** counter, separate from the shared `grammars`/`compared` the
@@ -326,9 +326,11 @@ fn run_json_corpus(d: &mut Differential) {
 }
 
 /// A couple of real Python source files under the bundled `python.lark`. The inputs
-/// are capped at a line boundary near `CAP` bytes so the (constant-factor-heavy)
-/// `fancy-regex` `STRING`/`LONG_STRING` side-probes — run identically by **both**
-/// backends — keep the test quick while still exercising strings, comments,
+/// are capped at a line boundary near `CAP` bytes to keep the corpus quick: the
+/// **Regex** reference backend still pays the (constant-factor-heavy) `fancy-regex`
+/// side-probes for every lookaround terminal, while the **Dfa** side now lexes
+/// python.lark fully lowered (STRING via the M4 splice, LONG_STRING via the Stage-B
+/// idiom — the files' real docstrings drive it). Still exercises strings, comments,
 /// numbers, names, and operators on real code.
 fn run_python_files(d: &mut Differential) {
     const CAP: usize = 6_000;
@@ -441,19 +443,20 @@ fn lookaround_grammar(t: &GenTerminal) -> (String, String) {
 /// terminal: build both backends (build parity is enforced), then either compare
 /// token streams over the terminal's exhaustive corpus — *iff* the terminal actually
 /// lowers ([`lower_terminal`] returns `Ok`) — or record it as a **pending**
-/// (routed-to-fancy) skip when the lowering declines it. With M1/M2/M3 landed the
-/// generated population is all lowerable, so every grammar here is compared; the
-/// pending path stays live for the bundled terminals the variable-offset / STRING
-/// milestone still declines.
+/// (routed-to-fancy) skip when the lowering declines it. With every shape and bundled
+/// idiom landed the generated population is all lowerable, so every grammar here is
+/// compared; the pending path stays live for any future generated decline.
 fn run_lookaround_grammars(d: &mut Differential) {
     // The bare boundary/lookbehind population, python.STRING's real nested/prefixed
-    // opening-guard idiom (the marquee L2 splice), *and* lark.REGEXP's regex-literal
-    // idiom (Stage B) — all must lex byte-identically under the two backends, and (with
-    // the splice + idiom landed) all genuinely lower.
+    // opening-guard idiom (the marquee L2 splice), lark.REGEXP's regex-literal idiom,
+    // *and* python.LONG_STRING's long-string idiom (Stage B) — all must lex
+    // byte-identically under the two backends, and (with the splice + idioms landed)
+    // all genuinely lower.
     for t in supported_terminals()
         .into_iter()
         .chain(string_idiom_terminals())
         .chain(regexp_idiom_terminals())
+        .chain(long_string_idiom_terminals())
     {
         let (grammar, pattern) = lookaround_grammar(&t);
         let start = ["start".to_string()];
@@ -531,6 +534,17 @@ fn test_scanner_backends_lex_identically() {
             Ok(Lowered::Branches(_))
         ),
         "lark.REGEXP must LOWER (Lowered::Branches) via the regex-literal idiom"
+    );
+    // And python.LONG_STRING: the python.lark differential above runs with LONG_STRING
+    // *lowered* (the Stage-B long-string idiom), so the real docstring-bearing Python
+    // source is the lowered engine agreeing with fancy — the Dfa side now lexes
+    // python.lark with no fancy side-probe at all.
+    assert!(
+        matches!(
+            lower_terminal_dotall("LONG_STRING", LONG_STRING_RAW, true),
+            Ok(Lowered::Branches(_))
+        ),
+        "python.LONG_STRING must LOWER (Lowered::Branches) via the long-string idiom"
     );
 
     eprintln!(

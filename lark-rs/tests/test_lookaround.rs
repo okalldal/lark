@@ -189,15 +189,19 @@ fn test_lookaround_oracle() {
 // engines are leftmost-first/backtracking like Python `re`, and the Python-generated
 // oracles independently cross-check each side, so the proof is triangulated.
 //
-// E2a changes NO grammar — the bundled files stay verbatim upstream and every string
-// terminal stays on `fancy-regex`. This harness only *classifies* the candidates, so
-// the eventual E4 rewrite (and any future edit) is gated by a proof, not a guess:
+// E2a changes NO grammar — the bundled files stay verbatim upstream. This harness only
+// *classifies* the candidates, so any deployment of a rewrite is gated by a proof, not
+// a guess:
 //   * `LONG_STRING` and the classic block-comment shape are **cleanly equivalent** —
-//     the rewrites are proven ready (E4 deploys `LONG_STRING`; E2/E5 the block comment),
-//     but are not applied to the grammar in this milestone.
+//     the rewrites are proven ready. The grammar is still never edited; the active DFA
+//     plan instead *lowered* `LONG_STRING` in the lexer (the Stage-B long-string idiom,
+//     `recognize_long_string_idiom`), with `LONG_NEW` below as the committed proof
+//     basis for its escape-pair body normalization.
 //   * `STRING` is a **negative result**: the standard lookaround-free rewrite is *not*
 //     equivalent (it accepts `""""`, which the oracle rejects), so `STRING` must stay on
-//     its lookaround form. The test pins exactly why, so the conclusion can't rot.
+//     its lookaround form — in the lexer it is lowered by the M4 opening-guard splice,
+//     which preserves the `(?!"")` semantics. The test pins exactly why, so the
+//     conclusion can't rot.
 mod matchlen {
     use fancy_regex::Regex as Fancy;
     use regex::Regex;

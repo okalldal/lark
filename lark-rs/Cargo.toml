@@ -29,16 +29,19 @@ perf-counters = []
 
 [dependencies]
 regex = "1.10"
-# Backtracking-regex overlay for the bundled-grammar terminals that use lookaround
-# (lookahead/lookbehind) which the linear-time `regex` crate cannot compile (issue #40).
-# This is a RUNTIME dependency *today*: the lexer DFA plan has lowered most bounded
-# lookaround into the `regex-automata` DFA, but two bundled terminals still *decline* to
-# `fancy-regex` at runtime (`python.LONG_STRING`, `lark.REGEXP`), so the side-probe is
-# still live. The plan is to drop it from the runtime at **L4** (once every bundled
-# lookaround terminal lowers or is rejected by policy) and keep `fancy-regex` thereafter
-# as a permanent **dev/test oracle** only — the independent match-length reference the
-# lowering is verified against (`docs/LEXER_DFA_PLAN.md`, L4 + Verification). Because
-# `regex` is a subset, a pattern that compiles with `regex` is never handed to `fancy-regex`.
+# Backtracking-regex overlay for lookaround terminals (lookahead/lookbehind) which the
+# linear-time `regex` crate cannot compile (issue #40). This is a RUNTIME dependency
+# *today*: the lexer DFA plan has lowered every bundled lookaround terminal into the
+# `regex-automata` DFA (STRING/REGEXP/LONG_STRING via the M4/Stage-B idioms), but the
+# side-probe is still live for per-instance *declines* in user grammars (a
+# variable-offset lookbehind outside a recognized idiom, a non-realizable guarded base)
+# and the `Unsupported` compatibility fallback. Dropping it from the runtime is **L4**,
+# which needs two policy decisions: flip the `Unsupported` fallback to a build error,
+# AND decide the per-instance `DeclinedToFancy` cases (error vs. documented fancy
+# support). `fancy-regex` stays thereafter as a permanent **dev/test oracle** only — the
+# independent match-length reference the lowering is verified against
+# (`docs/LEXER_DFA_PLAN.md`, L4 + Verification). Because `regex` is a subset, a pattern
+# that compiles with `regex` is never handed to `fancy-regex`.
 fancy-regex = "0.18"
 # Dense-DFA support for the strict-mode regex-collision check (issue #35): the
 # `regex` crate has no intersection/emptiness test, so we drop to its automata

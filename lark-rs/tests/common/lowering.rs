@@ -508,6 +508,76 @@ pub fn regexp_idiom_reject_patterns() -> Vec<String> {
     .collect()
 }
 
+/// The bundled `python.LONG_STRING` pattern, verbatim (the `/is` flags live on the
+/// terminal) — the Stage-B **long-string idiom** (`<prefix> <qqq> body <qqq>` with the
+/// escape-parity `(?<!\\)(\\\\)*?` close, absorbed by the escape-pair body
+/// normalization).
+pub const LONG_STRING_RAW: &str =
+    r#"([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')"#;
+
+/// The **long-string idiom** population (`python.LONG_STRING`, Stage B). The acceptance
+/// surface is narrow (triple-quote delimiters only), so the population varies the
+/// structural forms the recognizer admits (prefix-less single arm, both quote kinds, the
+/// full bundled two-arm + prefix shape) and the **exhaustive corpus**: quote/backslash
+/// stress for the parity close and the overlapping-quote-run boundaries, a newline
+/// alphabet for the **non-dotall** `\n`-exclusion (the one-terminal harness grammar is
+/// unflagged, so these corpora run non-DOTALL — consistently on both the lowered and the
+/// fancy-oracle side; the real `/is` path is covered by the splice canaries and the
+/// backend differential in `test_long_string_splice.rs`), and an `r`-prefix alphabet for
+/// the prefix interplay. Tokens need ≥ 6 chars (`""""""`), hence the longer max_len.
+///
+/// `shape` is [`ShapeClass::BoundedLookbehind`] — what the pattern's assertions actually
+/// classify as (unlike STRING/REGEXP there is no lookahead to re-tag).
+pub fn long_string_idiom_terminals() -> Vec<GenTerminal> {
+    let dq_arm = r#"(""".*?(?<!\\)(\\\\)*?""")"#;
+    let sq_arm = r#"('''.*?(?<!\\)(\\\\)*?''')"#;
+    let cases: [(&str, &str, &[char], usize); 4] = [
+        // prefix-less dq arm: quote/backslash/content stress to length 8
+        ("dq", dq_arm, &['"', '\\', 'a'], 8),
+        // sq twin
+        ("sq", sq_arm, &['\'', '\\', 'a'], 8),
+        // the non-dotall newline-exclusion corpus (a `\n` may appear nowhere in a body)
+        ("nl", dq_arm, &['"', '\\', '\n'], 8),
+        // the full bundled shape: prefix + both arms; `r""""""` is 7 chars
+        ("full", LONG_STRING_RAW, &['"', '\'', '\\', 'r'], 7),
+    ];
+    cases
+        .into_iter()
+        .map(|(label, pattern, alphabet, max_len)| GenTerminal {
+            name: format!("LONG_{label}"),
+            pattern: pattern.to_string(),
+            shape: ShapeClass::BoundedLookbehind,
+            alphabet: alphabet.to_vec(),
+            max_len,
+        })
+        .collect()
+}
+
+/// **Near-miss long-string-idiom shapes the recognizer must NOT accept** — its reject
+/// surface. Each is the bundled idiom with exactly one pinned part changed: the
+/// delimiter, the lookbehind, the escape group, or a quantifier's laziness. None may
+/// lower (each would need its own proof; note the missing-lookbehind variant is
+/// lookaround-*free* and so classifies `Plain` — "not Branches" is the assertion, same
+/// as the string-idiom reject convention). The recognizer-level assertion lives in
+/// `src/lookaround/lower.rs::tests::long_string_idiom_recognizer_is_exact`; the
+/// route-level one in `tests/test_long_string_splice.rs`.
+pub fn long_string_idiom_reject_patterns() -> Vec<String> {
+    [
+        r#"(r?)("".*?(?<!\\)(\\\\)*?"")"#, // two-quote delimiter
+        r#"""".*?(?<!\\)(\\\\)*?'''"#,     // mismatched open/close
+        r#"""".*?(\\\\)*?""""#,            // missing the lookbehind (lookaround-free)
+        r#"""".*?(?<!x)(\\\\)*?""""#,      // wrong lookbehind body
+        r#"""".*?(?<=\\)(\\\\)*?""""#,     // positive lookbehind
+        r#"""".*(?<!\\)(\\\\)*?""""#,      // greedy `.*` body
+        r#"""".*?(?<!\\)(\\\\)*""""#,      // greedy escape group
+        r#"""".*?(?<!\\)(\\)*?""""#,       // wrong escape-group body
+        r"\/\/\/.*?(?<!\\)(\\\\)*?\/\/\/", // tripled non-quote delimiter
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect()
+}
+
 /// **Adversarial string-idiom shapes with a *non-literal* delimiter** — the recognizer's
 /// own acceptance surface (not just the classifier's). Each is structurally the string
 /// idiom `<q>(?!<q><q>).*?(?<!\\)(\\\\)*?<q>` but with `<q>` a regex construct that is

@@ -21,9 +21,10 @@ use lark_rs::{
 /// The bundled `python.STRING` pattern, verbatim — lowers via the M4 opening-guard splice.
 const STRING_RAW: &str =
     r#"([ubf]?r?|r[ubf])("(?!"").*?(?<!\\)(\\\\)*?"|'(?!'').*?(?<!\\)(\\\\)*?')"#;
-/// The bundled `python.LONG_STRING` (DOTALL): a lazy body with a multi-char `"""` close and
-/// no opening guard — its `(?<!\\)` sits after a variable-width `.*?`, so the fixed-offset
-/// lowering **declines** it.
+/// The bundled `python.LONG_STRING` (DOTALL): its `(?<!\\)` sits after a variable-width
+/// `.*?` — the position the generic fixed-offset lowering declines — but the whole
+/// terminal is the exact Stage-B **long-string idiom** (`recognize_long_string_idiom`),
+/// which lowers it by absorbing the escape-parity close into escape-pair body items.
 const LONG_STRING_RAW: &str =
     r#"([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')"#;
 /// The bundled `lark.REGEXP`: its `(?!\/)` is internal to the top-level walk, but the
@@ -74,18 +75,64 @@ fn python_string_routes_to_lowered() {
     }
 }
 
-/// `python.LONG_STRING` is **not lowered** — its lookbehind sits after a variable-width
-/// `.*?`, so the fixed-offset lowering declines it to [`LoweringRoute::DeclinedToFancy`].
-/// Crucially it is **not** `Unsupported`: every assertion is a *supported shape*; the
-/// decline is per-instance, a transitional route, not a classifier reject.
+/// `python.LONG_STRING` now routes to [`LoweringRoute::Lowered`] via the Stage-B
+/// long-string idiom: two **unguarded** lookaround-free branches (one per quote arm,
+/// prefix duplicated), the `(?<!\\)(\\\\)*?` escape-parity close absorbed by the
+/// escape-pair body normalization, the lazy `*?` kept. It is in particular no longer
+/// `DeclinedToFancy` — that route was its pre-idiom outcome — and was never
+/// `Unsupported`.
 #[test]
-fn python_long_string_routes_to_declined_to_fancy() {
-    let route = route_terminal_dotall("LONG_STRING", LONG_STRING_RAW, true);
+fn python_long_string_routes_to_lowered() {
+    match route_terminal_dotall("LONG_STRING", LONG_STRING_RAW, true) {
+        LoweringRoute::Lowered(branches) => {
+            assert_eq!(
+                branches.len(),
+                2,
+                "one branch per quote arm, got {branches:#?}"
+            );
+            assert_eq!(
+                branches[0].regex,
+                r#"([ubf]?r?|r[ubf])"""(?:[^\\]|\\.)*?""""#
+            );
+            assert_eq!(
+                branches[1].regex,
+                r#"([ubf]?r?|r[ubf])'''(?:[^\\]|\\.)*?'''"#
+            );
+            for b in &branches {
+                assert!(
+                    b.leading.is_none() && b.trailing.is_none() && b.lookbehind.is_empty(),
+                    "the branches are unguarded — the lookbehind is absorbed, not carried"
+                );
+            }
+        }
+        other => {
+            panic!("python.LONG_STRING must now lower via the long-string idiom, got {other:?}")
+        }
+    }
+    // Non-DOTALL instances of the same shape exclude the newline the original `.`
+    // excludes — the `dotall` threading is per-instance, not baked into the idiom.
+    match route_terminal_dotall("LONG_STRING", LONG_STRING_RAW, false) {
+        LoweringRoute::Lowered(branches) => assert!(
+            branches[0].regex.contains(r"[^\\\n]"),
+            "the non-dotall lowering must exclude \\n from the body class, got {:?}",
+            branches[0].regex
+        ),
+        other => panic!("the non-dotall instance must lower too, got {other:?}"),
+    }
+}
+
+/// A **per-instance decline is still constructible** — the route LONG_STRING vacated. A
+/// variable-offset lookbehind outside any recognized idiom (`\w+(?<!_)x`) routes to
+/// [`LoweringRoute::DeclinedToFancy`]: every assertion is a *supported shape* (bounded
+/// lookbehind), so it is not `Unsupported`; the lowering declines this instance because
+/// the offset is not fixed — a transitional route to `fancy-regex`, not a reject.
+#[test]
+fn variable_offset_lookbehind_routes_to_declined_to_fancy() {
+    let route = route_terminal("VAROFF", r"\w+(?<!_)x");
     assert!(
         matches!(route, LoweringRoute::DeclinedToFancy { .. }),
-        "LONG_STRING must decline to fancy (a per-instance decline, not a reject), got {route:?}"
+        "a variable-offset lookbehind must decline to fancy, got {route:?}"
     );
-    // It is in particular neither lowered nor an out-of-shape rejection.
     assert!(!matches!(route, LoweringRoute::Lowered(_)));
     assert!(!matches!(route, LoweringRoute::Unsupported { .. }));
 }
@@ -196,8 +243,9 @@ fn route_flattens_to_lower_terminal_api() {
         lower_terminal("TRAIL", "[0-9]+(?![0-9])"),
         Ok(Lowered::Branches(_))
     ));
-    // DeclinedToFancy, Unsupported both flatten to Err.
-    assert!(lower_terminal("LONG_STRING", LONG_STRING_RAW).is_err());
+    // DeclinedToFancy, Unsupported both flatten to Err. (LONG_STRING lowers now, so the
+    // decline leg uses a per-instance variable-offset lookbehind instead.)
+    assert!(lower_terminal("VAROFF", r"\w+(?<!_)x").is_err());
     assert!(lower_terminal("INT", "a(?=b)c").is_err());
 }
 

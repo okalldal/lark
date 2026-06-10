@@ -8,14 +8,12 @@
 //! boundaries (the DFA is byte-level, terminals are char-level); `g_regex_flags`;
 //! and `PatternID` leftmost-first priority surviving the union.
 //!
-//! What is **active now** (every fixture, every build): both scanner backends *build*
-//! the grammar (build parity), and the fixture's headline lookaround terminal
-//! classifies into the shape it targets. What is **pending** (`#[ignore]`'d until the
-//! relevant shape lands): the lowered token stream equals the `fancy-regex` reference
-//! — i.e. the Dfa backend (once it *lowers* instead of routing to `fancy-regex`)
-//! lexes byte-identically to the Regex backend. That comparison is the per-fixture
-//! restriction of the master differential, and flips on automatically when lowering
-//! replaces the `fancy` routing.
+//! Everything here is **active** (nothing is `#[ignore]`'d): both scanner backends
+//! *build* each fixture (build parity), the fixture's headline lookaround terminal
+//! classifies into the shape it targets, and the lowered token stream equals the
+//! `fancy-regex` reference — the per-fixture restriction of the master differential.
+//! With every shape and Stage-B idiom landed, the Dfa side genuinely lowers every
+//! fixture, so each comparison is a real lowered-vs-fancy gate at its seam.
 
 mod common;
 
@@ -85,6 +83,21 @@ fn fixtures() -> Vec<SeamFixture> {
             seam: "a DOTALL body crossing newlines with an even-backslash lookbehind close",
             grammar: "start: LONG\nLONG: /\"\"\".*?(?<!\\\\)(\\\\\\\\)*?\"\"\"/s\n",
             g_regex_flags: 0,
+            input: "\"\"\"a\nb\"\"\"",
+            classify_target: Some((
+                r#""""\.*?(?<!\\)(\\\\)*?""""#,
+                ShapeClass::BoundedLookbehind,
+            )),
+        },
+        SeamFixture {
+            name: "g_regex_flags_dotall_long_string",
+            seam: "g_regex_flags=DOTALL must reach the idiom lowering's dotall threading \
+                   (the global `(?s…)` prefix is prepended to every lowered branch, so a \
+                   lowering that only saw the terminal's own flags would emit the \
+                   \\n-excluding body class and reject the newline body the original \
+                   accepts)",
+            grammar: "start: LONG\nLONG: /\"\"\".*?(?<!\\\\)(\\\\\\\\)*?\"\"\"/\n",
+            g_regex_flags: flags::DOTALL,
             input: "\"\"\"a\nb\"\"\"",
             classify_target: Some((
                 r#""""\.*?(?<!\\)(\\\\)*?""""#,
@@ -176,12 +189,12 @@ fn outcome(lexer: &BasicLexer, input: &str) -> Result<Vec<(String, String)>, usi
 }
 
 /// The Dfa backend must lex each seam fixture byte-identically to the Regex/`fancy`
-/// reference — the per-fixture restriction of the master differential. With M1/M2/M3
-/// landed the Dfa side genuinely **lowers** every fixture whose terminal is in shape;
-/// a terminal the lowering *declines* (the `newline_dotall_body` fixture's
-/// variable-offset lookbehind behind a flag wrapper) routes to `fancy-regex` on both
-/// sides, so they still agree. Either way the contract is the same: swapping the engine
-/// changes nothing.
+/// reference — the per-fixture restriction of the master differential. With M1–M4 and
+/// the Stage-B idioms landed the Dfa side genuinely **lowers every fixture** —
+/// including `newline_dotall_body` and `g_regex_flags_dotall_long_string`, whose
+/// LONG_STRING-shaped terminal the long-string idiom now lowers (it used to decline to
+/// `fancy-regex` on both sides and agree trivially) — so this is a real lowered-vs-fancy
+/// gate at each seam. The contract is the same: swapping the engine changes nothing.
 #[test]
 fn seam_fixtures_lowered_lex_equals_fancy() {
     for f in fixtures() {
