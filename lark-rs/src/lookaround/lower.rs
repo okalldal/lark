@@ -128,6 +128,11 @@ pub fn lower_boundary_dotall(
     if let Some(idiom) = recognize_string_idiom(&node) {
         return idiom.lower(pattern, dotall);
     }
+    if let Some(idiom) = recognize_regexp_idiom(&node) {
+        // `dotall` is inert here: the idiom contains no `.` (its body is the explicit
+        // class alternation), so the lowering is flag-shape-identical either way.
+        return Ok(idiom.lower());
+    }
     let mut branches = Vec::new();
     match &node {
         Node::Alt(arms) => {
@@ -978,6 +983,150 @@ fn is_plain_literal(c: char) -> bool {
     )
 }
 
+// ─── The regex-literal delimited-token idiom (lark.REGEXP) ──────────────────────
+//
+// `lark.REGEXP` is `\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*` — a slash-delimited token:
+// open `\/`, an internal `(?!\/)` that rejects the empty `//` body, a lazy repetition of
+// {escaped slash, escaped backslash, non-slash char}, the close `\/`, and a greedy flags
+// suffix. The `(?!\/)` sits *after* the opening slash — an internal lookahead the
+// top-level classifier rejects — so, like `python.STRING`'s `(?!"")`, it lowers only
+// through an **exact idiom recognizer** (Stage B of `docs/LEXER_DFA_PLAN.md`'s expansion
+// ladder: an audited delimited-token lowering, not internal-lookahead support).
+//
+// The lowering is the **proven Type-A rewrite**
+// (`tests/test_lookaround.rs::matchlen::regexp_match_length_equivalence`, exhaustive over
+// the `{/, \, a, i}` quotient alphabet; `docs/TERMINAL_REDUCTION_DIAGNOSIS.md`):
+//
+//     \/(\\\/|\\\\|[^\/])+\/<flags>
+//
+// one **unguarded** lookaround-free branch, justified by two case analyses:
+//
+//   * **The `(?!\/)` reduces to a non-empty body.** The guard asserts the char after the
+//     opening slash is not `/`. Every body alternative starts with a non-slash char
+//     (`\\\/` and `\\\\` start with `\`; `[^\/]` excludes `/`), so on a *non-empty* body
+//     the guard is vacuous; on an *empty* body the next char is the closing `/`, which
+//     the guard forbids. So `(?!\/)` + `(body)*?` ≡ `(body)+` exactly — the same
+//     empty/non-empty split as the STRING splice, except the empty arm here is *dead*
+//     (the bundled `//` can never be a REGEXP token), so no guarded arm remains at all.
+//   * **Lazy `*?` ≡ greedy `+` (match-end-identical).** At any position the lazy close
+//     (`\/…`) and a body step are *mutually exclusive*: the close requires the current
+//     char to be `/`, which no body alternative can begin with. So the lazy/greedy
+//     preference never picks between two viable continuations, and leftmost-first on the
+//     greedy form follows the identical path (the alternation order is preserved
+//     verbatim, so the `\\\/`-beats-`[^\/]` escape priority at a `\` is unchanged).
+//
+// The branch carries no guard, so it joins the leftmost-first plain engine directly — no
+// realizability question arises. The recognizer matches **only** this exact shape
+// (reject-when-unsure): the only generalization admitted is the flags *class content*
+// (any non-empty ASCII-alphanumeric set, e.g. `[i]`), or no flags suffix at all — both
+// trivially inside the same proof (alphanumeric flags are disjoint from `/` and `\`, and
+// the suffix is re-emitted verbatim). Anything else — another delimiter, a different
+// guard, a reordered/extended body, a nested assertion, a non-class flags suffix — falls
+// through to the generic route, which rejects/declines it exactly as before.
+
+/// A recognized regex-literal delimited-token idiom: the bundled `lark.REGEXP` shape
+/// `\/(?!\/)(\\\/|\\\\|[^\/])*?\/<flags>` where `<flags>` is empty or `[<alnum>]*`.
+pub struct RegexpIdiom {
+    /// The verbatim close-plus-flags source (`\/[imslux]*`, or just `\/`), re-emitted
+    /// unchanged in the lowered branch.
+    close_flags: String,
+}
+
+impl RegexpIdiom {
+    /// Lower the idiom into its single unguarded branch — the proven Type-A rewrite
+    /// (see the section comment): a non-empty greedy escaped body between literal
+    /// slashes, with the close+flags suffix verbatim.
+    fn lower(&self) -> Vec<LoweredBranch> {
+        vec![LoweredBranch {
+            regex: format!(r"\/(\\\/|\\\\|[^\/])+{}", self.close_flags),
+            leading: None,
+            trailing: None,
+            lookbehind: Vec::new(),
+        }]
+    }
+}
+
+/// Recognize the [`RegexpIdiom`] in a parsed terminal `node`, or `None`. Structural and
+/// exact: the parse of the bundled pattern is a 4-part top-level concat —
+/// `[Atom(\/), Assertion((?!\/)), Group((\\\/|\\\\|[^\/]))*?, Atom(\/<flags>)]` — and
+/// every part is pinned (the delimiter, the guard body, the body alternatives *and their
+/// order*, the lazy `*?`, the close). Only the flags-class content may vary (ASCII
+/// alphanumerics) per the proof note above. Everything else returns `None`, so a
+/// near-miss keeps its current route (reject/decline) — the reject-when-unsure direction.
+pub fn recognize_regexp_idiom(node: &Node) -> Option<RegexpIdiom> {
+    let parts = match node {
+        Node::Concat(parts) => parts.as_slice(),
+        _ => return None,
+    };
+    if parts.len() != 4 {
+        return None;
+    }
+    // parts[0]: the literal opening slash `\/`.
+    if !matches!(&parts[0], Node::Atom(s) if s == r"\/") {
+        return None;
+    }
+    // parts[1]: the empty-body guard `(?!\/)` — negative, lookahead, unquantified, with
+    // exactly the delimiter as its body.
+    match &parts[1] {
+        Node::Assertion {
+            neg: true,
+            look: Look::Ahead,
+            body,
+            quant,
+        } if quant.is_empty() && body.to_source() == r"\/" => {}
+        _ => return None,
+    }
+    // parts[2]: the lazy escaped body `(\\\/|\\\\|[^\/])*?` — a capturing group under a
+    // lazy star, whose alternation is exactly these three atoms in this order (the order
+    // carries the escape-beats-single-char priority the equivalence argument leans on).
+    match &parts[2] {
+        Node::Group { open, body, quant } if open == "(" && quant == "*?" => {
+            let arms = match body.as_ref() {
+                Node::Alt(arms) => arms.as_slice(),
+                _ => return None,
+            };
+            const BODY_ARMS: [&str; 3] = [r"\\\/", r"\\\\", r"[^\/]"];
+            if arms.len() != BODY_ARMS.len() {
+                return None;
+            }
+            for (arm, want) in arms.iter().zip(BODY_ARMS) {
+                if !matches!(arm, Node::Atom(s) if s == want) {
+                    return None;
+                }
+            }
+        }
+        _ => return None,
+    }
+    // parts[3]: the literal close `\/` followed by the flags suffix — empty, or a
+    // starred character class of ASCII alphanumerics (`[imslux]*`).
+    let close = match &parts[3] {
+        Node::Atom(s) => s.as_str(),
+        _ => return None,
+    };
+    let flags = close.strip_prefix(r"\/")?;
+    if !is_regexp_flags_suffix(flags) {
+        return None;
+    }
+    Some(RegexpIdiom {
+        close_flags: close.to_string(),
+    })
+}
+
+/// Whether `s` is an admissible REGEXP flags suffix: empty, or `[<chars>]*` where
+/// `<chars>` is a non-empty run of ASCII alphanumerics. Alphanumerics are never `/`,
+/// `\`, `]`, `^`, or `-`, so the class is a plain positive set disjoint from the
+/// delimiter and escape machinery — the only flags shape the proof note covers.
+/// Ranges, escapes, negation, other quantifiers, and any other suffix are refused.
+fn is_regexp_flags_suffix(s: &str) -> bool {
+    if s.is_empty() {
+        return true;
+    }
+    match s.strip_prefix('[').and_then(|r| r.strip_suffix("]*")) {
+        Some(chars) => !chars.is_empty() && chars.chars().all(|c| c.is_ascii_alphanumeric()),
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1133,6 +1282,78 @@ mod tests {
         let b = lower_boundary("(?<=ab)c").unwrap();
         let lb = &b[0].lookbehind[0];
         assert!(!lb.neg && lb.set == "ab" && lb.offset_chars == 0 && lb.width == 2);
+    }
+
+    /// The bundled `lark.REGEXP` (and its provably-equivalent flags variants) is
+    /// recognized and lowers to the single unguarded Type-A-rewrite branch.
+    #[test]
+    fn regexp_idiom_recognized_and_lowers_unguarded() {
+        for (pattern, lowered) in [
+            (
+                r#"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*"#,
+                r#"\/(\\\/|\\\\|[^\/])+\/[imslux]*"#,
+            ),
+            (
+                r#"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[i]*"#,
+                r#"\/(\\\/|\\\\|[^\/])+\/[i]*"#,
+            ),
+            (
+                r#"\/(?!\/)(\\\/|\\\\|[^\/])*?\/"#,
+                r#"\/(\\\/|\\\\|[^\/])+\/"#,
+            ),
+        ] {
+            let node = super::super::parse(pattern).unwrap();
+            assert!(
+                recognize_regexp_idiom(&node).is_some(),
+                "recognizer must accept the bundled idiom: {pattern:?}"
+            );
+            let b =
+                lower_boundary(pattern).unwrap_or_else(|e| panic!("{pattern:?} must lower: {e:?}"));
+            assert_eq!(b.len(), 1, "one unguarded branch");
+            assert_eq!(b[0].regex, lowered);
+            assert!(
+                b[0].leading.is_none() && b[0].trailing.is_none() && b[0].lookbehind.is_empty(),
+                "the lowered REGEXP branch is lookaround-free and unguarded"
+            );
+        }
+    }
+
+    /// The recognizer's reject surface: every near-miss of the idiom — wrong delimiter,
+    /// missing/odd guard, mutated body, nested assertion, lazy `.*?` body, missing
+    /// close, out-of-shape flags — must return `None`, falling through to the generic
+    /// route (which rejects/declines exactly as before the idiom landed).
+    #[test]
+    fn regexp_idiom_rejects_near_misses() {
+        let near_misses = [
+            // Wrong delimiter (the string-idiom shape transplanted onto REGEXP's body).
+            r#"\"(?!\")(\\\"|\\\\|[^\"])*?\"[imslux]*"#,
+            // Missing the `(?!\/)` guard entirely (3 parts — also a plain pattern).
+            r#"\/(\\\/|\\\\|[^\/])*?\/[imslux]*"#,
+            // Guard with the wrong body / polarity / quantifier.
+            r#"\/(?!\/\/)(\\\/|\\\\|[^\/])*?\/[imslux]*"#,
+            r#"\/(?=\/)(\\\/|\\\\|[^\/])*?\/[imslux]*"#,
+            r#"\/(?!\/)?(\\\/|\\\\|[^\/])*?\/[imslux]*"#,
+            // Body alternation reordered (the escape priority would change).
+            r#"\/(?!\/)([^\/]|\\\/|\\\\)*?\/[imslux]*"#,
+            // Body with an extra arm, a nested assertion, or replaced by a lazy `.*?`.
+            r#"\/(?!\/)(\\\/|\\\\|[^\/]|x)*?\/[imslux]*"#,
+            r#"\/(?!\/)(\\\/|\\\\|(?=x)[^\/])*?\/[imslux]*"#,
+            r#"\/(?!\/).*?\/[imslux]*"#,
+            // Greedy body star instead of the lazy `*?`.
+            r#"\/(?!\/)(\\\/|\\\\|[^\/])*\/[imslux]*"#,
+            // Missing close slash; flags class with a range / a slash / a `+` quant.
+            r#"\/(?!\/)(\\\/|\\\\|[^\/])*?[imslux]*"#,
+            r#"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[a-z]*"#,
+            r#"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[im\/]*"#,
+            r#"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]+"#,
+        ];
+        for p in near_misses {
+            let node = super::super::parse(p).unwrap_or_else(|e| panic!("parse {p:?}: {e:?}"));
+            assert!(
+                recognize_regexp_idiom(&node).is_none(),
+                "recognizer must reject the near-miss: {p:?}"
+            );
+        }
     }
 
     #[test]

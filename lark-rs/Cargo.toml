@@ -32,8 +32,8 @@ regex = "1.10"
 # Backtracking-regex overlay for the bundled-grammar terminals that use lookaround
 # (lookahead/lookbehind) which the linear-time `regex` crate cannot compile (issue #40).
 # This is a RUNTIME dependency *today*: the lexer DFA plan has lowered most bounded
-# lookaround into the `regex-automata` DFA, but two bundled terminals still *decline* to
-# `fancy-regex` at runtime (`python.LONG_STRING`, `lark.REGEXP`), so the side-probe is
+# lookaround into the `regex-automata` DFA, but one bundled terminal still *declines* to
+# `fancy-regex` at runtime (`python.LONG_STRING`), so the side-probe is
 # still live. The plan is to drop it from the runtime at **L4** (once every bundled
 # lookaround terminal lowers or is rejected by policy) and keep `fancy-regex` thereafter
 # as a permanent **dev/test oracle** only — the independent match-length reference the

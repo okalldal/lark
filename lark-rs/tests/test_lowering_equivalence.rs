@@ -18,7 +18,8 @@ mod common;
 use common::lowering::{
     boundary_mutations, corpus, fancy_matcher, fancy_prefix, has_guard, has_lookbehind,
     lookbehind_mutations, lowered_prefix, mutant_lookbehind_matcher, mutant_matcher,
-    string_idiom_terminals, supported_terminals, BoundaryMutation, GenTerminal,
+    regexp_idiom_terminals, string_idiom_terminals, supported_terminals, BoundaryMutation,
+    GenTerminal,
 };
 use lark_rs::ShapeClass;
 
@@ -206,6 +207,79 @@ fn string_idiom_lowered_equals_fancy() {
         failures.is_empty(),
         "string-idiom generative-equivalence divergence(s):\n  {}",
         failures.join("\n  ")
+    );
+}
+
+/// The **regex-literal delimited-token idiom** (lark.REGEXP's real shape, Stage B):
+/// every generated idiom terminal's lowered match-length must equal the `fancy-regex`
+/// oracle over (a) its exhaustive `{/, \, a, i}` corpus — which includes the empty `//`,
+/// the bare `/`, unterminated bodies, escaped slashes/backslashes, and flag suffixes —
+/// and (b) a hand list of longer named cases the exhaustive bound (len ≤ 5) cannot
+/// reach: multi-char bodies with flag runs (`/abc/im`), an escaped slash *inside* a body
+/// (`/a\/b/`), non-flag letters after the close (`/a/iX`), the `/a//`
+/// second-slash-not-swallowed case, and slash/backslash-heavy runs. `lowered_prefix`
+/// returning `Err` (a declined terminal) is surfaced as a divergence, so an idiom that
+/// *failed* to lower fails loudly rather than passing vacuously.
+#[test]
+fn regexp_idiom_lowered_equals_fancy() {
+    let terms = regexp_idiom_terminals();
+    assert!(!terms.is_empty(), "no regexp-idiom terminals generated");
+    let extras: [&str; 14] = [
+        "/a/",
+        "/a/i",
+        "/abc/im",
+        r"/\//",
+        r"/\\/",
+        r"/a\/b/",
+        "//",
+        "/",
+        "/a",
+        "/a//",
+        "/a/iX",
+        r"/\\\//",
+        r"/\/\\/i/",
+        r"\//\/",
+    ];
+    let mut failures = Vec::new();
+    let mut matched = 0usize;
+    for t in &terms {
+        let Some(oracle) = fancy_matcher(&t.pattern) else {
+            failures.push(format!("{}: fancy rejected {:?}", t.name, t.pattern));
+            continue;
+        };
+        let mut inputs = corpus(&t.alphabet, t.max_len);
+        inputs.extend(extras.iter().map(|s| s.to_string()));
+        for input in &inputs {
+            let fancy = fancy_prefix(&oracle, input);
+            matched += fancy.is_some() as usize;
+            let lowered = match lowered_prefix(&t.name, &t.pattern, input) {
+                Ok(v) => v,
+                Err(e) => {
+                    failures.push(format!("{}: lowered matcher unavailable: {e}", t.name));
+                    break;
+                }
+            };
+            if lowered != fancy {
+                failures.push(format!(
+                    "{} {:?} on input {input:?}: lowered={lowered:?} != fancy={fancy:?}",
+                    t.name, t.pattern
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "regexp-idiom generative-equivalence divergence(s):\n  {}",
+        failures
+            .iter()
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+    assert!(
+        matched > 0,
+        "the regexp-idiom corpus must exercise real matches (it would be vacuous otherwise)"
     );
 }
 

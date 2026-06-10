@@ -128,24 +128,28 @@ fn recognizer_still_accepts_literal_delimiters() {
 }
 
 /// **Bundled-terminal lowering-status tripwire** (deliverable 6's payoff-check, made
-/// executable). The honest scope of this milestone is: `python.STRING` lowers into the
-/// DFA, while `lark.REGEXP` (internal `(?!\/)`) and `python.LONG_STRING` (a lazy `.*?`
-/// body with a multi-character `"""` close and no opening guard) are **declined** — they
-/// route to `fancy-regex`, so `fancy-regex` stays in the runtime and L4/L5 remain blocked.
+/// executable). The honest scope on master is: `python.STRING` lowers into the DFA (the
+/// M4 splice) and `lark.REGEXP` lowers via the regex-literal delimited-token idiom
+/// (Stage B, `recognize_regexp_idiom` — gated by `tests/test_regexp_splice.rs`, the
+/// state-pruned Route-1 proof, and the generative-equivalence layer), while
+/// `python.LONG_STRING` (a lazy `.*?` body with a multi-character `"""` close and no
+/// opening guard) still **declines** — it routes to `fancy-regex`, so `fancy-regex`
+/// stays in the runtime and L4/L5 remain blocked.
 ///
-/// This pins that scope as a fact. If a future change makes REGEXP or LONG_STRING lower,
-/// this test goes red on purpose — forcing the author to (a) confirm the new lowering is
-/// proven correct and (b) re-run the payoff-check: with *all* bundled lookaround terminals
-/// lowered, L4 (drop `AnyRegex::Fancy` from the runtime) and L5 (bake) become unblocked,
-/// and `docs/LEXER_DFA_PLAN.md` + `docs/LEXER_DFA_STATUS.md` + `CLAUDE.md` must be updated.
+/// This pins that scope as a fact. If a future change makes LONG_STRING lower, this test
+/// goes red on purpose — forcing the author to (a) confirm the new lowering is proven
+/// correct and (b) re-run the payoff-check: with *all* bundled lookaround terminals
+/// lowered, L4 (drop `AnyRegex::Fancy` from the runtime — which *also* needs the
+/// `Unsupported` compatibility-fallback policy flip) and L5 (bake) become unblocked, and
+/// `docs/LEXER_DFA_PLAN.md` + `docs/LEXER_DFA_STATUS.md` + `CLAUDE.md` must be updated.
 /// It is the same negative-pin discipline as
 /// `test_lookaround.rs::string_lookaround_free_rewrite_is_not_equivalent`.
 ///
-/// Crucially, the non-lowering of LONG_STRING/REGEXP is a **decline-to-fancy** (a
-/// transitional route — they still lex correctly on `fancy-regex`), **not** a proof that
-/// the shape is *rejected*. The test asserts only "not `Ok(Lowered::Branches(_))`" — it
-/// does not assert a permanent rejection, because lowering them is a planned Stage-B
-/// follow-up (`docs/LEXER_DFA_STATUS.md`), not an out-of-shape error.
+/// Crucially, the non-lowering of LONG_STRING is a **decline-to-fancy** (a transitional
+/// route — it still lexes correctly on `fancy-regex`), **not** a proof that the shape is
+/// *rejected*. The test asserts only "not `Ok(Lowered::Branches(_))`" — it does not
+/// assert a permanent rejection, because lowering it is a planned Stage-B follow-up
+/// (`docs/LEXER_DFA_STATUS.md`), not an out-of-shape error.
 #[test]
 fn bundled_lookaround_terminal_lowering_status() {
     // Verbatim from the bundled grammars (the `/i` / `/is` flags live on the terminal;
@@ -154,7 +158,7 @@ fn bundled_lookaround_terminal_lowering_status() {
     const LONG_STRING_RAW: &str =
         r#"([ubf]?r?|r[ubf])(""".*?(?<!\\)(\\\\)*?"""|'''.*?(?<!\\)(\\\\)*?''')"#;
 
-    // STRING lowers (the milestone deliverable).
+    // STRING and REGEXP lower (the M4 splice and the Stage-B regex-literal idiom).
     assert!(
         matches!(
             lower_terminal_dotall("STRING", STRING_RAW, false),
@@ -162,32 +166,34 @@ fn bundled_lookaround_terminal_lowering_status() {
         ),
         "python.STRING must lower into the DFA"
     );
+    assert!(
+        matches!(
+            lower_terminal_dotall("lark.REGEXP", REGEXP_RAW, false),
+            Ok(Lowered::Branches(_))
+        ),
+        "lark.REGEXP must lower into the DFA via the regex-literal idiom"
+    );
 
-    // REGEXP and LONG_STRING are declined (route to fancy). A returned `Branches` here
-    // means the scope changed — see the doc above: prove it and re-run the L4/L5 payoff.
-    // If this starts lowering, that is good news ONLY if the PR also adds
-    // equivalence/proof/canary coverage and updates the L4/L5 status (plan + STATUS.md).
-    for (name, raw, dotall) in [
-        ("lark.REGEXP", REGEXP_RAW, false),
-        ("python.LONG_STRING", LONG_STRING_RAW, true),
-    ] {
-        assert!(
-            !matches!(
-                lower_terminal_dotall(name, raw, dotall),
-                Ok(Lowered::Branches(_))
-            ),
-            "{name} unexpectedly LOWERS now — fancy-regex was supposed to stay (L4 blocked). \
-             If this lowering is intentional and proven, update the payoff-check + docs and \
-             revise this tripwire."
-        );
-        // Pin the route as **decline-to-fancy**, not rejected/invalid: the raw pattern must
-        // still compile on the backtracking engine, so it lexes correctly today. This is
-        // what makes the non-lowering transitional rather than a permanent reject.
-        assert!(
-            fancy_regex::Regex::new(raw).is_ok(),
-            "{name} must still compile on fancy-regex (it is declined-to-fancy, not rejected)"
-        );
-    }
+    // LONG_STRING is declined (routes to fancy). A returned `Branches` here means the
+    // scope changed — see the doc above: prove it and re-run the L4/L5 payoff. If this
+    // starts lowering, that is good news ONLY if the PR also adds equivalence/proof/
+    // canary coverage and updates the L4/L5 status (plan + STATUS.md).
+    assert!(
+        !matches!(
+            lower_terminal_dotall("python.LONG_STRING", LONG_STRING_RAW, true),
+            Ok(Lowered::Branches(_))
+        ),
+        "python.LONG_STRING unexpectedly LOWERS now — fancy-regex was supposed to stay \
+         (L4 blocked). If this lowering is intentional and proven, update the \
+         payoff-check + docs and revise this tripwire."
+    );
+    // Pin the route as **decline-to-fancy**, not rejected/invalid: the raw pattern must
+    // still compile on the backtracking engine, so it lexes correctly today. This is
+    // what makes the non-lowering transitional rather than a permanent reject.
+    assert!(
+        fancy_regex::Regex::new(LONG_STRING_RAW).is_ok(),
+        "python.LONG_STRING must still compile on fancy-regex (declined-to-fancy, not rejected)"
+    );
 }
 
 /// **The canary.** `""""` (and `''''`) is a LEX ERROR; `"" ""` (and `'' ''`) is exactly

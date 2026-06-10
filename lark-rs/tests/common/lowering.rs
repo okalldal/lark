@@ -450,6 +450,37 @@ pub fn string_idiom_terminals() -> Vec<GenTerminal> {
     out
 }
 
+/// The **regex-literal delimited-token idiom** population (lark.REGEXP's *actual* shape —
+/// Stage B of `docs/LEXER_DFA_PLAN.md`'s expansion ladder). Each is the exact bundled
+/// idiom `\/(?!\/)(\\\/|\\\\|[^\/])*?\/<flags>`, varying only the flags suffix across the
+/// recognizer's (proof-covered) acceptance surface: the bundled `[imslux]*`, a smaller
+/// alphanumeric class, and no flags at all. The alphabet drives the load-bearing cases:
+/// `/` (open/close + the empty-`//` boundary + the `/a//` non-swallow), `\` (escape
+/// pairing for `\/` and `\\`), `a` (plain body content, also a non-flag letter after the
+/// close), and `i` (a real flag letter, also valid body content).
+///
+/// The shape's headline class is [`ShapeClass::LeadingBoundary`] (the `(?!\/)` re-tagged
+/// by the recognizer); like the string idiom these are kept out of
+/// [`supported_terminals`] and driven by their own equivalence gate + the scanner
+/// differential. Names are bare uppercase so the differential's generated grammars load.
+pub fn regexp_idiom_terminals() -> Vec<GenTerminal> {
+    let variants: [(&str, &str); 3] = [
+        ("RXBUNDLED", r#"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*"#),
+        ("RXFLAGI", r#"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[i]*"#),
+        ("RXNOFLAGS", r#"\/(?!\/)(\\\/|\\\\|[^\/])*?\/"#),
+    ];
+    variants
+        .into_iter()
+        .map(|(name, pattern)| GenTerminal {
+            name: name.to_string(),
+            pattern: pattern.to_string(),
+            shape: ShapeClass::LeadingBoundary,
+            alphabet: vec!['/', '\\', 'a', 'i'],
+            max_len: 5,
+        })
+        .collect()
+}
+
 /// **Adversarial string-idiom shapes with a *non-literal* delimiter** — the recognizer's
 /// own acceptance surface (not just the classifier's). Each is structurally the string
 /// idiom `<q>(?!<q><q>).*?(?<!\\)(\\\\)*?<q>` but with `<q>` a regex construct that is

@@ -371,6 +371,45 @@ fn prove_route1_pruned(name: &str, pattern: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The committed Route-1 proof for the **lark.REGEXP regex-literal idiom** on its **real
+/// bundled shape** (plus the recognizer's no-flags acceptance-surface variant), via the
+/// same **state-pruned** decision procedure the STRING splice uses. The state-pruned
+/// realization is preferred here for the same reason as STRING's: the idiom's
+/// content-bearing body (`[^\/]` admits every non-slash char) makes the brute
+/// `|alphabet|^(n+W+2)` enumeration of [`prove_route1`] intractable, while the
+/// per-base-state witness × ≤`W+1`-suffix coverage is a few hundred strings. Each
+/// representative must (a) classify with the recognizer-re-tagged supported leading
+/// boundary (the `(?!\/)`), (b) lower to branches (not decline), and (c) be proven
+/// match-length-identical to `fancy-regex`. The proof is additionally backstopped by an
+/// older independent exhaustive oracle on the same shape —
+/// `test_lookaround.rs::matchlen::regexp_match_length_equivalence` (the Type-A rewrite,
+/// `{/, \, a, i}` to length 6) — and the generative-equivalence layer.
+#[test]
+fn route1_proof_regexp_idiom_real_shape() {
+    let reps: [(&str, &str); 2] = [
+        (
+            "REGEXP_BUNDLED",
+            r#"\/(?!\/)(\\\/|\\\\|[^\/])*?\/[imslux]*"#,
+        ),
+        ("REGEXP_NOFLAGS", r#"\/(?!\/)(\\\/|\\\\|[^\/])*?\/"#),
+    ];
+    for (name, pattern) in reps {
+        let c = classify(pattern).unwrap_or_else(|e| panic!("classify {name} errored: {e}"));
+        assert!(
+            c.assertions
+                .iter()
+                .any(|a| a.verdict() == Verdict::Supported(ShapeClass::LeadingBoundary)),
+            "{name} must classify with a supported leading boundary (the recognized `(?!\\/)`)"
+        );
+        assert!(
+            lower_boundary(pattern).is_ok(),
+            "{name} must lower (not decline) for the proof to be non-vacuous"
+        );
+        prove_route1_pruned(name, pattern)
+            .unwrap_or_else(|cex| panic!("Route-1 (state-pruned) failed for {name}: {cex}"));
+    }
+}
+
 /// The committed Route-1 proof for the STRING opening-guard splice on its **real nested
 /// shape** — the deliverable's non-negotiable proof obligation. Each representative must
 /// (a) genuinely classify as a supported leading boundary (so the obligation targets the

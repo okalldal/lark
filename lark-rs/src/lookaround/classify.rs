@@ -47,15 +47,16 @@
 //! backreference, a nested assertion, or a variable-width lookbehind.
 //!
 //! The recognized idioms are **narrow gates, not general internal-lookahead support.**
-//! `python.STRING`'s `(?!"")` sits *after a variable-width prefix + the opening quote* —
-//! a position the top-level walk sees as `Internal`. It lowers only because
-//! [`super::lower::recognize_string_idiom`] matches that *exact* terminal shape and
-//! re-tags its interior lookaheads as `Leading`; outside a recognized idiom a deeper
-//! lookahead stays `Internal` (reject). The recognizer — never a position heuristic — is
-//! the single gate, so the dangerous direction (false-accept) stays closed. Two bundled
-//! lookaround terminals are *not* lowered yet and **decline to `fancy-regex`**:
-//! `python.LONG_STRING` (multi-char `"""` close) and `lark.REGEXP` (internal `(?!\/)`);
-//! see [`LEXER_DFA_STATUS.md`](../../docs/LEXER_DFA_STATUS.md).
+//! `python.STRING`'s `(?!"")` sits *after a variable-width prefix + the opening quote*,
+//! and `lark.REGEXP`'s `(?!\/)` sits *after the opening slash* — positions the top-level
+//! walk sees as `Internal`. Each lowers only because its exact recognizer
+//! ([`super::lower::recognize_string_idiom`] / [`super::lower::recognize_regexp_idiom`])
+//! matches that *precise* terminal shape and re-tags its interior lookaheads as
+//! `Leading`; outside a recognized idiom a deeper lookahead stays `Internal` (reject).
+//! The recognizers — never a position heuristic — are the single gate, so the dangerous
+//! direction (false-accept) stays closed. One bundled lookaround terminal is *not*
+//! lowered yet and **declines to `fancy-regex`**: `python.LONG_STRING` (multi-char `"""`
+//! close); see [`LEXER_DFA_STATUS.md`](../../docs/LEXER_DFA_STATUS.md).
 
 use super::{Look, Node};
 use crate::error::GrammarError;
@@ -248,17 +249,20 @@ pub fn classify(pattern: &str) -> Result<Classification, GrammarError> {
     let node = super::parse(pattern)?;
     let mut assertions = Vec::new();
     walk_top_level(&node, &mut assertions);
-    // String-literal opening-guard idiom refinement (python.STRING): a leading
-    // `(?!"")` after a variable-width prefix + the opening quote is seen by the
-    // top-level walk as `Internal` (it is nested inside the arms group, after a
-    // bounded prefix). It is, however, a *supported* leading boundary the
-    // [`super::lower::recognize_string_idiom`] splice lowers. So **only when the whole
-    // terminal is a recognized, lowerable idiom**, re-tag its interior `(?=)/(?!)`
-    // lookaheads as `Leading`. Outside a recognized idiom the verdict is unchanged, so
-    // a genuinely-internal lookahead (`a(?=b)c`, the verilog `(?!/)` inside a `*`) stays
-    // `Internal` (rejected) — the recognizer is the single gate, never a position
-    // heuristic that could false-accept.
-    if super::lower::recognize_string_idiom(&node).is_some() {
+    // Idiom refinement (python.STRING's opening guard, lark.REGEXP's empty-body
+    // guard): a `(?!"")` after a variable-width prefix + the opening quote, or a
+    // `(?!\/)` after the opening slash, is seen by the top-level walk as `Internal`
+    // (mid-concat / nested inside the arms group). Each is, however, a *supported*
+    // boundary an exact idiom recognizer lowers
+    // ([`super::lower::recognize_string_idiom`] / [`super::lower::recognize_regexp_idiom`]).
+    // So **only when the whole terminal is a recognized, lowerable idiom**, re-tag its
+    // interior `(?=)/(?!)` lookaheads as `Leading`. Outside a recognized idiom the
+    // verdict is unchanged, so a genuinely-internal lookahead (`a(?=b)c`, the verilog
+    // `(?!/)` inside a `*`) stays `Internal` (rejected) — the recognizers are the single
+    // gate, never a position heuristic that could false-accept.
+    if super::lower::recognize_string_idiom(&node).is_some()
+        || super::lower::recognize_regexp_idiom(&node).is_some()
+    {
         for a in &mut assertions {
             if a.look == Look::Ahead && a.position == Position::Internal {
                 a.position = Position::Leading;
@@ -322,9 +326,10 @@ pub enum LoweringRoute {
     /// declined (a variable-offset lookbehind, a non-greedy-monotone guarded base, a
     /// bundled idiom not yet lowered such as `python.LONG_STRING`), **or** a pattern the
     /// lookaround frontend could not parse. The runtime routes this to `fancy-regex` during
-    /// the transition — a correct fallback, never a mis-lowering. (Note `lark.REGEXP` is
-    /// *not* here: its internal `(?!\/)` makes it [`Self::Unsupported`]; it reaches the same
-    /// fancy runtime seam through the `Unsupported` compatibility fallback.)
+    /// the transition — a correct fallback, never a mis-lowering. (`lark.REGEXP` used to
+    /// reach the fancy seam through the `Unsupported` compatibility fallback; it now
+    /// lowers via the [`super::lower::recognize_regexp_idiom`] delimited-token idiom and
+    /// is [`Self::Lowered`].)
     DeclinedToFancy {
         /// A human-readable reason naming the terminal and why it declined.
         reason: String,

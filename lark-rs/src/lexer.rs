@@ -498,7 +498,7 @@ impl Scanner {
 ///
 /// **The `fancy` side-probe is transitional and blocks L4.** Even under the default `Dfa`
 /// backend, a *declined* lookaround terminal — one whose shape is not yet lowered
-/// (`python.LONG_STRING`, `lark.REGEXP`), or a per-instance lowering the realizability
+/// (`python.LONG_STRING`), or a per-instance lowering the realizability
 /// check declines — still runs on `fancy-regex` here. This keeps the bundled grammars
 /// correct, but it means `fancy-regex` stays in the runtime: L4 (drop the side-probe) and
 /// L5 (bake the scanner as static data) are blocked until every bundled lookaround
@@ -529,7 +529,7 @@ struct DfaScanner {
     /// `None` disables it (always run the engines).
     start_bytes: Option<Box<[bool; 256]>>,
     /// Lookaround terminals **declined to `fancy-regex`** (a shape not yet lowered —
-    /// `python.LONG_STRING`, `lark.REGEXP` — or a per-instance decline: a variable-offset
+    /// `python.LONG_STRING` — or a per-instance decline: a variable-offset
     /// lookbehind, or a guarded base that is not guard-realizable), rank-sorted — as in
     /// [`Scanner`]. Transitional: this list must be empty before L4 can drop `fancy-regex`.
     fancy: Vec<(usize, SymbolId, AnyRegex)>,
@@ -796,11 +796,12 @@ impl DfaScanner {
         //   * unguarded → one leftmost-first DFA (M0 semantics, exact within-pattern
         //     order — a sibling guard never disturbs `/ab|abc/`);
         //   * guarded → one all-matches DFA driven by the guarded-accept accumulator.
-        // A lookaround terminal whose shape is not yet lowered (`python.LONG_STRING`,
-        // `lark.REGEXP`), or whose guarded base is not guard-realizable (see
-        // `is_guard_realizable`), or whose lookbehind sits at a variable offset, declines
-        // to `fancy-regex`. M1/M2/M3 boundary+lookbehind and the M4 STRING splice all
-        // lower; the decline path is the transitional fallback that blocks L4.
+        // A lookaround terminal whose shape is not yet lowered (`python.LONG_STRING`),
+        // or whose guarded base is not guard-realizable (see `is_guard_realizable`),
+        // or whose lookbehind sits at a variable offset, declines to `fancy-regex`.
+        // M1/M2/M3 boundary+lookbehind, the M4 STRING splice, and the Stage-B
+        // `lark.REGEXP` regex-literal idiom all lower; the decline path is the
+        // transitional fallback that blocks L4.
         let mut plain_subs: Vec<SubPattern> = Vec::new();
         let mut plain_srcs: Vec<String> = Vec::new();
         let mut guarded_subs: Vec<SubPattern> = Vec::new();
@@ -872,8 +873,8 @@ impl DfaScanner {
                     // (`python.LONG_STRING`, a variable-offset lookbehind, a
                     // non-greedy-monotone base) or a pattern the frontend could not parse:
                     // route to fancy-regex exactly as today. (`lark.REGEXP` is *not* here —
-                    // its internal `(?!\/)` is `Unsupported`, below; it reaches the same
-                    // fancy seam through the Unsupported compatibility fallback.)
+                    // it lowers via the Stage-B regex-literal idiom and takes the
+                    // `Lowered` arm above.)
                     LoweringRoute::DeclinedToFancy { .. } => {
                         push_fancy_fallback(&mut fancy, &prefix, inline, rank, *id)?;
                         continue;
