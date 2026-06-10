@@ -457,8 +457,11 @@ mod tests {
 
     #[test]
     fn underscore_rule_is_transparent_alias_overrides() {
-        // `_inner` is transparent; the aliased alternative is not.
-        let cg = compile("start: _inner\n_inner: WORD -> kept | WORD\nWORD: /[a-z]+/\n");
+        // `_inner` is transparent; the aliased alternative is not. (The two
+        // alternatives must differ in expansion — same-expansion duplicates are
+        // a "Rules defined twice" load error, like Python Lark.)
+        let cg =
+            compile("start: _inner\n_inner: WORD -> kept | NUM\nWORD: /[a-z]+/\nNUM: /[0-9]+/\n");
         let inner = cg.symbols.id("_inner").unwrap();
         assert!(cg.symbols.info(inner).inline);
         let transparent: Vec<bool> = cg

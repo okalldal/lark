@@ -13,7 +13,7 @@
 
 use super::{rule::*, symbol::*, terminal::*, Grammar};
 use crate::error::GrammarError;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 /// Convert grammar text to a compiled [`Grammar`].
@@ -1365,31 +1365,74 @@ impl GrammarCompiler {
 
         // Each source alternative may distribute into several BNF alternatives
         // (a leading nullable fanned out), so `order` runs over the flattened
-        // result rather than the raw alternatives.
-        let mut order = 0;
+        // result rather than the raw alternatives — after the cross-alternative
+        // dedup + collision check (Python numbers post-dedup too).
+        let mut compiled: Vec<(CompiledAlt, Option<String>)> = Vec::new();
         for alt in raw.expansions.into_iter() {
             let alias = alt.alias.clone();
-            for (expansion_syms, gaps) in
-                self.compile_expansion(alt.expansion, &origin.name, true)?
-            {
-                let options = RuleOptions {
-                    expand1,
-                    keep_all_tokens: keep_all,
-                    priority: raw.priority,
-                    nones_before: Self::stored_gaps(gaps),
-                    placeholder_count: 0,
-                };
-                self.rules.push(Rule::new(
-                    origin.clone(),
-                    expansion_syms,
-                    alias.clone(),
-                    options,
-                    order,
-                ));
-                order += 1;
+            for alt_c in self.compile_expansion(alt.expansion, &origin.name, true)? {
+                compiled.push((alt_c, alias.clone()));
             }
         }
+        let compiled = Self::dedup_and_check_alts(&origin.name, compiled)?;
+        for (order, ((expansion_syms, gaps), alias)) in compiled.into_iter().enumerate() {
+            let options = RuleOptions {
+                expand1,
+                keep_all_tokens: keep_all,
+                priority: raw.priority,
+                nones_before: Self::stored_gaps(gaps),
+                placeholder_count: 0,
+            };
+            self.rules.push(Rule::new(
+                origin.clone(),
+                expansion_syms,
+                alias,
+                options,
+                order,
+            ));
+        }
         Ok(())
+    }
+
+    /// Python Lark's two-stage duplicate handling for one origin's compiled
+    /// alternatives (`load_grammar.py`). Stage 1, `SimplifyRule_Visitor.expansions`:
+    /// alternatives that are identical *trees* — here, identical
+    /// `(symbols, gaps, alias)`, since `_EMPTY` markers and alias nodes are part of
+    /// Python's tree — are silently deduped, so `a: X | X` and the coinciding
+    /// absent arms of `a: [A] C | [B] C` collapse instead of colliding as
+    /// reduce/reduce under LALR. Stage 2, the final `Rule` compile: surviving
+    /// duplicates of `(origin, expansion)` — `Rule.__eq__` ignores alias and
+    /// options — raise "Rules defined twice", which is how a colliding expansion
+    /// of optionals (`a: [A] [A] B`, whose two `A B` arms differ only in
+    /// placeholder positions) or a same-expansion alias pair (`a: X -> p | X -> q`)
+    /// is rejected *at load*, on every parser backend, instead of surfacing as an
+    /// LALR-only conflict or being silently resolved by Earley. Duplicate *empty*
+    /// expansions are tolerated, as in Python.
+    fn dedup_and_check_alts(
+        origin: &str,
+        alts: Vec<(CompiledAlt, Option<String>)>,
+    ) -> Result<Vec<(CompiledAlt, Option<String>)>, GrammarError> {
+        let mut seen: HashSet<(CompiledAlt, Option<String>)> = HashSet::new();
+        let mut out: Vec<(CompiledAlt, Option<String>)> = Vec::with_capacity(alts.len());
+        let mut seen_syms: HashSet<Vec<Symbol>> = HashSet::new();
+        for alt in alts {
+            if !seen.insert(alt.clone()) {
+                continue; // exact duplicate — Python's AST-level dedup_list
+            }
+            let syms = &alt.0 .0;
+            if !syms.is_empty() && !seen_syms.insert(syms.clone()) {
+                let rhs: Vec<&str> = syms.iter().map(|s| s.name()).collect();
+                return Err(GrammarError::Other {
+                    msg: format!(
+                        "Rules defined twice: {origin} -> {} \
+                         (Might happen due to colliding expansion of optionals: [] or ?)",
+                        rhs.join(" ")
+                    ),
+                });
+            }
+            out.push(alt);
+        }
+        Ok(out)
     }
 
     /// Gap vectors are stored on the rule only when they carry placeholders;
@@ -1785,6 +1828,12 @@ impl GrammarCompiler {
                 compiled.push((alt_c, alias.clone()));
             }
         }
+        // Same dedup + collision check as a named rule's alternatives: Python
+        // inlines groups into the parent, where its `expansions` dedup and
+        // "Rules defined twice" check run — so `(X | X)` collapses (and then
+        // takes the single-symbol shortcut below, like Python's inlined `X`),
+        // and `([A] [A] B)` is rejected at load.
+        let compiled = Self::dedup_and_check_alts(parent, compiled)?;
         // A plain single non-aliased alternative that compiles to exactly one
         // symbol *is* that symbol — skip the wrapper rule. Besides dropping a
         // redundant transparent node, this lets `(X)+` share `X`'s recurse helper
@@ -1967,6 +2016,10 @@ impl GrammarCompiler {
                 compiled.push((alt_c, alias.clone()));
             }
         }
+        // Same dedup + collision check as a named rule's alternatives (Python
+        // distributes `[...]` into the parent, where they run; see
+        // `dedup_and_check_alts`).
+        let compiled = Self::dedup_and_check_alts(parent, compiled)?;
         Ok(self.intern_helper(HelperKind::Maybe, compiled))
     }
 
@@ -2644,23 +2697,21 @@ impl GrammarCompiler {
         // Substitute template params in expansions
         let expansions = Self::substitute_template(&expansions, &subst);
         let origin = NonTerminal::new(&inst_name);
-        let mut order = 0;
+        let mut compiled: Vec<(CompiledAlt, Option<String>)> = Vec::new();
         for alt in expansions.into_iter() {
             let alias = alt.alias.clone();
-            for (syms, gaps) in self.compile_expansion(alt.expansion, &inst_name, true)? {
-                let options = RuleOptions {
-                    nones_before: Self::stored_gaps(gaps),
-                    ..inst_opts.clone()
-                };
-                self.rules.push(Rule::new(
-                    origin.clone(),
-                    syms,
-                    alias.clone(),
-                    options,
-                    order,
-                ));
-                order += 1;
+            for alt_c in self.compile_expansion(alt.expansion, &inst_name, true)? {
+                compiled.push((alt_c, alias.clone()));
             }
+        }
+        let compiled = Self::dedup_and_check_alts(&inst_name, compiled)?;
+        for (order, ((syms, gaps), alias)) in compiled.into_iter().enumerate() {
+            let options = RuleOptions {
+                nones_before: Self::stored_gaps(gaps),
+                ..inst_opts.clone()
+            };
+            self.rules
+                .push(Rule::new(origin.clone(), syms, alias, options, order));
         }
         self.current_keep_all = saved_keep_all;
         Ok(Symbol::NonTerminal(origin))

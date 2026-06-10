@@ -71,9 +71,12 @@ fn walkdir(dir: &Path) -> Vec<std::path::PathBuf> {
     if let Ok(entries) = std::fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            // `file_type()` does not follow symlinks, so a symlinked directory
+            // cycle cannot loop the walk.
+            let is_dir = entry.file_type().is_ok_and(|t| t.is_dir());
+            if is_dir {
                 out.extend(walkdir(&path));
-            } else if path.extension().map_or(false, |e| e == "py") {
+            } else if path.extension().is_some_and(|e| e == "py") {
                 out.push(path);
             }
         }
