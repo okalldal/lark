@@ -331,6 +331,68 @@ Machine-specific — **only ratios travel**; capture fresh numbers on your own b
 This bench turns that remaining LALR headroom into a tracked delta: **re-run it
 after each significant engine change and update the table.**
 
+## Wild bank vs Python Lark (cross-engine, 2026-06-10)
+
+`tools/bench_wild_python.py` is the Python-Lark side of `cargo bench --bench wild`:
+it replays every wild project through the in-tree Python Lark with the exact
+upstream options from each `meta.json`, timing build (single shot, like wild.rs)
+and **each input individually** — so the analysis can aggregate exactly the
+subset of inputs lark-rs parses (the Rust bench filters its corpus to inputs
+that parse) and the two engines compare over byte-identical input sets.
+
+```bash
+cargo bench --bench wild > wild_rust.out
+python3 tools/bench_wild_python.py lark_lark matter_idl mistql poetry_markers \
+    poetry_pep508 pylogics_ltl pyquil tartiflette > wild_python.json
+```
+
+Reference run (shared runner, Linux x86_64, release+LTO; in-tree Python Lark,
+CPython 3.11 — **only ratios travel**). Corpus rows are the same byte-identical
+input sets on both engines (xfail inputs excluded from both):
+
+| project | engine | corpus bytes | Rust ms | Python ms | parse speedup | Rust build | Py build | build ratio |
+|---------|--------|---:|---:|---:|---:|---:|---:|---:|
+| lark_lark      | LALR | 22.9K | 7.16 | 38.9 | **5.4×** | 241 ms | 55 ms | **0.2×** |
+| matter_idl     | LALR | 2.4K | 0.36 | 3.9 | **10.8×** | 1380 ms | 118 ms | **0.1×** |
+| mistql         | Earley/dyn | 1.4K | 36.9 | 1174 | **31.8×** | 2 ms | 40 ms | 18× |
+| poetry_markers | LALR | 639 | 0.07 | 0.61 | **8.2×** | 23 ms | 14 ms | 0.6× |
+| poetry_pep508  | LALR | 593 | 0.08 | 0.66 | **8.4×** | 35 ms | 29 ms | 0.8× |
+| pylogics_ltl   | LALR | 63 | 0.09 | 0.64 | **7.1×** | 122 ms | 59 ms | 0.5× |
+| pyquil         | LALR | 9.3K | 2.09 | 13.9 | **6.7×** | 962 ms | 219 ms | **0.2×** |
+| tartiflette    | LALR | 32.5K | 4.92 | 59.6 | **12.1×** | 592 ms | 108 ms | **0.2×** |
+
+**Reading.**
+
+- **Parse: LALR geomean 8.1× (range 5.4–12.1×), Earley/dynamic ~32×.** The
+  "10–100×" headline does **not** hold on real-world LALR grammars — wild
+  parsing sits at 5–13×, consistent with the synthetic 4–5× plus the wild
+  grammars' deeper trees. Earley reaches the headline's low end because Python
+  Lark's Earley is so much slower in absolute terms.
+- **Build: lark-rs is up to 12× *slower* than Python Lark** on every
+  medium-or-larger LALR grammar — the wild bank's headline finding.
+  Attribution (`cargo run --release --example wild_build_cost <project>`):
+  the **contextual lexer's per-state scanner construction is ~95% of build
+  time** (matter_idl: 1348 ms contextual vs 77 ms basic lexer; pyquil 963 vs
+  49; tartiflette 575 vs 24 — both scanner backends pay it, the dense DFA
+  slightly more than `regex`). Two gaps vs Python Lark's `ContextualLexer`:
+  1. **No dedup** — `ContextualLexer::new` builds one scanner per LALR state;
+     Python keys lexers by `frozenset(accepts)` and shares them. Measured on
+     the same grammars, that dedup is 4–5×: matter_idl 393 states → 86
+     distinct terminal-sets, pyquil 540 → 108, tartiflette 315 → 81,
+     lark_lark 118 → 47.
+  2. **Eager construction** — Python's per-state `BasicLexer` compiles its
+     scanner lazily on first use, so states never visited (most of them, for
+     a typical input) cost nothing.
+
+  Both fixes are local to `ContextualLexer::new` (dedup by sorted terminal-id
+  key; lazy `OnceCell` per scanner) and would put builds at-or-below Python's.
+- **Per-token allocations** remain the parse-side ceiling (the 2026-06-04
+  profiling finding): `next_token` clones the terminal *name* `String` per
+  token (`names[&id].clone()` — pure waste, the token already carries
+  `type_id`; the map lookup is also SipHash where a dense `Vec` index would
+  do) and allocates `value.to_string()` where a zero-copy span would do. The
+  name-clone is removable without the deferred tree-representation rework.
+
 ## Lexer backends: regex Scanner vs regex-automata DfaScanner (L1)
 
 `cargo bench --bench lex_backends` times the **lexer in isolation** (`BasicLexer::lex`)
