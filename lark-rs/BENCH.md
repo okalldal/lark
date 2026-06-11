@@ -226,7 +226,7 @@ cross-engine number (see "Earley arm" and "CYK arm" below).
   > next quote — O(n²) over the file (a 124 KB parse took ~177 s; JSON/SQL, which
   > use no lookaround terminals, were unaffected, which is what localized it). The
   > fix anchors the per-position fancy match to the search start with `\G`
-  > (`src/lexer.rs`, `Scanner::build`), so the search fails immediately when nothing
+  > (`src/lexer/scanner.rs`, `Scanner::build`), so the search fails immediately when nothing
   > matches at `pos`. Behaviour-preserving by construction — `match_end_at` already
   > required `m.start() == pos`, so the match set is identical, only the forward
   > scan is gone — and verified green across the full compliance/oracle/stdlib
@@ -409,7 +409,7 @@ input sets on both engines (xfail inputs excluded from both):
 
 `cargo bench --bench lex_backends` times the **lexer in isolation** (`BasicLexer::lex`)
 under each of the two combined-scanner engines behind the `ScannerBackend` seam
-(`src/lexer.rs`): the original `regex`-crate `Scanner` (combined alternation +
+(`src/lexer/mod.rs`): the original `regex`-crate `Scanner` (combined alternation +
 capture groups) and the L1 `DfaScanner` (a `regex-automata` multi-pattern DFA over
 the plain terminals, `docs/LEXER_DFA_PLAN.md`). The two are *correctness*-identical —
 the L0 differential oracle (`tests/test_scanner_differential.rs`) is the gate — so
@@ -505,7 +505,7 @@ input size). In the instruction profile, ~40% of all instructions are in
 | lexing (`Contextual::peek` → `next_token` → `Scanner::match_at`) | **~55%** | dominated by the `regex` engine + capture handling, *not* our logic |
 | reduce / tree-building (`reduce` → `TreeBuilder::assemble` → `Tree::new`) | **~32%** | `String` clones, `Tree` label + children `Vec` allocation |
 
-**Two concrete, localized root causes in the lexer** (`src/lexer.rs::match_at`),
+**Two concrete, localized root causes in the lexer** (`src/lexer/`, the backends' `match_at`),
 both **shared by the future Earley engine** (it lexes through the same
 `TokenSource`/`Scanner`) — **both now FIXED (perf sprint, 2026-06-04):**
 

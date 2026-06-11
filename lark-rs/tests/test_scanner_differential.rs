@@ -1,7 +1,7 @@
 //! L0 — the differential oracle for the lexer DFA rewrite (`docs/LEXER_DFA_PLAN.md`).
 //!
 //! Every token in the lexer funnels through one seam — `ScannerBackend::match_at`
-//! (`src/lexer.rs`), shared by `BasicLexer` and the per-state `ContextualLexer`.
+//! (`src/lexer/`), shared by `BasicLexer` and the per-state `ContextualLexer`.
 //! Two interchangeable engines sit behind it: the original `regex`-crate `Scanner`
 //! ([`LexerBackend::Regex`]) and the `regex-automata` DFA ([`LexerBackend::Dfa`]).
 //! This test is the contract that the swap changes **nothing**: for the same
