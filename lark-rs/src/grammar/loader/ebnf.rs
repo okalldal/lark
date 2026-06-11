@@ -2,7 +2,7 @@
 //! distribution, and anonymous-helper sharing (AST `Expr`s → flat BNF [`Rule`]s).
 
 use super::ast::*;
-use super::compiler::GrammarCompiler;
+use super::compiler::{AnonKind, GrammarCompiler};
 use crate::error::GrammarError;
 use crate::grammar::rule::{Rule, RuleOptions};
 use crate::grammar::symbol::{NonTerminal, Symbol, Terminal};
@@ -542,10 +542,10 @@ impl GrammarCompiler {
             }
         }
         let tag = match kind {
-            HelperKind::Group | HelperKind::GroupOptional => "group",
-            HelperKind::Maybe => "maybe",
-            HelperKind::Opt => "opt",
-            HelperKind::Star => "star",
+            HelperKind::Group | HelperKind::GroupOptional => AnonKind::Group,
+            HelperKind::Maybe => AnonKind::Maybe,
+            HelperKind::Opt => AnonKind::Opt,
+            HelperKind::Star => AnonKind::Star,
         };
         let name = self.fresh_anon_rule(tag);
         let origin = NonTerminal::new(&name);
@@ -675,7 +675,7 @@ impl GrammarCompiler {
         if let Some(name) = self.recurse_cache.get(&key) {
             return Symbol::NonTerminal(NonTerminal::new(name));
         }
-        let name = self.fresh_anon_rule("plus");
+        let name = self.fresh_anon_rule(AnonKind::Plus);
         let nt = NonTerminal::new(&name);
         self.rules.push(Rule::new(
             nt.clone(),
@@ -737,7 +737,7 @@ impl GrammarCompiler {
             }
             (n, Some(m)) if n == m => {
                 // exact repetition: inline n copies
-                let name = self.fresh_anon_rule("rep");
+                let name = self.fresh_anon_rule(AnonKind::Rep);
                 let nt = NonTerminal::new(&name);
                 let syms: Vec<Symbol> = std::iter::repeat(inner_sym).take(n).collect();
                 self.rules
@@ -747,7 +747,7 @@ impl GrammarCompiler {
             (n, max_opt) => {
                 // Range: generate rules for n..m repetitions
                 let max_count = max_opt.unwrap_or(n + 10); // cap at n+10 for unbounded
-                let name = self.fresh_anon_rule("rep_range");
+                let name = self.fresh_anon_rule(AnonKind::RepRange);
                 let nt = NonTerminal::new(&name);
                 for count in n..=max_count {
                     let syms: Vec<Symbol> =

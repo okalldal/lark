@@ -66,10 +66,12 @@ impl GrammarCompiler {
         {
             return existing.name.clone();
         }
-        // Use the clean hint when it is a fresh, valid identifier; otherwise fall
-        // back to a generated `__ANON_N` name (always a valid regex group name).
+        // Use the clean hint when it is a fresh, valid identifier — free in both
+        // the terminal and the rule namespace (`GrammarCompiler::hint_name_free`)
+        // — otherwise fall back to a generated `__ANON_N` name (always a valid
+        // regex group name).
         let name = match name_hint {
-            Some(h) if !self.terminals.iter().any(|t| t.name == h) => h,
+            Some(h) if self.hint_name_free(&h) => h,
             _ => self.fresh_terminal(),
         };
         self.terminals

@@ -2,8 +2,9 @@
 //! `python`, `unicode`, `lark`) and sibling-file imports, with rule-closure
 //! copying and module-prefix mangling.
 
-use super::ast::ImportSpec;
+use super::ast::{ImportSpec, Item};
 use super::compiler::GrammarCompiler;
+use super::parser::GrammarParser;
 use super::{load_grammar, load_grammar_with_base};
 use crate::error::GrammarError;
 use crate::grammar::rule::Rule;
@@ -12,10 +13,26 @@ use crate::grammar::terminal::{Pattern, PatternRe, TerminalDef};
 use crate::grammar::Grammar;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Synthetic start rule appended to an imported file so the requested terminals
 /// survive dead-terminal pruning while the file is compiled. Never copied out.
 const IMPORT_PROBE_RULE: &str = "__lark_import_probe";
+
+/// The names an `%import` directive will register in the importing grammar
+/// (aliases applied). Used by the compiler to reserve user-claimed names before
+/// any anonymous name is generated, and by the bundled-library probe to keep a
+/// library's own import targets importable in turn.
+pub(super) fn spec_final_names(spec: &ImportSpec) -> Vec<String> {
+    if let Some(names) = &spec.names {
+        names.clone()
+    } else if spec.path.len() > 1 {
+        let original = spec.path.last().cloned().unwrap_or_default();
+        vec![spec.alias.clone().unwrap_or(original)]
+    } else {
+        Vec::new()
+    }
+}
 
 impl GrammarCompiler {
     pub(super) fn resolve_import(&mut self, spec: ImportSpec) -> Result<(), GrammarError> {
@@ -69,11 +86,18 @@ impl GrammarCompiler {
 
         // Other bundled libraries (`python`, `unicode`, `lark`, …) carry rules as
         // well as terminals, so they route through the same source-parse +
-        // closure-copy path as a file import — just with the source embedded in the
-        // binary instead of read from disk.
+        // closure-copy path as a file import — just with the source embedded in
+        // the binary instead of read from disk, and compiled **once per process**
+        // (per options) instead of once per `%import` directive.
         if is_library {
             if let Some(src) = bundled_grammar_source(&module_path[0]) {
-                return self.import_from_source(src, None, &module_path, &names_to_import);
+                let imported = compile_bundled_grammar(
+                    &module_path[0],
+                    src,
+                    self.maybe_placeholders,
+                    self.global_keep_all,
+                )?;
+                return self.copy_requested(&imported, &module_path, &names_to_import);
             }
         }
 
@@ -114,11 +138,10 @@ impl GrammarCompiler {
         self.import_from_source(&text, sub_base, module_path, names_to_import)
     }
 
-    /// Parse a grammar `text` (read from a sibling file or embedded as a bundled
-    /// library) and copy the requested terminals/rules — and, for a rule, its
-    /// dependency closure — into this grammar. `sub_base` is the directory the
-    /// imported grammar's *own* relative imports resolve against (`None` for an
-    /// embedded library, which can only re-import other libraries, never files).
+    /// Parse a grammar `text` read from a sibling file and copy the requested
+    /// terminals/rules — and, for a rule, its dependency closure — into this
+    /// grammar. `sub_base` is the directory the imported grammar's *own* relative
+    /// imports resolve against.
     fn import_from_source(
         &mut self,
         text: &str,
@@ -126,7 +149,6 @@ impl GrammarCompiler {
         module_path: &[String],
         names_to_import: &[(String, Option<String>)],
     ) -> Result<(), GrammarError> {
-        let dotted = module_path.join(".");
         // A pure-terminal source (e.g. `tokens.lark`, `unicode.lark`) has no rule
         // referencing its terminals, so dead-terminal pruning would drop them.
         // Append a probe rule that references every requested name so they survive
@@ -145,18 +167,30 @@ impl GrammarCompiler {
             self.global_keep_all,
             sub_base,
         )?;
+        self.copy_requested(&imported, module_path, names_to_import)
+    }
 
-        // Dependency names are namespaced under the module path so an imported
-        // rule's private helpers/terminals never collide with the importing
-        // grammar's. Requested names keep their (aliased) name. Matches Python
-        // Lark's `_get_mangle('__'.join(dotted_path), aliases, ...)`.
+    /// Copy the requested terminals/rules — and, for a rule, its dependency
+    /// closure — out of a compiled imported grammar into this one.
+    ///
+    /// Dependency names are namespaced under the module path so an imported
+    /// rule's private helpers/terminals never collide with the importing
+    /// grammar's. Requested names keep their (aliased) name. Matches Python
+    /// Lark's `_get_mangle('__'.join(dotted_path), aliases, ...)`.
+    fn copy_requested(
+        &mut self,
+        imported: &Grammar,
+        module_path: &[String],
+        names_to_import: &[(String, Option<String>)],
+    ) -> Result<(), GrammarError> {
+        let dotted = module_path.join(".");
         let prefix = module_path.join("__");
         for (name, alias) in names_to_import {
             let final_name = alias.clone().unwrap_or_else(|| name.clone());
             if imported.terminals.iter().any(|t| &t.name == name) {
-                self.import_terminal(&imported, name, &final_name);
+                self.import_terminal(imported, name, &final_name);
             } else if imported.rules.iter().any(|r| &r.origin.name == name) {
-                self.import_rule_closure(&imported, name, &final_name, &prefix);
+                self.import_rule_closure(imported, name, &final_name, &prefix);
             } else {
                 return Err(GrammarError::ImportNotFound {
                     path: format!("{dotted}.{name}"),
@@ -296,6 +330,84 @@ fn bundled_grammar_source(module: &str) -> Option<&'static str> {
     }
 }
 
+/// Process-wide cache of compiled bundled libraries. Keyed by the module name
+/// plus the two loader options that change the compiled output
+/// (`maybe_placeholders` / `keep_all_tokens` alter EBNF expansion); the sources
+/// are embedded `&'static str`s, so a cache entry can never go stale.
+#[allow(clippy::type_complexity)]
+fn bundled_cache() -> &'static Mutex<HashMap<(String, bool, bool), Arc<Grammar>>> {
+    static CACHE: OnceLock<Mutex<HashMap<(String, bool, bool), Arc<Grammar>>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Compile a bundled library once per process (per options) and cache it.
+///
+/// A per-`%import` compile could probe just the requested names; to serve every
+/// request from one compile, the probe instead references **every importable
+/// name** — non-template rules, terminals, `%declare`d terminals, and the
+/// library's own `%import` targets (lark.lark registers `NUMBER` via
+/// `%import common.SIGNED_INT -> NUMBER`) — so nothing is pruned. The probe is
+/// reference-only (no literals, no EBNF operators), so it generates no helper
+/// rules and no anonymous terminals: every compiled rule and terminal is
+/// byte-identical to what the old per-request probe produced; the only
+/// difference is that *more* terminals survive pruning, and `copy_requested`
+/// copies only the requested closure anyway.
+///
+/// The lock is never held across a compile, so a library re-importing another
+/// module cannot deadlock. Consequently two threads *can* race the first
+/// compile of one key — the duplicate work is benign — but the cache entry is
+/// canonical: the loser discards its result and adopts the winner's, so
+/// repeated calls with the same key always return the same `Arc`.
+fn compile_bundled_grammar(
+    module: &str,
+    src: &str,
+    maybe_placeholders: bool,
+    keep_all_tokens: bool,
+) -> Result<Arc<Grammar>, GrammarError> {
+    let key = (module.to_string(), maybe_placeholders, keep_all_tokens);
+    if let Some(g) = bundled_cache().lock().unwrap().get(&key) {
+        return Ok(Arc::clone(g));
+    }
+
+    let items = GrammarParser::new(src).parse_start()?;
+    let mut names: Vec<String> = Vec::new();
+    for item in &items {
+        match item {
+            // A template cannot be referenced bare (it instantiates on demand),
+            // so it is not probe-able — and not importable by name either way.
+            Item::RuleItem(r) if r.params.is_empty() => names.push(r.name.clone()),
+            Item::RuleItem(_) => {}
+            Item::TermItem(t) => names.push(t.name.clone()),
+            Item::DeclareItem(syms) => {
+                for sym in syms {
+                    if let Symbol::Terminal(t) = sym {
+                        names.push(t.name.clone());
+                    }
+                }
+            }
+            Item::ImportItem(spec) => names.extend(spec_final_names(spec)),
+            Item::IgnoreItem(_) => {}
+        }
+    }
+    let probe = format!("{src}\n{IMPORT_PROBE_RULE}: {}\n", names.join(" "));
+    let grammar = Arc::new(load_grammar_with_base(
+        &probe,
+        &[IMPORT_PROBE_RULE.to_string()],
+        maybe_placeholders,
+        keep_all_tokens,
+        None,
+    )?);
+    // Re-check under the lock: if another thread won the compile race, its
+    // entry is canonical — never overwrite it (an overwrite would break the
+    // same-key ⇒ same-`Arc` guarantee the cache promises).
+    let mut cache = bundled_cache().lock().unwrap();
+    if let Some(existing) = cache.get(&key) {
+        return Ok(Arc::clone(existing));
+    }
+    cache.insert(key, Arc::clone(&grammar));
+    Ok(grammar)
+}
+
 /// Lark's `common.lark`, bundled and compiled once into a `name → inline-regex`
 /// map for `%import common.X` resolution.
 ///
@@ -339,4 +451,59 @@ pub(super) fn common_terminals() -> &'static HashMap<String, String> {
             .map(|t| (t.name, t.pattern.to_inline_regex()))
             .collect()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::grammar::load_grammar;
+
+    /// Repeated imports of one bundled library share a single compiled grammar;
+    /// distinct loader options compile (and cache) separately, since
+    /// `maybe_placeholders` / `keep_all_tokens` change the compiled rules.
+    #[test]
+    fn bundled_library_compiles_once_per_options() {
+        let src = bundled_grammar_source("lark").unwrap();
+        let a = compile_bundled_grammar("lark", src, false, false).unwrap();
+        let b = compile_bundled_grammar("lark", src, false, false).unwrap();
+        assert!(Arc::ptr_eq(&a, &b), "same options must hit the cache");
+        let c = compile_bundled_grammar("lark", src, true, false).unwrap();
+        assert!(
+            !Arc::ptr_eq(&a, &c),
+            "different options must compile separately"
+        );
+    }
+
+    /// A name a bundled library registers via its *own* `%import … -> alias`
+    /// stays importable: lark.lark's `NUMBER` is `%import common.SIGNED_INT ->
+    /// NUMBER`, which the all-names cache probe must reference or pruning drops
+    /// it (the old per-request probe referenced it explicitly).
+    #[test]
+    fn import_of_a_library_import_alias_resolves() {
+        let g = load_grammar(
+            "start: NUMBER\n%import lark.NUMBER\n",
+            &["start".to_string()],
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(g.terminals.iter().any(|t| t.name == "NUMBER"));
+    }
+
+    /// A `%declare`d (pattern-less) terminal stays importable through the cache
+    /// probe: python.lark declares `_INDENT` / `_DEDENT`.
+    #[test]
+    fn import_of_declared_terminal_resolves() {
+        let g = load_grammar(
+            "start: _INDENT\n%import python._INDENT\n",
+            &["start".to_string()],
+            false,
+            false,
+        )
+        .unwrap();
+        assert!(g
+            .terminals
+            .iter()
+            .any(|t| t.name == "_INDENT" && t.declared));
+    }
 }
