@@ -396,11 +396,7 @@ impl EarleyParser {
     ) -> Result<ParseTree, ParseError> {
         let start_id = self
             .start_id(start)
-            .ok_or_else(|| ParseError::UnexpectedEof {
-                line: 0,
-                col: 0,
-                expected: vec![],
-            })?;
+            .ok_or_else(|| ParseError::unexpected_eof(0, 0, vec![]))?;
         let toks: Vec<&Token> = tokens
             .iter()
             .filter(|t| t.type_id != SymbolId::END)
@@ -430,11 +426,7 @@ impl EarleyParser {
     ) -> Result<ParseTree, ParseError> {
         let start_id = self
             .start_id(start)
-            .ok_or_else(|| ParseError::UnexpectedEof {
-                line: 0,
-                col: 0,
-                expected: vec![],
-            })?;
+            .ok_or_else(|| ParseError::unexpected_eof(0, 0, vec![]))?;
         let (forest, root) = self.build_chart_dynamic(text, start_id, matcher, complete_lex)?;
         // Dynamic lexer: there is no terminal-ordering tie-break to consume the
         // priorities, so they DO feed the forest priority sum (Lark's
@@ -470,11 +462,7 @@ impl EarleyParser {
                 .join()
                 .unwrap_or(None)
         })
-        .ok_or_else(|| ParseError::UnexpectedEof {
-            line: 0,
-            col: 0,
-            expected: vec![],
-        })?;
+        .ok_or_else(|| ParseError::unexpected_eof(0, 0, vec![]))?;
         Ok(match value {
             NodeValue::Tree(t) => ParseTree::Tree(t),
             NodeValue::Token(t) => ParseTree::Token(t),
@@ -558,13 +546,9 @@ impl EarleyParser {
                     to_scan = next_scan;
                 }
                 None => {
-                    return Err(ParseError::UnexpectedToken {
-                        token: token.value.clone(),
-                        token_type: token.type_.clone(),
-                        line: token.line,
-                        col: token.column,
-                        expected: vec![],
-                    });
+                    // No per-state expected set exists for Earley (the scan set
+                    // is per-item, not a table row), so the report carries none.
+                    return Err(ParseError::unexpected_token(token, vec![]));
                 }
             }
             i += 1;
@@ -583,11 +567,7 @@ impl EarleyParser {
                 .last()
                 .map(|t| (t.end_line.max(t.line), t.end_column.max(t.column)))
                 .unwrap_or((1, 1));
-            ParseError::UnexpectedEof {
-                line,
-                col,
-                expected: vec![],
-            }
+            ParseError::unexpected_eof(line, col, vec![])
         })
     }
 
@@ -1098,12 +1078,13 @@ impl EarleyParser {
         if let Some(root) = root {
             self.load_leo_paths(&mut forest, &trans_arena, root);
         }
-        root.map(|root| (forest, root))
-            .ok_or(ParseError::UnexpectedEof {
-                line: *lines.last().unwrap_or(&1),
-                col: *cols.last().unwrap_or(&1),
-                expected: vec![],
-            })
+        root.map(|root| (forest, root)).ok_or_else(|| {
+            ParseError::unexpected_eof(
+                *lines.last().unwrap_or(&1),
+                *cols.last().unwrap_or(&1),
+                vec![],
+            )
+        })
     }
 
     /// The dynamic scanner for character step `i`: match each scan-set item's

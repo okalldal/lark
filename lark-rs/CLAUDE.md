@@ -167,7 +167,11 @@ src/
     dynamic.rs          DynamicMatcher (per-terminal regexes for Earley's dynamic lexer)
     collision.rs        strict-mode regex-collision (#35) + zero-width checks
   parsers/
-    mod.rs            ParsingFrontend — lowers grammar, wires lexer + parser
+    mod.rs            ParsingFrontend over a ParserDriver trait — one driver per
+                      parser × lexer × postlex wiring (a new configuration is a
+                      new impl, not match arms); per-backend builders share the
+                      lower + lexer-conf preamble; ParseError construction is
+                      centralized in error.rs (unexpected_token's END split)
     lalr.rs           Dense ParseTable, LalrParser, build_lalr_table
     token_source.rs   TokenSource trait + PreLexed / Contextual (lexer⇄parser API)
     tree_builder.rs   TreeBuilder — shared rule→tree shaping (LALR + Earley)

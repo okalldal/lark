@@ -566,10 +566,12 @@ impl LalrParser {
         };
         start_id
             .and_then(|id| self.table.start_states.get(&id).copied())
-            .ok_or_else(|| ParseError::UnexpectedEof {
-                line: 0,
-                col: 0,
-                expected: vec![format!("start symbol '{}'", start.unwrap_or("?"))],
+            .ok_or_else(|| {
+                ParseError::unexpected_eof(
+                    0,
+                    0,
+                    vec![format!("start symbol '{}'", start.unwrap_or("?"))],
+                )
             })
     }
 
@@ -643,32 +645,14 @@ impl LalrParser {
             Some(NodeValue::Tree(t)) => Ok(ParseTree::Tree(t)),
             Some(NodeValue::Token(tok)) => Ok(ParseTree::Token(tok)),
             // A start rule is never transparent, so its value is never Inline.
-            Some(NodeValue::Inline(_)) | None => Err(ParseError::UnexpectedEof {
-                line: 0,
-                col: 0,
-                expected: vec![],
-            }),
+            Some(NodeValue::Inline(_)) | None => Err(ParseError::unexpected_eof(0, 0, vec![])),
         }
     }
 
-    /// Build the error for a token with no action in the current state.
+    /// Build the error for a token with no action in the current state, filling
+    /// `expected` from the state's action row (only the parser knows it).
     fn unexpected(&self, state: usize, token: &Token) -> ParseError {
-        let expected = self.expected_at(state);
-        if token.type_id == SymbolId::END {
-            ParseError::UnexpectedEof {
-                line: token.line,
-                col: token.column,
-                expected,
-            }
-        } else {
-            ParseError::UnexpectedToken {
-                token: token.value.clone(),
-                token_type: token.type_.clone(),
-                line: token.line,
-                col: token.column,
-                expected,
-            }
-        }
+        ParseError::unexpected_token(token, self.expected_at(state))
     }
 
     /// Drive the LALR state machine against any [`TokenSource`]. SHIFT consumes a
