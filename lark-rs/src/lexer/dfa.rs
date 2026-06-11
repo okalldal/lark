@@ -139,9 +139,11 @@ struct ClassifiedSubs {
 /// into **unguarded** sub-patterns (plain terminals + the unguarded branches of
 /// boundary terminals) and **guarded** sub-patterns (branches with a leading and/or
 /// trailing guard). The two go to two different engines:
+///
 ///   * unguarded → one leftmost-first DFA (M0 semantics, exact within-pattern
 ///     order — a sibling guard never disturbs `/ab|abc/`);
 ///   * guarded → one all-matches DFA driven by the guarded-accept accumulator.
+///
 /// A lookaround terminal whose guarded base is not guard-realizable (see
 /// `is_guard_realizable`), or whose lookbehind sits at a variable offset outside
 /// a recognized idiom, FAILS THE BUILD with the categorized scope error (L4 —
@@ -243,6 +245,9 @@ fn classify_plan_groups(
 impl PlainEngine {
     /// Stage 2a — the leftmost-first plain engine: order the sub-patterns by `(rank,
     /// branch_order)` so the lowest `PatternID` is the leftmost-first winner.
+    /// Borrows `subs` (unlike [`GuardedEngine::build`], which consumes them): this
+    /// engine only derives its id/rank `map` from them — the guards a `SubPattern`
+    /// carries are all `None`/empty on the plain side, so nothing is stored.
     fn build(subs: &[SubPattern], srcs: &[String]) -> Result<Option<Self>, GrammarError> {
         if srcs.is_empty() {
             return Ok(None);
@@ -260,7 +265,8 @@ impl PlainEngine {
 }
 
 impl GuardedEngine {
-    /// Stage 2b — the all-matches guarded engine.
+    /// Stage 2b — the all-matches guarded engine. Consumes `subs`: the engine
+    /// stores them (guards and all) for `guarded_best` to evaluate per accept.
     fn build(subs: Vec<SubPattern>, srcs: &[String]) -> Result<Option<Self>, GrammarError> {
         if srcs.is_empty() {
             return Ok(None);

@@ -80,7 +80,7 @@ use crate::tree::Token;
 /// it, while the anchored search keeps missing at `pos` — exactly the
 /// `tests/test_lexer_scaling.rs` shape. Compiles to nothing without `perf-counters`.
 #[inline]
-pub(self) fn record_scan_skip(pos: usize, match_start: Option<usize>) {
+fn record_scan_skip(pos: usize, match_start: Option<usize>) {
     let skip = match match_start {
         Some(start) => start.saturating_sub(pos) as u64,
         None => 0,
