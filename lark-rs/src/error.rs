@@ -115,6 +115,48 @@ pub struct RecoveredTree {
 }
 
 impl ParseError {
+    /// The parser met a token it cannot act on. Builds an [`UnexpectedToken`]
+    /// carrying the token's position and the caller-supplied `expected` set — or,
+    /// when the token is the synthetic end-of-input terminal, the equivalent
+    /// [`UnexpectedEof`]. The one constructor every backend funnels its
+    /// bad-token reports through, so the END-vs-token split and the field
+    /// shapes cannot drift between them. What `expected` contains stays the
+    /// backend's call: LALR fills it from the parse table's action row; Earley
+    /// and CYK have no comparable per-state set and pass an empty list.
+    ///
+    /// [`UnexpectedToken`]: ParseError::UnexpectedToken
+    /// [`UnexpectedEof`]: ParseError::UnexpectedEof
+    pub(crate) fn unexpected_token(
+        token: &crate::tree::Token,
+        expected: Vec<String>,
+    ) -> ParseError {
+        if token.type_id == crate::grammar::intern::SymbolId::END {
+            ParseError::UnexpectedEof {
+                line: token.line,
+                col: token.column,
+                expected,
+            }
+        } else {
+            ParseError::UnexpectedToken {
+                token: token.value.clone(),
+                token_type: token.type_.clone(),
+                line: token.line,
+                col: token.column,
+                expected,
+            }
+        }
+    }
+
+    /// Unexpected end of input at a position (`0, 0` when no position is known —
+    /// e.g. an unresolvable start symbol or CYK's uniform "parsing failed").
+    pub(crate) fn unexpected_eof(line: usize, col: usize, expected: Vec<String>) -> ParseError {
+        ParseError::UnexpectedEof {
+            line,
+            col,
+            expected,
+        }
+    }
+
     /// Format a snippet of the input around the error position.
     pub fn get_context(text: &str, pos: usize, span: usize) -> String {
         let start = pos.saturating_sub(span);

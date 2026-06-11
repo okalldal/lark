@@ -36,6 +36,19 @@ pub struct Lark {
     frontend: parsers::ParsingFrontend,
 }
 
+/// `Lark` is `Send` (build on one thread, parse on another; `Mutex<Lark>` is
+/// `Sync`) but deliberately not `Sync` — the scanners hold `RefCell`/`OnceCell`
+/// scratch. The `Send` half rides the driver box's `Send` supertrait
+/// (`parsers::ParserDriver`), which a refactor could silently drop; this pin
+/// fails the build if it ever does (PR #146 review).
+const _: () = {
+    fn assert_send<T: Send>() {}
+    #[allow(dead_code)]
+    fn pin() {
+        assert_send::<Lark>();
+    }
+};
+
 impl Lark {
     pub fn new(grammar_text: &str, options: LarkOptions) -> Result<Self, LarkError> {
         let grammar = grammar::load_grammar_with_base(

@@ -296,11 +296,7 @@ impl CykParser {
 /// the input), so it reports a single end-of-input failure, like Python Lark's
 /// `ParseError('Parsing failed.')`.
 fn parse_failed() -> ParseError {
-    ParseError::UnexpectedEof {
-        line: 0,
-        col: 0,
-        expected: vec![],
-    }
+    ParseError::unexpected_eof(0, 0, vec![])
 }
 
 // ─── CNF conversion ─────────────────────────────────────────────────────────
