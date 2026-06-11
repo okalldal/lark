@@ -153,8 +153,19 @@ src/
     rule.rs           Rule, RuleOptions (expand1, keep_all_tokens, …)
     symbol.rs         Symbol, Terminal, NonTerminal  (surface grammar only)
     terminal.rs       TerminalDef, Pattern, PatternRe, PatternStr
-  lexer.rs            Scanner (id-based), BasicLexer, ContextualLexer, LexerState,
-                      DynamicMatcher (per-terminal regexes for Earley's dynamic lexer)
+  lexer/              BasicLexer, ContextualLexer + the combined scanners, one module
+                      per concern:
+    mod.rs              Lexer trait, LexerConf/LexerBackend, ScannerBackend seam,
+                        BasicLexer, ContextualLexer (lazy per-state scanners), LexerState
+    plan.rs             ScannerPlan: selection, Python-style ordering, `unless` retyping
+    pattern.rs          flag-wrapper algebra (the loader's baked `(?is:…)` + inverse)
+    route.rs            THE refusal seam (route_fancy_only_terminal)
+    guard.rs            compiled boundary/lookbehind guards + GuardContext
+    scanner.rs          the `regex`-crate combined-alternation backend (+ side-probes)
+    dfa.rs              the `regex-automata` DFA backend (default; staged build:
+                        classify → engines → prefilter), LoweredTerminalMatcher
+    dynamic.rs          DynamicMatcher (per-terminal regexes for Earley's dynamic lexer)
+    collision.rs        strict-mode regex-collision (#35) + zero-width checks
   parsers/
     mod.rs            ParsingFrontend — lowers grammar, wires lexer + parser
     lalr.rs           Dense ParseTable, LalrParser, build_lalr_table
@@ -326,7 +337,7 @@ After each REDUCE, `apply_rule_options()` post-processes children:
 | JSONTestSuite corpus | ✅ | 293/293 oracle agreement |
 | Compliance bank | ✅ | 257 grammars strip-mined from Python Lark's suite; 512/512 = 100% agree (XFAIL-gated) |
 | `strict` mode | ✅ | `strict=True` raises on shift/reduce conflicts (reduce/reduce already fatal) **and** on same-priority regex-terminal collisions (#35), like Lark |
-| Strict regex-collision (#35) | ✅ | `strict=True` rejects two same-priority *regex* terminals whose languages overlap, mirroring Python's interegular check. lark-rs has no FSM in `regex`, so each terminal is compiled to a whole-match DFA (`regex-automata`) and a **product-construction** BFS decides intersection-emptiness, reporting the shortest witness string. Excludes string-literal terminals (Python's `PatternStr`) via a `TerminalDef::string_type` flag so a keyword like `IF: "if"` is never flagged against `/[a-z]+/`. `src/lexer.rs::check_regex_collisions` |
+| Strict regex-collision (#35) | ✅ | `strict=True` rejects two same-priority *regex* terminals whose languages overlap, mirroring Python's interegular check. lark-rs has no FSM in `regex`, so each terminal is compiled to a whole-match DFA (`regex-automata`) and a **product-construction** BFS decides intersection-emptiness, reporting the shortest witness string. Excludes string-literal terminals (Python's `PatternStr`) via a `TerminalDef::string_type` flag so a keyword like `IF: "if"` is never flagged against `/[a-z]+/`. `src/lexer/collision.rs::check_regex_collisions` |
 | `g_regex_flags` | ✅ | Global regex flags (e.g. `IGNORECASE`) applied to every terminal via a combined-regex prefix |
 | Oracle-coverage enforcement | ✅ | Meta-test + CI freshness gate |
 

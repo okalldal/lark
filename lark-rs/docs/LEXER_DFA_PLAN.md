@@ -381,7 +381,7 @@ finite window. Three shapes, three moves:
 **General backstop.** For anything the three moves don't cover directly, the rigorous
 fallback is closure theory: a bounded assertion is a regular constraint, and finite
 automata are closed under intersection/complement, so it can be intersected into the
-NFA by **product construction** — the same machinery already in `src/lexer.rs` for the
+NFA by **product construction** — the same machinery already in `src/lexer/collision.rs` for the
 #35 collision check. (Recognition is fully general this way; priority-correct
 *match-length* for arbitrary internal assertions is the hard residue — see boundary.)
 
