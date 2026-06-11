@@ -55,7 +55,13 @@ pub struct ParserConf {
 /// postlex hook) it consumes tokens through. The frontend holds exactly one
 /// driver; a new `parser × lexer × postlex` configuration is a new impl of this
 /// trait, not a new match arm threaded through every frontend method.
-trait ParserDriver {
+///
+/// `Send` is a supertrait deliberately: the old enum frontend was a concrete
+/// type whose `Send`ness was inferred, so `Lark` was `Send`; a bare
+/// `Box<dyn ParserDriver>` would silently drop that from the public API
+/// (build-on-one-thread/parse-on-another, and `Mutex<Lark>` being `Sync`).
+/// Pinned at compile time in `lib.rs` so the bound cannot be dropped again.
+trait ParserDriver: Send {
     /// Parse the full input from `start` (or the grammar's default start).
     fn parse(&self, text: &str, start: Option<&str>) -> Result<ParseTree, ParseError>;
 
@@ -71,10 +77,17 @@ trait ParserDriver {
         _start: Option<&str>,
         _on_error: &mut dyn FnMut(&ParseError) -> bool,
     ) -> Result<RecoveredTree, LarkError> {
-        Err(LarkError::Grammar(GrammarError::Other {
-            msg: "error recovery requires parser='lalr' without a postlex hook".to_string(),
-        }))
+        Err(recovery_unsupported())
     }
+}
+
+/// The typed refusal for a configuration without recovery support — shared by
+/// the trait default and [`lalr_recover`]'s missing-lexer arm so the message
+/// cannot drift between them.
+fn recovery_unsupported() -> LarkError {
+    LarkError::Grammar(GrammarError::Other {
+        msg: "error recovery requires parser='lalr' without a postlex hook".to_string(),
+    })
 }
 
 /// Shared recovery body for the LALR drivers (issue #43): lex with the basic
@@ -92,9 +105,7 @@ fn lalr_recover(
     on_error: &mut dyn FnMut(&ParseError) -> bool,
 ) -> Result<RecoveredTree, LarkError> {
     let Some(lexer) = lexer else {
-        return Err(LarkError::Grammar(GrammarError::Other {
-            msg: "error recovery requires parser='lalr' without a postlex hook".to_string(),
-        }));
+        return Err(recovery_unsupported());
     };
     let tokens = lexer.lex(text)?;
     let mut errors = Vec::new();
