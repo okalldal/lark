@@ -1563,6 +1563,359 @@ impl ShortStringIdiom {
     }
 }
 
+// ─── Fence idiom (idiom #5): named-backref tag-echo delimited tokens ───────────
+//
+// The fence idiom matches languages that use the same run-time tag to open and
+// close a delimited span — heredoc / heredoc-indent (HCL2 Terraform) and CMake
+// bracket arguments (gersemi). The Python `re` module handles these via named
+// capturing groups and backreferences:
+//
+//   <<(?P<heredoc>[a-zA-Z][a-zA-Z0-9._-]+)\n(?:.|\n)*?(?P=heredoc)
+//   \[(?P<equal_signs>(=*))\[([\s\S]+?)\](?P=equal_signs)\]
+//
+// These patterns are **non-regular** (the `regex` crate and `regex-automata`
+// both reject them). However, they are **linear-time** recognisable:
+//
+//   (1) match the open literal + run the tag DFA anchored at `pos` → capture
+//       the tag bytes (e.g. "MARKER" or "====");
+//   (2) check the separator literal;
+//   (3) build `close_seq = close_pre ++ tag_bytes ++ close_post` and scan the
+//       rest for the first occurrence — a single linear `windows()` pass.
+//
+// No backtracking, no quadratic scan, total complexity O(n).
+//
+// [`recognize_fence_idiom`] detects the exact shape without calling the
+// lookaround AST parser (which fails on named backreferences). The compiled
+// [`FenceSpec`] is consumed in `lexer.rs` to build a [`FenceMatcher`].
+
+/// The five components of a recognised fence pattern; consumed by `lexer.rs` to
+/// build a [`FenceMatcher`](crate::lexer::FenceMatcher).
+pub struct FenceSpec {
+    /// Literal bytes before the named capture group (e.g. `b"<<"` or `b"["`).
+    pub open: Vec<u8>,
+    /// The tag regex (content of the named capture group, e.g.
+    /// `"[a-zA-Z][a-zA-Z0-9._-]+"` or `"(=*)"`).
+    pub tag_re: String,
+    /// Literal bytes between the tag and the body (e.g. `b"\n"` or `b"["`).
+    pub sep: Vec<u8>,
+    /// Literal bytes between the body and the backreference (e.g. `b""` or `b"]"`).
+    pub close_pre: Vec<u8>,
+    /// Literal bytes after the backreference (e.g. `b""` or `b"]"`).
+    pub close_post: Vec<u8>,
+}
+
+/// Try to recognise the fence idiom in the raw regex pattern `raw`.
+///
+/// The recognised shape is:
+///   `OPEN (?P<NAME>TAG_RE) SEP BODY_GROUP CLOSE_PRE (?P=NAME) CLOSE_POST`
+///
+/// where OPEN, SEP, CLOSE_PRE, CLOSE_POST are all pure regex literals
+/// (no unescaped metacharacters), BODY_GROUP is one balanced `(...)` group
+/// (optional, possibly with a trailing quantifier), and `(?P=NAME)` is the
+/// standard named backreference.
+///
+/// Returns `None` if the pattern does not match this exact shape. Never panics.
+pub fn recognize_fence_idiom(raw: &str) -> Option<FenceSpec> {
+    // Quick pre-check: must contain a named backreference.
+    if !raw.contains("(?P=") {
+        return None;
+    }
+
+    // Find the first `(?P<` at top level (skipping `\X` and character classes).
+    let named_open = scan_for(raw.as_bytes(), b"(?P<")?;
+
+    // Everything before `(?P<` must be a pure literal.
+    let open = unescape_regex_literal(&raw[..named_open])?;
+
+    // Extract NAME: alphanumeric/underscore chars between `<` and `>`.
+    let name_start = named_open + 4; // skip `(?P<`
+    let rest_after_open = raw.get(name_start..)?;
+    let gt_offset = rest_after_open.find('>')?;
+    let name = &rest_after_open[..gt_offset];
+    if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return None;
+    }
+
+    // The `(` of `(?P<NAME>...)` is at `named_open`; find its matching `)`.
+    let group_close = find_group_close(raw.as_bytes(), named_open)?;
+    let after_name_gt = name_start + gt_offset + 1; // position after `>`
+    let tag_re = &raw[after_name_gt..group_close];
+    if tag_re.is_empty() {
+        return None;
+    }
+
+    // After the named group: rest = SEP BODY_GROUP CLOSE_PRE (?P=NAME) CLOSE_POST
+    let after_group = group_close + 1;
+    let rest = raw.get(after_group..)?;
+
+    // Find `(?P=NAME)` in the rest — must appear exactly once.
+    let backref = format!("(?P={})", name);
+    let backref_pos = rest.find(backref.as_str())?;
+    if rest[backref_pos + backref.len()..].contains(backref.as_str()) {
+        return None; // more than one backref: too complex
+    }
+
+    let mid = &rest[..backref_pos];
+    let close_post_str = &rest[backref_pos + backref.len()..];
+
+    // CLOSE_POST must be a pure literal.
+    let close_post = unescape_regex_literal(close_post_str)?;
+
+    // Parse MID → (sep_str, close_pre_str).
+    let (sep_str, close_pre_str) = split_mid(mid)?;
+    let sep = unescape_regex_literal(sep_str)?;
+    let close_pre = unescape_regex_literal(close_pre_str)?;
+
+    Some(FenceSpec {
+        open,
+        tag_re: tag_re.to_string(),
+        sep,
+        close_pre,
+        close_post,
+    })
+}
+
+/// Find the first occurrence of the byte-string `pat` in `s`, scanning past
+/// `\X` escape sequences and `[...]` character classes (so a `pat` inside an
+/// escape or class is not reported). Does not track group depth.
+fn scan_for(s: &[u8], pat: &[u8]) -> Option<usize> {
+    let n = s.len();
+    let pn = pat.len();
+    let mut i = 0;
+    while i + pn <= n {
+        if s[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if s[i] == b'[' {
+            i += 1;
+            if i < n && s[i] == b'^' {
+                i += 1;
+            }
+            // `[]` or `[^]` — a literal `]` as first class char.
+            if i < n && s[i] == b']' {
+                i += 1;
+            }
+            while i < n && s[i] != b']' {
+                if s[i] == b'\\' {
+                    i += 1;
+                }
+                i += 1;
+            }
+            if i < n {
+                i += 1; // skip `]`
+            }
+            continue;
+        }
+        if s[i..].starts_with(pat) {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Find the matching `)` for the `(` at position `pos` in `s`, respecting
+/// `\X` escapes, `[...]` character classes, and nested groups. Returns the
+/// byte index of the matching `)`, or `None` if unbalanced.
+fn find_group_close(s: &[u8], pos: usize) -> Option<usize> {
+    debug_assert_eq!(s.get(pos), Some(&b'('));
+    let n = s.len();
+    let mut i = pos + 1;
+    let mut depth = 1usize;
+    while i < n && depth > 0 {
+        match s[i] {
+            b'\\' => {
+                i += 2;
+            }
+            b'[' => {
+                i += 1;
+                if i < n && s[i] == b'^' {
+                    i += 1;
+                }
+                if i < n && s[i] == b']' {
+                    i += 1;
+                }
+                while i < n && s[i] != b']' {
+                    if s[i] == b'\\' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                if i < n {
+                    i += 1;
+                }
+            }
+            b'(' => {
+                depth += 1;
+                i += 1;
+            }
+            b')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i);
+                }
+                i += 1;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    None
+}
+
+/// Split the MID section `SEP BODY_GROUP CLOSE_PRE` of a fence pattern into
+/// `(sep_str, close_pre_str)`. SEP is the literal prefix before the first
+/// unescaped `(`; BODY_GROUP is one balanced group with an optional quantifier
+/// (skipped); CLOSE_PRE is the literal suffix after the body.
+///
+/// Returns `None` if the MID section is not this exact shape.
+fn split_mid(mid: &str) -> Option<(&str, &str)> {
+    let s = mid.as_bytes();
+    let n = s.len();
+    let mut i = 0;
+
+    // SEP: literal chars until the first unescaped `(`.
+    while i < n {
+        match s[i] {
+            b'\\' => {
+                if i + 1 >= n {
+                    return None;
+                }
+                i += 2;
+            }
+            b'(' => break,
+            // Unescaped metacharacters other than `(` mean the SEP is not a
+            // plain literal → reject.
+            b'[' | b'*' | b'+' | b'?' | b'^' | b'$' | b'|' | b')' | b'{' => return None,
+            _ => i += 1,
+        }
+    }
+    let sep_end = i;
+
+    // Optional BODY_GROUP: one balanced `(...)` group.
+    if i < n {
+        if s[i] != b'(' {
+            return None;
+        }
+        let close_pos = find_group_close(s, i)?;
+        i = close_pos + 1;
+
+        // Skip an optional quantifier (`*`, `+`, `?`, `{m,n}`) plus lazy `?`.
+        if i < n && matches!(s[i], b'*' | b'+' | b'?') {
+            i += 1;
+            if i < n && s[i] == b'?' {
+                i += 1;
+            }
+        } else if i < n && s[i] == b'{' {
+            while i < n && s[i] != b'}' {
+                i += 1;
+            }
+            if i < n {
+                i += 1; // skip `}`
+            }
+            if i < n && s[i] == b'?' {
+                i += 1;
+            }
+        }
+    }
+    let close_pre_start = i;
+
+    // CLOSE_PRE: must be a pure literal (no more groups or metacharacters).
+    while i < n {
+        match s[i] {
+            b'\\' => {
+                if i + 1 >= n {
+                    return None;
+                }
+                i += 2;
+            }
+            b'(' | b'[' | b'*' | b'+' | b'?' | b'^' | b'$' | b'|' | b')' | b'{' => {
+                return None;
+            }
+            _ => i += 1,
+        }
+    }
+
+    Some((&mid[..sep_end], &mid[close_pre_start..]))
+}
+
+/// Convert a pure regex literal string (no unescaped metacharacters) to the
+/// actual bytes it matches. Returns `None` if `s` contains any unescaped
+/// regex metacharacter (`.`, `*`, `+`, `?`, `^`, `$`, `|`, `[`, `]`, `(`,
+/// `)`, `{`, `}`).
+fn unescape_regex_literal(s: &str) -> Option<Vec<u8>> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out: Vec<u8> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            '.' | '*' | '+' | '?' | '^' | '$' | '|' | '[' | ']' | '(' | ')' | '{' | '}' => {
+                return None; // unescaped metacharacter
+            }
+            '\\' => {
+                i += 1;
+                if i >= chars.len() {
+                    return None;
+                }
+                let b: u8 = match chars[i] {
+                    'n' => b'\n',
+                    't' => b'\t',
+                    'r' => b'\r',
+                    'a' => 0x07,
+                    'f' => 0x0c,
+                    'v' => 0x0b,
+                    '\\' => b'\\',
+                    '[' => b'[',
+                    ']' => b']',
+                    '(' => b'(',
+                    ')' => b')',
+                    '{' => b'{',
+                    '}' => b'}',
+                    '.' => b'.',
+                    '*' => b'*',
+                    '+' => b'+',
+                    '?' => b'?',
+                    '^' => b'^',
+                    '$' => b'$',
+                    '|' => b'|',
+                    '-' => b'-',
+                    '<' => b'<',
+                    '>' => b'>',
+                    '/' => b'/',
+                    '_' => b'_',
+                    ' ' => b' ',
+                    '0' => b'\0',
+                    'x' => {
+                        // `\xHH` hex escape
+                        if i + 2 >= chars.len() {
+                            return None;
+                        }
+                        let h: String = chars[i + 1..=i + 2].iter().collect();
+                        let v = u8::from_str_radix(&h, 16).ok()?;
+                        i += 2;
+                        v
+                    }
+                    _ => return None, // unrecognised escape in a literal context
+                };
+                out.push(b);
+            }
+            c => {
+                if c.is_ascii() {
+                    out.push(c as u8);
+                } else {
+                    let mut buf = [0u8; 4];
+                    let encoded = c.encode_utf8(&mut buf);
+                    out.extend_from_slice(encoded.as_bytes());
+                }
+            }
+        }
+        i += 1;
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2006,5 +2359,47 @@ mod tests {
         // still decline — never a generic variable-offset window-carry.
         assert!(lower_boundary(r"\w+(?<!_)x").is_err());
         assert!(lower_boundary(r#"""".*?(?<!\\)(\\\\)*?"#).is_err());
+    }
+
+    #[test]
+    fn fence_idiom_recognizer_accepts_wild_bank_patterns() {
+        // HCL2 heredoc: open=<<, tag=[a-zA-Z][a-zA-Z0-9._-]+, sep=\n, body=(?:.|\n)*?
+        let spec = recognize_fence_idiom(
+            r"<<(?P<heredoc>[a-zA-Z][a-zA-Z0-9._-]+)\n(?:.|\n)*?(?P=heredoc)",
+        )
+        .expect("hcl2 heredoc must be recognized");
+        assert_eq!(spec.open, b"<<");
+        assert_eq!(spec.tag_re, "[a-zA-Z][a-zA-Z0-9._-]+");
+        assert_eq!(spec.sep, b"\n");
+        assert_eq!(spec.close_pre, b"");
+        assert_eq!(spec.close_post, b"");
+
+        // HCL2 heredoc-trim: open=<<-
+        let spec = recognize_fence_idiom(
+            r"<<-(?P<heredoc_trim>[a-zA-Z][a-zA-Z0-9._-]+)\n(?:.|\n)*?(?P=heredoc_trim)",
+        )
+        .expect("hcl2 heredoc_trim must be recognized");
+        assert_eq!(spec.open, b"<<-");
+
+        // gersemi CMake bracket argument: open=[, tag=(=*), sep=[, close_pre=], close_post=]
+        let spec = recognize_fence_idiom(
+            r"\[(?P<equal_signs>(=*))\[([\s\S]+?)\](?P=equal_signs)\]",
+        )
+        .expect("gersemi bracket arg must be recognized");
+        assert_eq!(spec.open, b"[");
+        assert_eq!(spec.tag_re, "(=*)");
+        assert_eq!(spec.sep, b"[");
+        assert_eq!(spec.close_pre, b"]");
+        assert_eq!(spec.close_post, b"]");
+    }
+
+    #[test]
+    fn fence_idiom_recognizer_rejects_non_fence_patterns() {
+        // Regular boundary patterns — not fences.
+        assert!(recognize_fence_idiom(r"[a-z]+(?![a-z])").is_none());
+        // A named group without a backref.
+        assert!(recognize_fence_idiom(r"(?P<name>[a-z]+)foo").is_none());
+        // A pattern where the open section is not a literal.
+        assert!(recognize_fence_idiom(r"[a-z](?P<name>[a-z]+)(?P=name)").is_none());
     }
 }

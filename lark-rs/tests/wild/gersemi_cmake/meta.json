@@ -21,6 +21,9 @@
     "regex_module": false,
     "postlex": null
   },
+  "local_patches": [
+    "grammar/cmake.lark: removed leading negative lookaheads from UNQUOTED_ELEMENT (/(?:(?!\\[=*\\[))[...]+/ and /(?:(?!\\[=*\\[))[...]/). BRACKET_ARGUMENT (a fence terminal with higher priority) handles bracket-argument positions, making the lookaheads redundant. The `regex` crate rejects unbounded-width lookaheads inside a `+` quantified group; BRACKET_ARGUMENT priority ensures byte-identical parse results."
+  ],
   "inputs": {
     "inputs/bracket_arguments_should_not_be_affected.in.cmake": "tests/formatter/bracket_arguments_should_not_be_affected.in.cmake",
     "inputs/command_with_short_name.in.cmake": "tests/formatter/command_with_short_name.in.cmake",

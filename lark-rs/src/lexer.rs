@@ -54,6 +54,11 @@ use crate::tree::Token;
 // first, so a terminal the lowering refuses fails the grammar build with the same
 // categorized scope error (`docs/LOOKAROUND_SCOPE.md`) with and without the feature.
 // The feature only swaps the *matcher* for terminals that lower.
+//
+// The fence idiom ([`FenceMatcher`]) is handled by a third `SideProbe` variant that
+// bypasses both paths above: it neither lowers nor routes through the refusal seam
+// (the `regex` crate rejects named backreferences, but they are linear-time
+// recognisable — see `crate::lookaround::lower::recognize_fence_idiom`).
 
 enum SideProbe {
     /// The lowered single-terminal DFA — the default build (and the engine whose
@@ -68,6 +73,10 @@ enum SideProbe {
     /// instead of forward-scanning — the linearity fix; see the module docs.)
     #[cfg(feature = "fancy-oracle")]
     Fancy(fancy_regex::Regex),
+    /// Fence-idiom terminal (named backreference + tag-echo), matched by a
+    /// two-phase linear scanner. Used by both the default and `fancy-oracle` builds;
+    /// bypasses the refusal seam entirely.
+    Fence(FenceMatcher),
 }
 
 impl SideProbe {
@@ -84,8 +93,120 @@ impl SideProbe {
                 let m = m?;
                 (m.start() == pos && m.end() > pos).then_some(m.end())
             }
+            SideProbe::Fence(f) => f.match_at(text, pos).map(|s| pos + s.len()),
         }
     }
+}
+
+// ─── FenceMatcher: two-phase linear scanner for tag-echo delimited tokens ─────
+
+/// A compiled fence-idiom terminal: `OPEN(?P<NAME>TAG_RE)SEP BODY (?P=NAME)CLOSE_POST`.
+///
+/// Matched in two phases:
+/// 1. Check the `open` literal, run `tag_dfa` anchored after it, check `sep`.
+/// 2. Build `close_seq = close_pre ++ tag_bytes ++ close_post`; scan the
+///    remaining input for its first occurrence with `windows()`.
+///
+/// Both phases are O(n) — no backtracking.
+pub(crate) struct FenceMatcher {
+    /// The terminal's interned id — returned as the match type on success.
+    pub(crate) id: SymbolId,
+    /// The terminal's rank in the plan, for competing with plain terminals.
+    pub(crate) rank: usize,
+    /// Literal bytes that must appear at the start of the match.
+    open: Vec<u8>,
+    /// Anchored leftmost-first DFA for the tag pattern.
+    tag_dfa: dense::DFA<Vec<u32>>,
+    /// Literal bytes between tag end and the body.
+    sep: Vec<u8>,
+    /// Literal bytes between the body and the backreference.
+    close_pre: Vec<u8>,
+    /// Literal bytes after the backreference.
+    close_post: Vec<u8>,
+}
+
+impl FenceMatcher {
+    /// Build a `FenceMatcher` from a recognised [`FenceSpec`].
+    /// `prefix` is the global flag prefix (e.g. `"(?i)"`) applied to the tag DFA.
+    pub(crate) fn build(
+        id: SymbolId,
+        rank: usize,
+        spec: crate::lookaround::lower::FenceSpec,
+        prefix: &str,
+    ) -> Result<FenceMatcher, GrammarError> {
+        // Build an anchored leftmost-first DFA for the tag pattern.
+        let tag_src = format!("{}{}", prefix, spec.tag_re);
+        let tag_dfa = build_anchored_dfa(&tag_src)?;
+        Ok(FenceMatcher {
+            id,
+            rank,
+            open: spec.open,
+            tag_dfa,
+            sep: spec.sep,
+            close_pre: spec.close_pre,
+            close_post: spec.close_post,
+        })
+    }
+
+    /// Try to match starting exactly at byte offset `pos` in `text`. Returns the
+    /// matched slice `&text[pos..end]` on success, or `None` if no match.
+    pub(crate) fn match_at<'t>(&self, text: &'t str, pos: usize) -> Option<&'t str> {
+        let bytes = text.as_bytes();
+        let n = bytes.len();
+
+        // Phase 1a: open literal.
+        if !bytes.get(pos..).unwrap_or(&[]).starts_with(self.open.as_slice()) {
+            return None;
+        }
+        let after_open = pos + self.open.len();
+
+        // Phase 1b: tag DFA anchored at after_open.
+        let input = Input::new(text)
+            .span(after_open..n)
+            .anchored(Anchored::Yes);
+        let tag_end = match self.tag_dfa.try_search_fwd(&input) {
+            Ok(Some(hm)) => hm.offset(),
+            _ => return None,
+        };
+        // tag_end == after_open is valid (nullable tag, e.g. `=*` with zero `=`).
+
+        // Phase 1c: separator literal.
+        if !bytes.get(tag_end..).unwrap_or(&[]).starts_with(self.sep.as_slice()) {
+            return None;
+        }
+        let after_sep = tag_end + self.sep.len();
+
+        // Phase 2: build close_seq and scan for first occurrence.
+        let tag_bytes = &bytes[after_open..tag_end];
+        let close_seq_len = self.close_pre.len() + tag_bytes.len() + self.close_post.len();
+        if close_seq_len == 0 {
+            return None; // degenerate: no closing delimiter
+        }
+        let mut close_seq = Vec::with_capacity(close_seq_len);
+        close_seq.extend_from_slice(&self.close_pre);
+        close_seq.extend_from_slice(tag_bytes);
+        close_seq.extend_from_slice(&self.close_post);
+
+        let remaining = bytes.get(after_sep..).unwrap_or(&[]);
+        let found = remaining
+            .windows(close_seq_len)
+            .position(|w| w == close_seq.as_slice())?;
+
+        let end = after_sep + found + close_seq_len;
+        Some(&text[pos..end])
+    }
+}
+
+/// Extract the raw pattern from a terminal def and try to recognise the fence
+/// idiom. Returns `None` for string terminals or patterns that do not match.
+fn recognize_fence_idiom_from_def(
+    def: &TerminalDef,
+) -> Option<crate::lookaround::lower::FenceSpec> {
+    let raw = match &def.pattern {
+        Pattern::Re(p) => p.pattern.as_str(),
+        Pattern::Str(_) => return None,
+    };
+    crate::lookaround::lower::recognize_fence_idiom(raw)
 }
 
 /// Account the forward-skip cost of one per-position scan attempt for the
@@ -402,37 +523,50 @@ impl Scanner {
                 }
                 #[cfg(feature = "fancy-oracle")]
                 Err(e) => {
-                    // Acceptance is decided by THE refusal seam FIRST, exactly as the
-                    // default build below decides it — so the TEST-ONLY feature can
-                    // never change what a grammar build accepts (the Cargo.toml
-                    // contract). Only a terminal that *lowers* proceeds to the probe.
-                    route_fancy_only_terminal(by_id[id], global_flags, &e.to_string())?;
-                    // The historical reference matcher for the lowered terminal: the
-                    // `\G`-anchored fancy probe (`\G` anchors `find_from_pos` to
-                    // `pos` so a sparse terminal stays linear; the `regex` crate
-                    // cannot parse `\G`, so this pattern lives on the fancy engine
-                    // only). This is what makes the feature build an independent
-                    // oracle for the differential.
-                    let src = format!("{prefix}\\G{inline}");
-                    let anchored =
-                        fancy_regex::Regex::new(&src).map_err(|e| GrammarError::InvalidRegex {
-                            pattern: src.clone(),
-                            reason: e.to_string(),
+                    // Fence idiom: bypass the refusal seam for both build variants.
+                    if let Some(spec) = recognize_fence_idiom_from_def(by_id[id]) {
+                        let fm = FenceMatcher::build(*id, rank, spec, &prefix)?;
+                        side.push((rank, *id, SideProbe::Fence(fm)));
+                    } else {
+                        // Acceptance is decided by THE refusal seam FIRST, exactly as the
+                        // default build below decides it — so the TEST-ONLY feature can
+                        // never change what a grammar build accepts (the Cargo.toml
+                        // contract). Only a terminal that *lowers* proceeds to the probe.
+                        route_fancy_only_terminal(by_id[id], global_flags, &e.to_string())?;
+                        // The historical reference matcher for the lowered terminal: the
+                        // `\G`-anchored fancy probe (`\G` anchors `find_from_pos` to
+                        // `pos` so a sparse terminal stays linear; the `regex` crate
+                        // cannot parse `\G`, so this pattern lives on the fancy engine
+                        // only). This is what makes the feature build an independent
+                        // oracle for the differential.
+                        let src = format!("{prefix}\\G{inline}");
+                        let anchored = fancy_regex::Regex::new(&src).map_err(|e| {
+                            GrammarError::InvalidRegex {
+                                pattern: src.clone(),
+                                reason: e.to_string(),
+                            }
                         })?;
-                    side.push((rank, *id, SideProbe::Fancy(anchored)));
+                        side.push((rank, *id, SideProbe::Fancy(anchored)));
+                    }
                 }
                 #[cfg(not(feature = "fancy-oracle"))]
                 Err(e) => {
-                    // Default build: lower the terminal through THE refusal seam —
-                    // its own single-terminal DFA, or the categorized scope error
-                    // (identical to the `DfaScanner` backend's policy).
-                    let m = LoweredTerminalMatcher::build(
-                        *id,
-                        by_id[id],
-                        global_flags,
-                        &e.to_string(),
-                    )?;
-                    side.push((rank, *id, SideProbe::Lowered(m)));
+                    // Fence idiom: bypass the refusal seam.
+                    if let Some(spec) = recognize_fence_idiom_from_def(by_id[id]) {
+                        let fm = FenceMatcher::build(*id, rank, spec, &prefix)?;
+                        side.push((rank, *id, SideProbe::Fence(fm)));
+                    } else {
+                        // Default build: lower the terminal through THE refusal seam —
+                        // its own single-terminal DFA, or the categorized scope error
+                        // (identical to the `DfaScanner` backend's policy).
+                        let m = LoweredTerminalMatcher::build(
+                            *id,
+                            by_id[id],
+                            global_flags,
+                            &e.to_string(),
+                        )?;
+                        side.push((rank, *id, SideProbe::Lowered(m)));
+                    }
                 }
             }
         }
@@ -589,6 +723,10 @@ struct DfaScanner {
     start_bytes: Option<Box<[bool; 256]>>,
     /// regex-terminal-id → (matched-text → keyword-terminal-id) — identical retype.
     unless: HashMap<SymbolId, RetypeTable>,
+    /// Fence-idiom terminals (tag-echo delimited), matched by the two-phase linear
+    /// scanner unconditionally (they do their own open-literal pre-check and are not
+    /// included in `start_bytes`).
+    fences: Vec<FenceMatcher>,
 }
 
 /// Leftmost-first DFA over the unguarded sub-patterns. Sub-patterns are ordered by
@@ -1056,6 +1194,7 @@ impl DfaScanner {
         let mut guarded_subs: Vec<SubPattern> = Vec::new();
         let mut guarded_srcs: Vec<String> = Vec::new();
         let mut base_inlines: Vec<String> = Vec::new(); // for the start-byte union
+        let mut fences: Vec<FenceMatcher> = Vec::new();
 
         for (rank, (id, inline)) in plan.groups.iter().enumerate() {
             let src = format!("{prefix}{inline}");
@@ -1079,12 +1218,22 @@ impl DfaScanner {
                 Err(e) => e.to_string(),
             };
 
+            let def = by_id[id];
+
+            // Fence-idiom terminals bypass the refusal seam entirely: the named
+            // backreference makes the `regex` crate refuse them, but the pattern is
+            // linear-time recognisable via the two-phase scanner.
+            if let Some(spec) = recognize_fence_idiom_from_def(def) {
+                let fm = FenceMatcher::build(*id, rank, spec, &prefix)?;
+                fences.push(fm);
+                continue;
+            }
+
             // A lookaround (or otherwise regex-rejected) terminal — lower it through
             // THE single refusal seam, or fail the build with the categorized scope
             // error. The seam strips the loader's whole-pattern flag wrapper and
             // returns the merged flag bitset; `wrap_flags(flags, …)` re-applies the
             // same scoping to every lowered branch and guard below.
-            let def = by_id[id];
             let (lowered, flags) = route_fancy_only_terminal(def, global_flags, &compile_err)?;
             let compile_guard =
                 |g: &crate::lookaround::lower::GuardSpec| -> Result<Guard, GrammarError> {
@@ -1190,6 +1339,7 @@ impl DfaScanner {
             guarded,
             start_bytes,
             unless,
+            fences,
         })
     }
 
@@ -1224,6 +1374,15 @@ impl DfaScanner {
                     if best.is_none_or(|(r, b, _, _)| (cand.0, cand.1) < (r, b)) {
                         best = Some(cand);
                     }
+                }
+            }
+        }
+        // Fence matchers run unconditionally: they do their own open-literal
+        // pre-check and are not included in `start_bytes`.
+        for fm in &self.fences {
+            if let Some(value) = fm.match_at(text, pos) {
+                if best.is_none_or(|(r, b, _, _)| (fm.rank, 0usize) < (r, b)) {
+                    best = Some((fm.rank, 0, fm.id, value));
                 }
             }
         }
@@ -2166,10 +2325,14 @@ impl LoweredTerminalMatcher {
         global_flags: u32,
         compile_err: &str,
     ) -> Result<Self, GrammarError> {
-        // `compile_err` is only consumed on the refusal path; pre-check the routing so
-        // the error carries the engine's own message (DfaScanner::build re-derives the
-        // same answer from the plan source, which includes the global prefix).
-        route_fancy_only_terminal(def, global_flags, compile_err)?;
+        // Fence idiom: bypass route_fancy_only_terminal — DfaScanner::build handles
+        // fence terminals internally via its own fence-recognition path.
+        if recognize_fence_idiom_from_def(def).is_none() {
+            // `compile_err` is only consumed on the refusal path; pre-check the routing so
+            // the error carries the engine's own message (DfaScanner::build re-derives the
+            // same answer from the plan source, which includes the global prefix).
+            route_fancy_only_terminal(def, global_flags, compile_err)?;
+        }
         let scanner = DfaScanner::build(&[(id, def)], global_flags)?;
         Ok(LoweredTerminalMatcher { scanner })
     }

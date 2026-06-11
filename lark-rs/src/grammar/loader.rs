@@ -1572,10 +1572,12 @@ impl GrammarCompiler {
     }
 
     /// Compile one position of an expansion into either a single fixed symbol
-    /// sequence (the common case) or, for a distributable leading nullable, the
-    /// set of present-form alternatives to fan out across the parent (see
-    /// [`compile_expansion`]). `is_last` suppresses distribution for a *trailing*
-    /// nullable, which keeps its shared `__anon_*` helper.
+    /// sequence (the common case) or, for a distributable nullable, the set of
+    /// present-form alternatives to fan out across the parent (see
+    /// [`compile_expansion`]). Trailing `X*` is the only case suppressed: its
+    /// shared plus-helper prevents R/R conflicts when two otherwise-identical
+    /// star wrappers appear in the same LALR state. Trailing `X?` is distributed
+    /// like Python Lark's `SimplifyRule_Visitor` does — no such R/R risk exists.
     fn compile_slot(
         &mut self,
         expr: Expr,
@@ -1594,11 +1596,11 @@ impl GrammarCompiler {
                 }
             }
         }
-        // Only a *leading* (non-final) nullable distributes, and only when it
-        // carries no alias. `try_distribute` never compiles anything on its
-        // `None` path, so the fall-through `compile_expr` below compiles the
-        // position exactly once.
-        if !is_last && !Self::expr_contains_alias(&expr) {
+        // Suppress distribution only for a trailing `X*` (the shared plus-helper
+        // it creates is necessary to prevent R/R conflicts). Everything else —
+        // including trailing `X?` — distributes exactly like Python Lark.
+        let suppress_trailing = is_last && matches!(&expr, Expr::Repeat { min: 0, max: None, .. });
+        if !suppress_trailing && !Self::expr_contains_alias(&expr) {
             if let Some(slot) = self.try_distribute(&expr, parent)? {
                 return Ok(slot);
             }
@@ -2111,25 +2113,43 @@ impl GrammarCompiler {
     /// cached by `(inner, keep_all)` so identical `x+`/`x*` occurrences reuse one
     /// rule (Python Lark's `rules_cache`). Sharing collapses what would otherwise be
     /// duplicate, conflicting recurse rules into one, keeping `a+ b | a+` LALR.
+    ///
+    /// When `inner_sym` is a **named terminal** (`filter_out=false`), `keep_all` is
+    /// irrelevant to token filtering (named terminals are always kept regardless) and
+    /// is normalized to `false` in the cache key. This makes e.g. `DECIMAL+` in a
+    /// `!float_lit` and `DECIMAL+` in a plain `int_lit` share one helper rule,
+    /// matching Python Lark's grammar-wide `rules_cache` key (the inner expression
+    /// only, no `keep_all` context). Without this normalization, two separate helpers
+    /// with identical bodies cause an unresolvable LALR reduce/reduce conflict.
     fn plus_helper(&mut self, inner_sym: Symbol) -> Symbol {
-        let key = (inner_sym.clone(), self.current_keep_all);
+        // Named (non-filtered) terminals are always kept regardless of keep_all, so
+        // the rule options difference is semantically invisible → normalize key.
+        let effective_keep_all = match &inner_sym {
+            Symbol::Terminal(t) if !t.filter_out => false,
+            _ => self.current_keep_all,
+        };
+        let key = (inner_sym.clone(), effective_keep_all);
         if let Some(name) = self.recurse_cache.get(&key) {
             return Symbol::NonTerminal(NonTerminal::new(name));
         }
         let name = self.fresh_anon_rule("plus");
         let nt = NonTerminal::new(&name);
+        let opts = RuleOptions {
+            keep_all_tokens: effective_keep_all,
+            ..self.anon_opts()
+        };
         self.rules.push(Rule::new(
             nt.clone(),
             vec![inner_sym.clone()],
             None,
-            self.anon_opts(),
+            opts.clone(),
             0,
         ));
         self.rules.push(Rule::new(
             nt.clone(),
             vec![Symbol::NonTerminal(nt.clone()), inner_sym],
             None,
-            self.anon_opts(),
+            opts,
             1,
         ));
         self.recurse_cache.insert(key, name);
