@@ -138,7 +138,16 @@ src/
   bin/generate_parser.rs  CLI: `generate-parser --grammar x.lark --output parser.rs`
   grammar/
     mod.rs            load_grammar() entry point; surface Grammar
-    loader.rs         .lark syntax lexer + parser + compiler (EBNF → Grammar)
+    loader/           .lark syntax → Grammar, one module per pipeline phase:
+      mod.rs            load_grammar()/load_grammar_with_base() + pipeline wiring
+      tokenizer.rs      hand-written .lark lexer (Tok enum)
+      ast.rs            raw AST (Item, RawRule, RawTerm, Expr, ImportSpec)
+      parser.rs         recursive-descent GrammarParser
+      compiler.rs       GrammarCompiler state + staging + final Grammar assembly
+      ebnf.rs           rule bodies: EBNF expansion, distribution, helper sharing
+      terminals.rs      terminal algebra → regex; PatternStr classification
+      templates.rs      parameterized template instantiation
+      imports.rs        %import resolution (bundled libraries + sibling files)
     intern.rs         SymbolId/SymbolTable + lower(Grammar) → CompiledGrammar
     analysis.rs       NULLABLE / FIRST over SymbolId (no FOLLOW — true LALR(1))
     rule.rs           Rule, RuleOptions (expand1, keep_all_tokens, …)
@@ -206,20 +215,23 @@ tools/
                              (needs `pip install regex` for synapse_storm)
 ```
 
-### Grammar Loading Pipeline (`loader.rs`)
+### Grammar Loading Pipeline (`grammar/loader/`)
+
+One module per phase (`tokenizer` → `parser` → `compiler`, which delegates to
+`imports` / `terminals` / `ebnf` / `templates`):
 
 ```
 .lark text
-  → GrammarLexer      (hand-written lexer: Tok enum)
-  → GrammarParser     (recursive descent)
-      → RawRule / RawTerm / ImportSpec AST nodes
-  → GrammarCompiler   (lowers AST to Grammar)
-      → EBNF expansion: star/plus/opt/group → anonymous rules (__anon_*)
-      → resolve_import(): parses the bundled src/grammars/common.lark through this
-        same loader (cached) and copies the requested terminal(s) — no
-        hand-transcribed regex table, so common terminals cannot drift from Lark
-      → compile_term(): sorts alts longest-first, builds TerminalDef
-      → compile_rule_body(): lowers rule bodies to Symbol sequences
+  → tokenizer::Lexer  (hand-written lexer: Tok enum)
+  → parser::GrammarParser  (recursive descent)
+      → ast: RawRule / RawTerm / ImportSpec nodes
+  → compiler::GrammarCompiler  (lowers AST to Grammar)
+      → imports::resolve_import(): parses the bundled src/grammars/common.lark
+        through this same loader (cached) and copies the requested terminal(s) —
+        no hand-transcribed regex table, so common terminals cannot drift from Lark
+      → terminals::resolve_terminals(): sorts alts longest-first, builds TerminalDef
+      → ebnf: rule bodies → Symbol sequences; star/plus/opt/group → anonymous
+        rules (__anon_*); templates:: instantiates parameterized rules on demand
   → Grammar { rules, terminals, ignore, start }   (surface, string-named)
 ```
 
