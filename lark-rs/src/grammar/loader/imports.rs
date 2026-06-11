@@ -354,7 +354,10 @@ fn bundled_cache() -> &'static Mutex<HashMap<(String, bool, bool), Arc<Grammar>>
 /// copies only the requested closure anyway.
 ///
 /// The lock is never held across a compile, so a library re-importing another
-/// module cannot deadlock (a duplicate concurrent compile is idempotent).
+/// module cannot deadlock. Consequently two threads *can* race the first
+/// compile of one key — the duplicate work is benign — but the cache entry is
+/// canonical: the loser discards its result and adopts the winner's, so
+/// repeated calls with the same key always return the same `Arc`.
 fn compile_bundled_grammar(
     module: &str,
     src: &str,
@@ -394,10 +397,14 @@ fn compile_bundled_grammar(
         keep_all_tokens,
         None,
     )?);
-    bundled_cache()
-        .lock()
-        .unwrap()
-        .insert(key, Arc::clone(&grammar));
+    // Re-check under the lock: if another thread won the compile race, its
+    // entry is canonical — never overwrite it (an overwrite would break the
+    // same-key ⇒ same-`Arc` guarantee the cache promises).
+    let mut cache = bundled_cache().lock().unwrap();
+    if let Some(existing) = cache.get(&key) {
+        return Ok(Arc::clone(existing));
+    }
+    cache.insert(key, Arc::clone(&grammar));
     Ok(grammar)
 }
 

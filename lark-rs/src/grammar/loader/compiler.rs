@@ -186,20 +186,43 @@ impl GrammarCompiler {
         }
     }
 
+    /// Whether `name` is free to assign to an anonymous (generated or
+    /// hint-named) terminal. Checks **both** namespaces, not just terminals:
+    /// the lowerer interns every symbol into one `by_name` table, so a terminal
+    /// that shadows a *rule* name corrupts the id space — `intern_nonterminal`
+    /// would hand back the terminal's id (guarded only by a `debug_assert` in
+    /// release builds). `__ANON_0` is a valid user *rule* name (a leading `__`
+    /// lexes as a rule token), so the rule namespace is reachable. Reservations
+    /// cover user-authored names known up front; the live lists are the
+    /// defensive backstop for names minted mid-compile (uppercase literal
+    /// hints) and anything reservation cannot see.
+    fn anon_terminal_name_free(&self, name: &str) -> bool {
+        !self.reserved_term_names.contains(name)
+            && !self.reserved_rule_names.contains(name)
+            && !self.terminals.iter().any(|t| t.name == name)
+            && !self.rules.iter().any(|r| r.origin.name == name)
+    }
+
     /// A fresh `__ANON_{n}` terminal name, skipping names the user's grammar
-    /// claims — both the up-front reservations and the live terminal list, since
-    /// a literal's uppercase *hint* can mint an `__ANON_{n}` lookalike mid-compile
-    /// (see [`reserved_term_names`](Self::reserved_term_names)).
+    /// claims in either namespace (see
+    /// [`anon_terminal_name_free`](Self::anon_terminal_name_free)).
     pub(super) fn fresh_terminal(&mut self) -> String {
         loop {
             let name = format!("__ANON_{}", self.term_counter);
             self.term_counter += 1;
-            if !self.reserved_term_names.contains(&name)
-                && !self.terminals.iter().any(|t| t.name == name)
-            {
+            if self.anon_terminal_name_free(&name) {
                 return name;
             }
         }
+    }
+
+    /// Whether a literal's human-readable name *hint* (`","` → `COMMA`,
+    /// `"kw"` → `KW`) may be used as the terminal's name. Same availability
+    /// rule as a generated name (a hint like `__ANON_5` — the uppercase form of
+    /// `"__anon_5"` — must dodge both namespaces too); on rejection the caller
+    /// falls back to [`fresh_terminal`](Self::fresh_terminal).
+    pub(super) fn hint_name_free(&self, name: &str) -> bool {
+        self.anon_terminal_name_free(name)
     }
 
     pub(super) fn process_items(&mut self, items: Vec<Item>) -> Result<(), GrammarError> {
@@ -432,7 +455,57 @@ impl GrammarCompiler {
 
 #[cfg(test)]
 mod tests {
-    use crate::grammar::load_grammar;
+    use crate::grammar::{load_grammar, lower, SymbolKind};
+
+    /// The review blocker: `__ANON_0` lexes as a *rule* name (a leading `__` is
+    /// a rule token), and the counter-generated terminal for `/x/` used to take
+    /// that same name. The lowerer interns both namespaces into one `by_name`
+    /// table, so the shadow corrupted the id space — the rule resolved to the
+    /// terminal's id in release builds (`intern.rs` guards it only with a
+    /// `debug_assert`). The generated name must dodge rule names too.
+    #[test]
+    fn generated_terminal_skips_user_rule_name() {
+        let g = load_grammar(
+            "start: /x/ __ANON_0\n__ANON_0: \"y\"\n",
+            &["start".to_string()],
+            false,
+            false,
+        )
+        .unwrap();
+        // The literal skipped the rule-claimed name…
+        assert!(!g.terminals.iter().any(|t| t.name == "__ANON_0"));
+        assert!(g
+            .terminals
+            .iter()
+            .any(|t| t.name == "__ANON_1" && t.pattern.as_regex_str() == "x"));
+        // …so lowering interns `__ANON_0` as the rule it is.
+        let compiled = lower(&g);
+        let id = compiled.symbols.id("__ANON_0").unwrap();
+        assert_eq!(compiled.symbols.kind(id), SymbolKind::NonTerminal);
+    }
+
+    /// The hint variant of the same route: the uppercase hint of a literal
+    /// `"__anon_5"` is `__ANON_5`, which a user *rule* may already claim; the
+    /// hint must be rejected (falling back to `__ANON_0`), not shadow the rule.
+    #[test]
+    fn hint_minted_terminal_skips_user_rule_name() {
+        let g = load_grammar(
+            "start: \"__anon_5\" __ANON_5\n__ANON_5: \"y\"\n",
+            &["start".to_string()],
+            false,
+            false,
+        )
+        .unwrap();
+        let lit = g
+            .terminals
+            .iter()
+            .find(|t| t.pattern.as_regex_str() == "__anon_5")
+            .unwrap();
+        assert_ne!(lit.name, "__ANON_5", "hint must not shadow the user's rule");
+        let compiled = lower(&g);
+        let id = compiled.symbols.id("__ANON_5").unwrap();
+        assert_eq!(compiled.symbols.kind(id), SymbolKind::NonTerminal);
+    }
 
     /// `__anon_plus_0` is a valid *user* rule name; the `thing+` helper must not
     /// reuse it (pre-fix, both origins were named `__anon_plus_0`, silently
