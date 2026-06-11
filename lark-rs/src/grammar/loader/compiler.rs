@@ -376,14 +376,25 @@ impl GrammarCompiler {
             // $END is synthetic and handled by the parser, not the lexer.
         }
 
-        // Add ignore terminals (one terminal per ignore pattern)
-        let n_ignore = self.ignore_patterns.len();
-        let ignore_names: Vec<String> = (0..n_ignore).map(|i| format!("__IGNORE_{}", i)).collect();
-        for (i, pat) in self.ignore_patterns.into_iter().enumerate() {
-            let name = format!("__IGNORE_{}", i);
-            // `%ignore` tokens never reach the tree (the parse loop skips them), so
-            // they need no per-occurrence filter — they appear in no rule body.
+        // Add ignore terminals (one terminal per ignore pattern). `__IGNORE_{n}`
+        // is the third generated-name family, and the import-alias route reaches
+        // it like the others (`%import common.WS -> __IGNORE_0`), so it skips
+        // user-claimed names via the same availability check. `%ignore` tokens
+        // never reach the tree (the parse loop skips them), so they need no
+        // per-occurrence filter — they appear in no rule body.
+        let ignore_patterns = std::mem::take(&mut self.ignore_patterns);
+        let mut ignore_names: Vec<String> = Vec::with_capacity(ignore_patterns.len());
+        let mut ignore_counter = 0usize;
+        for pat in ignore_patterns {
+            let name = loop {
+                let candidate = format!("__IGNORE_{}", ignore_counter);
+                ignore_counter += 1;
+                if self.anon_terminal_name_free(&candidate) {
+                    break candidate;
+                }
+            };
             self.terminals.push(TerminalDef::new(&name, pat, 0));
+            ignore_names.push(name);
         }
 
         // Reject use-before-definition: a rule body that references a symbol which
@@ -560,6 +571,30 @@ mod tests {
         // surviving as a duplicate of the literal's definition.
         assert_eq!(
             g.terminals.iter().filter(|t| t.name == "__ANON_0").count(),
+            0
+        );
+    }
+
+    /// `__IGNORE_{n}` is the third generated-name family, reachable by the same
+    /// import-alias route as `__ANON_{n}`: pre-fix, `%import common.WS ->
+    /// __IGNORE_0` plus any `%ignore` left two TerminalDefs named `__IGNORE_0`,
+    /// both surviving pruning (the ignore-name set keeps the name alive).
+    #[test]
+    fn generated_ignore_terminal_skips_import_alias_taken_name() {
+        let g = load_grammar(
+            "start: \"a\"\n%ignore \" \"\n%import common.WS -> __IGNORE_0\n",
+            &["start".to_string()],
+            false,
+            false,
+        )
+        .unwrap();
+        assert_eq!(g.ignore, vec!["__IGNORE_1".to_string()]);
+        // The unreferenced imported terminal prunes away; no duplicate survives.
+        assert_eq!(
+            g.terminals
+                .iter()
+                .filter(|t| t.name == "__IGNORE_0")
+                .count(),
             0
         );
     }
