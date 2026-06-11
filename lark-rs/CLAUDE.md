@@ -228,7 +228,9 @@ One module per phase (`tokenizer` → `parser` → `compiler`, which delegates t
   → compiler::GrammarCompiler  (lowers AST to Grammar)
       → imports::resolve_import(): parses the bundled src/grammars/common.lark
         through this same loader (cached) and copies the requested terminal(s) —
-        no hand-transcribed regex table, so common terminals cannot drift from Lark
+        no hand-transcribed regex table, so common terminals cannot drift from
+        Lark; the other bundled libraries (python/lark/unicode) are likewise
+        compiled once per process per option set and cached
       → terminals::resolve_terminals(): sorts alts longest-first, builds TerminalDef
       → ebnf: rule bodies → Symbol sequences; star/plus/opt/group → anonymous
         rules (__anon_*); templates:: instantiates parameterized rules on demand

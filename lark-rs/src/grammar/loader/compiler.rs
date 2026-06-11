@@ -10,13 +10,50 @@
 
 use super::ast::*;
 use super::ebnf::{CompiledAlt, HelperKey};
+use super::imports::spec_final_names;
 use crate::error::GrammarError;
 use crate::grammar::rule::{Rule, RuleOptions};
 use crate::grammar::symbol::Symbol;
 use crate::grammar::terminal::{Pattern, TerminalDef};
 use crate::grammar::Grammar;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+
+/// The closed set of anonymous-helper flavours the compiler generates, each
+/// rendered as a `__anon_{tag}_{n}` rule name (terminals use `__ANON_{n}` via
+/// [`GrammarCompiler::fresh_terminal`]). Typed so a new helper cannot pick a
+/// colliding tag by typo, and so the rendering lives in exactly one place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AnonKind {
+    /// `(...)` group helper (also the optional-group form).
+    Group,
+    /// `[...]` under `maybe_placeholders`.
+    Maybe,
+    /// `x?` optional wrapper.
+    Opt,
+    /// `x*` nullable wrapper over the shared `+`-recurse helper.
+    Star,
+    /// The shared `+`-recurse helper (`P: inner | P inner`).
+    Plus,
+    /// `x~n` exact repetition.
+    Rep,
+    /// `x~n..m` bounded-range repetition.
+    RepRange,
+}
+
+impl AnonKind {
+    fn tag(self) -> &'static str {
+        match self {
+            AnonKind::Group => "group",
+            AnonKind::Maybe => "maybe",
+            AnonKind::Opt => "opt",
+            AnonKind::Star => "star",
+            AnonKind::Plus => "plus",
+            AnonKind::Rep => "rep",
+            AnonKind::RepRange => "rep_range",
+        }
+    }
+}
 
 /// Converts the parsed AST into flat BNF rules and terminal definitions.
 pub(super) struct GrammarCompiler {
@@ -80,6 +117,20 @@ pub(super) struct GrammarCompiler {
     /// grammar's directory). `None` when the grammar was built from a string with
     /// no source location, in which case only `%import common.*` resolves.
     pub(super) base_path: Option<PathBuf>,
+    /// User-authored rule names (rules, templates, import targets), collected up
+    /// front so [`fresh_anon_rule`](Self::fresh_anon_rule) never hands out a name
+    /// the grammar already claims — `__anon_group_0` is a *valid* user rule name,
+    /// and a generated duplicate would silently merge two unrelated origins.
+    /// Generated names never collide with each other (one monotonic counter), and
+    /// import-mangled dependencies (`mod__name` / `_mod__name`) cannot take the
+    /// `__anon_{tag}_{n}` shape, so user-authored names are the only hazard.
+    reserved_rule_names: HashSet<String>,
+    /// User-authored terminal names (terminals, declares, import targets), the
+    /// same guard for [`fresh_terminal`](Self::fresh_terminal)'s `__ANON_{n}`.
+    /// Unlike rules, generated terminal names must *also* dodge live state: a
+    /// literal `"__anon_5"` interns under the hint `__ANON_5` (its uppercase
+    /// form), which no up-front scan can see.
+    reserved_term_names: HashSet<String>,
 }
 
 impl GrammarCompiler {
@@ -108,13 +159,21 @@ impl GrammarCompiler {
             helper_cache: HashMap::new(),
             nullable_opts: std::collections::HashSet::new(),
             base_path,
+            reserved_rule_names: HashSet::new(),
+            reserved_term_names: HashSet::new(),
         }
     }
 
-    pub(super) fn fresh_anon_rule(&mut self, tag: &str) -> String {
-        let name = format!("__anon_{}_{}", tag, self.anon_counter);
-        self.anon_counter += 1;
-        name
+    /// A fresh `__anon_{tag}_{n}` helper-rule name, skipping any name the user's
+    /// grammar already claims (see [`reserved_rule_names`](Self::reserved_rule_names)).
+    pub(super) fn fresh_anon_rule(&mut self, kind: AnonKind) -> String {
+        loop {
+            let name = format!("__anon_{}_{}", kind.tag(), self.anon_counter);
+            self.anon_counter += 1;
+            if !self.reserved_rule_names.contains(&name) {
+                return name;
+            }
+        }
     }
 
     /// Options for anonymous EBNF helper rules (groups, optionals, repetition).
@@ -127,27 +186,60 @@ impl GrammarCompiler {
         }
     }
 
+    /// A fresh `__ANON_{n}` terminal name, skipping names the user's grammar
+    /// claims — both the up-front reservations and the live terminal list, since
+    /// a literal's uppercase *hint* can mint an `__ANON_{n}` lookalike mid-compile
+    /// (see [`reserved_term_names`](Self::reserved_term_names)).
     pub(super) fn fresh_terminal(&mut self) -> String {
-        let name = format!("__ANON_{}", self.term_counter);
-        self.term_counter += 1;
-        name
+        loop {
+            let name = format!("__ANON_{}", self.term_counter);
+            self.term_counter += 1;
+            if !self.reserved_term_names.contains(&name)
+                && !self.terminals.iter().any(|t| t.name == name)
+            {
+                return name;
+            }
+        }
     }
 
     pub(super) fn process_items(&mut self, items: Vec<Item>) -> Result<(), GrammarError> {
-        // First pass: register templates
+        // First pass: register templates, and reserve every user-authored name so
+        // generated `__anon_*` / `__ANON_*` names can never shadow one. An import's
+        // target may be a rule or a terminal — unknowable before resolution — so it
+        // reserves in both namespaces (harmless: the namespaces cannot overlap).
         for item in &items {
-            if let Item::RuleItem(r) = item {
-                if !r.params.is_empty() {
-                    self.templates.insert(
-                        r.name.clone(),
-                        (
-                            r.params.clone(),
-                            r.expansions.clone(),
-                            r.modifiers.clone(),
-                            r.priority,
-                        ),
-                    );
+            match item {
+                Item::RuleItem(r) => {
+                    self.reserved_rule_names.insert(r.name.clone());
+                    if !r.params.is_empty() {
+                        self.templates.insert(
+                            r.name.clone(),
+                            (
+                                r.params.clone(),
+                                r.expansions.clone(),
+                                r.modifiers.clone(),
+                                r.priority,
+                            ),
+                        );
+                    }
                 }
+                Item::TermItem(t) => {
+                    self.reserved_term_names.insert(t.name.clone());
+                }
+                Item::DeclareItem(syms) => {
+                    for sym in syms {
+                        if let Symbol::Terminal(t) = sym {
+                            self.reserved_term_names.insert(t.name.clone());
+                        }
+                    }
+                }
+                Item::ImportItem(spec) => {
+                    for name in spec_final_names(spec) {
+                        self.reserved_rule_names.insert(name.clone());
+                        self.reserved_term_names.insert(name);
+                    }
+                }
+                Item::IgnoreItem(_) => {}
             }
         }
 
@@ -335,5 +427,88 @@ impl GrammarCompiler {
             ignore: ignore_names,
             start: self.start,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::grammar::load_grammar;
+
+    /// `__anon_plus_0` is a valid *user* rule name; the `thing+` helper must not
+    /// reuse it (pre-fix, both origins were named `__anon_plus_0`, silently
+    /// merging two unrelated rules).
+    #[test]
+    fn generated_helper_rule_skips_user_taken_name() {
+        let g = load_grammar(
+            "start: thing+ __anon_plus_0\n__anon_plus_0: \"b\"\nthing: \"a\"\n",
+            &["start".to_string()],
+            false,
+            false,
+        )
+        .unwrap();
+        let user_named: Vec<_> = g
+            .rules
+            .iter()
+            .filter(|r| r.origin.name == "__anon_plus_0")
+            .collect();
+        assert_eq!(
+            user_named.len(),
+            1,
+            "only the user's rule may carry the user's name"
+        );
+        // The `+` helper exists under a fresh (skipped-forward) name.
+        assert!(
+            g.rules
+                .iter()
+                .any(|r| r.origin.name.starts_with("__anon_plus_")
+                    && r.origin.name != "__anon_plus_0")
+        );
+    }
+
+    /// A user cannot *define* a terminal named `__ANON_0` (a leading `__` lexes
+    /// as a rule name), but an import alias can register one: `%import
+    /// common.INT -> __ANON_0`. The inline `/x/` literal must not be interned
+    /// under that taken name (pre-fix, two TerminalDefs shared it).
+    #[test]
+    fn generated_terminal_skips_import_alias_taken_name() {
+        let g = load_grammar(
+            "start: /x/\n%import common.INT -> __ANON_0\n",
+            &["start".to_string()],
+            false,
+            false,
+        )
+        .unwrap();
+        // The literal skipped to the next free generated name…
+        assert!(g
+            .terminals
+            .iter()
+            .any(|t| t.name == "__ANON_1" && t.pattern.as_regex_str() == "x"));
+        // …so the unreferenced imported terminal prunes away cleanly instead of
+        // surviving as a duplicate of the literal's definition.
+        assert_eq!(
+            g.terminals.iter().filter(|t| t.name == "__ANON_0").count(),
+            0
+        );
+    }
+
+    /// A literal whose uppercase *hint* mints an `__ANON_n` lookalike must not
+    /// collide with a later counter-generated name: `"__anon_5"` interns under
+    /// the hint `__ANON_5`, so the counter has to skip 5 when it gets there.
+    #[test]
+    fn generated_terminal_skips_hint_minted_name() {
+        let mut grammar = String::from("start: \"__anon_5\"");
+        // Burn counters 0..5 with distinct regex literals, then add one more.
+        for i in 0..6 {
+            grammar.push_str(&format!(" /x{i}/"));
+        }
+        grammar.push('\n');
+        let g = load_grammar(&grammar, &["start".to_string()], false, false).unwrap();
+        let anon5: Vec<_> = g
+            .terminals
+            .iter()
+            .filter(|t| t.name == "__ANON_5")
+            .collect();
+        assert_eq!(anon5.len(), 1, "terminal names must stay unique");
+        assert_eq!(anon5[0].pattern.as_regex_str(), "__anon_5");
     }
 }
