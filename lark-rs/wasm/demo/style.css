@@ -1,0 +1,183 @@
+/* lark-rs playground — dead-simple, framework-free, mobile-first.
+   Two columns on wide screens, one column on phones. 16px form fields so
+   iOS Safari doesn't zoom on focus. */
+
+:root {
+  --bg: #ffffff;
+  --fg: #1a1a2e;
+  --muted: #6b7280;
+  --border: #d1d5db;
+  --panel: #f8fafc;
+  --accent: #6d28d9;
+  --error-bg: #fef2f2;
+  --error-fg: #b91c1c;
+  --token-bg: #eef2ff;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111118;
+    --fg: #e5e7eb;
+    --muted: #9ca3af;
+    --border: #374151;
+    --panel: #1a1a24;
+    --accent: #a78bfa;
+    --error-bg: #2d1515;
+    --error-fg: #f87171;
+    --token-bg: #1e2240;
+  }
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0 auto;
+  padding: 0 1rem 2rem;
+  max-width: 70rem;
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+header { padding: 1rem 0 0; }
+h1 { margin: 0; font-size: 1.5rem; }
+h1 .thin { font-weight: 300; color: var(--muted); }
+.sub { margin: 0.25rem 0 0; color: var(--muted); font-size: 0.9rem; }
+.sub a { color: var(--accent); }
+.version { white-space: nowrap; }
+
+main {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+@media (max-width: 800px) {
+  main { grid-template-columns: 1fr; }
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.75rem;
+  min-width: 0; /* let grid children shrink instead of overflowing on phones */
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  align-items: center;
+  margin-bottom: 0.75rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+.controls label { display: inline-flex; align-items: center; gap: 0.4rem; }
+.controls .check { gap: 0.3rem; }
+
+select, input[type="text"], button {
+  font: inherit;
+  font-size: 16px; /* not rem-relative: prevents iOS focus zoom */
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.3rem 0.5rem;
+  min-height: 2.25rem; /* comfortable touch target */
+}
+input[type="checkbox"] { width: 1.1rem; height: 1.1rem; }
+
+button { cursor: pointer; }
+button:hover { border-color: var(--accent); }
+
+.area-label {
+  display: block;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: 0.25rem;
+}
+
+textarea {
+  width: 100%;
+  min-height: 14rem;
+  resize: vertical;
+  font-family: var(--mono);
+  font-size: 16px; /* prevents iOS focus zoom */
+  line-height: 1.4;
+  color: var(--fg);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.5rem;
+  -webkit-text-size-adjust: 100%;
+}
+#input { min-height: 8rem; }
+
+details { margin-top: 0.75rem; font-size: 0.9rem; }
+summary { cursor: pointer; color: var(--muted); }
+.hint { color: var(--muted); font-size: 0.85rem; margin: 0.5rem 0; }
+
+.import-row { margin: 0.5rem 0; }
+.import-row-head { display: flex; gap: 0.5rem; margin-bottom: 0.25rem; }
+.import-row-head input { flex: 1; min-width: 0; font-family: var(--mono); }
+.import-row textarea { min-height: 6rem; }
+#add-import { margin-top: 0.25rem; }
+
+.out-controls {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+.tabs { display: flex; gap: 0.25rem; }
+.tabs button { border-radius: 6px 6px 0 0; border-bottom: none; }
+.tabs button.active { background: var(--token-bg); color: var(--accent); font-weight: 600; }
+.status { color: var(--muted); font-size: 0.85rem; text-align: right; }
+
+.output {
+  border: 1px solid var(--border);
+  border-radius: 0 6px 6px 6px;
+  background: var(--bg);
+  padding: 0.5rem;
+  margin: 0;
+  overflow: auto;
+  max-height: 32rem;
+  font-family: var(--mono);
+  font-size: 0.85rem;
+}
+
+.error {
+  margin-top: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 6px;
+  background: var(--error-bg);
+  color: var(--error-fg);
+  font-family: var(--mono);
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+}
+
+/* Rendered tree */
+.output details { margin: 0; font-size: inherit; }
+.output summary { color: inherit; }
+.output ul {
+  list-style: none;
+  margin: 0;
+  padding-left: 1.1rem;
+  border-left: 1px dotted var(--border);
+}
+.output li { margin: 0.1rem 0; }
+.rule { font-weight: 600; color: var(--accent); }
+.rule.ambig { color: var(--error-fg); }
+.token { background: var(--token-bg); border-radius: 4px; padding: 0 0.3rem; }
+.tok-type { color: var(--muted); font-size: 0.8em; }
+.tok-value { font-weight: 600; }
+.hole { color: var(--muted); font-style: italic; }
+
+footer { margin-top: 1.5rem; color: var(--muted); font-size: 0.85rem; }

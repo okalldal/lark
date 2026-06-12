@@ -64,6 +64,24 @@ as a JSON string.
   (above). Without the option, a file import fails with the same
   `ImportNotFound` error a string-loaded grammar gets everywhere else.
 
+## Playground (GitHub Pages demo)
+
+[`demo/`](demo/) is a static, framework-free playground over the web build:
+pick or write a grammar (including `%import` from in-memory virtual files),
+type input, and see the parse tree rendered live (or as raw pretty-printed
+JSON). It is mobile-friendly and has no server component — the page plus the
+wasm-pack output are plain static files; the browser instantiates the WASM.
+
+```bash
+npm run demo          # build web pkg → demo/pkg/, serve on :8137
+```
+
+`.github/workflows/demo-pages.yml` builds the same thing on every push to
+master and deploys `demo/` to GitHub Pages (one-time repo setup:
+Settings → Pages → Source = "GitHub Actions"). The example bank
+(`demo/examples.js`) is pinned by `../tests/wasm/demo_examples.test.mjs`, so
+`npm test` fails if an engine change breaks a demo example.
+
 ## Tests
 
 ```bash

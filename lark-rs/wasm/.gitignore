@@ -1,4 +1,5 @@
 node_modules/
 pkg/
 pkg-web/
+demo/pkg/
 target/

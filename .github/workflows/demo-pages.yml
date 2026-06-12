@@ -1,0 +1,67 @@
+# Build the lark-rs WASM playground (lark-rs/wasm/demo/) and deploy it to
+# GitHub Pages. The site is pure static files: the demo page plus the
+# wasm-pack web build copied to demo/pkg/ — the browser instantiates the
+# .wasm itself, so there is nothing to "host" beyond serving the files.
+#
+# One-time repo setup: Settings → Pages → Source = "GitHub Actions".
+
+name: demo-pages
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'lark-rs/**'
+      - '.github/workflows/demo-pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One Pages deployment at a time; a newer push supersedes an in-flight one.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: lark-rs/wasm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install wasm-pack
+        run: npm ci
+
+      - name: Build demo (wasm-pack web build → demo/pkg)
+        run: npm run demo:build
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: lark-rs/wasm/demo
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
