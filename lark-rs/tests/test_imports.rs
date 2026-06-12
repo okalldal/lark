@@ -88,6 +88,136 @@ fn test_relative_imports_oracle() {
     );
 }
 
+// ─── In-memory import sources (#47 follow-up) ────────────────────────────────────────
+// The WASM binding has no filesystem, so `LarkOptions::import_sources` supplies
+// sibling grammars as a virtual-path → text map. The contract is "identical to
+// the filesystem mode": these tests replay the SAME oracle cases with the same
+// fixture files fed from memory instead of disk.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+/// Build a LALR parser for a fixture grammar with every sibling `.lark` file fed
+/// through `import_sources` (no `base_path`, so the filesystem path is provably
+/// not in play).
+fn make_lalr_in_memory(rel_path: &str) -> Lark {
+    let dir = grammars_dir().join("imports");
+    let mut sources = HashMap::new();
+    for entry in std::fs::read_dir(&dir).expect("imports fixture dir") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().is_some_and(|e| e == "lark") {
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            sources.insert(name, std::fs::read_to_string(&path).expect("fixture"));
+        }
+    }
+    let text = std::fs::read_to_string(grammars_dir().join(rel_path)).expect("grammar");
+    Lark::new(
+        &text,
+        LarkOptions {
+            parser: ParserAlgorithm::Lalr,
+            lexer: LexerType::Contextual,
+            start: vec!["start".to_string()],
+            import_sources: Some(Arc::new(sources)),
+            ..Default::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("Grammar {rel_path} failed to load from memory: {e}"))
+}
+
+/// The file-import oracle replayed with the same fixture files supplied as
+/// in-memory sources: trees must match the same committed Python-Lark oracle,
+/// so the two resolution modes are pinned identical.
+#[test]
+fn test_in_memory_imports_match_file_import_oracle() {
+    let oracle = load_oracle("imports", "cases");
+    let cases = oracle.as_array().expect("cases must be an array");
+
+    let mut failures = Vec::new();
+    for case in cases {
+        let grammar = case["grammar"].as_str().expect("grammar field");
+        let input = case["input"].as_str().unwrap_or("");
+        let should_pass = case["should_pass"].as_bool().unwrap_or(false);
+
+        let lark = make_lalr_in_memory(grammar);
+        match (should_pass, lark.parse(input)) {
+            (true, Ok(tree)) => {
+                if let Err(msg) = tree_matches_oracle(&tree, &case["tree"]) {
+                    failures.push(format!("{grammar} input={input:?}: tree mismatch: {msg}"));
+                }
+            }
+            (true, Err(e)) => {
+                failures.push(format!("{grammar} input={input:?}: expected success: {e}"))
+            }
+            (false, Err(_)) => {}
+            (false, Ok(_)) => failures.push(format!("{grammar} input={input:?}: expected failure")),
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "in-memory import oracle failures ({}):\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// Nested in-memory imports: the imported grammar's own relative imports
+/// resolve against its *virtual* directory, exactly as on disk.
+#[test]
+fn test_in_memory_imports_nest_through_virtual_directories() {
+    let sources: HashMap<String, String> = [
+        (
+            "dir/lib.lark".to_string(),
+            "%import .tokens (NAME)\ngreeting: \"hello\" NAME\n".to_string(),
+        ),
+        (
+            "dir/tokens.lark".to_string(),
+            "NAME: /[a-z]+/\n".to_string(),
+        ),
+    ]
+    .into();
+    let lark = Lark::new(
+        "%import .dir.lib (greeting)\nstart: greeting \"!\"\n%ignore \" \"\n",
+        LarkOptions {
+            parser: ParserAlgorithm::Lalr,
+            lexer: LexerType::Contextual,
+            start: vec!["start".to_string()],
+            import_sources: Some(Arc::new(sources)),
+            ..Default::default()
+        },
+    )
+    .expect("nested in-memory imports resolve");
+    let tree = lark.parse("hello world !").expect("parses");
+    let tree = tree.as_tree().expect("tree root");
+    assert_eq!(tree.data, "start");
+    assert_eq!(
+        tree.children[0].as_tree().expect("greeting").data,
+        "greeting"
+    );
+}
+
+/// Providing `import_sources` switches file imports to the map *exclusively*:
+/// a path that exists on disk (base_path points at the real fixture dir) but
+/// not in the map must fail, proving there is no silent filesystem fallback.
+#[test]
+fn test_in_memory_sources_never_fall_back_to_the_filesystem() {
+    let res = Lark::new(
+        "%import .tokens (NUMBER)\nstart: NUMBER\n",
+        LarkOptions {
+            parser: ParserAlgorithm::Lalr,
+            lexer: LexerType::Contextual,
+            start: vec!["start".to_string()],
+            base_path: Some(grammars_dir().join("imports")),
+            import_sources: Some(Arc::new(HashMap::new())),
+            ..Default::default()
+        },
+    );
+    assert!(
+        res.is_err(),
+        "expected ImportNotFound from the empty in-memory map, got Ok \
+         (the resolver fell back to the filesystem)"
+    );
+}
+
 /// A file import with no base path (grammar built from a bare string) is
 /// unresolvable — only the bundled `common` library is available — and must error
 /// rather than silently drop the requested symbols.

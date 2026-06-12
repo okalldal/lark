@@ -135,6 +135,29 @@ test("bundled %import works; file %import fails cleanly (no filesystem)", () => 
   );
 });
 
+test("importSources resolves relative %import in memory (#47 follow-up)", () => {
+  // The in-memory file provider: virtual paths → grammar text, nesting
+  // through virtual directories like sibling files on disk.
+  const parser = new Lark('%import .dir.lib (greeting)\nstart: greeting "!"\n%ignore " "\n', {
+    parser: "lalr",
+    importSources: {
+      "dir/lib.lark": '%import .tokens (NAME)\ngreeting: "hello" NAME\n',
+      "dir/tokens.lark": "NAME: /[a-z]+/\n",
+    },
+  });
+  const tree = parser.parse("hello world !");
+  assert.equal(tree.data, "start");
+  assert.equal(tree.children[0].data, "greeting");
+  assert.equal(tree.children[0].children[0].value, "world");
+
+  // A path missing from the map is still a clean GrammarError, and the map
+  // never falls back to any other source.
+  assert.throws(
+    () => new Lark("%import .missing (X)\nstart: X\n", { importSources: {} }),
+    (e) => e.name === "GrammarError" && /import/i.test(e.message),
+  );
+});
+
 test("deeply nested input parses, serializes, and drops on the small WASM stack", () => {
   // The #33/#151 payoff this binding depends on: the forest walk, the tree's
   // Drop/Clone glue, and the JSON serializer are all iterative, so a parse

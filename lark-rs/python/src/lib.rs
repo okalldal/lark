@@ -347,6 +347,10 @@ impl PyLark {
             strict,
             g_regex_flags,
             base_path: None,
+            // Python callers have a real filesystem; in-memory import sources
+            // (#153) are a WASM-binding affordance. Python Lark's own
+            // `import_paths` loaders could map here if ever needed.
+            import_sources: None,
             postlex: None,
             // No Python kwarg — the binding always uses the default (regex) scanner
             // backend; the DFA backend is an internal lark-rs knob (LEXER_DFA_PLAN).

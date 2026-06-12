@@ -28,8 +28,22 @@ Options mirror the Python binding's kwargs (camelCase or snake_case):
 `parser` (`"earley"` default | `"lalr"` | `"cyk"`), `lexer`, `start` (string or
 array), `ambiguity`, `propagatePositions`, `keepAllTokens`,
 `maybePlaceholders` (default `true`, like Python Lark), `strict`,
-`gRegexFlags` (flag letters, e.g. `"i"`). Errors are JS `Error`s with `name`
-set to `"GrammarError"` or `"ParseError"`.
+`gRegexFlags` (flag letters, e.g. `"i"`), and `importSources` (below). Errors
+are JS `Error`s with `name` set to `"GrammarError"` or `"ParseError"`.
+
+Relative `%import` works without a filesystem via `importSources` — a plain
+object mapping virtual `/`-separated paths to grammar text; an imported
+grammar's own relative imports resolve against its virtual directory, exactly
+like sibling files on disk:
+
+```js
+const parser = new Lark('%import .dir.lib (greeting)\nstart: greeting', {
+  importSources: {
+    "dir/lib.lark":    '%import .tokens (NAME)\ngreeting: "hello" NAME',
+    "dir/tokens.lark": "NAME: /[a-z]+/",
+  },
+});
+```
 
 Trees are returned in the repo's oracle JSON shape
 (`tools/generate_oracles.py`): tree nodes `{type, data, children}`, token
@@ -45,10 +59,10 @@ as a JSON string.
   manual worklist implementations (#151), and this binding's serializer is an
   explicit-stack walk. The smoke test pins a 50,000-level-deep parse.
 * **No filesystem** — `%import` of the bundled libraries (`common`, `python`,
-  `lark`, `unicode`) works (they are compiled from in-memory sources); a
-  *file* import fails with the same `ImportNotFound` error a string-loaded
-  grammar gets everywhere else. An in-memory file-provider API is a possible
-  follow-up.
+  `lark`, `unicode`) works (they are compiled from in-memory sources), and
+  relative file imports resolve through the in-memory `importSources` map
+  (above). Without the option, a file import fails with the same
+  `ImportNotFound` error a string-loaded grammar gets everywhere else.
 
 ## Tests
 
