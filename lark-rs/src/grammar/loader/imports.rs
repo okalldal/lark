@@ -5,7 +5,7 @@
 use super::ast::{ImportSpec, Item};
 use super::compiler::GrammarCompiler;
 use super::parser::GrammarParser;
-use super::{load_grammar, load_grammar_with_base};
+use super::{load_grammar, load_grammar_with_base, load_grammar_with_sources};
 use crate::error::GrammarError;
 use crate::grammar::rule::Rule;
 use crate::grammar::symbol::{NonTerminal, Symbol, Terminal};
@@ -18,6 +18,16 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// Synthetic start rule appended to an imported file so the requested terminals
 /// survive dead-terminal pruning while the file is compiled. Never copied out.
 const IMPORT_PROBE_RULE: &str = "__lark_import_probe";
+
+/// Canonical key for a virtual path in the in-memory `import_sources` map:
+/// components joined with `/`, regardless of the host's path separator, so map
+/// keys are written the same way on every platform.
+fn virtual_key(path: &std::path::Path) -> String {
+    path.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
 
 /// The names an `%import` directive will register in the importing grammar
 /// (aliases applied). Used by the compiler to reserve user-claimed names before
@@ -108,12 +118,36 @@ impl GrammarCompiler {
     /// `load_grammar`, then copy the requested terminals/rules (and, for a rule,
     /// its dependency closure) into this grammar — mirroring Python Lark's
     /// `GrammarLoader.do_import` + `_remove_unused`.
+    ///
+    /// When in-memory `import_sources` are set (the #47 follow-up: the WASM no-filesystem
+    /// case), the same `<base>/a/b/c.lark` path is resolved as a virtual key
+    /// into the map instead of the filesystem — so directory layout, nesting,
+    /// and error behavior are identical between the two modes.
     fn resolve_file_import(
         &mut self,
         module_path: &[String],
         names_to_import: &[(String, Option<String>)],
     ) -> Result<(), GrammarError> {
         let dotted = module_path.join(".");
+
+        // In-memory mode: the map root is the implicit base, so a grammar built
+        // from a bare string can still import (that is the point — WASM has no
+        // source location for *any* grammar). The filesystem is never touched.
+        if let Some(sources) = &self.import_sources {
+            let mut file = self.base_path.clone().unwrap_or_default();
+            for comp in module_path {
+                file.push(comp);
+            }
+            file.set_extension("lark");
+            let text = sources.get(&virtual_key(&file)).cloned().ok_or_else(|| {
+                GrammarError::ImportNotFound {
+                    path: dotted.clone(),
+                }
+            })?;
+            let sub_base = file.parent().map(PathBuf::from);
+            return self.import_from_source(&text, sub_base, module_path, names_to_import);
+        }
+
         // Resolve `a.b.c` → `<base>/a/b/c.lark`. Without a base path (grammar built
         // from a bare string) a file import is unresolvable, exactly as Python Lark
         // cannot find a relative import with no source location.
@@ -160,12 +194,13 @@ impl GrammarCompiler {
             .collect::<Vec<_>>()
             .join(" ");
         let probe = format!("{text}\n{IMPORT_PROBE_RULE}: {probe_body}\n");
-        let imported = load_grammar_with_base(
+        let imported = load_grammar_with_sources(
             &probe,
             &[IMPORT_PROBE_RULE.to_string()],
             self.maybe_placeholders,
             self.global_keep_all,
             sub_base,
+            self.import_sources.clone(),
         )?;
         self.copy_requested(&imported, module_path, names_to_import)
     }

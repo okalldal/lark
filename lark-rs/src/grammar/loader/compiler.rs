@@ -18,6 +18,7 @@ use crate::grammar::terminal::{Pattern, TerminalDef};
 use crate::grammar::Grammar;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// The closed set of anonymous-helper flavours the compiler generates, each
 /// rendered as a `__anon_{tag}_{n}` rule name (terminals use `__ANON_{n}` via
@@ -117,6 +118,12 @@ pub(super) struct GrammarCompiler {
     /// grammar's directory). `None` when the grammar was built from a string with
     /// no source location, in which case only `%import common.*` resolves.
     pub(super) base_path: Option<PathBuf>,
+    /// In-memory grammar sources for relative imports (the #47 follow-up: the WASM
+    /// no-filesystem case): virtual `/`-separated path (e.g. `"dir/tokens.lark"`)
+    /// → grammar text. When `Some`, file imports resolve against this map *only*
+    /// — the filesystem is never consulted — with `base_path` acting as a virtual
+    /// prefix (default: the map root). Shared down nested imports via `Arc`.
+    pub(super) import_sources: Option<Arc<HashMap<String, String>>>,
     /// User-authored rule names (rules, templates, import targets), collected up
     /// front so [`fresh_anon_rule`](Self::fresh_anon_rule) never hands out a name
     /// the grammar already claims — `__anon_group_0` is a *valid* user rule name,
@@ -139,6 +146,7 @@ impl GrammarCompiler {
         maybe_placeholders: bool,
         keep_all_tokens: bool,
         base_path: Option<PathBuf>,
+        import_sources: Option<Arc<HashMap<String, String>>>,
     ) -> Self {
         GrammarCompiler {
             start,
@@ -159,6 +167,7 @@ impl GrammarCompiler {
             helper_cache: HashMap::new(),
             nullable_opts: std::collections::HashSet::new(),
             base_path,
+            import_sources,
             reserved_rule_names: HashSet::new(),
             reserved_term_names: HashSet::new(),
         }

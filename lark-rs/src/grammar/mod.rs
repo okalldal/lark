@@ -8,7 +8,7 @@ pub mod terminal;
 pub use intern::{
     lower, CompiledGrammar, CompiledRule, SymbolId, SymbolInfo, SymbolKind, SymbolTable,
 };
-pub use loader::{load_grammar, load_grammar_with_base};
+pub use loader::{load_grammar, load_grammar_with_base, load_grammar_with_sources};
 
 use rule::Rule;
 use terminal::TerminalDef;

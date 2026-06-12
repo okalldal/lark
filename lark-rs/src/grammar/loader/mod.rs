@@ -38,7 +38,9 @@ use super::Grammar;
 use crate::error::GrammarError;
 use compiler::GrammarCompiler;
 use parser::GrammarParser;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 /// Convert grammar text to a compiled [`Grammar`].
 ///
@@ -70,6 +72,32 @@ pub fn load_grammar_with_base(
     keep_all_tokens: bool,
     base_path: Option<PathBuf>,
 ) -> Result<Grammar, GrammarError> {
+    load_grammar_with_sources(
+        grammar_text,
+        start,
+        maybe_placeholders,
+        keep_all_tokens,
+        base_path,
+        None,
+    )
+}
+
+/// Like [`load_grammar_with_base`], but with optional in-memory grammar sources
+/// for relative file imports (the #47 follow-up): a map of virtual `/`-separated path
+/// (e.g. `"dir/tokens.lark"`) → grammar text. When `import_sources` is `Some`,
+/// `%import .module (...)` resolves against the map *only* — the filesystem is
+/// never consulted — with `base_path` as an optional virtual prefix. This is how
+/// environments without a filesystem (WASM, #47) supply sibling grammars; an
+/// imported grammar's own relative imports resolve against its virtual
+/// directory, exactly like the filesystem path.
+pub fn load_grammar_with_sources(
+    grammar_text: &str,
+    start: &[String],
+    maybe_placeholders: bool,
+    keep_all_tokens: bool,
+    base_path: Option<PathBuf>,
+    import_sources: Option<Arc<HashMap<String, String>>>,
+) -> Result<Grammar, GrammarError> {
     let mut parser = GrammarParser::new(grammar_text);
     let items = parser.parse_start()?;
 
@@ -78,6 +106,7 @@ pub fn load_grammar_with_base(
         maybe_placeholders,
         keep_all_tokens,
         base_path,
+        import_sources,
     );
     compiler.process_items(items)?;
     compiler.compile()

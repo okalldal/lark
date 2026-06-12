@@ -51,12 +51,13 @@ const _: () = {
 
 impl Lark {
     pub fn new(grammar_text: &str, options: LarkOptions) -> Result<Self, LarkError> {
-        let grammar = grammar::load_grammar_with_base(
+        let grammar = grammar::load_grammar_with_sources(
             grammar_text,
             &options.start,
             options.maybe_placeholders,
             options.keep_all_tokens,
             options.base_path.clone(),
+            options.import_sources.clone(),
         )?;
         let frontend = parsers::build_frontend(&grammar, &options)?;
         Ok(Lark { grammar, frontend })
@@ -139,6 +140,16 @@ pub struct LarkOptions {
     /// `unicode`, `lark`) are available, as when a grammar is built from an
     /// in-memory string with no source location.
     pub base_path: Option<std::path::PathBuf>,
+    /// In-memory grammar sources for relative `%import .module (...)` resolution
+    /// (the #47 follow-up): a map of virtual `/`-separated path (e.g. `"tokens.lark"`,
+    /// `"dir/lib.lark"`) → grammar text. When `Some`, file imports resolve
+    /// against this map *only* — the filesystem is never consulted — with
+    /// `base_path` acting as an optional virtual prefix into the map. An imported
+    /// grammar's own relative imports resolve against its virtual directory, so
+    /// nested imports compose exactly as they do on disk. This is how
+    /// environments without a filesystem (the WASM binding, #47) supply sibling
+    /// grammars. `None` (the default) keeps the filesystem behavior above.
+    pub import_sources: Option<std::sync::Arc<std::collections::HashMap<String, String>>>,
     /// Post-lexer hook applied to the token stream before it reaches the parser.
     /// Currently an [`Indenter`], which injects `%declare`d `INDENT` / `DEDENT`
     /// tokens for Python-style significant-whitespace grammars. Mirrors Python
@@ -175,6 +186,7 @@ impl Default for LarkOptions {
             strict: false,
             g_regex_flags: 0,
             base_path: None,
+            import_sources: None,
             postlex: None,
             lexer_backend: LexerBackend::default(),
         }

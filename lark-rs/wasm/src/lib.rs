@@ -26,9 +26,12 @@
 //!   iterative (#151) — and the serializer below is also an explicit-stack
 //!   walk, so no path here recurses to tree depth either.
 //! * No filesystem: `%import` of the bundled libraries (`common`, `python`,
-//!   `lark`, `unicode`) works — they are compiled from in-memory sources —
-//!   while a *file* import fails with the same `ImportNotFound` a grammar
-//!   loaded from a bare string gets everywhere else.
+//!   `lark`, `unicode`) works — they are compiled from in-memory sources — and
+//!   relative file imports (`%import .module (...)`) resolve against the
+//!   `importSources` option (the #47 follow-up): a plain object mapping virtual paths
+//!   (`"tokens.lark"`, `"dir/lib.lark"`) to grammar text. Without it, a file
+//!   import fails with the same `ImportNotFound` a grammar loaded from a bare
+//!   string gets everywhere else.
 
 use lark_core::{
     Ambiguity, Child, Lark, LarkOptions, LexerType, ParseTree, ParserAlgorithm, Token, Tree,
@@ -70,9 +73,11 @@ impl WasmLark {
     /// `lexer` ("auto" | "basic" | "contextual" | "dynamic" |
     /// "dynamic_complete"), `start` (string or array of strings), `ambiguity`
     /// ("resolve" | "explicit" | "forest"), `propagatePositions`,
-    /// `keepAllTokens`, `maybePlaceholders`, `strict` (booleans), and
-    /// `gRegexFlags` (a string of Python-style flag letters, e.g. `"is"`).
-    /// Snake_case key spellings are accepted too.
+    /// `keepAllTokens`, `maybePlaceholders`, `strict` (booleans),
+    /// `gRegexFlags` (a string of Python-style flag letters, e.g. `"is"`), and
+    /// `importSources` (an object mapping virtual paths to grammar text, for
+    /// relative `%import` without a filesystem). Snake_case key spellings are
+    /// accepted too.
     #[wasm_bindgen(constructor)]
     pub fn new(grammar: &str, options: &JsValue) -> Result<WasmLark, JsValue> {
         let options = parse_options(options)?;
@@ -241,6 +246,39 @@ fn parse_options(opts: &JsValue) -> Result<LarkOptions, JsValue> {
         }
     }
 
+    // In-memory grammar sources for relative `%import .module (...)` (the #47 follow-up):
+    // a plain object mapping virtual `/`-separated paths (e.g. "tokens.lark",
+    // "dir/lib.lark") to grammar text — WASM has no filesystem, so this is the
+    // only way to supply sibling grammars.
+    let import_sources = match get(opts, "importSources", "import_sources") {
+        None => None,
+        Some(v) => {
+            if !v.is_object() {
+                return Err(js_error(
+                    "GrammarError",
+                    "importSources must be an object mapping paths to grammar text",
+                ));
+            }
+            let mut map = std::collections::HashMap::new();
+            for entry in js_sys::Object::entries(&js_sys::Object::from(v)).iter() {
+                let pair = js_sys::Array::from(&entry);
+                let (key, value) = (pair.get(0).as_string(), pair.get(1).as_string());
+                match (key, value) {
+                    (Some(k), Some(text)) => {
+                        map.insert(k, text);
+                    }
+                    _ => {
+                        return Err(js_error(
+                            "GrammarError",
+                            "importSources values must be grammar-text strings",
+                        ))
+                    }
+                }
+            }
+            Some(std::sync::Arc::new(map))
+        }
+    };
+
     Ok(LarkOptions {
         start,
         parser,
@@ -252,6 +290,7 @@ fn parse_options(opts: &JsValue) -> Result<LarkOptions, JsValue> {
         strict: get_bool(opts, "strict", "strict", false)?,
         g_regex_flags,
         base_path: None,
+        import_sources,
         postlex: None,
         // No JS option — the binding always uses the default scanner backend;
         // the backend choice is an internal lark-rs knob (LEXER_DFA_PLAN).
