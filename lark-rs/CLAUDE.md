@@ -638,11 +638,16 @@ each failure's build/parse error). `cargo bench --bench wild` runs
 the same bank as a recorded performance trend (build cost + corpus/largest-input
 throughput per project).
 
-Findings (updated 2026-06-10, post-L4 burndown round — the xfail set encodes them,
+Findings (updated 2026-06-12, post-fence-idiom round — the xfail set encodes them,
 and each fixed root cause is pinned in distilled form by `tests/test_wild_gap_pins.rs`):
-**189/257 inputs agree, 72 XFAIL, 4 grammars not building.** Every remaining failure
-is an **engine-scope refusal** — a backtracking/backreference construct the lexer-DFA
-routing *deliberately* rejects (`docs/LOOKAROUND_SCOPE.md`).
+**189/257 inputs agree, 75 XFAIL (72 original + 3 `parse-alt:` for gersemi's
+documented-divergent alt grammar), 4 grammars not building.** Every remaining failure
+is an **engine-scope refusal** — an internal-lookahead/backtracking construct the
+lexer-DFA routing *deliberately* rejects (`docs/LOOKAROUND_SCOPE.md`). A project may
+carry an `alt_grammar` in its `meta.json`: a supplementary workaround edit replayed
+when the original fails to build, with its own `build-alt:`/`parse-alt:`/`panic-alt:`
+xfail namespaces so an alt that builds but produces wrong trees can never hide behind
+the original's `parse:` entries.
 
 **Cleared by the burndown round** (the wild bank's first payoff):
 
@@ -683,13 +688,20 @@ routing *deliberately* rejects (`docs/LOOKAROUND_SCOPE.md`).
 (`docs/LOOKAROUND_SCOPE.md`), the measured real-world cost of dropping the
 backtracking engine (4 of 16 wild grammars, all non-building):
 
-* **hcl2**: heredoc terminal uses a backreference (`<<(?P<heredoc>…)…(?P=heredoc)`).
-* **gersemi_cmake**: CMake bracket arguments use a backreference
-  (`(?P=equal_signs)` — the `[==[…]==]` matching-fence idiom). hcl2 + gersemi are
-  one *family* (tag-echo fences: heredocs, Lua long brackets, Rust raw strings,
-  PostgreSQL dollar-quoting) — non-regular but exactly recognizable in linear
-  time; an audited **fence-recognizer primitive** is the named candidate growth
-  path if this scope is ever revisited.
+* **hcl2**: the heredoc backreference terminals now lex via the **fence-idiom
+  matcher** (idiom #5, `lexer/fence.rs` — the tag-echo recognizer that round
+  landed), but the grammar still fails the build on `STRING_LIT`'s internal
+  `(?!\${)` lookahead (L4 out-of-scope).
+* **gersemi_cmake**: BRACKET_ARGUMENT (`[==[…]==]`, `(?P=equal_signs)`) likewise
+  lexes via the fence matcher, and UNQUOTED_ELEMENT's leading `(?!\[=*\[)` guard
+  now classifies (unbounded *leading* lookahead is supported) — but the loader
+  inlines the elements into `UNQUOTED_ARGUMENT : UNQUOTED_ELEMENT+`, which
+  re-internalizes the guard, so the original grammar still fails the build.
+  `alt_grammar/cmake.lark` documents the closest buildable edit (drop the
+  guards); **Python Lark itself parses 3 of the 8 inputs differently under that
+  edit** (the guards are load-bearing), so the alt is recorded as divergent
+  (`parse-alt:` xfails), not as a workaround. lark-rs-on-alt ≡ Python-on-alt:
+  the residual gap is the grammar edit, not the engine.
 * **synapse_storm**: atomic groups `(?>…)` + recursive subpatterns `(?&NAME)`
   (`regex`-module-only; context-free lookahead — the one genuine
   backtracking-engine case in the bank).

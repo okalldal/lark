@@ -11,6 +11,8 @@
     }
   },
   "entry_grammar": "grammar/cmake.lark",
+  "alt_grammar": "alt_grammar/cmake.lark",
+  "alt_grammar_note": "NOT tree-identical: dropping UNQUOTED_ELEMENT's (?!\\[=*\\[) guards changes Python Lark's own trees on 3/8 inputs (recorded as parse-alt xfails); see the alt grammar's header comment.",
   "lark_options": {
     "parser": "lalr",
     "lexer": "contextual",
