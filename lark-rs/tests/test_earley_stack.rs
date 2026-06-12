@@ -122,7 +122,9 @@ fn resolve_walk_is_iterative_on_nested_chain() {
 /// recurses to tree depth — a property of the caller-owned *result* value on
 /// every engine (LALR returns the same `Tree` type), unchanged by #33, which is
 /// about the walk. Handled explicitly here so this test exercises exactly the
-/// guarantee under test and nothing else.
+/// guarantee under test and nothing else. Tracked as #151 (iterative
+/// `Drop`/`Clone` for `Tree`); when that lands, delete this helper and drop the
+/// tree inside the small-stack thread instead.
 fn drop_deep(mut t: Tree) {
     let mut stack = std::mem::take(&mut t.children);
     while let Some(c) = stack.pop() {
