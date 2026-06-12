@@ -2,11 +2,17 @@
   "permissions": {
     "allow": [
       "Bash(cargo:*)",
-      "Bash(cargo test:*)",
-      "Bash(cargo build:*)",
-      "Bash(cargo clippy:*)",
+      "Bash(rustfmt:*)",
       "Bash(python3 lark-rs/tools/generate_oracles.py*)",
+      "Bash(python3 tools/generate_oracles.py*)",
+      "Bash(python3 lark-rs/tools/extract_lark_compliance.py*)",
+      "Bash(python3 tools/extract_lark_compliance.py*)",
+      "Bash(python3 lark-rs/tools/generate_wild_oracles.py*)",
+      "Bash(python3 tools/generate_wild_oracles.py*)",
       "Bash(python3 -c:*)",
+      "Bash(lark-rs/scripts/check-fast.sh)",
+      "Bash(./scripts/check-fast.sh)",
+      "Bash(scripts/check-fast.sh)",
       "Bash(git status)",
       "Bash(git diff*)",
       "Bash(git log*)",
@@ -15,9 +21,14 @@
       "Bash(git push*)",
       "Bash(git fetch*)",
       "Bash(git branch*)",
-      "Bash(find lark-rs*)",
-      "Bash(grep -r*)",
-      "Bash(grep -n*)"
+      "Bash(git submodule update*)",
+      "Bash(git config core.hooksPath .githooks)"
+    ],
+    "deny": [
+      "Edit(lark-rs/tests/fixtures/oracles/**)",
+      "Write(lark-rs/tests/fixtures/oracles/**)",
+      "Edit(lark-rs/tests/standalone/*.rs)",
+      "Write(lark-rs/tests/standalone/*.rs)"
     ]
   },
   "hooks": {
@@ -27,7 +38,19 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cd /home/user/lark && echo '=== lark-rs test status ===' && cargo test --manifest-path lark-rs/Cargo.toml 2>&1 | grep -E 'test .*(ok|FAILED)|test result|error\\[' | head -30 && echo '=== git status ===' && git log --oneline -3"
+            "command": "cd \"${CLAUDE_PROJECT_DIR:-/home/user/lark}\" && git config core.hooksPath .githooks && echo '=== git ===' && git status -sb && git log --oneline -3 && echo '=== lark-rs cargo test (failures only; warms the build cache) ===' && { out=$(cargo test --manifest-path lark-rs/Cargo.toml 2>&1) || true; echo \"$out\" | grep -E 'FAILED|panicked|^error|error\\[' | head -40; echo \"$out\" | awk '/^test result:/ {p+=$4; f+=$6} END {printf \"TOTAL: %d passed, %d failed across all test targets\\n\", p, f}'; } && echo 'Pre-push gate enabled (.githooks). Before pushing run: lark-rs/scripts/check-fast.sh'",
+            "timeout": 600
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in *.rs) rustfmt --edition 2021 \"$f\" 2>/dev/null || true ;; esac"
           }
         ]
       }
