@@ -210,10 +210,11 @@ fn internal_lookahead_routes_to_unsupported_internal() {
 }
 
 /// A known unbounded assertion routes to [`LoweringRoute::Unsupported`] with
-/// [`Rejection::Unbounded`].
+/// [`Rejection::Unbounded`]. Leading unbounded lookaheads are now supported
+/// (LeadingBoundary), so this test uses a *trailing* unbounded one.
 #[test]
 fn unbounded_lookahead_routes_to_unsupported_unbounded() {
-    match route_terminal("UNB", "(?![ ]*X)Y") {
+    match route_terminal("UNB", "[a-z]+(?=ab+)") {
         LoweringRoute::Unsupported { rejection, .. } => assert_eq!(rejection, Rejection::Unbounded),
         other => panic!("an unbounded lookahead must be Unsupported(Unbounded), got {other:?}"),
     }

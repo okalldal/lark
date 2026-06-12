@@ -888,12 +888,15 @@ pub fn reject_cases() -> Vec<RejectCase> {
     };
 
     // Unbounded-width lookahead — the `*`/`+`/`{m,}` body, both polarities.
+    // Leading unbounded lookaheads are SUPPORTED (LeadingBoundary) — the guard
+    // runs anchored at match-start so the assertion width does not affect the
+    // accept position. Only TRAILING unbounded lookaheads remain in the reject
+    // corpus.
     let unbounded_bodies = [
         "[ ]*X", "a*b", "ab+", r"\d{2,}", ".*", "(ab)+", "[0-9]+c", r"x*",
     ];
     for body in unbounded_bodies {
         for neg in ["=", "!"] {
-            mk(format!("(?{neg}{body})Y"), Rejection::Unbounded, &mut out);
             mk(format!("Y(?{neg}{body})"), Rejection::Unbounded, &mut out);
         }
     }

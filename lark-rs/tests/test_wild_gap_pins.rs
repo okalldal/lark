@@ -218,3 +218,126 @@ NAME: /[a-zA-Z_][a-zA-Z0-9_]*/
         ],
     );
 }
+
+// ─── 4. hcl2 / gersemi_cmake: the fence idiom (named-backref tag echo) ──────
+
+/// gersemi's BRACKET_ARGUMENT `\[(?P<eq>(=*))\[([\s\S]+?)\](?P=eq)\]`: a
+/// non-regular tag-echo pattern, matched by the two-phase `FenceMatcher`
+/// instead of failing the build. Expected trees from Python Lark 1.x over this
+/// exact grammar.
+#[test]
+fn fence_idiom_bracket_argument_lexes_like_python() {
+    let g = r#"start: arg+
+?arg: BRACKET | NAME
+BRACKET: /\[(?P<eq>(=*))\[([\s\S]+?)\](?P=eq)\]/
+NAME: /[a-z]+/
+%ignore /[ \n]+/
+"#;
+    let lark = build(g, LexerType::Contextual);
+    assert_parses(
+        &lark,
+        &[
+            ("[[x]]", "(start BRACKET:[[x]])"),
+            // Lazy body: the close fence is the FIRST echo of the open tag, so
+            // an inner `]]` (shorter tag) does not close `[==[`.
+            ("[==[ a ]] b ]==]", "(start BRACKET:[==[ a ]] b ]==])"),
+            (
+                "foo [=[bar]=] baz",
+                "(start NAME:foo BRACKET:[=[bar]=] NAME:baz)",
+            ),
+        ],
+    );
+    // Python's `([\s\S]+?)` body needs at least ONE char, so `[[]]` does not
+    // lex (pinned: an earlier matcher draft started the close-scan at the
+    // separator and silently accepted it). An unterminated fence is also a
+    // lex error, exactly like Python.
+    for bad in ["[[]]", "[=[ unterminated"] {
+        assert!(
+            lark.parse(bad).is_err(),
+            "{bad:?} must be a lex error (Python re rejects it)"
+        );
+    }
+}
+
+/// hcl2's heredoc shape `<<(?P<tag>…)\n(?:.|\n)*?(?P=tag)` — the second fence
+/// family member (the `*?` body admits an empty heredoc).
+#[test]
+fn fence_idiom_heredoc_lexes_like_python() {
+    let g = r#"start: VAR "=" HEREDOC
+HEREDOC: /<<(?P<tag>[A-Z]+)\n(?:.|\n)*?(?P=tag)/
+VAR: /[a-z]+/
+%ignore / +/
+"#;
+    let lark = build(g, LexerType::Contextual);
+    assert_parses(
+        &lark,
+        &[(
+            "x = <<EOF\nline one\nEOF",
+            "(start VAR:x HEREDOC:<<EOF\nline one\nEOF)",
+        )],
+    );
+}
+
+// ─── 5. hcl2: trailing-optional distribution + plus-helper dedup ────────────
+
+/// Distilled from hcl2's `!float_lit: DECIMAL+ "." DECIMAL+ (EXP_MARK DECIMAL+)?`
+/// next to `int_lit: DECIMAL+`. Two independent loader fixes are needed before
+/// this is LALR-buildable: the trailing `(…)?` must distribute like Python's
+/// `SimplifyRule_Visitor` (not keep an `__anon` helper that collides with
+/// `float_lit`'s own item), and the `DECIMAL+` plus-helpers of the `!` and
+/// plain rules must dedup to ONE shared rule (`keep_all` is irrelevant for a
+/// named terminal). Each fix alone still reduce/reduce-conflicts.
+#[test]
+fn trailing_optional_distributes_and_plus_helpers_dedup() {
+    let g = r#"start: float_lit | int_lit
+!float_lit: DECIMAL+ "." DECIMAL+ (EXP_MARK DECIMAL+)?
+int_lit: DECIMAL+
+DECIMAL: /[0-9]/
+EXP_MARK: /[eE][+-]?/
+"#;
+    let lark = build(g, LexerType::Contextual);
+    assert_parses(
+        &lark,
+        &[
+            (
+                "12.5e3",
+                "(start (float_lit DECIMAL:1 DECIMAL:2 DOT:. DECIMAL:5 EXP_MARK:e DECIMAL:3))",
+            ),
+            (
+                "3.14",
+                "(start (float_lit DECIMAL:3 DOT:. DECIMAL:1 DECIMAL:4))",
+            ),
+            ("42", "(start (int_lit DECIMAL:4 DECIMAL:2))"),
+        ],
+    );
+}
+
+// ─── 6. gersemi_cmake: unbounded LEADING lookahead guard ────────────────────
+
+/// gersemi's UNQUOTED_ELEMENT carries a leading `(?!\[=*\[)` whose body is
+/// unbounded (`=*`). At a LEADING position the guard runs anchored at the
+/// match start and never affects the accept length, so it lowers; expected
+/// trees from Python Lark 1.x. (The original grammar still fails the build —
+/// the loader inlines the elements into `UNQUOTED_ARGUMENT : UNQUOTED_ELEMENT+`,
+/// re-internalizing the guard — but the standalone leading shape now works.)
+#[test]
+fn unbounded_leading_lookahead_guard_lexes_like_python() {
+    let g = r#"start: tok+
+?tok: BRACKET | UNQ
+BRACKET: /\[=*\[/
+UNQ: /(?!\[=*\[)[^ \n]+/
+%ignore /[ \n]+/
+"#;
+    let lark = build(g, LexerType::Contextual);
+    assert_parses(
+        &lark,
+        &[
+            ("foo", "(start UNQ:foo)"),
+            // `[==x` has no closing `[`, so the guard passes and UNQ eats it…
+            ("[==x", "(start UNQ:[==x)"),
+            // …while a true bracket-opener fails the guard and BRACKET wins.
+            ("[=[", "(start BRACKET:[=[)"),
+            ("a [=[ b", "(start UNQ:a BRACKET:[=[ UNQ:b)"),
+        ],
+    );
+}

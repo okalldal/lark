@@ -32,6 +32,13 @@ impl Guard {
     /// (`at == text.len()`) `S` cannot match (no chars follow), so a negative guard
     /// `(?!S)` holds and a positive guard `(?=S)` fails — exactly Python's
     /// trailing-assertion-at-EOF semantics.
+    ///
+    /// Cost note: the DFA run stops where `S`'s automaton dies, so a *bounded*
+    /// body keeps a guard run O(width). A LEADING guard may carry an unbounded
+    /// body (`classify.rs` admits e.g. `(?!\[=*\[)`), for which the run is
+    /// bounded only by the remaining input — the same per-attempt worst case
+    /// Python `re` pays evaluating the identical assertion, so oracle parity
+    /// holds, but such a terminal is not linear-by-construction.
     pub(super) fn holds(&self, text: &str, at: usize) -> bool {
         let input = Input::new(text)
             .span(at..text.len())

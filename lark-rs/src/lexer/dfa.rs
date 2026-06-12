@@ -14,6 +14,7 @@ use regex_automata::{
     Anchored, Input, MatchKind,
 };
 
+use super::fence::{recognize_fence_idiom_from_def, FenceMatcher};
 use super::guard::{Guard, GuardContext, LookbehindGuardC};
 use super::pattern::wrap_flags;
 use super::plan::{scanner_plan, RetypeTable};
@@ -87,6 +88,12 @@ pub(super) struct DfaScanner {
     start_bytes: Option<Box<[bool; 256]>>,
     /// regex-terminal-id → (matched-text → keyword-terminal-id) — identical retype.
     unless: HashMap<SymbolId, RetypeTable>,
+    /// Fence-idiom terminals (tag-echo delimited, `fence.rs`), matched by the
+    /// two-phase scanner unconditionally — they do their own open-literal
+    /// pre-check and are not included in `start_bytes`. They bypass the refusal
+    /// seam: a named backreference is non-regular (the `regex` crate is right to
+    /// reject it) but linear-time recognisable per attempt.
+    fences: Vec<FenceMatcher>,
 }
 
 /// Leftmost-first DFA over the unguarded sub-patterns. Sub-patterns are ordered by
@@ -133,6 +140,8 @@ struct ClassifiedSubs {
     guarded_subs: Vec<SubPattern>,
     guarded_srcs: Vec<String>,
     base_inlines: Vec<String>,
+    /// Fence-idiom terminals — neither engine hosts them (see [`DfaScanner::fences`]).
+    fences: Vec<FenceMatcher>,
 }
 
 /// Stage 1 — walk the rank-ordered plan, classifying each terminal's lowered branches
@@ -162,6 +171,7 @@ fn classify_plan_groups(
         guarded_subs: Vec::new(),
         guarded_srcs: Vec::new(),
         base_inlines: Vec::new(),
+        fences: Vec::new(),
     };
 
     for (rank, (id, inline)) in groups.iter().enumerate() {
@@ -186,12 +196,23 @@ fn classify_plan_groups(
             Err(e) => e.to_string(),
         };
 
+        let def = by_id[id];
+
+        // Fence-idiom terminals bypass the refusal seam entirely: the named
+        // backreference makes the `regex` crate refuse them (correctly — the
+        // language is non-regular), but the recognized shape is matched
+        // linearly per attempt by the two-phase `FenceMatcher`.
+        if let Some(spec) = recognize_fence_idiom_from_def(def) {
+            out.fences
+                .push(FenceMatcher::build(*id, rank, spec, prefix)?);
+            continue;
+        }
+
         // A lookaround (or otherwise regex-rejected) terminal — lower it through
         // THE single refusal seam, or fail the build with the categorized scope
         // error. The seam strips the loader's whole-pattern flag wrapper and
         // returns the merged flag bitset; the [`GuardContext`] re-applies the
         // same scoping to every lowered branch and guard below.
-        let def = by_id[id];
         let (lowered, flags) = route_fancy_only_terminal(def, global_flags, &compile_err)?;
         let ctx = GuardContext { prefix, flags };
 
@@ -318,6 +339,7 @@ impl DfaScanner {
             guarded,
             start_bytes,
             unless,
+            fences: classified.fences,
         })
     }
 
@@ -353,6 +375,17 @@ impl DfaScanner {
                     if best.is_none_or(|(r, b, _, _)| (cand.0, cand.1) < (r, b)) {
                         best = Some(cand);
                     }
+                }
+            }
+        }
+        // Fence matchers run outside the `runnable` gate: they do their own
+        // open-literal pre-check and are not included in `start_bytes`. The
+        // tie-break is the same `(rank, branch_order)` rule (a fence terminal
+        // is a single branch, so its branch order is 0).
+        for fm in &self.fences {
+            if let Some(value) = fm.match_at(text, pos) {
+                if best.is_none_or(|(r, b, _, _)| (fm.rank, 0usize) < (r, b)) {
+                    best = Some((fm.rank, 0, fm.id, value));
                 }
             }
         }
@@ -444,7 +477,7 @@ fn guarded_best<'t>(
 /// match-kind-agnostic — `MatchKind` lives on the determinizer (leftmost-first keeps
 /// the NFA's alternation priority; all surfaces every overlapping match). Captures are
 /// dropped — the winning sub-pattern is read from `PatternID`.
-fn build_combined_dfa(
+pub(super) fn build_combined_dfa(
     srcs: &[&str],
     match_kind: MatchKind,
 ) -> Result<dense::DFA<Vec<u32>>, GrammarError> {
@@ -518,10 +551,13 @@ impl LoweredTerminalMatcher {
         global_flags: u32,
         compile_err: &str,
     ) -> Result<Self, GrammarError> {
-        // `compile_err` is only consumed on the refusal path; pre-check the routing so
-        // the error carries the engine's own message (DfaScanner::build re-derives the
+        // A fence-idiom terminal never routes (DfaScanner::build recognizes it
+        // internally); everything else pre-checks the routing so the error
+        // carries the engine's own message (DfaScanner::build re-derives the
         // same answer from the plan source, which includes the global prefix).
-        route_fancy_only_terminal(def, global_flags, compile_err)?;
+        if recognize_fence_idiom_from_def(def).is_none() {
+            route_fancy_only_terminal(def, global_flags, compile_err)?;
+        }
         let scanner = DfaScanner::build(&[(id, def)], global_flags)?;
         Ok(LoweredTerminalMatcher { scanner })
     }

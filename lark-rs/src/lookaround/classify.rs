@@ -37,7 +37,15 @@
 //! *reject when unsure*. The three supported shapes (`docs/LEXER_DFA_PLAN.md`):
 //!
 //!   * **Leading boundary** — a fixed-position lookahead `(?=S)` / `(?!S)` at the
-//!     start of the match. Lowered by splicing peek-branch states.
+//!     start of the match. Lowered by splicing peek-branch states. The body `S`
+//!     may be unbounded-width (e.g. `(?!\[=*\[)`) because the guard runs anchored
+//!     at the match start and the accept position is determined by the base pattern,
+//!     not by `S`'s width. (Trailing and internal unbounded lookaheads remain NYI.)
+//!     Worst-case cost note: an unbounded `S` means the per-attempt guard run is
+//!     bounded only by the remaining input, so a pathological guard (`(?=a*b)`) can
+//!     scan O(n) per match attempt — the same worst case Python `re` pays for the
+//!     identical pattern, so oracle parity holds, but the lexer is no longer
+//!     linear-by-construction for such a terminal.
 //!   * **Trailing boundary** — a lookahead `X(?=S)` / `X(?!S)` at the end of the
 //!     match. Lowered as a *guarded accept* (the maximal-munch driver records the
 //!     accept only when the next byte is allowed).
@@ -45,9 +53,10 @@
 //!     Lowered by carrying the needed history window in the DFA state.
 //!
 //! Everything else is **rejected** with a clear, actionable [`GrammarError`] naming
-//! the terminal, the assertion, and the reason: unbounded-width lookahead
-//! (`(?![ ]*X)`), an *internal* (mid-pattern / priority-entangled) lookahead, a
-//! backreference, a nested assertion, or a variable-width lookbehind.
+//! the terminal, the assertion, and the reason: unbounded-width trailing/internal
+//! lookahead (`(?![ ]*X)` at a non-leading position), an *internal* (mid-pattern /
+//! priority-entangled) lookahead, a backreference, a nested assertion, or a
+//! variable-width lookbehind.
 //!
 //! The recognized idioms are **narrow gates, not general internal-lookahead support.**
 //! `python.STRING`'s `(?!"")` sits *after a variable-width prefix + the opening quote*,
@@ -152,8 +161,10 @@ impl Rejection {
             | Rejection::QuantifiedAssertion
             | Rejection::VariableWidthBehind
             | Rejection::Internal => Scope::OutOfScope,
-            // Unbounded trailing-context lookahead is a regular-language construct
-            // (classic lex trailing context) — implementable, just not implemented.
+            // Unbounded trailing/internal-context lookahead is a regular-language
+            // construct (classic lex trailing context) — implementable, just not
+            // implemented. Leading unbounded lookaheads are SUPPORTED (they do
+            // not affect the accept position, so the body width is irrelevant).
             Rejection::Unbounded => Scope::NotYetImplemented,
         }
     }
@@ -163,9 +174,12 @@ impl Rejection {
         match self {
             Rejection::Unbounded => {
                 "unbounded-width lookahead — its body can match arbitrarily many \
-                 characters, so it is not a fixed-window boundary assertion. Bound \
-                 the body's width (e.g. drop a `*`/`+` quantifier) or restructure \
-                 the terminal."
+                 characters, so it is not a fixed-window boundary assertion. At a \
+                 leading position `(?!X)Y` is supported regardless of X's width; \
+                 here the assertion sits at a trailing or internal position where \
+                 the accept length depends on how far X extends. Bound the body's \
+                 width (e.g. drop a `*`/`+` quantifier) or move the assertion to \
+                 a leading position."
             }
             Rejection::Internal => {
                 "internal (mid-pattern) lookahead — it is neither at the start nor \
@@ -376,7 +390,14 @@ impl AssertionInfo {
             // A bounded lookbehind is lowerable wherever it sits (carried in state).
             (Look::Behind, Some(_)) => Verdict::Supported(ShapeClass::BoundedLookbehind),
             (Look::Behind, None) => Verdict::Rejected(Rejection::VariableWidthBehind),
-            (Look::Ahead, None) => Verdict::Rejected(Rejection::Unbounded),
+            // An unbounded LEADING lookahead is still a fixed-position check: the
+            // guard DFA runs anchored at the match start, so its body width doesn't
+            // affect the accept position (which is determined solely by the base
+            // pattern). `(?!\[=*\[)body` is the canonical wild-bank case.
+            (Look::Ahead, None) => match self.position {
+                Position::Leading => Verdict::Supported(ShapeClass::LeadingBoundary),
+                _ => Verdict::Rejected(Rejection::Unbounded),
+            },
             (Look::Ahead, Some(_)) => match self.position {
                 Position::Leading => Verdict::Supported(ShapeClass::LeadingBoundary),
                 Position::Trailing => Verdict::Supported(ShapeClass::TrailingBoundary),
@@ -1010,6 +1031,14 @@ mod tests {
             verdicts("(?!if|else|while)[a-z]+"),
             vec![Verdict::Supported(ShapeClass::LeadingBoundary)]
         );
+        // Unbounded-width body (`=*`) at a LEADING position is supported: the
+        // guard DFA runs anchored at the match start and the accept position is
+        // determined by the base pattern, so the body's width does not matter.
+        // The canonical wild-bank case is gersemi's `(?!\[=*\[)BODY`.
+        assert_eq!(
+            verdicts(r"(?!\[=*\[)[^\s]+"),
+            vec![Verdict::Supported(ShapeClass::LeadingBoundary)]
+        );
     }
 
     #[test]
@@ -1058,14 +1087,19 @@ mod tests {
 
     #[test]
     fn unbounded_lookahead_rejected() {
+        // Leading unbounded lookaheads are SUPPORTED (LeadingBoundary): the
+        // guard runs anchored at match-start so its width does not affect the
+        // accept position.
         assert_eq!(
             verdicts("(?![ ]*X)Y"),
-            vec![Verdict::Rejected(Rejection::Unbounded)]
+            vec![Verdict::Supported(ShapeClass::LeadingBoundary)]
         );
         assert_eq!(
             verdicts("(?=a*b)c"),
-            vec![Verdict::Rejected(Rejection::Unbounded)]
+            vec![Verdict::Supported(ShapeClass::LeadingBoundary)]
         );
+        // Trailing unbounded lookaheads are still rejected — the width of the
+        // assertion would change the number of characters consumed.
         assert_eq!(
             verdicts("[a-z]+(?=ab+)"),
             vec![Verdict::Rejected(Rejection::Unbounded)]
@@ -1169,8 +1203,11 @@ mod tests {
         ));
 
         // Out-of-shape assertions are permanently rejected — an Err that names the
-        // terminal and shows the assertion source.
-        for (name, pat) in [("UNB", "(?![ ]*X)Y"), ("INT", "a(?=b)c")] {
+        // terminal and shows the assertion source. Leading unbounded lookaheads
+        // now lower (LeadingBoundary), so use a *trailing* unbounded lookahead
+        // (`[a-z]+(?=ab+)`) and an internal one (`a(?=b)c`) as the out-of-shape
+        // examples.
+        for (name, pat) in [("UNB", "[a-z]+(?=ab+)"), ("INT", "a(?=b)c")] {
             let e = lower_terminal(name, pat).unwrap_err();
             let msg = format!("{e}");
             assert!(msg.contains(name), "message must name the terminal: {msg}");

@@ -165,7 +165,12 @@ impl PatternRe {
         if let Err(e) = Regex::new(&full) {
             // Parse the raw pattern (not `full`): the analyzer models the loader's
             // baked flag wrapper via the same parse the routing strip uses.
-            if crate::lookaround::parse(&pattern).is_err() {
+            // Also accept fence-idiom patterns (named backreferences): the lookaround
+            // analyzer correctly cannot parse them, but they are handled by the
+            // two-phase `FenceMatcher` at lexer-build time.
+            if crate::lookaround::parse(&pattern).is_err()
+                && crate::lookaround::lower::recognize_fence_idiom(&pattern).is_none()
+            {
                 return Err(GrammarError::InvalidRegex {
                     pattern: pattern.clone(),
                     reason: format!(
