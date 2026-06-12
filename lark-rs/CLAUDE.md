@@ -189,6 +189,9 @@ tests/
   test_earley_dynamic.rs  Curated dynamic-lexer oracles (overlap, %ignore, dynamic_complete)
   test_earley_compliance.rs  Replays the Earley compliance bank (XFAIL-gated); the Phase-2 regression net
   test_earley_dynamic_compliance.rs  Replays the dynamic-lexer Earley bank (XFAIL-gated)
+  test_earley_stack.rs  #33 net: deep forest walks replayed on a 512 KB thread —
+                      crashes (stack overflow) if input-depth recursion creeps
+                      back into the forest→tree walk
   test_cyk_compliance.rs  Replays the CYK compliance bank (XFAIL-gated); the Phase-3 CYK regression net
   test_cyk_scaling.rs Deterministic cubic-envelope gate (#87): asserts the O(n³·|grammar|) table fill stays flat per n³ on a densely ambiguous grammar (perf-counters feature)
   test_recovery.rs    Error-recovery oracle (#43) — single-token-deletion recovery vs Python Lark's `on_error` driver: tree + deletion-count parity, plus on_error/partial-tree behaviour
@@ -357,8 +360,13 @@ shadow each other (materializing any deferred Joop-Leo path first); cluster 3
 (`dynamic_complete` resolve tie-break) by a split-point tie-break in
 `sorted_families`, gated to the dynamic lexer, that restores Python's
 earliest-split-first segmentation order (lark-rs's EBNF helper nodes otherwise
-reverse it via LIFO completion). Remaining open Earley item: #33 (de-recurse
-forest walk). #35 (strict regex-collision) is ✅ done — a
+reverse it via LIFO completion). #33 (de-recurse forest walk) is ✅ done — the
+forest→tree walk (value assembly, lazy priority sum, `_ambig` dedup keying) runs
+on explicit heap frames instead of native recursion, so the dedicated 256 MB-stack
+thread is gone and the walk's native-stack use is O(1) in forest depth (pinned by
+`tests/test_earley_stack.rs`, which replays deep transparent/nested chains on a
+512 KB thread; this also unblocks WASM (#47), which has no `std::thread`).
+#35 (strict regex-collision) is ✅ done — a
 `regex-automata` product-construction emptiness test backs the strict-mode check.
 #31 (Earley perf gate) is ✅ done — the shared bench harness re-runs the
 unambiguous workloads under `parser='earley'` and reports the Earley/LALR ratio
@@ -407,7 +415,7 @@ grammars), but the behavioral findings stay pinned in `tests/test_lookaround.rs`
 | Component | Status | Notes |
 |-----------|--------|-------|
 | PyO3 Python binding | ✅ | `lark-rs/python/` — a `maturin`/PyO3 crate exposing `Lark` / `Tree` / `Token` with Python Lark's kwargs (`parser`, `lexer`, `start`, `ambiguity`, `propagate_positions`, `keep_all_tokens`, `maybe_placeholders`, `strict`, `g_regex_flags`). `Token` is `str`-like; errors map to `LarkError`/`GrammarError`/`ParseError`. `abi3-py38` wheel via `maturin build`. Round-trip parity pinned against the Python-Lark oracle by `python/tests/test_roundtrip.py` |
-| WASM target | ⬜ | Browser/Node.js |
+| WASM target | ⬜ | Browser/Node.js. No longer gated on the forest walk's `std::thread` stack band-aid (#33 ✅, the walk is iterative); `%import` from file paths still needs an in-memory file provider |
 | C API | ✅ | `lark_h` crate (#48): `#[no_mangle]` surface (`lark_new`/`lark_parse`/`lark_tree_*`/`lark_free`) + committed `lark.h` + C smoke test. lark-rs is now a workspace so `cargo test --all` covers it |
 | `include_lark!` proc-macro | 🟡 | Compile-time grammar validation (#49). `lark_proc/` crate: `include_lark!("grammars/x.lark")` reads + validates the grammar through the real `Lark` loader at `cargo build`, so a bad grammar is a compiler error (file/line, attributed to the macro span), and generates a typed `XParser` struct with `parse(&str) -> Result<ParseTree, ParseError>`. The grammar source is embedded; the `Lark` is built once per thread (`thread_local!`, since `Lark` is not `Sync`). Pinned by `lark_proc/tests/include_lark.rs` (runtime parsing) and `lark_proc/tests/compile_fail.rs` (a malformed grammar fails `cargo build` with the validation error attributed to the macro span — the headline #49 guarantee, regression-netted). Follow-up: bake the LALR `ParseTable` into `const` data so no table construction happens at runtime (regex lexer still compiles patterns at runtime regardless) |
 | Benchmarks vs Python Lark | ✅ | #50: `cargo bench --bench vs_python_lark` — JSON / Python / SQL through both engines, byte-identical inputs, prints MB/s + speedup (~4–6× on the reference box). Results in `BENCH.md` |
@@ -586,9 +594,6 @@ runtime emits a pure-`regex` parser, so a grammar with lookaround terminals (the
 `python`/`lark`) is not yet standalone-able — that bakeability is the explicit payoff of
 the DFA plan's final phase (a serialized `regex-automata` DFA replaces the baked
 `ScannerPlan` alternation).
-
-Deferred until specialist work is available: #33 (de-recurse forest walk,
-profiler-gated).
 
 Low-priority API generality: #69 (general trait-object postlex beyond the built-in
 `Indenter`) — split out of #67; the `Indenter` covers the common case, so this is
