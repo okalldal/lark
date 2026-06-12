@@ -1,6 +1,9 @@
 name: Python type check
+# PR branches are covered by `pull_request`; `push` is master-only so a PR
+# push doesn't run the jobs twice.
 on:
   push:
+    branches: [master]
     paths:
       - 'lark/**'
       - '*.py'

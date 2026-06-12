@@ -1,19 +1,24 @@
 #!/usr/bin/env bash
 #
-# Pre-push gate: runs the local CI gate (lark-rs/scripts/check.sh) and aborts
-# the push if any check fails. Enable once per clone with:
+# Pre-push gate: runs the FAST local gate (lark-rs/scripts/check-fast.sh —
+# fmt + `cargo test --all`) and aborts the push if it fails. The full CI
+# matrix (fancy-oracle differential, scaling gates, oracle freshness, binding
+# jobs) runs on the PR in GitHub Actions — push, open the PR, and fix any
+# remaining red from the CI callback instead of pre-running it all locally.
+# To reproduce a red CI in full locally: lark-rs/scripts/check.sh
+#
+# Enable once per clone with:
 #
 #   git config core.hooksPath .githooks
-#
 set -euo pipefail
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-GATE="$REPO_ROOT/lark-rs/scripts/check.sh"
+GATE="$REPO_ROOT/lark-rs/scripts/check-fast.sh"
 
 if [ ! -x "$GATE" ]; then
   echo "pre-push: gate script not found or not executable: $GATE" >&2
   exit 1
 fi
 
-echo "pre-push: running local CI gate before push…"
+echo "pre-push: running fast local gate before push…"
 exec "$GATE"

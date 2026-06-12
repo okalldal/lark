@@ -1,21 +1,24 @@
 #!/usr/bin/env bash
 #
-# Local CI gate — runs exactly what GitHub Actions runs, so a red CI is caught
-# here before pushing instead of after. Mirrors:
+# FULL local CI gate — runs exactly what GitHub Actions' `fmt` + `test` jobs
+# run. This is NOT the routine pre-push step: it duplicates the PR's CI run
+# minute for minute. Use it to reproduce a red CI locally (e.g. debugging an
+# oracle-freshness or scaling-gate failure without a push/CI round trip).
 #
-#   * Rust format  (.github/workflows/lark-rs.yml)  → cargo fmt --check --all
-#   * lark-rs test (.github/workflows/lark-rs.yml)  → cargo test --all
-#                                                      + oracle-freshness gate
-#
-# Exits non-zero on the first failing gate. Run manually any time:
-#
-#   lark-rs/scripts/check.sh
-#
-# It is also invoked automatically by the committed pre-push hook
-# (.githooks/pre-push); enable that once per clone with:
+# The routine pre-push gate is lark-rs/scripts/check-fast.sh (fmt +
+# `cargo test --all` — the Pareto cut), which the committed pre-push hook
+# (.githooks/pre-push) runs; enable that once per clone with:
 #
 #   git config core.hooksPath .githooks
 #
+# Mirrors (.github/workflows/lark-rs.yml):
+#
+#   * Rust format  → cargo fmt --check --all
+#   * lark-rs test → cargo test --all + fancy-oracle differential
+#                    + perf-counters scaling gates + python.lark LALR gate
+#                    + oracle-freshness gate
+#
+# Exits non-zero on the first failing gate.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,38 +43,29 @@ note "Rust tests: cargo test --all"
 #     zero fancy-regex code, so the L0 whole-lexer differential
 #     (tests/test_scanner_differential.rs) only runs under the TEST-ONLY
 #     fancy-oracle feature, which resurrects the Regex reference backend's fancy
-#     side-probes as the independent oracle. Matches the CI step of the same name.
-note "Fancy-oracle differential: cargo test -p lark-rs --features fancy-oracle"
-( cd "$LARK_RS_DIR" && cargo test -p lark-rs --features fancy-oracle ) \
+#     side-probes as the independent oracle. It is the only test target gated on
+#     the feature, so it is named explicitly — running the whole suite under the
+#     feature would just repeat step 2. Matches the CI step of the same name.
+note "Fancy-oracle differential: cargo test -p lark-rs --features fancy-oracle --test test_scanner_differential"
+( cd "$LARK_RS_DIR" && cargo test -p lark-rs --features fancy-oracle --test test_scanner_differential ) \
   || fail "fancy-oracle differential failed — the lowered engine diverged from the fancy reference"
 
-# 2b. Deterministic super-linearity gate (#56) — the scaling regression net only
-#     runs with the perf-counters feature, so it is a no-op in `cargo test --all`.
-note "Earley scaling gate: cargo test --features perf-counters --test test_earley_scaling"
-( cd "$LARK_RS_DIR" && cargo test --features perf-counters --test test_earley_scaling ) \
-  || fail "Earley scaling gate failed — a super-linearity regressed (see test_earley_scaling.rs)"
+# 2b. Deterministic scaling gates — the regression nets keyed on the src/perf.rs
+#     work counters only run with the perf-counters feature, so they are a no-op
+#     in `cargo test --all`. One invocation, one build (matches the CI "Scaling
+#     gates" step): Earley super-linearity (#56), CYK cubic envelope (#87), lexer
+#     linear scan (#104), dense-DFA build cost (docs/LEXER_DFA_PLAN.md).
+note "Scaling gates: cargo test --features perf-counters --test test_earley_scaling --test test_cyk_scaling --test test_lexer_scaling --test test_lexer_dfa_build_scaling"
+( cd "$LARK_RS_DIR" && cargo test --features perf-counters \
+    --test test_earley_scaling --test test_cyk_scaling \
+    --test test_lexer_scaling --test test_lexer_dfa_build_scaling ) \
+  || fail "a scaling gate failed — a complexity regression (see the failing test_*_scaling.rs)"
 
-# 2c. CYK scaling gate (#87) — same perf-counters discipline; asserts the
-#     O(n³·|grammar|) table fill stays within a cubic envelope (flat per n³).
-note "CYK scaling gate: cargo test --features perf-counters --test test_cyk_scaling"
-( cd "$LARK_RS_DIR" && cargo test --features perf-counters --test test_cyk_scaling ) \
-  || fail "CYK scaling gate failed — a complexity regression in CNF/DP (see test_cyk_scaling.rs)"
-
-# 2d. Lexer linear-scan gate (#104) — same perf-counters discipline; asserts
-#     flat-per-byte per-position scan work via the lexer_scan_steps counter, so an
-#     un-anchored fancy-regex forward-scan (the O(n²) pathology) is caught
-#     deterministically. Matches the CI "Lexer scaling gate" step.
-note "Lexer scaling gate: cargo test --features perf-counters --test test_lexer_scaling"
-( cd "$LARK_RS_DIR" && cargo test --features perf-counters --test test_lexer_scaling ) \
-  || fail "Lexer scaling gate failed — per-position scan work regressed (see test_lexer_scaling.rs)"
-
-# 2e. Dense-DFA build-cost gate (docs/LEXER_DFA_PLAN.md) — asserts the lookaround
-#     lowering's determinized dense-DFA build cost stays flat per terminal and per
-#     guard width via the dense_build_bytes counter, so a determinization blowup in
-#     the L5 bake target is caught. Matches the CI "Lexer DFA build-cost gate" step.
-note "Lexer DFA build-cost gate: cargo test --features perf-counters --test test_lexer_dfa_build_scaling"
-( cd "$LARK_RS_DIR" && cargo test --features perf-counters --test test_lexer_dfa_build_scaling ) \
-  || fail "Lexer DFA build-cost gate failed — determinization blowup in the lookaround lowering (see test_lexer_dfa_build_scaling.rs)"
+# 2c. python.lark LALR build gate (#79) — #[ignore]d because the build is slow
+#     (~18s debug), so `cargo test --all` skips it. Matches the CI step.
+note "python.lark LALR build gate: cargo test --lib tests::test_python_lark_builds_under_lalr -- --ignored --exact"
+( cd "$LARK_RS_DIR" && cargo test --lib tests::test_python_lark_builds_under_lalr -- --ignored --exact ) \
+  || fail "python.lark LALR build gate failed — the full python.lark table no longer builds"
 
 # 3. Oracle-freshness gate — regenerate from Python Lark and require no diff.
 #    (Needs 'pip install lark' and the JSONTestSuite submodule:

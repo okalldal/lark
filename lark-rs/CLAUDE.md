@@ -101,25 +101,43 @@ To initialise the JSONTestSuite submodule:
 git submodule update --init tests/corpora/JSONTestSuite
 ```
 
-### Before Pushing — Local CI Gate
+### Before Pushing — Fast Gate, Then Let the PR's CI Be the Full Gate
 
-`lark-rs/scripts/check.sh` runs **exactly** what GitHub Actions runs (the `Format`
-pre-commit job, `cargo test --all`, and the oracle-freshness gate). Run it before
-pushing so a red CI is caught locally first:
+**Do NOT run the full CI locally before pushing** — that runs everything twice
+(once in the session, once in GitHub Actions). The intended loop is:
 
-```bash
-lark-rs/scripts/check.sh
-```
+1. Run the **fast gate** (the Pareto cut — fmt + `cargo test --all` catches
+   nearly every red):
+   ```bash
+   lark-rs/scripts/check-fast.sh
+   ```
+2. Push the branch and **open the PR right away** — the `pull_request` run IS
+   the full CI (fancy-oracle differential, scaling gates, python.lark LALR
+   gate, oracle freshness, python/wasm binding jobs). Branch pushes alone no
+   longer trigger CI; the PR does.
+3. Subscribe to the PR's activity (CI callback) and fix any red from there.
 
-Enable the committed pre-push hook once per clone so it runs automatically on
-every `git push` (and blocks the push if any gate fails):
+Two cases where you should run more than the fast gate before pushing:
+
+* Touched `tools/` generators or `tests/fixtures/oracles/` → also run the
+  oracle-freshness regen (`check.sh` step 3) so a stale-oracle red doesn't cost
+  a CI round trip.
+* Touched `lark-rs/python/` or `lark-rs/wasm/` → also run that crate's own
+  tests (`maturin develop && pytest` / `npm test`).
+
+`lark-rs/scripts/check.sh` (the **full** gate, mirroring CI's `fmt` + `test`
+jobs exactly) still exists — for **reproducing a red CI locally**, not as a
+routine pre-push step.
+
+Enable the committed pre-push hook once per clone so the fast gate runs
+automatically on every `git push` (and blocks the push if it fails):
 
 ```bash
 git config core.hooksPath .githooks
 ```
 
-Requirements: `pip install lark pre-commit` and the JSONTestSuite submodule
-(above). **Never push without a green gate.**
+Requirements for the full gate: `pip install lark pre-commit` and the
+JSONTestSuite submodule (above).
 
 ---
 

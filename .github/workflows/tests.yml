@@ -1,6 +1,9 @@
 name: Tests
+# PR branches are covered by `pull_request`; `push` is master-only so a PR
+# push doesn't run the matrix twice.
 on:
   push:
+    branches: [master]
     paths:
       - 'lark/**'
       - 'tests/**'
