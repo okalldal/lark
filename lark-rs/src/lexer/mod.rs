@@ -34,6 +34,7 @@
 //! guard       compiled boundary/lookbehind guards + their compilation context
 //! scanner     the `regex`-crate combined-alternation backend (+ side-probes)
 //! dfa         the `regex-automata` multi-pattern DFA backend (the default)
+//! fence       the fence-idiom matcher (tag-echo heredocs / bracket arguments)
 //! dynamic     per-terminal matching for Earley's dynamic lexer
 //! collision   strict-mode regex-collision + zero-width construction checks
 //! ```
@@ -41,6 +42,7 @@
 mod collision;
 mod dfa;
 mod dynamic;
+mod fence;
 mod guard;
 mod pattern;
 mod plan;

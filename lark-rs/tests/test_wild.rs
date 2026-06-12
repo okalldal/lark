@@ -235,6 +235,8 @@ fn test_wild_bank() {
     let mut failures: BTreeSet<String> = BTreeSet::new();
     let mut details: Vec<String> = Vec::new();
     let mut total = 0usize;
+    let mut n_alt_built = 0usize;
+    let mut n_alt_clean = 0usize;
 
     for pdir in &projects {
         let project_t0 = std::time::Instant::now();
@@ -259,9 +261,62 @@ fn test_wild_bank() {
             Err(e) => {
                 failures.insert(format!("build:{name}"));
                 details.push(format!("build:{name}: {e}"));
+                // Original grammar can't build → all its inputs are failures.
                 for case in cases {
                     let f = case["input_file"].as_str().unwrap_or("?");
                     failures.insert(format!("parse:{name}:{f}"));
+                }
+                // If an alt grammar exists, also try it. An alt grammar exists to
+                // prove "a valid workaround edit exists in grammar land": it must
+                // build AND be tree-identical to the ORIGINAL grammar's Python
+                // oracle on every input. A corpus-coincidental edit (one that
+                // happens to match these inputs but is semantically divergent)
+                // does not qualify — that bar is enforced structurally below:
+                // the `build-alt:`/`parse-alt:`/`panic-alt:` failure namespaces
+                // are NOT xfail-able, so a committed alt that diverges anywhere
+                // fails the build outright. Alt results are supplementary — they
+                // can only ADD failures, never remove the original grammar's
+                // failures above (the original's `parse:` entries are already in
+                // the failure set, so reusing those keys would silently mask an
+                // alt that builds but produces WRONG trees).
+                if let Some(alt_rel) = meta["alt_grammar"].as_str() {
+                    let alt_path = pdir.join(alt_rel);
+                    let alt_grammar = std::fs::read_to_string(&alt_path)
+                        .unwrap_or_else(|e| panic!("read {}: {e}", alt_path.display()));
+                    let Some(mut alt_opts) = meta_options(&meta, pdir) else {
+                        unreachable!("meta_options succeeded above")
+                    };
+                    alt_opts.base_path = alt_path.parent().map(|p| p.to_path_buf());
+                    match try_build(&alt_grammar, alt_opts) {
+                        Ok(alt_lark) => {
+                            n_alt_built += 1;
+                            let mut clean = true;
+                            for case in cases {
+                                let input_rel =
+                                    case["input_file"].as_str().expect("case has input_file");
+                                let input = std::fs::read_to_string(pdir.join(input_rel))
+                                    .unwrap_or_else(|e| panic!("read {input_rel}: {e}"));
+                                let parsed = try_parse(&alt_lark, &input);
+                                if let Err(e) = case_matches(&parsed, case) {
+                                    clean = false;
+                                    let kind = if matches!(parsed, ParseOutcome::Panic) {
+                                        "panic-alt"
+                                    } else {
+                                        "parse-alt"
+                                    };
+                                    failures.insert(format!("{kind}:{name}:{input_rel}"));
+                                    details.push(format!("{kind}:{name}:{input_rel}: {e}"));
+                                }
+                            }
+                            if clean {
+                                n_alt_clean += 1;
+                            }
+                        }
+                        Err(e) => {
+                            failures.insert(format!("build-alt:{name}"));
+                            details.push(format!("build-alt:{name}: {e}"));
+                        }
+                    }
                 }
                 continue;
             }
@@ -297,6 +352,23 @@ fn test_wild_bank() {
                 .collect()
         })
         .unwrap_or_default();
+    // Alt-grammar outcomes are NOT xfail-able: an alt grammar's whole purpose is
+    // to demonstrate a tree-identical workaround, so a divergent alt must be
+    // removed, not allow-listed — parking it in xfail would instill false
+    // confidence on the strength of a (often small) per-project corpus.
+    let alt_xfails: Vec<&String> = xfail
+        .iter()
+        .filter(|k| {
+            k.starts_with("build-alt:")
+                || k.starts_with("parse-alt:")
+                || k.starts_with("panic-alt:")
+        })
+        .collect();
+    assert!(
+        alt_xfails.is_empty(),
+        "xfail.json must not allow-list alt-grammar failures (an alt grammar must \
+         be tree-identical to the original's oracle, or be removed): {alt_xfails:?}"
+    );
 
     if std::env::var("LARK_WILD_DETAILS").is_ok() {
         for d in &details {
@@ -304,17 +376,46 @@ fn test_wild_bank() {
         }
     }
     let n_build_fail = failures.iter().filter(|f| f.starts_with("build:")).count();
-    let n_input_fail = failures.iter().filter(|f| !f.starts_with("build:")).count();
+    // Input-level agreement counts the ORIGINAL grammars only — exclude the
+    // build keys and the supplementary alt-grammar (`*-alt:`) keys.
+    let n_input_fail = failures
+        .iter()
+        .filter(|f| {
+            !f.starts_with("build") && !f.starts_with("parse-alt:") && !f.starts_with("panic-alt:")
+        })
+        .count();
+    // "Tree-identical via alt" demands a CLEAN alt run (built + every input
+    // agrees with the oracle), not merely a successful build.
+    let build_note = if n_alt_built > 0 {
+        format!(
+            "{n_build_fail} grammars not building: \
+             {n_alt_clean} tree-identical via alt grammar, \
+             {} alt-divergent, {} without a working alt",
+            n_alt_built - n_alt_clean,
+            n_build_fail - n_alt_built
+        )
+    } else {
+        format!("{n_build_fail} grammars not building")
+    };
     eprintln!(
         "wild bank: {}/{total} inputs agree with oracle across {} projects \
-         ({n_build_fail} grammars not building); {} known-XFAIL",
+         ({build_note}); {} known-XFAIL",
         total - n_input_fail,
         projects.len(),
         xfail.len()
     );
 
     if std::env::var("LARK_WILD_WRITE_XFAIL").is_ok() {
-        let list: Vec<&String> = failures.iter().collect();
+        // Alt-grammar failures are excluded: they are not xfail-able (see the
+        // assertion above) — a divergent alt is removed, never allow-listed.
+        let list: Vec<&String> = failures
+            .iter()
+            .filter(|k| {
+                !k.starts_with("build-alt:")
+                    && !k.starts_with("parse-alt:")
+                    && !k.starts_with("panic-alt:")
+            })
+            .collect();
         let path = oracles_dir().join("xfail.json");
         std::fs::write(&path, serde_json::to_string_pretty(&list).unwrap() + "\n")
             .expect("write xfail.json");

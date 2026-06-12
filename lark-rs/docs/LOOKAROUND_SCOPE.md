@@ -29,6 +29,25 @@ section comment in `src/lookaround/lower.rs`) — and guarded bases proven
 `python.DEC_NUMBER`'s `0(?:_?0)*` arm). Every bundled lookaround terminal lowers; the
 bundled grammars build with zero refusals.
 
+Two additions from the wild-bank fence family (2026-06):
+
+* **Leading boundary lookahead of *unbounded* width** — `(?!\[=*\[)BODY` (the
+  gersemi UNQUOTED_ELEMENT guard). A leading guard runs anchored at the match
+  start and never affects the accept position, so the bounded-width demand was
+  unnecessary at that one position. (Cost caveat: the per-attempt guard run is
+  then bounded only by the remaining input — the same worst case Python `re`
+  pays — so such a terminal is not linear-by-construction; see
+  `lexer/guard.rs::Guard::holds`.) Trailing/internal unbounded stay NYI below.
+* **The fence idiom (idiom #5)** — `OPEN(?P<tag>T)SEP body (?P=tag)CLOSE`, the
+  tag-echo family (HCL2 heredocs, CMake bracket arguments, Lua long brackets,
+  PostgreSQL dollar-quoting). Non-regular, so it does NOT lower into the DFA;
+  it is recognized exactly (`lower.rs::recognize_fence_idiom` — literal
+  open/sep/close sections, a universal lazy body, one backref) and matched by
+  the two-phase linear-per-attempt `lexer/fence.rs::FenceMatcher`. The
+  recognizer rejects greedy or content-constrained bodies rather than risk a
+  silent divergence from Python's lazy-backref semantics, and honors the
+  body's minimum (`+?` ≥ 1 char: `[[]]` is a lex error, exactly as in Python).
+
 Positional analysis runs after the **vacuous-group splice**
 (`classify.rs::unwrap_vacuous_groups`): a bare unquantified `(?:…)` is spliced into
 its enclosing concatenation (`(?:X) ≡ X` exactly), so a boundary guard the loader's
@@ -47,7 +66,7 @@ here first.
 |---|---|---|---|
 | Internal (mid-pattern) lookahead | `a(?=b)c`, the block-comment `(\*(?!\/)\|[^*])*` | `Rejection::Internal` | Priority-entangled: a mid-pattern assertion couples greedy/lazy match length to positions a per-state guard cannot represent; a general lowering means product-construction state blowup and an audit surface this project deliberately refuses. **Named parity break** (Python's backtracking engine accepts these). The **audited delimited-token idioms are the sanctioned growth path**: a common, exactly-recognizable shape can be admitted one Stage-B audit at a time (STRING/REGEXP/LONG_STRING are the precedents). |
 | Variable-width lookbehind body | `(?<!a*)b` | `Rejection::VariableWidthBehind` (+ defensive `UnboundedLookbehindBody`) | **Python `re` rejects these too** ("look-behind requires fixed-width pattern") — rejection is oracle *parity*, not a break. |
-| Backreferences | `(a)\1b`, `(a)(?=\1)` | `DeclineReason::BacktrackingOnlySyntax`, `Rejection::Backref` | Not a regular language; no DFA can host it. **The named parity break class** (with the rest of backtracking-only syntax: atomic groups, possessive quantifiers). No bundled grammar uses them. |
+| Backreferences | `(a)\1b`, `(a)(?=\1)` | `DeclineReason::BacktrackingOnlySyntax`, `Rejection::Backref` | Not a regular language; no DFA can host it. **The named parity break class** (with the rest of backtracking-only syntax: atomic groups, possessive quantifiers). No bundled grammar uses them. **One audited exception:** the exact tag-echo **fence idiom** (`(?P<tag>…)…(?P=tag)`, see "What lowers") is recognized and matched by its own linear two-phase scanner — general backreferences remain out of scope. |
 | Nested assertions | `(?=(?!a)b)c` | `Rejection::Nested` | Audit cost out of proportion to demand; flatten the assertion instead. |
 | Quantified assertions | `a(?=b)?` | `Rejection::QuantifiedAssertion` (+ defensive `QuantifiedLookbehind`) | Degenerate and priority-entangled; almost always a bug in the grammar. |
 | Zero-width degenerates | `(?!a)` alone, `a(?<=())b` | `DeclineReason::ZeroWidthBranch`, `ZeroWidthLookbehindBody` | A zero-width terminal/window; the lexer forbids zero-width matches. |
@@ -61,7 +80,7 @@ building, the test fails loudly and demands the promotion protocol below.
 | Shape | Example | Variant | Path to support |
 |---|---|---|---|
 | Fixed-width lookbehind at variable offset | `\w+(?<!_)q` | `DeclineReason::VariableOffsetLookbehind` | Python accepts these (the body is fixed-width). Generalize M3's offset model (window-carrying over variable prefixes) or admit common shapes as idioms. The headline NYI case. |
-| Unbounded trailing lookahead | `[a-z]+(?=ab+)` | `Rejection::Unbounded` | Regular (classic lex trailing context); needs a reverse-scan/product mechanism. No current plan — demand-driven. |
+| Unbounded trailing lookahead | `[a-z]+(?=ab+)` | `Rejection::Unbounded` | Regular (classic lex trailing context); needs a reverse-scan/product mechanism. No current plan — demand-driven. (The *leading* unbounded case is now supported — see "What lowers".) |
 | Non-realizable guarded base | `(ab\|abc)(?!z)`, `ab??(?!c)` | `DeclineReason::NonRealizableGuardedBase` | The base prefers a shorter match than its longest, so the longest-accept accumulator cannot host it. The semantic gate already proves the provable cases; widening further means a preference-aware accumulator. |
 | Assertion in an interior group | `(a(?<!b))c` | `DeclineReason::NestedInGroup` | Needs group-aware peeling for **capturing/flag** groups. (A bare unquantified `(?:…)` is no longer this case at all: the vacuous-group splice normalizes it away everywhere — a proven identity, `(?:X) ≡ X` — which is how the wild mappyfile composition shape lowers.) |
 | VERBOSE-mode lookaround | `(?x:[0-9]+ (?![0-9]))`, or any lookaround pattern under `g_regex_flags = VERBOSE` | `DeclineReason::VerboseMode` | The analyzer's width/offset arithmetic is not verbose-aware; under `x` (whether from a whole-pattern wrapper or the global flag) whitespace/comments would be miscounted as literal width (a false-accept hazard). Needs a verbose-aware frontend. |

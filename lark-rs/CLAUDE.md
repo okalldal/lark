@@ -638,11 +638,23 @@ each failure's build/parse error). `cargo bench --bench wild` runs
 the same bank as a recorded performance trend (build cost + corpus/largest-input
 throughput per project).
 
-Findings (updated 2026-06-10, post-L4 burndown round — the xfail set encodes them,
+Findings (updated 2026-06-12, post-fence-idiom round — the xfail set encodes them,
 and each fixed root cause is pinned in distilled form by `tests/test_wild_gap_pins.rs`):
 **189/257 inputs agree, 72 XFAIL, 4 grammars not building.** Every remaining failure
-is an **engine-scope refusal** — a backtracking/backreference construct the lexer-DFA
-routing *deliberately* rejects (`docs/LOOKAROUND_SCOPE.md`).
+is an **engine-scope refusal** — an internal-lookahead/backtracking construct the
+lexer-DFA routing *deliberately* rejects (`docs/LOOKAROUND_SCOPE.md`). A project may
+carry an `alt_grammar` in its `meta.json`: a workaround edit replayed when the
+original fails to build, proving "a valid edit exists in grammar land." The bar is
+strict and **structurally enforced**: the alt must build and be **tree-identical to
+the original grammar's Python oracle on every input** — its
+`build-alt:`/`parse-alt:`/`panic-alt:` failure namespaces are *not xfail-able*
+(`test_wild.rs` asserts none appear in `xfail.json`, and `LARK_WILD_WRITE_XFAIL`
+never writes them), so a divergent alt fails the build and must be removed, not
+allow-listed. A corpus-coincidental edit (matches the project's few inputs but is
+semantically divergent) does not qualify — that would instill false confidence and
+lean on honest caveats instead of tests. No current project has a qualifying alt;
+the investigated near-misses are recorded in each project's `meta.json`
+(`alt_grammar_finding`).
 
 **Cleared by the burndown round** (the wild bank's first payoff):
 
@@ -683,13 +695,24 @@ routing *deliberately* rejects (`docs/LOOKAROUND_SCOPE.md`).
 (`docs/LOOKAROUND_SCOPE.md`), the measured real-world cost of dropping the
 backtracking engine (4 of 16 wild grammars, all non-building):
 
-* **hcl2**: heredoc terminal uses a backreference (`<<(?P<heredoc>…)…(?P=heredoc)`).
-* **gersemi_cmake**: CMake bracket arguments use a backreference
-  (`(?P=equal_signs)` — the `[==[…]==]` matching-fence idiom). hcl2 + gersemi are
-  one *family* (tag-echo fences: heredocs, Lua long brackets, Rust raw strings,
-  PostgreSQL dollar-quoting) — non-regular but exactly recognizable in linear
-  time; an audited **fence-recognizer primitive** is the named candidate growth
-  path if this scope is ever revisited.
+* **hcl2**: the heredoc backreference terminals now lex via the **fence-idiom
+  matcher** (idiom #5, `lexer/fence.rs` — the tag-echo recognizer that round
+  landed), but the grammar still fails the build on `STRING_LIT`'s internal
+  `(?!\${)` lookahead (L4 out-of-scope).
+* **gersemi_cmake**: BRACKET_ARGUMENT (`[==[…]==]`, `(?P=equal_signs)`) likewise
+  lexes via the fence matcher, and UNQUOTED_ELEMENT's leading `(?!\[=*\[)` guard
+  now classifies (unbounded *leading* lookahead is supported) — but the loader
+  inlines the elements into `UNQUOTED_ARGUMENT : UNQUOTED_ELEMENT+`, which
+  re-internalizes the guard, so the original grammar still fails the build.
+  **No qualifying alt grammar is committed** — both investigated edits fail the
+  tree-identity bar (recorded in `meta.json` `alt_grammar_finding`): dropping
+  the guards changes *Python Lark's own* trees on 3/8 inputs (the guards are
+  load-bearing), and hoisting a single leading guard onto `UNQUOTED_ARGUMENT`
+  (buildable here via the unbounded-leading lowering) is corpus-identical on
+  8/8 — lark-rs-on-edit ≡ Python-on-original, verified 2026-06-12 — but
+  provably divergent on inputs like `$[=[x]=]` (internal element boundaries
+  after `$`/escape/reference no longer re-check the guard), i.e. tree-identical
+  by corpus coincidence, not by construction.
 * **synapse_storm**: atomic groups `(?>…)` + recursive subpatterns `(?&NAME)`
   (`regex`-module-only; context-free lookahead — the one genuine
   backtracking-engine case in the bank).

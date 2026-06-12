@@ -11,6 +11,7 @@
     }
   },
   "entry_grammar": "grammar/cmake.lark",
+  "alt_grammar_finding": "No tree-identical workaround edit is known. Dropping UNQUOTED_ELEMENT's (?!\\[=*\\[) guards changes Python Lark's own trees on 3/8 inputs (verified 2026-06-12). Hoisting a single leading guard onto UNQUOTED_ARGUMENT (which lark-rs can build via the unbounded-leading-lookahead lowering) is corpus-identical on 8/8 AND lark-rs-on-edit == Python-on-original, but is provably divergent on inputs like `$[=[x]=]` (internal element boundaries after $/escape/reference no longer re-check the guard), so it does not qualify: an alt grammar must be tree-identical by construction, not by corpus coincidence.",
   "lark_options": {
     "parser": "lalr",
     "lexer": "contextual",

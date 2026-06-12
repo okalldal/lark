@@ -26,6 +26,13 @@ use crate::grammar::terminal::TerminalDef;
 // first, so a terminal the lowering refuses fails the grammar build with the same
 // categorized scope error (`docs/LOOKAROUND_SCOPE.md`) with and without the feature.
 // The feature only swaps the *matcher* for terminals that lower.
+//
+// Fence-idiom terminals (`fence.rs` — named-backref tag echoes) are the one shape
+// that bypasses the seam in BOTH builds, by the same recognizer, so acceptance is
+// still identical: the default build matches them via the `FenceMatcher` inside
+// `LoweredTerminalMatcher`, while the fancy build keeps the `\G` probe —
+// `fancy-regex` natively supports `(?P=name)`, which makes the feature build a
+// genuinely independent oracle for exactly the newest matcher.
 
 enum SideProbe {
     /// The lowered single-terminal DFA — the default build (and the engine whose
@@ -145,11 +152,16 @@ impl Scanner {
                     // default build below decides it — so the TEST-ONLY feature can
                     // never change what a grammar build accepts (the Cargo.toml
                     // contract). Only a terminal that *lowers* proceeds to the probe.
-                    super::route::route_fancy_only_terminal(
-                        by_id[id],
-                        global_flags,
-                        &e.to_string(),
-                    )?;
+                    // A fence-idiom terminal is the one exception in BOTH builds (the
+                    // recognizer is the shared acceptance test); its `\G` fancy probe
+                    // below works as-is — fancy-regex supports `(?P=name)` natively.
+                    if super::fence::recognize_fence_idiom_from_def(by_id[id]).is_none() {
+                        super::route::route_fancy_only_terminal(
+                            by_id[id],
+                            global_flags,
+                            &e.to_string(),
+                        )?;
+                    }
                     // The historical reference matcher for the lowered terminal: the
                     // `\G`-anchored fancy probe (`\G` anchors `find_from_pos` to
                     // `pos` so a sparse terminal stays linear; the `regex` crate
