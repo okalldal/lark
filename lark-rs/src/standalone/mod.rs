@@ -551,6 +551,27 @@ mod tests {
         assert!(parser.parse("").is_err(), "empty input");
     }
 
+    /// #151 pin for the runtime's own `Tree`: deep enough that the derived
+    /// `Drop`/`Clone` glue would overflow the default 8 MB test stack, so a
+    /// crash here means the manual worklist impls were lost.
+    #[test]
+    fn runtime_tree_drop_and_clone_are_iterative() {
+        use super::runtime::{Child, Tree};
+        let mut t = Tree {
+            data: "leaf".to_string(),
+            children: vec![],
+        };
+        for _ in 0..200_000 {
+            t = Tree {
+                data: "nest".to_string(),
+                children: vec![Child::Tree(t)],
+            };
+        }
+        let copy = t.clone();
+        drop(t);
+        drop(copy);
+    }
+
     // ─── Standalone compliance bank (#86) ─────────────────────────────────────
     //
     // `runtime.rs` is a parallel re-expression of the in-process LALR reduce /

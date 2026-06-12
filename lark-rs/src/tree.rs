@@ -203,11 +203,87 @@ impl fmt::Display for Child {
 ///
 /// `data` is the rule name or alias that produced this node.
 /// `children` are the sub-nodes or tokens.
-#[derive(Debug, Clone)]
+///
+/// `Drop` and `Clone` are implemented manually with explicit worklists (#151):
+/// the compiler-derived glue recurses to tree depth, and a parse result is as
+/// deep as the input is nested (e.g. `a: X a | X` over a long input), so the
+/// derived glue overflows small native stacks — notably WASM's (#47). With
+/// these impls, no engine or caller code path recurses to input depth.
+#[derive(Debug)]
 pub struct Tree {
     pub data: String,
     pub children: Vec<Child>,
     pub meta: Meta,
+}
+
+impl Drop for Tree {
+    fn drop(&mut self) {
+        // Fast path: leaf-only children drop in place — no recursion possible.
+        // This keeps the hot path (every token-holding node) at one scan.
+        if !self.children.iter().any(Child::is_tree) {
+            return;
+        }
+        // Worklist of whole `children` vectors (3-word moves, never per-element
+        // copies). Invariant: a vector is pushed only if it contains a subtree
+        // with sub-subtrees; every `Tree` value therefore reaches its own
+        // (recursive) drop with empty or leaf-only children, where the fast
+        // path returns immediately — so native depth stays constant.
+        let mut stack: Vec<Vec<Child>> = vec![std::mem::take(&mut self.children)];
+        while let Some(mut vec) = stack.pop() {
+            for child in vec.iter_mut() {
+                if let Child::Tree(t) = child {
+                    if t.children.iter().any(Child::is_tree) {
+                        stack.push(std::mem::take(&mut t.children));
+                    }
+                }
+            }
+            // `vec` drops here; every tree in it is now empty or leaf-only.
+        }
+    }
+}
+
+impl Clone for Tree {
+    fn clone(&self) -> Self {
+        // Explicit-frame deep copy: one heap frame per open node instead of one
+        // native frame per tree level.
+        struct Frame<'a> {
+            src: std::slice::Iter<'a, Child>,
+            data: String,
+            meta: Meta,
+            out: Vec<Child>,
+        }
+        fn frame(t: &Tree) -> Frame<'_> {
+            Frame {
+                src: t.children.iter(),
+                data: t.data.clone(),
+                meta: t.meta.clone(),
+                out: Vec::with_capacity(t.children.len()),
+            }
+        }
+        let mut stack = vec![frame(self)];
+        loop {
+            let top = stack
+                .last_mut()
+                .expect("clone stack never empties mid-walk");
+            match top.src.next() {
+                Some(Child::Tree(t)) => stack.push(frame(t)),
+                Some(Child::Token(tok)) => top.out.push(Child::Token(tok.clone())),
+                Some(Child::None) => top.out.push(Child::None),
+                None => {
+                    let done = stack.pop().expect("just peeked");
+                    let tree = Tree {
+                        data: done.data,
+                        children: done.out,
+                        meta: done.meta,
+                    };
+                    match stack.last_mut() {
+                        Some(parent) => parent.out.push(Child::Tree(tree)),
+                        None => return tree,
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl Tree {
@@ -326,6 +402,49 @@ impl fmt::Display for ParseTree {
             ParseTree::Tree(t) => write!(f, "{t}"),
             ParseTree::Token(tok) => write!(f, "Token({}, {:?})", tok.type_, tok.value),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Deep enough that the compiler-derived `Drop`/`Clone` glue (a few native
+    /// frames per tree level) overflows the default 8 MB test stack — so this
+    /// test crashing is the regression signal that the manual worklist impls
+    /// (#151) were lost.
+    const DEPTH: usize = 200_000;
+
+    fn deep_tree(depth: usize) -> Tree {
+        let mut t = Tree::new("leaf", vec![Child::Token(Token::new("X", "x"))]);
+        for _ in 0..depth {
+            t = Tree::new("nest", vec![Child::Tree(t)]);
+        }
+        t
+    }
+
+    #[test]
+    fn drop_of_deep_tree_is_iterative() {
+        drop(deep_tree(DEPTH));
+    }
+
+    #[test]
+    fn clone_of_deep_tree_is_iterative() {
+        let t = deep_tree(DEPTH);
+        let copy = t.clone();
+        // The clone is structurally complete: same nesting depth, leaf intact.
+        let mut cur: &Tree = &copy;
+        let mut depth = 0usize;
+        while let Some(Child::Tree(next)) = cur.children.first() {
+            cur = next;
+            depth += 1;
+        }
+        assert_eq!(depth, DEPTH);
+        assert_eq!(cur.data, "leaf");
+        assert_eq!(
+            cur.children[0].as_token().map(|t| t.value.as_str()),
+            Some("x")
+        );
     }
 }
 

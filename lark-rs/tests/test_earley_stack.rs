@@ -36,11 +36,10 @@ fn earley(grammar: &str, ambiguity: Ambiguity) -> Lark {
 }
 
 /// Run `f` on a thread whose stack is [`STACK`] bytes and hand its result back.
-/// A recursive walk overflows in `f`; the result is *returned* so any deep tree
-/// is dropped on the test thread's normal-sized stack (drop depth of the
-/// caller-owned result tree is the caller's property, same as for LALR — the
-/// guarantee under test is the walk, not the returned value's `Drop`). The
-/// `Lark` is *moved* into `f` (it is `Send`, not `Sync`).
+/// A recursive walk overflows in `f`. Since #151 (iterative `Drop`/`Clone` for
+/// `Tree`), deep trees are dropped *inside* the small-stack thread too, pinning
+/// that the caller-side disposal of a deep result is also O(1) in tree depth.
+/// The `Lark` is *moved* into `f` (it is `Send`, not `Sync`).
 fn on_small_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
     std::thread::scope(|s| {
         std::thread::Builder::new()
@@ -90,47 +89,37 @@ fn explicit_walk_is_iterative_on_transparent_chain() {
 /// Resolve mode, *non-transparent* right recursion: every level is a real
 /// symbol node, so the walk goes through `Eval`'s per-node buffer push (and the
 /// lazy priority sum descends the same chain) rather than the splice path. The
-/// result tree is genuinely N deep; it is dropped outside the small stack.
+/// result tree is genuinely N deep. Since #151 the depth count, the clone, and
+/// both drops all run *inside* the small-stack thread: `Tree`'s manual
+/// `Drop`/`Clone` are worklist-based, so none of them recurse to tree depth.
 #[test]
 fn resolve_walk_is_iterative_on_nested_chain() {
     const N: usize = 10_000;
     let lark = earley("start: a\na: X a | X\nX: \"x\"\n", Ambiguity::Resolve);
     let input = "x".repeat(N);
-    let tree = on_small_stack(move || lark.parse(&input).expect("deep nesting parses"));
-    let ParseTree::Tree(root) = tree else {
-        panic!("expected a tree at the root");
-    };
-    // Count the nesting depth iteratively (the tree is too deep to recurse on).
-    let mut depth = 0usize;
-    let mut cur: &Tree = &root;
-    loop {
-        depth += 1;
-        match cur.children.iter().find_map(|c| match c {
-            Child::Tree(t) => Some(t),
-            _ => None,
-        }) {
-            Some(t) => cur = t,
-            None => break,
+    on_small_stack(move || {
+        let tree = lark.parse(&input).expect("deep nesting parses");
+        let ParseTree::Tree(root) = tree else {
+            panic!("expected a tree at the root");
+        };
+        // Count the nesting depth iteratively (deep by construction).
+        let mut depth = 0usize;
+        let mut cur: &Tree = &root;
+        loop {
+            depth += 1;
+            match cur.children.iter().find_map(|c| match c {
+                Child::Tree(t) => Some(t),
+                _ => None,
+            }) {
+                Some(t) => cur = t,
+                None => break,
+            }
         }
-    }
-    // start → a (×N): the innermost `a` has only a token child.
-    assert_eq!(depth, N + 1, "right recursion nests one `a` per token");
-    drop_deep(root);
-}
-
-/// Drop a deep tree without recursing. `Tree`'s compiler-generated drop glue
-/// recurses to tree depth — a property of the caller-owned *result* value on
-/// every engine (LALR returns the same `Tree` type), unchanged by #33, which is
-/// about the walk. Handled explicitly here so this test exercises exactly the
-/// guarantee under test and nothing else. Tracked as #151 (iterative
-/// `Drop`/`Clone` for `Tree`); when that lands, delete this helper and drop the
-/// tree inside the small-stack thread instead.
-fn drop_deep(mut t: Tree) {
-    let mut stack = std::mem::take(&mut t.children);
-    while let Some(c) = stack.pop() {
-        if let Child::Tree(mut sub) = c {
-            // `sub`'s children move into the work list; `sub` then drops flat.
-            stack.append(&mut sub.children);
-        }
-    }
+        // start → a (×N): the innermost `a` has only a token child.
+        assert_eq!(depth, N + 1, "right recursion nests one `a` per token");
+        // #151 pins: cloning and dropping the deep tree must not recurse.
+        let copy = root.clone();
+        drop(root);
+        drop(copy);
+    });
 }
