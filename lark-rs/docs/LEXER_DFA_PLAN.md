@@ -501,8 +501,8 @@ priority surviving the union.
   determinized size stays flat *per terminal* and *per guard width* over a size sweep,
   matching the Earley/CYK scaling gates. It is a codegen-time cost (paid at standalone
   generation, not every runtime load), so a determinization regression — parity
-  duplication, a spliced/product union — is caught deterministically. CI runs it as its
-  own `--features perf-counters` step.
+  duplication, a spliced/product union — is caught deterministically. CI runs it in the
+  shared `--features perf-counters` "Scaling gates" step.
 * **Tie-break fidelity** — Lark's (priority, length, …) selection + `unless` on top of
   raw `PatternID`. The differential oracle is the net.
 * **Lost free optimizations** — the regex crate's auto-prefilters; must be re-added

@@ -60,17 +60,20 @@ cargo test test_json_corpus         # 293-file JSONTestSuite (requires submodule
 cargo test test_earley              # Earley oracle + Earley compliance bank (Phase 2)
 cargo test --test test_wild         # wild-grammar bank (real-world grammars, tests/wild/)
 
-# Deterministic super-linearity gate (#56) — needs the work-counter feature.
-cargo test --features perf-counters --test test_earley_scaling
-# CYK cubic-envelope gate (#87) — same feature; asserts O(n³) table fill.
-cargo test --features perf-counters --test test_cyk_scaling
-# Lexer linear-scan gate (#104) and dense-DFA build-cost gate (lookaround lowering).
-cargo test --features perf-counters --test test_lexer_scaling
-cargo test --features perf-counters --test test_lexer_dfa_build_scaling
+# Deterministic scaling gates — need the work-counter feature. One invocation,
+# one build (this is exactly CI's "Scaling gates" step): Earley super-linearity
+# (#56), CYK cubic envelope (#87), lexer linear scan (#104), dense-DFA build
+# cost (lookaround lowering). Each --test flag also works on its own.
+cargo test --features perf-counters --test test_earley_scaling \
+  --test test_cyk_scaling --test test_lexer_scaling \
+  --test test_lexer_dfa_build_scaling
 
 # L0 whole-lexer differential (the fancy-regex reference backend is TEST-ONLY,
 # behind the default-off `fancy-oracle` feature — docs/LOOKAROUND_SCOPE.md).
-cargo test -p lark-rs --features fancy-oracle
+# Named explicitly + --lib (the only fancy-oracle-gated target plus the lib's
+# cfg-gated unit tests) — running the whole suite under the feature would just
+# repeat `cargo test --all` under a second build.
+cargo test -p lark-rs --features fancy-oracle --lib --test test_scanner_differential
 ```
 
 **Perf regression net (`perf-counters` feature).** Suspected super-linearities are
@@ -84,7 +87,8 @@ per-position scan work via `lexer_scan_steps`; `tests/test_lexer_dfa_build_scali
 asserts the lookaround lowering's **dense-DFA build cost** (the L5 bake target) stays
 flat per terminal and per guard width via `dense_build_bytes` (summed
 `dense::DFA::memory_usage`); `examples/profile_parse.rs scaling` prints the same
-counters as a demonstration table. CI runs each gating variant as its own step.
+counters as a demonstration table. CI runs all four gates in one shared
+perf-counters step ("Scaling gates" in `.github/workflows/lark-rs.yml`).
 
 **Earley / ambiguity oracles (Phase 2).** `generate_oracles.py` and
 `extract_lark_compliance.py` already emit the Earley fixtures as part of their

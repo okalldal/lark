@@ -18,8 +18,9 @@
 #   * python/wasm binding jobs    (separate crates; only relevant when you
 #                                  touched lark-rs/python/ or lark-rs/wasm/)
 #
-# This is the pre-push hook's gate (.githooks/pre-push). For reproducing a red
-# CI locally in full, use lark-rs/scripts/check.sh.
+# This is the pre-push hook's gate (.githooks/pre-push), and check.sh runs it
+# as its steps 1+2 so the two gates can't drift. For reproducing a red CI
+# locally in full, use lark-rs/scripts/check.sh.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,4 +35,4 @@ note "Rust format: cargo fmt --check --all"
 note "Rust tests: cargo test --all"
 ( cd "$LARK_RS_DIR" && cargo test --all ) || fail "cargo test --all failed"
 
-printf '\n\033[1;32m✅ Fast gate passed — push, open the PR, and let CI run the full matrix.\033[0m\n'
+printf '\n\033[1;32m✅ Fast gate passed (fmt + cargo test --all).\033[0m\n'

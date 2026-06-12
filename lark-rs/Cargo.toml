@@ -84,8 +84,14 @@ path = "examples/json_parser.rs"
 
 # The L0 whole-lexer differential needs the fancy-oracle reference backend (the
 # `Regex` backend's historical fancy side-probes) — meaningless against the lowered
-# probes, which share the machinery under test. CI runs it via
-# `cargo test -p lark-rs --features fancy-oracle` (plain `cargo test` skips it).
+# probes, which share the machinery under test. CI and check.sh run it BY NAME
+# (`cargo test -p lark-rs --features fancy-oracle --lib --test
+# test_scanner_differential`; plain `cargo test` skips it) on the assumption that
+# this is the only fancy-oracle-gated [[test]]. If you add another [[test]] with
+# required-features = ["fancy-oracle"], you MUST add its --test flag to
+# .github/workflows/lark-rs.yml and lark-rs/scripts/check.sh, or it will never
+# run anywhere — cargo gives no error for a required-features target that is
+# simply not selected.
 [[test]]
 name = "test_scanner_differential"
 required-features = ["fancy-oracle"]

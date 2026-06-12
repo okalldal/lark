@@ -10,11 +10,13 @@ on:
     paths:
       - 'lark-rs/**'
       - 'lark/**'
+      - '.githooks/**'
       - '.github/workflows/lark-rs.yml'
   pull_request:
     paths:
       - 'lark-rs/**'
       - 'lark/**'
+      - '.githooks/**'
       - '.github/workflows/lark-rs.yml'
 
 # A newer push to the same branch/PR supersedes the in-flight run.
@@ -69,10 +71,14 @@ jobs:
       # resurrects the Regex reference backend's fancy side-probes. `-p lark-rs`,
       # not `--all`: the workspace siblings do not define the feature. The
       # differential is the ONLY test target gated on the feature (Cargo.toml
-      # required-features), so name it explicitly — running the whole suite here
-      # would just repeat the Cargo-test step above under a pointless rebuild.
+      # required-features), so name it explicitly — running every integration
+      # target here would just repeat the Cargo-test step above under a pointless
+      # rebuild. `--lib` keeps the lib unit tests in this feature build too:
+      # scanner.rs has #[cfg(feature = "fancy-oracle")] code whose unit tests
+      # (e.g. global_verbose_flag_refuses_lookaround_lowering) are documented in
+      # Cargo.toml as running under both builds.
       - name: Fancy-oracle differential (test-only reference)
-        run: cargo test -p lark-rs --features fancy-oracle --test test_scanner_differential
+        run: cargo test -p lark-rs --features fancy-oracle --lib --test test_scanner_differential
 
       # Deterministic scaling gates. The work counters in src/perf.rs only exist
       # under the `perf-counters` feature, so these regression nets are a no-op in

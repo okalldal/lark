@@ -28,26 +28,24 @@ REPO_ROOT="$(cd "$LARK_RS_DIR/.." && pwd)"
 note() { printf '\n\033[1;34m▶ %s\033[0m\n' "$1"; }
 fail() { printf '\n\033[1;31m❌ %s\033[0m\n' "$1" >&2; exit 1; }
 
-# 1. Rust format gate — identical to the CI "fmt" job.
-note "Rust format: cargo fmt --check --all"
-( cd "$LARK_RS_DIR" && cargo fmt --check --all ) || fail "cargo fmt --check failed — run 'cargo fmt --all' in lark-rs/"
-
-# 2. Rust test suite — identical to the CI "cargo test --all" step. (The L0 lexer
-#    differential oracle needs the fancy-oracle feature and runs in step 2a.) It
-#    needs the JSONTestSuite submodule for full coverage (it skips that corpus
-#    gracefully if absent).
-note "Rust tests: cargo test --all"
-( cd "$LARK_RS_DIR" && cargo test --all ) || fail "cargo test --all failed"
+# 1+2. Format + test suite — delegated to the fast gate (the same script the
+#      pre-push hook runs), so the routine and full gates cannot drift on these
+#      two steps. Identical to the CI "fmt" job and "Cargo test" step. The test
+#      run needs the JSONTestSuite submodule for full coverage (it skips that
+#      corpus gracefully if absent).
+"$SCRIPT_DIR/check-fast.sh" || fail "fast gate (fmt + cargo test --all) failed"
 
 # 2a. Fancy-oracle differential (docs/LOOKAROUND_SCOPE.md): the default build has
 #     zero fancy-regex code, so the L0 whole-lexer differential
 #     (tests/test_scanner_differential.rs) only runs under the TEST-ONLY
 #     fancy-oracle feature, which resurrects the Regex reference backend's fancy
 #     side-probes as the independent oracle. It is the only test target gated on
-#     the feature, so it is named explicitly — running the whole suite under the
-#     feature would just repeat step 2. Matches the CI step of the same name.
-note "Fancy-oracle differential: cargo test -p lark-rs --features fancy-oracle --test test_scanner_differential"
-( cd "$LARK_RS_DIR" && cargo test -p lark-rs --features fancy-oracle --test test_scanner_differential ) \
+#     the feature, so it is named explicitly — running every integration target
+#     under the feature would just repeat step 2. `--lib` keeps the lib unit
+#     tests (scanner.rs's cfg-gated probe code) in the feature build, the
+#     "runs under both builds" contract in Cargo.toml. Matches the CI step.
+note "Fancy-oracle differential: cargo test -p lark-rs --features fancy-oracle --lib --test test_scanner_differential"
+( cd "$LARK_RS_DIR" && cargo test -p lark-rs --features fancy-oracle --lib --test test_scanner_differential ) \
   || fail "fancy-oracle differential failed — the lowered engine diverged from the fancy reference"
 
 # 2b. Deterministic scaling gates — the regression nets keyed on the src/perf.rs
