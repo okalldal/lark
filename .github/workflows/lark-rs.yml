@@ -147,3 +147,38 @@ jobs:
           pip install maturin lark pytest
           maturin develop
           python -m pytest tests/ -v
+
+  # The WASM binding (lark-rs/wasm, #47) is likewise not a workspace member —
+  # it targets wasm32-unknown-unknown and is packaged by wasm-pack. Build the
+  # npm package and run the JS smoke tests (tests/wasm/), which replay the JSON
+  # oracle corpus through the WASM module and compare every tree against the
+  # committed Python-Lark output.
+  wasm-binding:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: rustfmt
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Check formatting (wasm crate)
+        run: cargo fmt --check
+        working-directory: lark-rs/wasm
+
+      - name: Host-side unit tests (options + serializer)
+        run: cargo test
+        working-directory: lark-rs/wasm
+
+      - name: Build the npm package (wasm-pack) and run the JS smoke tests
+        working-directory: lark-rs/wasm
+        run: |
+          npm ci
+          npm test

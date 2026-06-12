@@ -123,10 +123,82 @@ pub enum Child {
 }
 
 /// A node in the parse tree. `data` is the rule name (or alias) that built it.
-#[derive(Clone, Debug)]
+///
+/// `Drop` and `Clone` are manual worklist implementations (#151, same as the
+/// main crate's `Tree`): the derived glue recurses to tree depth, and a parse
+/// result is as deep as the input is nested, so the derived glue overflows
+/// small native stacks.
+#[derive(Debug)]
 pub struct Tree {
     pub data: String,
     pub children: Vec<Child>,
+}
+
+impl Drop for Tree {
+    fn drop(&mut self) {
+        let is_tree = |c: &Child| matches!(c, Child::Tree(_));
+        // Fast path: leaf-only children drop in place — no recursion possible.
+        if !self.children.iter().any(is_tree) {
+            return;
+        }
+        // Worklist of whole `children` vectors (3-word moves, never per-element
+        // copies). Invariant: a vector is pushed only if it contains a subtree
+        // with sub-subtrees; every `Tree` value therefore reaches its own
+        // (recursive) drop with empty or leaf-only children, where the fast
+        // path returns immediately — so native depth stays constant.
+        let mut stack: Vec<Vec<Child>> = vec![std::mem::take(&mut self.children)];
+        while let Some(mut vec) = stack.pop() {
+            for child in vec.iter_mut() {
+                if let Child::Tree(t) = child {
+                    if t.children.iter().any(is_tree) {
+                        stack.push(std::mem::take(&mut t.children));
+                    }
+                }
+            }
+            // `vec` drops here; every tree in it is now empty or leaf-only.
+        }
+    }
+}
+
+impl Clone for Tree {
+    fn clone(&self) -> Self {
+        // Explicit-frame deep copy: one heap frame per open node instead of one
+        // native frame per tree level.
+        struct Frame<'a> {
+            src: std::slice::Iter<'a, Child>,
+            data: String,
+            out: Vec<Child>,
+        }
+        fn frame(t: &Tree) -> Frame<'_> {
+            Frame {
+                src: t.children.iter(),
+                data: t.data.clone(),
+                out: Vec::with_capacity(t.children.len()),
+            }
+        }
+        let mut stack = vec![frame(self)];
+        loop {
+            let top = stack
+                .last_mut()
+                .expect("clone stack never empties mid-walk");
+            match top.src.next() {
+                Some(Child::Tree(t)) => stack.push(frame(t)),
+                Some(Child::Token(tok)) => top.out.push(Child::Token(tok.clone())),
+                Some(Child::None) => top.out.push(Child::None),
+                None => {
+                    let done = stack.pop().expect("just peeked");
+                    let tree = Tree {
+                        data: done.data,
+                        children: done.out,
+                    };
+                    match stack.last_mut() {
+                        Some(parent) => parent.out.push(Child::Tree(tree)),
+                        None => return tree,
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// The result of a parse — usually a `Tree`, but a `?start` rule that collapses
