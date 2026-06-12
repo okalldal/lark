@@ -101,21 +101,30 @@ To initialise the JSONTestSuite submodule:
 git submodule update --init tests/corpora/JSONTestSuite
 ```
 
-### Before Pushing — Fast Gate, Then Let the PR's CI Be the Full Gate
+### Finishing a Task — Review → Fast Gate → PR → CI Callback
 
 **Do NOT run the full CI locally before pushing** — that runs everything twice
-(once in the session, once in GitHub Actions). The intended loop is:
+(once in the session, once in GitHub Actions). The intended end-of-task loop:
 
-1. Run the **fast gate** (the Pareto cut — fmt + `cargo test --all` catches
+1. Run **`/code-review`** on the branch diff and apply the findings. Do this
+   *before* creating the PR: the review runs in a fresh subagent either way
+   (it sees only the diff, not the session's reasoning), and fixing findings
+   pre-PR means CI runs once on the final diff instead of twice (pre-review +
+   post-fix). Summarize what the review flagged and how it was addressed in
+   the PR description.
+2. Run the **fast gate** (the Pareto cut — fmt + `cargo test --all` catches
    nearly every red):
    ```bash
    lark-rs/scripts/check-fast.sh
    ```
-2. Push the branch and **open the PR right away** — the `pull_request` run IS
-   the full CI (fancy-oracle differential, scaling gates, python.lark LALR
-   gate, oracle freshness, python/wasm binding jobs). Branch pushes alone no
-   longer trigger CI; the PR does.
-3. Subscribe to the PR's activity (CI callback) and fix any red from there.
+3. Push the branch and **create the PR right away** — the `pull_request` run
+   IS the full CI (fancy-oracle differential, scaling gates, python.lark LALR
+   gate, oracle freshness, python/wasm binding jobs). Branch pushes alone do
+   not trigger CI; the PR does.
+4. Subscribe to the PR's activity (CI callback) and fix any red from there.
+
+One review, one CI run per task; post-PR pushes should only be fixes for
+genuinely CI-environment-specific failures.
 
 Two cases where you should run more than the fast gate before pushing:
 
