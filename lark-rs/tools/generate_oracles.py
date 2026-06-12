@@ -356,6 +356,13 @@ NUMBER: /[0-9]+/
 # "a" tokens so the two shapes are visible. Ambiguous at the *root*.
 EARLEY_AMBIG_ROOT_GRAMMAR = r'!start: start start | "a"'
 
+# Deeply ambiguous at the root (issue #63): both left- and right-recursive, so
+# "x"*n has 2^(n-1) derivations. Under `!` (keep_all_tokens) every position is
+# in AmbiguousExpander's to_expand set, so an ambiguous child's derivations
+# distribute over the parent and the root `_ambig` is FLAT N-way (4 children
+# for "xxx", 8 for "xxxx") — not a binarized nest.
+EARLEY_FLAT_AMBIG_GRAMMAR = r'!start: "x" start | start "x" | "x"'
+
 # Ambiguity nested below the start rule: `inner` is the ambiguous S→S S|"a", wrapped
 # by anonymous "(" … ")" that get filtered, so the `_ambig` node appears as a
 # *child* of `start`, not at the root.
@@ -431,10 +438,18 @@ EARLEY_GRAMMARS = [
         ("1 +",      False),
     ]),
     ("ambig_root", EARLEY_AMBIG_ROOT_GRAMMAR, [
-        ("a",   True),
-        ("aa",  True),
-        ("aaa", True),
-        ("",    False),
+        ("a",    True),
+        ("aa",   True),
+        ("aaa",  True),
+        ("aaaa", True),   # Catalan(3) = 5 derivations — flat 5-way `_ambig` (#63)
+        ("",     False),
+    ]),
+    ("flat_ambig", EARLEY_FLAT_AMBIG_GRAMMAR, [
+        ("x",    True),
+        ("xx",   True),
+        ("xxx",  True),   # 4 derivations, one flat `_ambig`
+        ("xxxx", True),   # 8 derivations
+        ("",     False),
     ]),
     ("ambig_nested", EARLEY_AMBIG_NESTED_GRAMMAR, [
         ("(a)",   True),

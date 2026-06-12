@@ -1801,9 +1801,9 @@ impl<'a> Transformer<'a> {
             }
             Frame::ExpandCombine {
                 lefts,
-                transparent_right,
+                distribute_right,
             } => {
-                let right_alts: Vec<NodeValue> = if transparent_right {
+                let right_alts: Vec<NodeValue> = if distribute_right {
                     let Ret::Derivs(alts) = w.take_ret() else {
                         unreachable!("Derivs returns Ret::Derivs")
                     };
@@ -1958,23 +1958,29 @@ impl<'a> Transformer<'a> {
     /// tail half of the former `expand_packed`.
     ///
     /// The alternative values the right symbol contributes are normally one — but
-    /// a *transparent* (`_rule` / `__anon_*`) child that is itself ambiguous under
-    /// explicit ambiguity contributes one alternative per derivation, which is
-    /// distributed over the parent's child-lists. This is Lark's
-    /// `AmbiguousExpander`: rather than nest an `_ambig` under the spliced
+    /// an ambiguous child at an *expandable* position contributes one alternative
+    /// per derivation, which is distributed over the parent's child-lists. This is
+    /// Lark's `AmbiguousExpander`: rather than nest an `_ambig` under the child
     /// position, the ambiguity is shifted up so the parent itself becomes the
     /// `_ambig` (`parent(_ambig(a, b))` → `_ambig(parent(a), parent(b))`).
+    /// Expandable positions are Lark's `maybe_create_ambiguous_expander`
+    /// `to_expand` set: every transparent (`_rule` / `__anon_*`) child, and —
+    /// under `keep_all_tokens` — *every* position (so e.g.
+    /// `!start: "x" start | start "x" | "x"` yields one flat N-way `_ambig`,
+    /// not a binarized nest; issue #63).
     fn expand_right(&mut self, w: &mut Walk, packed: Packed, lefts: Vec<Vec<NodeValue>>) {
         match packed.right {
             // ε right: the child-lists are exactly the left prefixes.
             ForestRef::None => w.ret = Some(Ret::Lists(lefts)),
             ForestRef::Node(rid) => {
-                let transparent_right = !self.resolve && self.is_transparent_node(rid);
+                let distribute_right = !self.resolve
+                    && (self.is_transparent_node(rid)
+                        || self.grammar.rules[packed.rule].options.keep_all_tokens);
                 w.frames.push(Frame::ExpandCombine {
                     lefts,
-                    transparent_right,
+                    distribute_right,
                 });
-                if transparent_right {
+                if distribute_right {
                     w.frames.push(Frame::Derivs { node: rid });
                 } else {
                     w.frames.push(Frame::Eval { node: rid });
@@ -2132,12 +2138,12 @@ enum Frame {
     ExpandRight {
         packed: Packed,
     },
-    /// Resume after the right symbol's value(s); `transparent_right` records
+    /// Resume after the right symbol's value(s); `distribute_right` records
     /// which child item was pushed (`Derivs` vs `Eval`), i.e. which `Ret`
     /// variant to consume.
     ExpandCombine {
         lefts: Vec<Vec<NodeValue>>,
-        transparent_right: bool,
+        distribute_right: bool,
     },
     ExpandInter {
         node: usize,
