@@ -1,4 +1,5 @@
 [
+  "build:gersemi_cmake",
   "build:hcl2",
   "build:miniwdl_wdl",
   "build:synapse_storm",

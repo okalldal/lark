@@ -235,6 +235,7 @@ fn test_wild_bank() {
     let mut failures: BTreeSet<String> = BTreeSet::new();
     let mut details: Vec<String> = Vec::new();
     let mut total = 0usize;
+    let mut n_alt_built = 0usize;
 
     for pdir in &projects {
         let project_t0 = std::time::Instant::now();
@@ -259,9 +260,53 @@ fn test_wild_bank() {
             Err(e) => {
                 failures.insert(format!("build:{name}"));
                 details.push(format!("build:{name}: {e}"));
-                for case in cases {
-                    let f = case["input_file"].as_str().unwrap_or("?");
-                    failures.insert(format!("parse:{name}:{f}"));
+                // If an alt grammar exists, try it. An alt grammar documents a
+                // workaround that produces identical parse trees: it lets the
+                // bank classify "compatible with edit" vs. "incompatible".
+                if let Some(alt_rel) = meta["alt_grammar"].as_str() {
+                    let alt_path = pdir.join(alt_rel);
+                    let alt_grammar = std::fs::read_to_string(&alt_path)
+                        .unwrap_or_else(|e| panic!("read {}: {e}", alt_path.display()));
+                    let Some(mut alt_opts) = meta_options(&meta, pdir) else {
+                        unreachable!("meta_options succeeded above")
+                    };
+                    alt_opts.base_path = alt_path.parent().map(|p| p.to_path_buf());
+                    match try_build(&alt_grammar, alt_opts) {
+                        Ok(alt_lark) => {
+                            n_alt_built += 1;
+                            for case in cases {
+                                let input_rel =
+                                    case["input_file"].as_str().expect("case has input_file");
+                                let input = std::fs::read_to_string(pdir.join(input_rel))
+                                    .unwrap_or_else(|e| panic!("read {input_rel}: {e}"));
+                                let parsed = try_parse(&alt_lark, &input);
+                                if let Err(e) = case_matches(&parsed, case) {
+                                    let kind = if matches!(parsed, ParseOutcome::Panic) {
+                                        "panic"
+                                    } else {
+                                        "parse"
+                                    };
+                                    failures.insert(format!("{kind}:{name}:{input_rel}"));
+                                    details.push(format!(
+                                        "{kind}:{name}:{input_rel} [alt grammar]: {e}"
+                                    ));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            failures.insert(format!("build-alt:{name}"));
+                            details.push(format!("build-alt:{name}: {e}"));
+                            for case in cases {
+                                let f = case["input_file"].as_str().unwrap_or("?");
+                                failures.insert(format!("parse:{name}:{f}"));
+                            }
+                        }
+                    }
+                } else {
+                    for case in cases {
+                        let f = case["input_file"].as_str().unwrap_or("?");
+                        failures.insert(format!("parse:{name}:{f}"));
+                    }
                 }
                 continue;
             }
@@ -304,10 +349,20 @@ fn test_wild_bank() {
         }
     }
     let n_build_fail = failures.iter().filter(|f| f.starts_with("build:")).count();
-    let n_input_fail = failures.iter().filter(|f| !f.starts_with("build:")).count();
+    // Exclude both "build:" and "build-alt:" from the input-level failure count.
+    let n_input_fail = failures.iter().filter(|f| !f.starts_with("build")).count();
+    let build_note = if n_alt_built > 0 {
+        let n_incompatible = n_build_fail - n_alt_built;
+        format!(
+            "{n_build_fail} grammars not building: \
+             {n_alt_built} compatible via alt grammar, {n_incompatible} incompatible"
+        )
+    } else {
+        format!("{n_build_fail} grammars not building")
+    };
     eprintln!(
         "wild bank: {}/{total} inputs agree with oracle across {} projects \
-         ({n_build_fail} grammars not building); {} known-XFAIL",
+         ({build_note}); {} known-XFAIL",
         total - n_input_fail,
         projects.len(),
         xfail.len()
