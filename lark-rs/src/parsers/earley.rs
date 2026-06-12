@@ -445,24 +445,16 @@ impl EarleyParser {
         resolve: bool,
         term_priority: bool,
     ) -> Result<ParseTree, ParseError> {
-        // The forest→tree walk recurses to the depth of the parse forest, which is
-        // O(input length) for left-recursive list grammars — enough to blow the
-        // default stack on a long input. Run it on a generous dedicated stack
-        // (`thread::scope` keeps the borrows of `self.grammar` / `forest` valid).
-        let grammar = &self.grammar;
-        let value = std::thread::scope(|s| {
-            std::thread::Builder::new()
-                .stack_size(256 * 1024 * 1024)
-                .spawn_scoped(s, || {
-                    let mut tr = Transformer::new(grammar, &forest, resolve, term_priority);
-                    let mut visiting = HashSet::new();
-                    tr.eval_symbol(root, &mut visiting)
-                })
-                .expect("spawn forest-walk thread")
-                .join()
-                .unwrap_or(None)
-        })
-        .ok_or_else(|| ParseError::unexpected_eof(0, 0, vec![]))?;
+        // The walk is driven by an explicit frame stack (issue #33), so its
+        // native-stack use is O(1) no matter how deep the forest is — it runs
+        // right here on the caller's stack. (It used to recurse to forest depth,
+        // O(input length) for list-like rules, and needed a dedicated thread with
+        // a 256 MB stack; `std::thread` does not exist on WASM (#47), so the
+        // de-recursion is also what makes this engine portable there.)
+        let mut tr = Transformer::new(&self.grammar, &forest, resolve, term_priority);
+        let value = tr
+            .transform(root)
+            .ok_or_else(|| ParseError::unexpected_eof(0, 0, vec![]))?;
         Ok(match value {
             NodeValue::Tree(t) => ParseTree::Tree(t),
             NodeValue::Token(t) => ParseTree::Token(t),
@@ -1338,55 +1330,107 @@ impl<'a> Transformer<'a> {
     }
 
     /// ForestSumVisitor: a node's priority is the max over its derivations.
+    ///
+    /// Iterative two-phase DFS (issue #33 — the priority sum recurses to forest
+    /// depth just like the value walk did): `Enter` pushes a node's family
+    /// children, `Exit` combines their now-memoized priorities. Semantics are
+    /// identical to the natural recursion: results memoize in `prio`, and an edge
+    /// back into an in-progress node (`prio_visiting`) contributes 0.
     fn node_priority(&mut self, id: usize) -> i32 {
         if let Some(&p) = self.prio.get(&id) {
             return p;
         }
-        if !self.prio_visiting.insert(id) {
+        if self.prio_visiting.contains(&id) {
             return 0; // cycle: contribute nothing
         }
-        let forest = self.forest;
-        let node = &forest.nodes[id];
-        let parent_inter = node.is_intermediate;
-        let mut best = if node.families.is_empty() {
-            0
-        } else {
-            i32::MIN
-        };
-        for k in 0..node.families.len() {
-            let p = forest.nodes[id].families[k];
-            let v = self.packed_priority(&p, parent_inter);
-            if v > best {
-                best = v;
+        enum Step {
+            Enter(usize),
+            Exit(usize),
+        }
+        let mut stack = vec![Step::Enter(id)];
+        while let Some(step) = stack.pop() {
+            match step {
+                Step::Enter(n) => {
+                    if self.prio.contains_key(&n) || !self.prio_visiting.insert(n) {
+                        continue; // memoized, or in-progress (a cycle edge)
+                    }
+                    stack.push(Step::Exit(n));
+                    // Children in reverse push order so they evaluate in family
+                    // order, left before right — the recursive call order, which
+                    // is load-bearing in cyclic forests (a child's value depends
+                    // on which ancestors are in-progress when it is reached).
+                    for p in self.forest.nodes[n].families.iter().rev() {
+                        for r in [p.right, p.left] {
+                            if let ForestRef::Node(c) = r {
+                                stack.push(Step::Enter(c));
+                            }
+                        }
+                    }
+                }
+                Step::Exit(n) => {
+                    let node = &self.forest.nodes[n];
+                    let parent_inter = node.is_intermediate;
+                    let mut best = if node.families.is_empty() {
+                        0
+                    } else {
+                        i32::MIN
+                    };
+                    for k in 0..self.forest.nodes[n].families.len() {
+                        let p = self.forest.nodes[n].families[k];
+                        let v = self.packed_priority_value(&p, parent_inter);
+                        if v > best {
+                            best = v;
+                        }
+                    }
+                    self.prio_visiting.remove(&n);
+                    self.prio.insert(n, best);
+                }
             }
         }
-        self.prio_visiting.remove(&id);
-        self.prio.insert(id, best);
-        best
+        self.prio.get(&id).copied().unwrap_or(0)
     }
 
     /// A derivation's priority: the rule's own priority (only counted at a real
     /// symbol node, not at intermediates) plus its children's priorities. Token
     /// leaves count 0 — the basic lexer already "used up" terminal priorities.
     fn packed_priority(&mut self, packed: &Packed, parent_inter: bool) -> i32 {
+        // Make sure both node children are computed (left before right, the
+        // recursive evaluation order), then combine by lookup.
+        for r in [packed.left, packed.right] {
+            if let ForestRef::Node(c) = r {
+                self.node_priority(c);
+            }
+        }
+        self.packed_priority_value(packed, parent_inter)
+    }
+
+    /// Lookup-only half of [`packed_priority`](Self::packed_priority): combines
+    /// child priorities already computed (or in-progress → 0) by the DFS.
+    fn packed_priority_value(&self, packed: &Packed, parent_inter: bool) -> i32 {
         let rule_prio = self.grammar.rules[packed.rule].options.priority;
         let base = if !parent_inter && rule_prio != 0 {
             rule_prio
         } else {
             0
         };
-        let child = |this: &mut Self, r: ForestRef| match r {
-            ForestRef::Node(id) => this.node_priority(id),
+        let child = |r: ForestRef| match r {
+            ForestRef::Node(id) => {
+                if self.prio_visiting.contains(&id) {
+                    0 // in-progress: a cycle edge contributes nothing
+                } else {
+                    self.prio.get(&id).copied().unwrap_or(0)
+                }
+            }
             // A scanned token contributes its terminal's priority — but only under
             // the dynamic lexer (`term_priority` is empty for the basic lexer).
-            ForestRef::Tok(t) => this
+            ForestRef::Tok(t) => self
                 .term_priority
-                .get(&this.forest.tokens[t].type_id)
+                .get(&self.forest.tokens[t].type_id)
                 .copied()
                 .unwrap_or(0),
             ForestRef::None => 0,
         };
-        base + child(self, packed.left) + child(self, packed.right)
+        base + child(packed.left) + child(packed.right)
     }
 
     /// Family indices of `node_id` in Lark's `sort_key` order: non-empty
@@ -1462,218 +1506,538 @@ impl<'a> Transformer<'a> {
             .unwrap_or(false)
     }
 
-    /// The deduped list of derivation values for a symbol node. Under `resolve`
-    /// this is the single best derivation (highest priority, first in `sort_key`
-    /// order); under explicit ambiguity it is every distinct derivation. Memoized,
-    /// since a shared SPPF node is reachable from many parents.
-    fn symbol_derivations(
-        &mut self,
-        node_id: usize,
-        visiting: &mut HashSet<usize>,
-    ) -> Vec<NodeValue> {
-        if let Some(d) = self.deriv_memo.get(&node_id) {
-            return d.clone();
-        }
-        if !visiting.insert(node_id) {
-            return Vec::new(); // cycle in the forest — discard this family
-        }
-        let order = self.sorted_families(node_id);
+    // ─── The de-recursed walk (issue #33) ──────────────────────────────────────
+    //
+    // The walk's natural shape is a set of mutually recursive functions, but its
+    // recursion depth is the SPPF chain length — O(input length) for any
+    // list-like rule (`x*`, `x+`, `expr: expr "+" term`) — which used to require
+    // running the whole walk on a dedicated thread with a 256 MB stack. The
+    // recursion is reified instead: each former function is a *work* [`Frame`]
+    // variant, each point after a recursive call a *continuation* variant, the
+    // locals live in the frame, and the value a call would have returned travels
+    // through [`Walk::ret`]. Frames are heap-allocated, so native-stack use is
+    // O(1) regardless of forest depth (`std::thread` does not exist on WASM, #47,
+    // so this is also what makes the engine portable there).
+    //
+    // The de-recursion is mechanical and preserves the original semantics
+    // exactly, including the parts that are easy to get wrong:
+    //  * the `visiting` cycle set (formerly a `&mut HashSet` parameter): inserted
+    //    on entry, removed on *every* exit path of the former function;
+    //  * resolve-mode rollback: a failed family truncates the shared child buffer
+    //    back to the mark taken before its attempt;
+    //  * the memoization points (`memo` / `deriv_memo` / resolve's
+    //    second-visit-only `seen` rule) fire at the same places.
 
-        let mut derivs: Vec<NodeValue> = Vec::new();
-        if self.resolve {
-            for fi in order {
-                let packed = self.forest.nodes[node_id].families[fi];
-                if let Some(list) = self.expand_packed(&packed, visiting).into_iter().next() {
-                    derivs.push(self.builder.assemble(packed.rule, list));
-                    break;
+    /// Walk the forest from `root` to its final value — the de-recursed
+    /// `eval_symbol(root)` (see [`Frame`] for the correspondence).
+    fn transform(&mut self, root: usize) -> Option<NodeValue> {
+        let mut walk = Walk {
+            frames: vec![Frame::Eval { node: root }],
+            bufs: Vec::new(),
+            visiting: HashSet::new(),
+            ret: None,
+        };
+        while let Some(frame) = walk.frames.pop() {
+            self.step(frame, &mut walk);
+        }
+        match walk.ret {
+            Some(Ret::Value(v)) => v,
+            _ => unreachable!("the root Eval frame returns Ret::Value"),
+        }
+    }
+
+    /// Execute one frame. A *work* frame ignores `w.ret`; a *continuation* frame
+    /// consumes the return value of the child item it was pushed above.
+    fn step(&mut self, frame: Frame, w: &mut Walk) {
+        match frame {
+            // ── eval_symbol: evaluate a real (non-intermediate) symbol node to a
+            //    single value — the best derivation under `resolve`, or an
+            //    `_ambig` over all of them under explicit. `Ret::Value(None)` if
+            //    every derivation is discarded (e.g. an ambiguity cycle).
+            Frame::Eval { node } => {
+                if let Some(v) = self.memo.get(&node) {
+                    w.ret = Some(Ret::Value(Some(v.clone())));
+                } else if self.resolve {
+                    // Resolve mode keeps a single derivation, so its value is
+                    // assembled by streaming children straight into one buffer —
+                    // a left-recursive transparent helper (`x*`/`x+`/`_rule`)
+                    // then costs O(total children) instead of the O(children²)
+                    // the materialize-then-splice path pays re-copying each
+                    // growing prefix (issue #54). The streamed frames mirror
+                    // `TreeBuilder::assemble`'s filtering + shaping (via
+                    // `keep_token` / `shape`) so resolve trees stay
+                    // byte-for-byte identical to the explicit path and to LALR.
+                    w.bufs.push(Vec::new());
+                    w.frames.push(Frame::EvalShape { node });
+                    w.frames.push(Frame::AppendRule { node });
+                } else {
+                    w.frames.push(Frame::EvalAmbig { node });
+                    w.frames.push(Frame::Derivs { node });
                 }
             }
-        } else {
-            let mut keys: HashSet<String> = HashSet::new();
-            for fi in order {
-                let packed = self.forest.nodes[node_id].families[fi];
-                for list in self.expand_packed(&packed, visiting) {
-                    let v = self.builder.assemble(packed.rule, list);
+            // Resolve: shape the children streamed into this node's buffer.
+            Frame::EvalShape { node } => {
+                let children = w.bufs.pop().expect("Eval pushed a buffer");
+                match w.take_ret() {
+                    Ret::Rule(None) => w.ret = Some(Ret::Value(None)),
+                    Ret::Rule(Some(rule)) => {
+                        let v = self.builder.shape(rule, children);
+                        // Memoize only on the second visit: a single-use node is
+                        // returned by move (no clone). `insert` returns false
+                        // when the node was already present, i.e. this is its
+                        // second full build — cache it so any further reuse is a
+                        // cheap clone, bounding rebuilds to at most two per node.
+                        if !self.seen.insert(node) {
+                            self.memo.insert(node, v.clone());
+                        }
+                        w.ret = Some(Ret::Value(Some(v)));
+                    }
+                    _ => unreachable!("AppendRule returns Ret::Rule"),
+                }
+            }
+
+            // ── append_rule_children (resolve): pick `node`'s best non-discarded
+            //    family and append its rule-position children — post-filter, with
+            //    transparent children spliced in place — to the current buffer.
+            //    Returns the chosen rule (so the parent can `shape` it), or `None`
+            //    if every family is discarded (a forest cycle). Works for both
+            //    symbol nodes (a complete rule) and intermediate nodes (a rule
+            //    prefix); both just contribute children in left-to-right order.
+            Frame::AppendRule { node } => {
+                if !w.visiting.insert(node) {
+                    w.ret = Some(Ret::Rule(None)); // cycle — discard this derivation
+                } else {
+                    let fams = self.sorted_families(node);
+                    self.rule_try_family(w, node, fams, 0);
+                }
+            }
+            Frame::RuleNext {
+                node,
+                fams,
+                idx,
+                mark,
+                rule,
+            } => {
+                let Ret::Packed(ok) = w.take_ret() else {
+                    unreachable!("AppendPacked returns Ret::Packed")
+                };
+                if ok {
+                    w.visiting.remove(&node);
+                    w.ret = Some(Ret::Rule(Some(rule)));
+                } else {
+                    // Discarded part-way: roll back, try the next family.
+                    w.buf().truncate(mark);
+                    self.rule_try_family(w, node, fams, idx + 1);
+                }
+            }
+
+            // ── append_packed (resolve): append one derivation's children — its
+            //    left prefix (an intermediate of the same rule) then its right
+            //    symbol at `packed.right_pos`. `Ret::Packed(false)` if any
+            //    sub-node is discarded, so the parent can try another family.
+            Frame::AppendPacked { packed } => match packed.left {
+                ForestRef::None => self.packed_right(w, packed),
+                ForestRef::Node(lid) => {
+                    w.frames.push(Frame::PackedRight { packed });
+                    w.frames.push(Frame::AppendRule { node: lid });
+                }
+                // `left` is always an intermediate node or nothing in the
+                // binarized forest; handle a token defensively for symmetry with
+                // the explicit path.
+                ForestRef::Tok(t) => {
+                    let tok = self.forest.tokens[t].clone();
+                    w.buf().push(Child::Token(tok));
+                    self.packed_right(w, packed);
+                }
+            },
+            Frame::PackedRight { packed } => match w.take_ret() {
+                Ret::Rule(None) => w.ret = Some(Ret::Packed(false)),
+                Ret::Rule(Some(_)) => self.packed_right(w, packed),
+                _ => unreachable!("AppendRule returns Ret::Rule"),
+            },
+            Frame::PackedAfterSplice => {
+                let Ret::Rule(rule) = w.take_ret() else {
+                    unreachable!("Splice returns Ret::Rule")
+                };
+                w.ret = Some(Ret::Packed(rule.is_some()));
+            }
+            // A real (non-transparent) right symbol contributes one shaped value;
+            // mirror `assemble`'s per-value handling (a `Token` is subject to the
+            // position's filter, a `Tree` is always kept).
+            Frame::PackedAfterEval { rule, right_pos } => {
+                let Ret::Value(v) = w.take_ret() else {
+                    unreachable!("Eval returns Ret::Value")
+                };
+                match v {
+                    None => w.ret = Some(Ret::Packed(false)),
+                    Some(NodeValue::Token(tk)) => {
+                        if self.builder.keep_token(rule, right_pos) {
+                            w.buf().push(Child::Token(tk));
+                        }
+                        w.ret = Some(Ret::Packed(true));
+                    }
+                    Some(NodeValue::Tree(tr)) => {
+                        w.buf().push(Child::Tree(tr));
+                        w.ret = Some(Ret::Packed(true));
+                    }
+                    Some(NodeValue::Inline(cs)) => {
+                        w.buf().extend(cs);
+                        w.ret = Some(Ret::Packed(true));
+                    }
+                }
+            }
+
+            // ── splice_node (resolve): append a transparent symbol node's spliced
+            //    children (plus its rule's `maybe_placeholders`) to the current
+            //    buffer, so a chain of transparent helpers flattens in one linear
+            //    pass.
+            Frame::Splice { node } => {
+                w.frames.push(Frame::SpliceTail);
+                w.frames.push(Frame::AppendRule { node });
+            }
+            Frame::SpliceTail => {
+                let Ret::Rule(rule) = w.take_ret() else {
+                    unreachable!("AppendRule returns Ret::Rule")
+                };
+                match rule {
+                    None => w.ret = Some(Ret::Rule(None)),
+                    Some(rule) => {
+                        for _ in 0..self.grammar.rules[rule].options.placeholder_count {
+                            w.buf().push(Child::None);
+                        }
+                        // Trailing placeholders of a distributed absent `[...]`
+                        // (the streaming mirror of `TreeBuilder::shape`'s
+                        // trailing append).
+                        let len = self.grammar.rules[rule].expansion.len();
+                        self.push_nones_before(rule, len, w.buf());
+                        w.ret = Some(Ret::Rule(Some(rule)));
+                    }
+                }
+            }
+
+            // ── eval_symbol, explicit tail: collapse the derivation list to one
+            //    value, or an `_ambig` over all of them.
+            Frame::EvalAmbig { node } => {
+                let Ret::Derivs(mut derivs) = w.take_ret() else {
+                    unreachable!("Derivs returns Ret::Derivs")
+                };
+                let result = match derivs.len() {
+                    0 => None,
+                    1 => Some(derivs.pop().unwrap()),
+                    _ => {
+                        let children: Vec<Child> =
+                            derivs.into_iter().map(node_value_to_child).collect();
+                        Some(NodeValue::Tree(Tree::new("_ambig", children)))
+                    }
+                };
+                if let Some(v) = &result {
+                    self.memo.insert(node, v.clone());
+                }
+                w.ret = Some(Ret::Value(result));
+            }
+
+            // ── symbol_derivations (explicit): the deduped list of derivation
+            //    values for a symbol node — every distinct derivation. Memoized,
+            //    since a shared SPPF node is reachable from many parents.
+            Frame::Derivs { node } => {
+                debug_assert!(
+                    !self.resolve,
+                    "resolve mode streams; it never materializes derivation lists"
+                );
+                if let Some(d) = self.deriv_memo.get(&node) {
+                    w.ret = Some(Ret::Derivs(d.clone()));
+                } else if !w.visiting.insert(node) {
+                    // Cycle in the forest — discard this family.
+                    w.ret = Some(Ret::Derivs(Vec::new()));
+                } else {
+                    let fams = self.sorted_families(node);
+                    self.derivs_try_family(w, node, fams, 0, Vec::new(), HashSet::new());
+                }
+            }
+            Frame::DerivsNext {
+                node,
+                fams,
+                idx,
+                rule,
+                mut derivs,
+                mut keys,
+            } => {
+                let Ret::Lists(lists) = w.take_ret() else {
+                    unreachable!("ExpandPacked returns Ret::Lists")
+                };
+                for list in lists {
+                    let v = self.builder.assemble(rule, list);
                     if keys.insert(node_value_key(&v)) {
                         derivs.push(v);
                     }
                 }
+                self.derivs_try_family(w, node, fams, idx + 1, derivs, keys);
             }
-        }
 
-        visiting.remove(&node_id);
-        // The *real* #56 Arm-2 cost: explicit mode materializes one owned value per
-        // symbol node, and a transparent left-recursive helper's value is the whole
-        // accumulated child list — so the SPPF chain of n helper nodes builds Inlines
-        // of size 1, 2, …, n = O(n²) elements total (and `deriv_memo` then clones
-        // them). Counting the materialized derivation sizes here (behind
-        // `perf-counters`) exhibits that quadratic deterministically — the signal the
-        // streaming fix (the explicit analog of #55) must flatten. It is *not* the
-        // `expand_packed` clone loop the issue guessed (that is linear; see there).
-        // Gated at the call site (not just inside the no-op) so the `sum` — itself
-        // O(materialized children), i.e. the quadratic we are measuring — is never
-        // computed in a normal build.
-        #[cfg(feature = "perf-counters")]
-        crate::perf::add_explicit_node_children(derivs.iter().map(node_value_size).sum::<u64>());
-        self.deriv_memo.insert(node_id, derivs.clone());
-        derivs
-    }
-
-    /// Evaluate a real (non-intermediate) symbol node to a single value: the best
-    /// derivation under `resolve`, or an `_ambig` over all of them under explicit.
-    /// Returns `None` if every derivation is discarded (e.g. an ambiguity cycle).
-    fn eval_symbol(&mut self, node_id: usize, visiting: &mut HashSet<usize>) -> Option<NodeValue> {
-        if let Some(v) = self.memo.get(&node_id) {
-            return Some(v.clone());
-        }
-        // Resolve mode keeps a single derivation, so its value can be assembled by
-        // streaming children straight into one buffer — a left-recursive
-        // transparent helper (`x*`/`x+`/`_rule`) then costs O(total children)
-        // instead of the O(children²) the materialize-then-splice path pays
-        // re-copying each growing prefix (issue #54).
-        if self.resolve {
-            let mut children: Vec<Child> = Vec::new();
-            let rule = self.append_rule_children(node_id, &mut children, visiting)?;
-            let v = self.builder.shape(rule, children);
-            // Memoize only on the second visit: a single-use node is returned by
-            // move (no clone). `insert` returns false when the node was already
-            // present, i.e. this is its second full build — cache it so any further
-            // reuse is a cheap clone, bounding rebuilds to at most two per node.
-            if !self.seen.insert(node_id) {
-                self.memo.insert(node_id, v.clone());
-            }
-            return Some(v);
-        }
-        let mut derivs = self.symbol_derivations(node_id, visiting);
-        let result = match derivs.len() {
-            0 => None,
-            1 => Some(derivs.pop().unwrap()),
-            _ => {
-                let children: Vec<Child> = derivs.into_iter().map(node_value_to_child).collect();
-                Some(NodeValue::Tree(Tree::new("_ambig", children)))
-            }
-        };
-
-        if let Some(v) = &result {
-            self.memo.insert(node_id, v.clone());
-        }
-        result
-    }
-
-    // ─── Resolve-mode streaming assembly (issue #54) ──────────────────────────
-    //
-    // The explicit-ambiguity path above materializes every alternative as an owned
-    // child-list and splices transparent children by copying their `Inline` value
-    // into the parent — O(n²) on a left-recursive transparent helper, whose SPPF is
-    // a chain of n prefix nodes each one element longer than the last. Resolve mode
-    // keeps exactly one derivation, so it can instead *stream* children into a
-    // single shared buffer: a transparent child appends its own children in place
-    // (no per-level copy), making the walk linear. The three methods below mirror
-    // `TreeBuilder::assemble`'s filtering + shaping (via `keep_token` / `shape`) so
-    // resolve trees stay byte-for-byte identical to the explicit path and to LALR.
-
-    /// Resolve mode. Pick `node`'s best non-discarded family and append its
-    /// rule-position children — post-filter, with transparent children spliced in
-    /// place — to `out`. Returns the chosen rule (so the caller can `shape` it), or
-    /// `None` if every family is discarded (a forest cycle). Works for both symbol
-    /// nodes (a complete rule) and intermediate nodes (a rule prefix); both just
-    /// contribute children in left-to-right order.
-    fn append_rule_children(
-        &mut self,
-        node: usize,
-        out: &mut Vec<Child>,
-        visiting: &mut HashSet<usize>,
-    ) -> Option<usize> {
-        if !visiting.insert(node) {
-            return None; // cycle in the forest — discard this derivation
-        }
-        let mut chosen = None;
-        for fi in self.sorted_families(node) {
-            let packed = self.forest.nodes[node].families[fi];
-            let mark = out.len();
-            if self.append_packed(&packed, out, visiting) {
-                chosen = Some(packed.rule);
-                break;
-            }
-            out.truncate(mark); // discarded part-way: roll back, try the next family
-        }
-        visiting.remove(&node);
-        chosen
-    }
-
-    /// Append one derivation's children — its left prefix (an intermediate of the
-    /// same rule) then its right symbol at `packed.right_pos` — to `out`. Returns
-    /// false if any sub-node is discarded, so the caller can try another family.
-    fn append_packed(
-        &mut self,
-        packed: &Packed,
-        out: &mut Vec<Child>,
-        visiting: &mut HashSet<usize>,
-    ) -> bool {
-        match packed.left {
-            ForestRef::None => {}
-            ForestRef::Node(lid) => {
-                if self.append_rule_children(lid, out, visiting).is_none() {
-                    return false;
+            // ── expand_packed (explicit): expand one derivation into its rule's
+            //    child-lists. `left` is always an intermediate (the accumulated
+            //    prefix) or nothing; `right` is the symbol just consumed (a
+            //    symbol node or token leaf) or nothing (ε).
+            Frame::ExpandPacked { packed } => match packed.left {
+                ForestRef::None => self.expand_right(w, packed, vec![Vec::new()]),
+                ForestRef::Node(lid) => {
+                    w.frames.push(Frame::ExpandRight { packed });
+                    w.frames.push(Frame::ExpandInter { node: lid });
+                }
+                ForestRef::Tok(t) => {
+                    let tok = self.forest.tokens[t].clone();
+                    self.expand_right(w, packed, vec![vec![NodeValue::Token(tok)]]);
+                }
+            },
+            Frame::ExpandRight { packed } => {
+                let Ret::Lists(lefts) = w.take_ret() else {
+                    unreachable!("ExpandInter returns Ret::Lists")
+                };
+                if lefts.is_empty() {
+                    w.ret = Some(Ret::Lists(Vec::new()));
+                } else {
+                    self.expand_right(w, packed, lefts);
                 }
             }
-            // `left` is always an intermediate node or nothing in the binarized
-            // forest; handle a token defensively for symmetry with `expand_packed`.
-            ForestRef::Tok(t) => out.push(Child::Token(self.forest.tokens[t].clone())),
+            Frame::ExpandCombine {
+                lefts,
+                transparent_right,
+            } => {
+                let right_alts: Vec<NodeValue> = if transparent_right {
+                    let Ret::Derivs(alts) = w.take_ret() else {
+                        unreachable!("Derivs returns Ret::Derivs")
+                    };
+                    alts
+                } else {
+                    match w.take_ret() {
+                        Ret::Value(Some(v)) => vec![v],
+                        Ret::Value(None) => Vec::new(),
+                        _ => unreachable!("Eval returns Ret::Value"),
+                    }
+                };
+                if right_alts.is_empty() {
+                    // Right discarded → the whole derivation is gone.
+                    w.ret = Some(Ret::Lists(Vec::new()));
+                } else {
+                    self.expand_combine(w, &lefts, &right_alts);
+                }
+            }
+
+            // ── expand_intermediate (explicit): expand an intermediate node into
+            //    the alternative child-lists it contributes to its parent rule.
+            Frame::ExpandInter { node } => {
+                if !w.visiting.insert(node) {
+                    w.ret = Some(Ret::Lists(Vec::new())); // cycle — discard
+                } else {
+                    let fams = self.sorted_families(node);
+                    self.inter_try_family(w, node, fams, 0, Vec::new());
+                }
+            }
+            Frame::InterNext {
+                node,
+                fams,
+                idx,
+                mut out,
+            } => {
+                let Ret::Lists(lists) = w.take_ret() else {
+                    unreachable!("ExpandPacked returns Ret::Lists")
+                };
+                out.extend(lists);
+                self.inter_try_family(w, node, fams, idx + 1, out);
+            }
         }
+    }
+
+    /// Resolve: try family `fams[idx]` of `node`, or finish with `Ret::Rule(None)`
+    /// once every family has been discarded (the loop of the former
+    /// `append_rule_children`).
+    fn rule_try_family(&mut self, w: &mut Walk, node: usize, fams: Vec<usize>, idx: usize) {
+        match fams.get(idx) {
+            None => {
+                w.visiting.remove(&node);
+                w.ret = Some(Ret::Rule(None));
+            }
+            Some(&fi) => {
+                let packed = self.forest.nodes[node].families[fi];
+                let mark = w.buf().len();
+                w.frames.push(Frame::RuleNext {
+                    node,
+                    fams,
+                    idx,
+                    mark,
+                    rule: packed.rule,
+                });
+                w.frames.push(Frame::AppendPacked { packed });
+            }
+        }
+    }
+
+    /// Resolve: handle `packed.right` once the left prefix has streamed into the
+    /// buffer — the tail half of the former `append_packed`.
+    fn packed_right(&mut self, w: &mut Walk, packed: Packed) {
         match packed.right {
-            ForestRef::None => {} // ε production: no right child
+            // ε production: no right child.
+            ForestRef::None => w.ret = Some(Ret::Packed(true)),
             ForestRef::Tok(t) => {
-                self.push_nones_before(packed.rule, packed.right_pos, out);
+                self.push_nones_before(packed.rule, packed.right_pos, w.buf());
                 if self.builder.keep_token(packed.rule, packed.right_pos) {
-                    out.push(Child::Token(self.forest.tokens[t].clone()));
+                    let tok = self.forest.tokens[t].clone();
+                    w.buf().push(Child::Token(tok));
                 }
+                w.ret = Some(Ret::Packed(true));
             }
             ForestRef::Node(rid) => {
-                self.push_nones_before(packed.rule, packed.right_pos, out);
+                self.push_nones_before(packed.rule, packed.right_pos, w.buf());
                 if self.is_transparent_node(rid) {
-                    // Splice the transparent child's children straight into `out`.
-                    if self.splice_node(rid, out, visiting).is_none() {
-                        return false;
-                    }
+                    // Splice the transparent child's children straight into the
+                    // buffer.
+                    w.frames.push(Frame::PackedAfterSplice);
+                    w.frames.push(Frame::Splice { node: rid });
                 } else {
-                    // A real symbol node contributes one shaped value; mirror
-                    // `assemble`'s per-value handling (a `Token` is subject to the
-                    // position's filter, a `Tree` is always kept).
-                    match self.eval_symbol(rid, visiting) {
-                        None => return false,
-                        Some(NodeValue::Token(tk)) => {
-                            if self.builder.keep_token(packed.rule, packed.right_pos) {
-                                out.push(Child::Token(tk));
-                            }
-                        }
-                        Some(NodeValue::Tree(tr)) => out.push(Child::Tree(tr)),
-                        Some(NodeValue::Inline(cs)) => out.extend(cs),
-                    }
+                    w.frames.push(Frame::PackedAfterEval {
+                        rule: packed.rule,
+                        right_pos: packed.right_pos,
+                    });
+                    w.frames.push(Frame::Eval { node: rid });
                 }
             }
         }
-        true
     }
 
-    /// Append a transparent symbol node's spliced children (plus its rule's
-    /// `maybe_placeholders`) to `out`. Recurses through `append_rule_children`, so a
-    /// chain of transparent helpers flattens into `out` in one linear pass.
-    fn splice_node(
+    /// Explicit: expand family `fams[idx]` of `node`, or finish (memoize + hand
+    /// back) the derivation list once every family has been processed (the loop
+    /// of the former `symbol_derivations`).
+    fn derivs_try_family(
         &mut self,
+        w: &mut Walk,
         node: usize,
-        out: &mut Vec<Child>,
-        visiting: &mut HashSet<usize>,
-    ) -> Option<usize> {
-        let rule = self.append_rule_children(node, out, visiting)?;
-        for _ in 0..self.grammar.rules[rule].options.placeholder_count {
-            out.push(Child::None);
+        fams: Vec<usize>,
+        idx: usize,
+        derivs: Vec<NodeValue>,
+        keys: HashSet<String>,
+    ) {
+        match fams.get(idx) {
+            None => {
+                w.visiting.remove(&node);
+                // The *real* #56 Arm-2 cost: explicit mode materializes one owned
+                // value per symbol node, and a transparent left-recursive helper's
+                // value is the whole accumulated child list — so the SPPF chain of
+                // n helper nodes builds Inlines of size 1, 2, …, n = O(n²) elements
+                // total (and `deriv_memo` then clones them). Counting the
+                // materialized derivation sizes here (behind `perf-counters`)
+                // exhibits that quadratic deterministically — the signal the
+                // streaming fix (the explicit analog of #55) must flatten. It is
+                // *not* the cartesian clone loop the issue guessed (that is
+                // linear; see `expand_combine`). Gated at the call site (not just
+                // inside the no-op) so the `sum` — itself O(materialized
+                // children), i.e. the quadratic we are measuring — is never
+                // computed in a normal build.
+                #[cfg(feature = "perf-counters")]
+                crate::perf::add_explicit_node_children(
+                    derivs.iter().map(node_value_size).sum::<u64>(),
+                );
+                self.deriv_memo.insert(node, derivs.clone());
+                w.ret = Some(Ret::Derivs(derivs));
+            }
+            Some(&fi) => {
+                let packed = self.forest.nodes[node].families[fi];
+                w.frames.push(Frame::DerivsNext {
+                    node,
+                    fams,
+                    idx,
+                    rule: packed.rule,
+                    derivs,
+                    keys,
+                });
+                w.frames.push(Frame::ExpandPacked { packed });
+            }
         }
-        // Trailing placeholders of a distributed absent `[...]` (the streaming
-        // mirror of `TreeBuilder::shape`'s trailing append).
-        let len = self.grammar.rules[rule].expansion.len();
-        self.push_nones_before(rule, len, out);
-        Some(rule)
+    }
+
+    /// Explicit: handle `packed.right` once the left prefixes are known — the
+    /// tail half of the former `expand_packed`.
+    ///
+    /// The alternative values the right symbol contributes are normally one — but
+    /// a *transparent* (`_rule` / `__anon_*`) child that is itself ambiguous under
+    /// explicit ambiguity contributes one alternative per derivation, which is
+    /// distributed over the parent's child-lists. This is Lark's
+    /// `AmbiguousExpander`: rather than nest an `_ambig` under the spliced
+    /// position, the ambiguity is shifted up so the parent itself becomes the
+    /// `_ambig` (`parent(_ambig(a, b))` → `_ambig(parent(a), parent(b))`).
+    fn expand_right(&mut self, w: &mut Walk, packed: Packed, lefts: Vec<Vec<NodeValue>>) {
+        match packed.right {
+            // ε right: the child-lists are exactly the left prefixes.
+            ForestRef::None => w.ret = Some(Ret::Lists(lefts)),
+            ForestRef::Node(rid) => {
+                let transparent_right = !self.resolve && self.is_transparent_node(rid);
+                w.frames.push(Frame::ExpandCombine {
+                    lefts,
+                    transparent_right,
+                });
+                if transparent_right {
+                    w.frames.push(Frame::Derivs { node: rid });
+                } else {
+                    w.frames.push(Frame::Eval { node: rid });
+                }
+            }
+            ForestRef::Tok(t) => {
+                let tok = self.forest.tokens[t].clone();
+                self.expand_combine(w, &lefts, &[NodeValue::Token(tok)]);
+            }
+        }
+    }
+
+    /// Explicit: the cartesian product of left prefixes × right alternatives.
+    ///
+    /// The named #56 Arm-2 suspect: clone each growing prefix to form the
+    /// cartesian product of left prefixes × right values. Counting the
+    /// `NodeValue`s copied here (behind `perf-counters`) is what *disproves* that
+    /// guess — it stays **linear** even on a transparent left-recursive helper
+    /// (`x*` / `x+` / `_rule`), because every rule's binarized RHS prefix is
+    /// bounded (≤ its arity), so this clone is O(1) per node. The real explicit
+    /// super-linearity is the per-node derivation-value rebuild counted in
+    /// `derivs_try_family` — the still-missing explicit analog of #55's
+    /// resolve-mode streaming. Kept verbatim (no fast path) so the disproof
+    /// measures the actual loop; the true fix is tracked as a follow-up (#59).
+    fn expand_combine(&self, w: &mut Walk, lefts: &[Vec<NodeValue>], right_alts: &[NodeValue]) {
+        let mut out: Vec<Vec<NodeValue>> = Vec::with_capacity(lefts.len() * right_alts.len());
+        for list in lefts {
+            for rv in right_alts {
+                crate::perf::add_explicit_prefix_copies(list.len() as u64);
+                let mut l = list.clone();
+                l.push(rv.clone());
+                out.push(l);
+            }
+        }
+        w.ret = Some(Ret::Lists(out));
+    }
+
+    /// Explicit: expand family `fams[idx]` of intermediate `node`, or finish (the
+    /// loop of the former `expand_intermediate`).
+    fn inter_try_family(
+        &mut self,
+        w: &mut Walk,
+        node: usize,
+        fams: Vec<usize>,
+        idx: usize,
+        out: Vec<Vec<NodeValue>>,
+    ) {
+        match fams.get(idx) {
+            None => {
+                w.visiting.remove(&node);
+                w.ret = Some(Ret::Lists(out));
+            }
+            Some(&fi) => {
+                let packed = self.forest.nodes[node].families[fi];
+                w.frames.push(Frame::InterNext {
+                    node,
+                    fams,
+                    idx,
+                    out,
+                });
+                w.frames.push(Frame::ExpandPacked { packed });
+            }
+        }
     }
 
     /// Push the `None` placeholders a distributed absent `[...]` left before
@@ -1684,104 +2048,151 @@ impl<'a> Transformer<'a> {
             out.push(Child::None);
         }
     }
+}
 
-    /// Expand an intermediate node into the alternative child-lists it contributes
-    /// to its parent rule. Under `resolve` only the best (first non-discarded)
-    /// derivation is kept.
-    fn expand_intermediate(
-        &mut self,
-        node_id: usize,
-        visiting: &mut HashSet<usize>,
-    ) -> Vec<Vec<NodeValue>> {
-        if !visiting.insert(node_id) {
-            return Vec::new(); // cycle — discard
-        }
-        let order = self.sorted_families(node_id);
-        let mut out: Vec<Vec<NodeValue>> = Vec::new();
-        for fi in order {
-            let packed = self.forest.nodes[node_id].families[fi];
-            let lists = self.expand_packed(&packed, visiting);
-            if self.resolve {
-                if !lists.is_empty() {
-                    out = lists;
-                    break;
-                }
-            } else {
-                out.extend(lists);
-            }
-        }
-        visiting.remove(&node_id);
-        out
+/// One step of the de-recursed forest walk (issue #33). *Work* variants are the
+/// entries of the former recursive functions; *continuation* variants resume them
+/// after the child item above finishes (its result in [`Walk::ret`]).
+///
+/// Correspondence to the former recursion — resolve mode (the streaming assembly
+/// of #54/#55):
+///
+/// | function               | work          | continuation(s)                  |
+/// |------------------------|---------------|----------------------------------|
+/// | `eval_symbol`          | `Eval`        | `EvalShape`                      |
+/// | `append_rule_children` | `AppendRule`  | `RuleNext`                       |
+/// | `append_packed`        | `AppendPacked`| `PackedRight`, `PackedAfterSplice`, `PackedAfterEval` |
+/// | `splice_node`          | `Splice`      | `SpliceTail`                     |
+///
+/// explicit mode:
+///
+/// | function               | work           | continuation(s)               |
+/// |------------------------|----------------|-------------------------------|
+/// | `eval_symbol`          | `Eval`         | `EvalAmbig`                   |
+/// | `symbol_derivations`   | `Derivs`       | `DerivsNext`                  |
+/// | `expand_packed`        | `ExpandPacked` | `ExpandRight`, `ExpandCombine`|
+/// | `expand_intermediate`  | `ExpandInter`  | `InterNext`                   |
+enum Frame {
+    Eval {
+        node: usize,
+    },
+    EvalShape {
+        node: usize,
+    },
+    AppendRule {
+        node: usize,
+    },
+    /// Resume after the attempt of family `fams[idx]` (whose rule is `rule`);
+    /// `mark` is the buffer length to roll back to if it was discarded.
+    RuleNext {
+        node: usize,
+        fams: Vec<usize>,
+        idx: usize,
+        mark: usize,
+        rule: usize,
+    },
+    AppendPacked {
+        packed: Packed,
+    },
+    /// Resume after the left prefix of `packed` streamed in.
+    PackedRight {
+        packed: Packed,
+    },
+    PackedAfterSplice,
+    /// Resume after the right symbol's value; `rule`/`right_pos` locate its
+    /// position for per-position token filtering.
+    PackedAfterEval {
+        rule: usize,
+        right_pos: usize,
+    },
+    Splice {
+        node: usize,
+    },
+    SpliceTail,
+    EvalAmbig {
+        node: usize,
+    },
+    Derivs {
+        node: usize,
+    },
+    /// Resume after family `fams[idx]` (rule `rule`) expanded; `derivs`/`keys`
+    /// are the accumulated deduped values.
+    DerivsNext {
+        node: usize,
+        fams: Vec<usize>,
+        idx: usize,
+        rule: usize,
+        derivs: Vec<NodeValue>,
+        keys: HashSet<String>,
+    },
+    ExpandPacked {
+        packed: Packed,
+    },
+    /// Resume after the left intermediate's child-lists.
+    ExpandRight {
+        packed: Packed,
+    },
+    /// Resume after the right symbol's value(s); `transparent_right` records
+    /// which child item was pushed (`Derivs` vs `Eval`), i.e. which `Ret`
+    /// variant to consume.
+    ExpandCombine {
+        lefts: Vec<Vec<NodeValue>>,
+        transparent_right: bool,
+    },
+    ExpandInter {
+        node: usize,
+    },
+    /// Resume after family `fams[idx]` expanded; `out` is the accumulated lists.
+    InterNext {
+        node: usize,
+        fams: Vec<usize>,
+        idx: usize,
+        out: Vec<Vec<NodeValue>>,
+    },
+}
+
+/// The value a finished walk item hands back — the return value of the
+/// corresponding former recursive function.
+enum Ret {
+    /// `eval_symbol`: the node's single value, or `None` if every derivation was
+    /// discarded.
+    Value(Option<NodeValue>),
+    /// `append_rule_children` / `splice_node`: the chosen rule, or `None` if
+    /// every family was discarded.
+    Rule(Option<usize>),
+    /// `append_packed`: did this derivation contribute its children?
+    Packed(bool),
+    /// `symbol_derivations`: the node's deduped derivation values.
+    Derivs(Vec<NodeValue>),
+    /// `expand_packed` / `expand_intermediate`: alternative child-lists.
+    Lists(Vec<Vec<NodeValue>>),
+}
+
+/// Mutable state of one [`Transformer::transform`] run: the frame stack, the
+/// resolve-mode child-buffer stack (each `Eval` pushes a fresh buffer; splices
+/// stream into the top one, so `RuleNext`'s rollback marks stay valid), the
+/// in-progress cycle set (the former `visiting` parameter), and the return-value
+/// slot connecting a finished item to its continuation.
+struct Walk {
+    frames: Vec<Frame>,
+    bufs: Vec<Vec<Child>>,
+    visiting: HashSet<usize>,
+    ret: Option<Ret>,
+}
+
+impl Walk {
+    /// Take the child item's return value (each continuation consumes exactly one).
+    fn take_ret(&mut self) -> Ret {
+        self.ret
+            .take()
+            .expect("a finished walk item set a return value")
     }
 
-    /// Expand one derivation (packed node) into its rule's child-lists. `left` is
-    /// always an intermediate (the accumulated prefix) or nothing; `right` is the
-    /// symbol just consumed (a symbol node or token leaf) or nothing (ε).
-    fn expand_packed(
-        &mut self,
-        packed: &Packed,
-        visiting: &mut HashSet<usize>,
-    ) -> Vec<Vec<NodeValue>> {
-        let lefts: Vec<Vec<NodeValue>> = match packed.left {
-            ForestRef::None => vec![Vec::new()],
-            ForestRef::Node(id) => self.expand_intermediate(id, visiting),
-            ForestRef::Tok(t) => vec![vec![NodeValue::Token(self.forest.tokens[t].clone())]],
-        };
-        if lefts.is_empty() {
-            return Vec::new();
-        }
-
-        // The alternative values the right symbol contributes. Normally one — but a
-        // *transparent* (`_rule` / `__anon_*`) child that is itself ambiguous under
-        // explicit ambiguity contributes one alternative per derivation, which we
-        // distribute over the parent's child-lists below. This is Lark's
-        // `AmbiguousExpander`: rather than nest an `_ambig` under the spliced
-        // position, the ambiguity is shifted up so the parent itself becomes the
-        // `_ambig` (`parent(_ambig(a, b))` → `_ambig(parent(a), parent(b))`).
-        let right_alts: Vec<NodeValue> = match packed.right {
-            ForestRef::None => Vec::new(),
-            ForestRef::Node(id) => {
-                if !self.resolve && self.is_transparent_node(id) {
-                    let alts = self.symbol_derivations(id, visiting);
-                    if alts.is_empty() {
-                        return Vec::new(); // right discarded → whole derivation gone
-                    }
-                    alts
-                } else {
-                    match self.eval_symbol(id, visiting) {
-                        Some(v) => vec![v],
-                        None => return Vec::new(), // right discarded → whole derivation gone
-                    }
-                }
-            }
-            ForestRef::Tok(t) => vec![NodeValue::Token(self.forest.tokens[t].clone())],
-        };
-
-        if right_alts.is_empty() {
-            // ε right: the child-lists are exactly the left prefixes.
-            return lefts;
-        }
-
-        // The named #56 Arm-2 suspect: clone each growing prefix to form the
-        // cartesian product of left prefixes × right values. Counting the
-        // `NodeValue`s copied here (behind `perf-counters`) is what *disproves* that
-        // guess — it stays **linear** even on a transparent left-recursive helper
-        // (`x*` / `x+` / `_rule`), because every rule's binarized RHS prefix is
-        // bounded (≤ its arity), so this clone is O(1) per node. The real explicit
-        // super-linearity is the per-node derivation-value rebuild counted in
-        // `symbol_derivations` — the still-missing explicit analog of #55's
-        // resolve-mode streaming. Kept verbatim (no fast path) so the disproof
-        // measures the actual loop; the true fix is tracked as a follow-up.
-        let mut out: Vec<Vec<NodeValue>> = Vec::with_capacity(lefts.len() * right_alts.len());
-        for list in &lefts {
-            for rv in &right_alts {
-                crate::perf::add_explicit_prefix_copies(list.len() as u64);
-                let mut l = list.clone();
-                l.push(rv.clone());
-                out.push(l);
-            }
-        }
-        out
+    /// The resolve-mode child buffer currently being streamed into.
+    fn buf(&mut self) -> &mut Vec<Child> {
+        self.bufs
+            .last_mut()
+            .expect("a resolve Eval frame pushed a buffer")
     }
 }
 
@@ -1800,44 +2211,51 @@ fn node_value_size(v: &NodeValue) -> u64 {
 }
 
 /// A stable structural key for de-duplicating equal `_ambig` derivations.
+/// Iterative (explicit work stack) — a derivation value is as deep as the tree it
+/// describes, and the walk that calls this must not recurse to input depth (#33).
 fn node_value_key(v: &NodeValue) -> String {
-    fn child_key(c: &Child, out: &mut String) {
-        match c {
-            Child::Tree(t) => tree_key(t, out),
-            Child::Token(t) => {
-                out.push_str("T:");
-                out.push_str(&t.type_);
-                out.push('=');
-                out.push_str(&t.value);
-            }
-            Child::None => out.push_str("None"),
-        }
+    enum K<'a> {
+        Child(&'a Child),
+        Tree(&'a Tree),
+        Lit(&'static str),
     }
-    fn tree_key(t: &Tree, out: &mut String) {
-        out.push('(');
-        out.push_str(&t.data);
-        for c in &t.children {
-            out.push(' ');
-            child_key(c, out);
-        }
-        out.push(')');
+    fn token_key(t: &Token, out: &mut String) {
+        out.push_str("T:");
+        out.push_str(&t.type_);
+        out.push('=');
+        out.push_str(&t.value);
     }
     let mut out = String::new();
+    let mut stack: Vec<K> = Vec::new();
     match v {
-        NodeValue::Token(t) => {
-            out.push_str("T:");
-            out.push_str(&t.type_);
-            out.push('=');
-            out.push_str(&t.value);
-        }
-        NodeValue::Tree(t) => tree_key(t, &mut out),
+        NodeValue::Token(t) => token_key(t, &mut out),
+        NodeValue::Tree(t) => stack.push(K::Tree(t)),
         NodeValue::Inline(cs) => {
             out.push_str("I[");
-            for c in cs {
-                child_key(c, &mut out);
-                out.push(',');
+            stack.push(K::Lit("]"));
+            for c in cs.iter().rev() {
+                stack.push(K::Lit(","));
+                stack.push(K::Child(c));
             }
-            out.push(']');
+        }
+    }
+    while let Some(k) = stack.pop() {
+        match k {
+            K::Lit(s) => out.push_str(s),
+            K::Child(c) => match c {
+                Child::Tree(t) => stack.push(K::Tree(t)),
+                Child::Token(t) => token_key(t, &mut out),
+                Child::None => out.push_str("None"),
+            },
+            K::Tree(t) => {
+                out.push('(');
+                out.push_str(&t.data);
+                stack.push(K::Lit(")"));
+                for c in t.children.iter().rev() {
+                    stack.push(K::Child(c));
+                    stack.push(K::Lit(" "));
+                }
+            }
         }
     }
     out
