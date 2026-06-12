@@ -4,8 +4,7 @@
 //! so `cargo test` stays green while the gap is documented and reproducible. Run
 //!
 //! ```bash
-//! cargo test --test test_known_gaps -- --ignored                 # gaps 1 & 2
-//! cargo test --features perf-counters --test test_known_gaps -- --ignored  # + gap 3
+//! cargo test --features perf-counters --test test_known_gaps -- --ignored  # gap 3
 //! ```
 //!
 //! and watch them fail — that failure *is* the proof the gap exists. When a gap is
@@ -53,17 +52,20 @@ fn gap1_loader_accepts_trailing_bar_empty_alt() {
     assert!(matches!(tree, ParseTree::Tree(_)));
 }
 
-// ─── Gap 2 (#63): explicit `_ambig` nesting on deeply ambiguous input ──────────
+// ─── Gap 2 (#63, FIXED): explicit `_ambig` nesting on deeply ambiguous input ───
 //
 // For a grammar ambiguous N>2 ways over a span, Python Lark emits ONE `_ambig`
-// node with all N full derivations as flat children. lark-rs emits a *binarized*
-// (nested) `_ambig`, so the child count and shape differ. Grammar:
+// node with all N full derivations as flat children. lark-rs used to emit a
+// *binarized* (nested) `_ambig`, so the child count and shape differed. Grammar:
 // `!start: "x" start | start "x" | "x"` (both left- and right-recursive). For
-// "xxx" Python's root `_ambig` has 4 children; lark-rs nests them and has 2.
-// This is an SPPF→tree ambiguity-flattening difference, independent of Leo (Leo
-// does not even fire on this grammar — its reduction path is not deterministic).
+// "xxx" Python's root `_ambig` has 4 children; lark-rs nested them and had 2.
+// The driver is `keep_all_tokens`: Python's `AmbiguousExpander` `to_expand` set
+// covers *every* position under `!`, so an ambiguous non-transparent child's
+// derivations distribute over the parent instead of nesting an `_ambig` under
+// it. Fixed in `Transformer::expand_right` (the same distribution the
+// transparent-child path always did). Without `!`, Python itself nests — that
+// shape was already matched. This test is now a regression guard.
 #[test]
-#[ignore = "known gap #63: explicit _ambig is nested, not Python's flat N-way, on deeply ambiguous input"]
 fn gap2_explicit_ambig_is_flat_n_way() {
     let lark = earley(
         "!start: \"x\" start | start \"x\" | \"x\"\n",
