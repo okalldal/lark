@@ -15,6 +15,12 @@ cargo test                    # run the full test suite
 cargo test test_json_corpus   # run the 293-file JSONTestSuite corpus
 ```
 
+## Picking Work
+
+When asked to find or take on the most valuable / highest-value work (or given
+no specific task), run **`/next-task`** — it codifies the backlog survey
+(open PRs/issues, STATUS.md follow-ups, xfail burndown) and the selection rubric.
+
 ## Python Lark is Our Oracle
 
 When working on `lark-rs`, use Python Lark as the ground truth:
