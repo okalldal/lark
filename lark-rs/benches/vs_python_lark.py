@@ -266,22 +266,26 @@ def measure(fn):
     return samples[0], samples[len(samples) // 2]
 
 
-GRAMMARS = {"json": JSON_GRAMMAR, "python": PY_GRAMMAR, "sql": SQL_GRAMMAR, "nl": NL_GRAMMAR}
+GRAMMARS = {"json": JSON_GRAMMAR, "python": PY_GRAMMAR, "python_sm": PY_GRAMMAR,
+            "sql": SQL_GRAMMAR, "nl": NL_GRAMMAR}
 
 # (algo, workload, lexer, postlex, start) — mirrored in benches/vs_python_lark.rs.
-# LALR + contextual on JSON/Python/SQL; Earley on the two workloads it can run
-# cross-engine (JSON/basic, SQL/dynamic). Python uses the real upstream
-# python.lark (start="file_input" + PythonIndenter); it has no Earley row: postlex
-# is incompatible with the dynamic lexer, and the basic lexer can't drive the
-# Indenter the way the workload needs — see the .rs module header. CYK runs the
-# NL workload (the one genuinely ambiguous grammar that needs a general-CFG
-# engine), bounded to a short sentence since CYK is O(n³).
+# LALR + contextual on JSON/Python/SQL; Earley on JSON (basic lexer), SQL (dynamic
+# lexer), and python_sm — the real upstream python.lark (start="file_input" +
+# PythonIndenter) over the basic lexer, the one Earley + postlex configuration
+# (postlex is incompatible with the dynamic lexer). python_sm is the same
+# generator as the LALR python workload bounded to a few classes: this engine
+# measures ~0.001 MB/s on python.lark, so the full 125 KB input would take hours
+# per iteration — see the .rs module header. CYK runs the NL workload (the one
+# genuinely ambiguous grammar that needs a general-CFG engine), bounded to a
+# short sentence since CYK is O(n³).
 CONFIGS = [
     ("lalr", "json", "contextual", False, "start"),
     ("lalr", "python", "contextual", True, "file_input"),
     ("lalr", "sql", "contextual", False, "start"),
     ("earley", "json", "basic", False, "start"),
     ("earley", "sql", "dynamic", False, "start"),
+    ("earley", "python_sm", "basic", True, "file_input"),
     ("cyk", "nl", "basic", False, "start"),
 ]
 
@@ -312,6 +316,7 @@ def main():
         inputs = {
             "json": (d / "json.txt").read_text(),
             "python": (d / "python.txt").read_text(),
+            "python_sm": (d / "python_sm.txt").read_text(),
             "sql": (d / "sql.txt").read_text(),
             "nl": (d / "nl.txt").read_text(),
         }
@@ -319,6 +324,7 @@ def main():
         inputs = {
             "json": gen_json(512, 5),
             "python": gen_python(80),
+            "python_sm": gen_python(4),
             "sql": gen_sql(700),
             "nl": gen_nl(12),
         }

@@ -102,8 +102,9 @@ comparison); `median_ns` drives the MB/s. Speedup on a row is
    `cargo bench --bench vs_python_lark` reports it directly on the JSON/Python/SQL/NL
    workloads (see "Cross-engine end-to-end" below).
 2. **Rust-Earley vs Python-Lark-Earley** — the same story for the second engine,
-   now wired into `cargo bench --bench vs_python_lark` (JSON + SQL; ~13–16× on the
-   reference box, since Python Lark's Earley is much slower in absolute terms).
+   now wired into `cargo bench --bench vs_python_lark` (JSON + SQL + python_sm;
+   ~13× on JSON/SQL and ~43× on python_sm on the reference box, since Python
+   Lark's Earley is much slower in absolute terms).
 3. **Rust-Earley vs Rust-LALR** — the *cost of generality*, not "slowness."
    Earley is O(n³) worst case and solves a strictly harder problem; reading a
    cubic-Earley-on-pathological-input number as a regression against LALR is a
@@ -194,9 +195,10 @@ optimization into a tracked delta.
 number behind the project's "10–100×" goal — over four real workloads. It is the
 throughput analog of the oracle: lark-rs and Python Lark parse the **same grammar**
 over the **same bytes**, so the ratio is apples-to-apples. JSON / Python / SQL run
-on **LALR + the contextual lexer** (Lark's primary USP); JSON and SQL *also* run on
-**Earley**, and the NL workload runs on **CYK** — so all three engines have a
-cross-engine number (see "Earley arm" and "CYK arm" below).
+on **LALR + the contextual lexer** (Lark's primary USP); JSON, SQL, and a bounded
+Python workload (`python_sm`, issue #78) *also* run on **Earley**, and the NL
+workload runs on **CYK** — so all three engines have a cross-engine number (see
+"Earley arm" and "CYK arm" below).
 
 - **JSON** — the canonical JSON grammar over a ~92 KB array of records (the
   `json_large` shape from `parse.rs`).
@@ -250,7 +252,7 @@ time the exact same bytes (no generator-drift risk). Both sides assert the
 workload parses before timing, so grammar drift fails loudly rather than silently
 measuring an error path.
 
-### Earley arm (JSON + SQL)
+### Earley arm (JSON + SQL + python_sm)
 
 JSON and SQL also run under `parser='earley'` — the second engine — so the
 "Rust-Earley vs Python-Earley" comparison has a number, not just the
@@ -259,11 +261,14 @@ one each workload needs under Earley: **JSON → basic**, **SQL → dynamic** (t
 basic lexer can't tell the assignment `=` from the comparison `=` in the SQL
 grammar — true in *both* engines, so it's a fair constraint, not a lark-rs gap).
 
-**Python has no Earley row.** Its `Indenter` postlex hook is LALR-only in lark-rs,
-and Python Lark itself refuses postlex with the dynamic lexer
-(`Can't use postlex with a dynamic lexer`) — so there is simply no apples-to-apples
-Earley configuration for a significant-whitespace grammar to compare. Lifting
-postlex onto the Earley engine is future work.
+**`python_sm`** is the Earley row for the significant-whitespace workload
+(issue #78): the real upstream `python.lark` + the `Indenter` postlex hook over
+the **basic** lexer — the one Earley + postlex configuration both engines support
+(both refuse postlex with the dynamic lexer; Python Lark's `lexer='auto'`
+resolves to `'basic'` for Earley + postlex too). It is the same generator as the
+LALR `python` workload **bounded to a few classes (~6 KB)**: Python Lark's Earley
+measures ~0.001 MB/s on this grammar, so the full 125 KB input would take ~10
+minutes *per iteration* on the Python side.
 
 ### CYK arm (NL) — issue #87
 
@@ -288,39 +293,41 @@ Machine-specific — **only ratios travel**; capture fresh numbers on your own b
 
 - `Linux x86_64`, Intel Xeon @ 2.80 GHz, 4 cores, `rustc 1.94.1`, release + LTO.
 - **Python Lark 1.3.1**, CPython 3.11.15 (the in-tree copy). LALR rows use
-  `lexer='contextual'`; Earley rows use `lexer='basic'` (JSON) / `'dynamic'` (SQL).
-  Measured 2026-06-06 (the Python row re-measured against the **real upstream
-  `python.lark`** — issue #79; see below).
+  `lexer='contextual'`; Earley rows use `lexer='basic'` (JSON, python_sm) /
+  `'dynamic'` (SQL). Measured 2026-06-12 (full re-run — first measurement since
+  the DFA lexer backend became the default and postlex landed on Earley, #78).
 
 | engine | workload | bytes | Rust MB/s | Python MB/s | speedup |
 |--------|----------|------:|----------:|------------:|--------:|
-| LALR   | JSON   | ~92 KB  | ~4.3 | ~0.9 | **~4.5×** |
-| LALR   | Python | ~122 KB | ~0.5 | ~0.3 | **~1.8×** |
-| LALR   | SQL    | ~57 KB  | ~3.2 | ~0.8 | **~4.2×** |
-| Earley | JSON   | ~92 KB  | ~0.5 | ~0.1 | **~10.2×** |
-| Earley | SQL    | ~57 KB  | ~0.1 | ~0.01 | **~13.5×** |
-| CYK    | NL     | ~186 B  | ~0.6 | ~0.02 | **~29.5×** |
+| LALR   | JSON      | ~92 KB  | ~5.4  | ~0.7   | **~7.2×** |
+| LALR   | Python    | ~122 KB | ~1.5  | ~0.2   | **~6.7×** |
+| LALR   | SQL       | ~57 KB  | ~3.6  | ~0.6   | **~5.6×** |
+| Earley | JSON      | ~92 KB  | ~0.5  | ~0.04  | **~12.9×** |
+| Earley | SQL       | ~57 KB  | ~0.1  | ~0.007 | **~13.3×** |
+| Earley | python_sm | ~6 KB   | ~0.06 | ~0.001 | **~43.2×** |
+| CYK    | NL        | ~186 B  | ~0.5  | ~0.02  | **~26.9×** |
 
 **Reading.** Three separate stories:
 
-- **LALR** — lark-rs is ~4–5× faster than Python Lark on JSON/SQL, consistent with
-  the internal baseline above (~4–5× on JSON/arith). The **Python** row is lower
-  (~1.8×) and is the honest outlier: the real upstream `python.lark` routes its
-  `STRING`/`LONG_STRING`/`DEC_NUMBER` terminals through `fancy-regex` (lookaround —
-  see the "Key Design Decisions" note in `CLAUDE.md`), which carries a per-token
-  constant-factor tax the pure-`regex` JSON/SQL scanners do not, and it is a far
-  larger grammar. Still a real win on the *actual* Python grammar (issue #79), not a
-  curated subset. The general gap to the "10–100×" headline is the
-  deliberately-deferred tree-representation work (`Box<str>`/arena labels, zero-copy
-  spans — see the profiling findings below; parse throughput is allocation-bound,
-  ~3 allocations per input byte, not algorithm-bound).
-- **Earley** — the margin is *larger* (~13–16×), because Python Lark's Earley is
-  dramatically slower in absolute terms (multiple seconds per parse here) while
-  lark-rs's Earley stays in the tens-to-hundreds of ms. This is the second engine
-  paying its cost-of-generality (Earley is much slower than LALR *within* lark-rs
-  too — see `parse.rs`), but doing so far more cheaply than the reference
-  implementation. SQL's dynamic lexer is the most expensive configuration, which is
-  exactly where the gap is widest.
+- **LALR** — lark-rs is ~6–7× faster than Python Lark across all three workloads.
+  The **Python** row used to be the honest outlier (~1.8× when its
+  `STRING`/`LONG_STRING`/`DEC_NUMBER` terminals routed through `fancy-regex`);
+  with the DFA backend lowering those lookarounds into the combined scanner
+  (`docs/LEXER_DFA_PLAN.md`, L4) it now sits with the others (~6.7×, and ~3×
+  faster in absolute MB/s than the old fancy-routed number). The general gap to
+  the "10–100×" headline is the deliberately-deferred tree-representation work
+  (`Box<str>`/arena labels, zero-copy spans — see the profiling findings below;
+  parse throughput is allocation-bound, ~3 allocations per input byte, not
+  algorithm-bound).
+- **Earley** — the margin is *larger* (~13× on JSON/SQL, ~43× on python_sm),
+  because Python Lark's Earley is dramatically slower in absolute terms (multiple
+  seconds per parse here) while lark-rs's Earley stays in the tens-to-hundreds of
+  ms. This is the second engine paying its cost-of-generality (Earley is much
+  slower than LALR *within* lark-rs too — see `parse.rs`), but doing so far more
+  cheaply than the reference implementation. The gap is widest on the two
+  heaviest configurations: SQL's dynamic lexer and python_sm's big-grammar
+  significant-whitespace parse (the row issue #78 made possible — neither engine
+  could run Earley + postlex before).
 - **CYK** — the widest margin (~29×). Same story as Earley but more pronounced:
   Python Lark's pure-Python CYK DP pays a large constant factor per table cell,
   while lark-rs's port keeps the same O(n³) shape in native code. The absolute

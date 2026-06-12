@@ -19,11 +19,14 @@
 //!
 //! JSON / Python / SQL are run on **LALR + the contextual lexer** (Lark's primary
 //! USP), and JSON + SQL are *also* run on **Earley** (the second engine) so the
-//! Earley-vs-Python-Earley story has a number too. Python has no Earley row: its
-//! `Indenter` postlex hook is LALR-only in lark-rs, and Python Lark can't pair
-//! postlex with the dynamic lexer either — there is no apples-to-apples Earley
-//! configuration for a significant-whitespace grammar. (The Earley-vs-LALR *cost
-//! of generality* — same engine, same input — lives in `benches/parse.rs`.)
+//! Earley-vs-Python-Earley story has a number too. The Python workload runs under
+//! Earley as **`python_sm`** — the same generator, bounded to a few classes —
+//! on `lexer='basic'` + the `Indenter` postlex hook (issue #78), the one
+//! Earley + postlex configuration both engines support (neither can pair postlex
+//! with the dynamic lexer). It is bounded because Python Lark's Earley measures
+//! ~0.001 MB/s on this grammar — the full 125 KB input would take hours per
+//! iteration there. (The Earley-vs-LALR *cost of generality* — same engine, same
+//! input — lives in `benches/parse.rs`.)
 //!
 //! The **NL** workload runs only on **CYK** (lark-rs vs Python Lark's CYK): it is
 //! the one genuinely ambiguous grammar here, so it's the like-for-like CYK-vs-CYK
@@ -403,10 +406,11 @@ struct Config {
 }
 
 /// The LALR row uses the contextual lexer (Lark's USP) on all three workloads.
-/// The Earley row covers the two workloads Earley can run cross-engine: JSON
-/// (basic lexer) and SQL (the *dynamic* lexer — the basic lexer can't tell the
-/// assignment `=` from the comparison `=` here, in either engine). Python is
-/// **omitted under Earley** (postlex is LALR-only); see the module header.
+/// The Earley row covers JSON (basic lexer), SQL (the *dynamic* lexer — the
+/// basic lexer can't tell the assignment `=` from the comparison `=` here, in
+/// either engine), and `python_sm` — the real `python.lark` + Indenter postlex
+/// over the basic lexer (issue #78), input-bounded because Python Lark's Earley
+/// is ~0.001 MB/s on it (see the module header).
 ///
 /// The CYK row uses the **NL** workload — the one grammar here that genuinely
 /// *needs* a general-CFG engine (JSON/SQL/Python are all LALR-parseable). CYK is
@@ -458,6 +462,15 @@ fn configs() -> Vec<Config> {
             start: "start",
             postlex: false,
             maybe_placeholders: false,
+        },
+        Config {
+            name: "python_sm",
+            algo: Algo::Earley,
+            lexer: LexerType::Basic,
+            grammar: PY_GRAMMAR,
+            start: "file_input",
+            postlex: true,
+            maybe_placeholders: true,
         },
         Config {
             name: "nl",
@@ -608,6 +621,9 @@ fn main() {
     let inputs: HashMap<&str, String> = HashMap::from([
         ("json", gen_json(512, 5)),
         ("python", gen_python(80)),
+        // Earley + python.lark (issue #78): same generator, bounded to a few
+        // classes — Python Lark's Earley is ~0.001 MB/s on this grammar.
+        ("python_sm", gen_python(4)),
         ("sql", gen_sql(700)),
         // CYK is O(n³): a single ambiguous sentence (12 PPs ≈ 40 tokens), not a file.
         ("nl", gen_nl(12)),
@@ -627,6 +643,7 @@ fn main() {
     let py = run_python(&[
         ("json", &inputs["json"]),
         ("python", &inputs["python"]),
+        ("python_sm", &inputs["python_sm"]),
         ("sql", &inputs["sql"]),
         ("nl", &inputs["nl"]),
     ]);

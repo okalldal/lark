@@ -227,6 +227,28 @@ impl ParserDriver for EarleyBasic {
     }
 }
 
+/// Earley driven by a postlex hook over the basic lexer (issue #78): the same
+/// materialized-stream wiring as [`LalrPostlex`] — lex everything, let the
+/// [`Indenter`] rewrite the stream (injecting INDENT/DEDENT), then parse.
+/// Earley has no contextual lexer (nothing narrows terminals by parser state),
+/// and the dynamic lexer folds scanning into the parse loop so there is no
+/// token stream to rewrite — Python Lark refuses that pairing too.
+struct EarleyPostlex {
+    parser: EarleyParser,
+    lexer: BasicLexer,
+    postlex: Indenter,
+    symbols: SymbolTable,
+    resolve: bool,
+}
+
+impl ParserDriver for EarleyPostlex {
+    fn parse(&self, text: &str, start: Option<&str>) -> Result<ParseTree, ParseError> {
+        let tokens = self.lexer.lex(text)?;
+        let tokens = self.postlex.process(tokens, &self.symbols)?;
+        self.parser.parse(&tokens, start, self.resolve)
+    }
+}
+
 /// Earley with the dynamic lexer (Sprint 5): scanning folded into the parse
 /// loop, trying exactly the terminals the parser predicts at each position.
 struct EarleyDynamic {
@@ -247,15 +269,22 @@ impl ParserDriver for EarleyDynamic {
 
 /// CYK over the basic lexer. Like Earley, CYK has no parser-state-driven
 /// lexer, so it always uses the basic lexer; the grammar is converted to
-/// Chomsky Normal Form once when the parser is built.
+/// Chomsky Normal Form once when the parser is built. `postlex` rewrites the
+/// materialized stream before the DP, exactly like the other basic-lexer
+/// postlex drivers — Python Lark wires its `PostLexConnector` in front of
+/// every parser the same way.
 struct Cyk {
     parser: CykParser,
     lexer: BasicLexer,
+    postlex: Option<(Indenter, SymbolTable)>,
 }
 
 impl ParserDriver for Cyk {
     fn parse(&self, text: &str, start: Option<&str>) -> Result<ParseTree, ParseError> {
-        let tokens = self.lexer.lex(text)?;
+        let mut tokens = self.lexer.lex(text)?;
+        if let Some((postlex, symbols)) = &self.postlex {
+            tokens = postlex.process(tokens, symbols)?;
+        }
         self.parser.parse(&tokens, start)
     }
 }
@@ -310,12 +339,18 @@ pub fn build_frontend(
     grammar: &Grammar,
     options: &LarkOptions,
 ) -> Result<ParsingFrontend, LarkError> {
-    // postlex is currently wired only through the LALR frontend (issue #67 tracks
-    // the contextual-lexer/other-backend support). Fail loudly rather than
-    // silently ignoring a configured hook on Earley/CYK.
-    if options.postlex.is_some() && options.parser != ParserAlgorithm::Lalr {
+    // postlex rides every parser (LALR: basic + contextual; Earley/CYK: basic —
+    // issue #78), but never the dynamic lexer: scanning is folded into the Earley
+    // loop there, so no token stream exists for the hook to rewrite. Python Lark
+    // refuses the same pairing. Fail loudly rather than silently ignoring the hook.
+    if options.postlex.is_some()
+        && matches!(
+            options.lexer,
+            LexerType::Dynamic | LexerType::DynamicComplete
+        )
+    {
         return Err(LarkError::Grammar(GrammarError::Other {
-            msg: "postlex (Indenter) is only supported with parser='lalr'".to_string(),
+            msg: "Can't use postlex with a dynamic lexer. Use lexer='basic' instead".to_string(),
         }));
     }
     let driver = match options.parser {
@@ -458,7 +493,30 @@ fn build_earley(
             check_zero_width_terminals(&lexer_conf)?;
             check_regex_collisions(&lexer_conf, options.strict, None)?;
             let lexer = BasicLexer::new(&lexer_conf)?;
+            // postlex (issue #78): validate the hook's terminal names at build
+            // time (same contract as the LALR builders), then rewrite the
+            // materialized stream before the chart is built. Python Lark's
+            // `lexer='auto'` resolves to 'basic' for Earley + postlex, which is
+            // exactly the path every non-dynamic LexerType takes here (the
+            // dynamic pairing was refused in `build_frontend`). The symbol
+            // table is cloned out before the parser consumes the grammar.
+            let postlex = match &options.postlex {
+                Some(p) => {
+                    p.validate(&cg.symbols)?;
+                    Some((p.clone(), cg.symbols.clone()))
+                }
+                None => None,
+            };
             let parser = EarleyParser::new(cg);
+            if let Some((postlex, symbols)) = postlex {
+                return Ok(Box::new(EarleyPostlex {
+                    parser,
+                    lexer,
+                    postlex,
+                    symbols,
+                    resolve,
+                }));
+            }
             Ok(Box::new(EarleyBasic {
                 parser,
                 lexer,
@@ -479,6 +537,19 @@ fn build_cyk(grammar: &Grammar, options: &LarkOptions) -> Result<Box<dyn ParserD
     check_zero_width_terminals(&lexer_conf)?;
     check_regex_collisions(&lexer_conf, options.strict, None)?;
     let lexer = BasicLexer::new(&lexer_conf)?;
+    // postlex (issue #78): same build-time validation + materialized-stream
+    // rewrite as the Earley basic path; Python Lark supports CYK + postlex too.
+    let postlex = match &options.postlex {
+        Some(p) => {
+            p.validate(&cg.symbols)?;
+            Some((p.clone(), cg.symbols.clone()))
+        }
+        None => None,
+    };
     let parser = CykParser::new(cg)?;
-    Ok(Box::new(Cyk { parser, lexer }))
+    Ok(Box::new(Cyk {
+        parser,
+        lexer,
+        postlex,
+    }))
 }
