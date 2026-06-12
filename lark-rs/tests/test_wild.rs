@@ -260,9 +260,16 @@ fn test_wild_bank() {
             Err(e) => {
                 failures.insert(format!("build:{name}"));
                 details.push(format!("build:{name}: {e}"));
-                // If an alt grammar exists, try it. An alt grammar documents a
-                // workaround that produces identical parse trees: it lets the
-                // bank classify "compatible with edit" vs. "incompatible".
+                // Original grammar can't build → all its inputs are failures.
+                for case in cases {
+                    let f = case["input_file"].as_str().unwrap_or("?");
+                    failures.insert(format!("parse:{name}:{f}"));
+                }
+                // If an alt grammar exists, also try it. An alt grammar documents a
+                // workaround that produces identical parse trees: it lets the bank
+                // classify "compatible with edit" vs. "incompatible". Its results
+                // are supplementary — it can only ADD failures (if the alt itself is
+                // broken), never remove the original grammar's failures above.
                 if let Some(alt_rel) = meta["alt_grammar"].as_str() {
                     let alt_path = pdir.join(alt_rel);
                     let alt_grammar = std::fs::read_to_string(&alt_path)
@@ -296,16 +303,7 @@ fn test_wild_bank() {
                         Err(e) => {
                             failures.insert(format!("build-alt:{name}"));
                             details.push(format!("build-alt:{name}: {e}"));
-                            for case in cases {
-                                let f = case["input_file"].as_str().unwrap_or("?");
-                                failures.insert(format!("parse:{name}:{f}"));
-                            }
                         }
-                    }
-                } else {
-                    for case in cases {
-                        let f = case["input_file"].as_str().unwrap_or("?");
-                        failures.insert(format!("parse:{name}:{f}"));
                     }
                 }
                 continue;
