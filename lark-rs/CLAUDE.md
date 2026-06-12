@@ -129,7 +129,10 @@ Requirements: `pip install lark pre-commit` and the JSONTestSuite submodule
 src/
   lib.rs              Public API: Lark, LarkOptions, ParserAlgorithm, LexerType
   error.rs            LarkError, GrammarError, ParseError
-  tree.rs             Tree, Token (carries type_id: SymbolId), Child
+  tree.rs             Tree, Token (carries type_id: SymbolId), Child. Tree's
+                      Drop/Clone are manual worklist impls (#151) — the derived
+                      glue recurses to tree depth, which overflows small native
+                      stacks (WASM's ~1 MB) on deeply nested parse results
   postlex.rs          Indenter — postlex stream transform (INDENT/DEDENT injection)
   standalone/         Standalone parser generation (#42)
     mod.rs            bake ParseTable + lexer → self-contained Rust source
@@ -189,9 +192,11 @@ tests/
   test_earley_dynamic.rs  Curated dynamic-lexer oracles (overlap, %ignore, dynamic_complete)
   test_earley_compliance.rs  Replays the Earley compliance bank (XFAIL-gated); the Phase-2 regression net
   test_earley_dynamic_compliance.rs  Replays the dynamic-lexer Earley bank (XFAIL-gated)
-  test_earley_stack.rs  #33 net: deep forest walks replayed on a 512 KB thread —
-                      crashes (stack overflow) if input-depth recursion creeps
-                      back into the forest→tree walk
+  test_earley_stack.rs  #33/#151 net: deep forest walks replayed on a 512 KB
+                      thread — crashes (stack overflow) if input-depth recursion
+                      creeps back into the forest→tree walk or Tree's
+                      Drop/Clone (the deep result is cloned + dropped on the
+                      same small stack)
   test_cyk_compliance.rs  Replays the CYK compliance bank (XFAIL-gated); the Phase-3 CYK regression net
   test_cyk_scaling.rs Deterministic cubic-envelope gate (#87): asserts the O(n³·|grammar|) table fill stays flat per n³ on a densely ambiguous grammar (perf-counters feature)
   test_recovery.rs    Error-recovery oracle (#43) — single-token-deletion recovery vs Python Lark's `on_error` driver: tree + deletion-count parity, plus on_error/partial-tree behaviour
@@ -225,6 +230,10 @@ tests/
                       cyk_bank.json + cyk_xfail.json (CYK)
     wild/             <project>.json + xfail.json — wild-bank oracles (tests/wild/)
   corpora/            Git submodules for external test corpora (JSONTestSuite)
+  wasm/               JS smoke tests for the WASM binding (#47): replay the JSON
+                      oracle corpus through the wasm-pack npm package and pin the
+                      WASM-specific constraints (deep-tree stack safety, no-fs
+                      %import behavior). Run via `npm test` in lark-rs/wasm/
 
 tools/
   generate_oracles.py        Runs Python Lark, writes fixtures/oracles/**/*.json
@@ -365,7 +374,12 @@ forest→tree walk (value assembly, lazy priority sum, `_ambig` dedup keying) ru
 on explicit heap frames instead of native recursion, so the dedicated 256 MB-stack
 thread is gone and the walk's native-stack use is O(1) in forest depth (pinned by
 `tests/test_earley_stack.rs`, which replays deep transparent/nested chains on a
-512 KB thread; this also unblocks WASM (#47), which has no `std::thread`).
+512 KB thread; this also unblocked WASM (#47), which has no `std::thread`).
+#151 (its follow-up) is ✅ done — `Tree`'s `Drop`/`Clone` are manual worklist
+impls (in both `tree.rs` and the standalone runtime's own `Tree`), closing the
+last input-depth recursion: the compiler-derived glue, which bit when a caller
+dropped/cloned a deep result tree or the walk discarded a deep already-built
+child (resolve-mode family rollback).
 #35 (strict regex-collision) is ✅ done — a
 `regex-automata` product-construction emptiness test backs the strict-mode check.
 #31 (Earley perf gate) is ✅ done — the shared bench harness re-runs the
@@ -415,7 +429,7 @@ grammars), but the behavioral findings stay pinned in `tests/test_lookaround.rs`
 | Component | Status | Notes |
 |-----------|--------|-------|
 | PyO3 Python binding | ✅ | `lark-rs/python/` — a `maturin`/PyO3 crate exposing `Lark` / `Tree` / `Token` with Python Lark's kwargs (`parser`, `lexer`, `start`, `ambiguity`, `propagate_positions`, `keep_all_tokens`, `maybe_placeholders`, `strict`, `g_regex_flags`). `Token` is `str`-like; errors map to `LarkError`/`GrammarError`/`ParseError`. `abi3-py38` wheel via `maturin build`. Round-trip parity pinned against the Python-Lark oracle by `python/tests/test_roundtrip.py` |
-| WASM target | ⬜ | Browser/Node.js. No longer gated on the forest walk's `std::thread` stack band-aid (#33 ✅, the walk is iterative); `%import` from file paths still needs an in-memory file provider |
+| WASM target | ✅ | `lark-rs/wasm/` (#47) — a `wasm-bindgen` crate (excluded from the workspace, like `python/`) packaged by `wasm-pack` into an npm package (`npm run build` → `pkg/` for Node, `pkg-web/` for browsers). API mirrors the PyO3 binding (`new Lark(grammar, {parser, lexer, start, ...})`, errors with `name` = `GrammarError`/`ParseError`); `.parse()` returns the tree as a plain JS object in the **oracle JSON shape**, so JS tests compare directly against committed Python-Lark fixtures. Serialization is an explicit-stack walk and `Tree`'s `Drop`/`Clone` are iterative (#151), so deep parse results survive WASM's ~1 MB stack — pinned by a 50k-deep smoke case. Bundled `%import` libraries work (in-memory); a *file* `%import` fails with the usual `ImportNotFound` (an in-memory file-provider API is a possible follow-up). Gated by `tests/wasm/` (JS smoke tests vs the JSON oracle corpus) in its own CI job (`wasm-binding`) |
 | C API | ✅ | `lark_h` crate (#48): `#[no_mangle]` surface (`lark_new`/`lark_parse`/`lark_tree_*`/`lark_free`) + committed `lark.h` + C smoke test. lark-rs is now a workspace so `cargo test --all` covers it |
 | `include_lark!` proc-macro | 🟡 | Compile-time grammar validation (#49). `lark_proc/` crate: `include_lark!("grammars/x.lark")` reads + validates the grammar through the real `Lark` loader at `cargo build`, so a bad grammar is a compiler error (file/line, attributed to the macro span), and generates a typed `XParser` struct with `parse(&str) -> Result<ParseTree, ParseError>`. The grammar source is embedded; the `Lark` is built once per thread (`thread_local!`, since `Lark` is not `Sync`). Pinned by `lark_proc/tests/include_lark.rs` (runtime parsing) and `lark_proc/tests/compile_fail.rs` (a malformed grammar fails `cargo build` with the validation error attributed to the macro span — the headline #49 guarantee, regression-netted). Follow-up: bake the LALR `ParseTable` into `const` data so no table construction happens at runtime (regex lexer still compiles patterns at runtime regardless) |
 | Benchmarks vs Python Lark | ✅ | #50: `cargo bench --bench vs_python_lark` — JSON / Python / SQL through both engines, byte-identical inputs, prints MB/s + speedup (~4–6× on the reference box). Results in `BENCH.md` |

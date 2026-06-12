@@ -1,0 +1,13 @@
+{
+  "name": "lark-rs-wasm-dev",
+  "private": true,
+  "description": "Build/test harness for the lark-rs WASM binding. The publishable npm package is generated into pkg/ by `npm run build` (wasm-pack).",
+  "scripts": {
+    "build": "wasm-pack build --target nodejs --out-dir pkg",
+    "build:web": "wasm-pack build --target web --out-dir pkg-web",
+    "test": "npm run build && node --test ../tests/wasm/*.test.mjs"
+  },
+  "devDependencies": {
+    "wasm-pack": "^0.15.0"
+  }
+}
