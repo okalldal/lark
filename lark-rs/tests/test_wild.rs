@@ -266,14 +266,19 @@ fn test_wild_bank() {
                     let f = case["input_file"].as_str().unwrap_or("?");
                     failures.insert(format!("parse:{name}:{f}"));
                 }
-                // If an alt grammar exists, also try it. An alt grammar documents
-                // the closest known workaround edit; its results are supplementary
-                // — it can only ADD failures, never remove the original grammar's
-                // failures above. Alt outcomes get their own `build-alt:` /
-                // `parse-alt:` / `panic-alt:` key namespaces: the original's
-                // `parse:` entries are already in the failure set (and typically
-                // in xfail), so reusing them would silently mask an alt grammar
-                // that builds but produces WRONG trees.
+                // If an alt grammar exists, also try it. An alt grammar exists to
+                // prove "a valid workaround edit exists in grammar land": it must
+                // build AND be tree-identical to the ORIGINAL grammar's Python
+                // oracle on every input. A corpus-coincidental edit (one that
+                // happens to match these inputs but is semantically divergent)
+                // does not qualify — that bar is enforced structurally below:
+                // the `build-alt:`/`parse-alt:`/`panic-alt:` failure namespaces
+                // are NOT xfail-able, so a committed alt that diverges anywhere
+                // fails the build outright. Alt results are supplementary — they
+                // can only ADD failures, never remove the original grammar's
+                // failures above (the original's `parse:` entries are already in
+                // the failure set, so reusing those keys would silently mask an
+                // alt that builds but produces WRONG trees).
                 if let Some(alt_rel) = meta["alt_grammar"].as_str() {
                     let alt_path = pdir.join(alt_rel);
                     let alt_grammar = std::fs::read_to_string(&alt_path)
@@ -347,6 +352,23 @@ fn test_wild_bank() {
                 .collect()
         })
         .unwrap_or_default();
+    // Alt-grammar outcomes are NOT xfail-able: an alt grammar's whole purpose is
+    // to demonstrate a tree-identical workaround, so a divergent alt must be
+    // removed, not allow-listed — parking it in xfail would instill false
+    // confidence on the strength of a (often small) per-project corpus.
+    let alt_xfails: Vec<&String> = xfail
+        .iter()
+        .filter(|k| {
+            k.starts_with("build-alt:")
+                || k.starts_with("parse-alt:")
+                || k.starts_with("panic-alt:")
+        })
+        .collect();
+    assert!(
+        alt_xfails.is_empty(),
+        "xfail.json must not allow-list alt-grammar failures (an alt grammar must \
+         be tree-identical to the original's oracle, or be removed): {alt_xfails:?}"
+    );
 
     if std::env::var("LARK_WILD_DETAILS").is_ok() {
         for d in &details {
@@ -384,7 +406,16 @@ fn test_wild_bank() {
     );
 
     if std::env::var("LARK_WILD_WRITE_XFAIL").is_ok() {
-        let list: Vec<&String> = failures.iter().collect();
+        // Alt-grammar failures are excluded: they are not xfail-able (see the
+        // assertion above) — a divergent alt is removed, never allow-listed.
+        let list: Vec<&String> = failures
+            .iter()
+            .filter(|k| {
+                !k.starts_with("build-alt:")
+                    && !k.starts_with("parse-alt:")
+                    && !k.starts_with("panic-alt:")
+            })
+            .collect();
         let path = oracles_dir().join("xfail.json");
         std::fs::write(&path, serde_json::to_string_pretty(&list).unwrap() + "\n")
             .expect("write xfail.json");

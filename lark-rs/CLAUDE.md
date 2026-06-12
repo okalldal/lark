@@ -640,14 +640,21 @@ throughput per project).
 
 Findings (updated 2026-06-12, post-fence-idiom round — the xfail set encodes them,
 and each fixed root cause is pinned in distilled form by `tests/test_wild_gap_pins.rs`):
-**189/257 inputs agree, 75 XFAIL (72 original + 3 `parse-alt:` for gersemi's
-documented-divergent alt grammar), 4 grammars not building.** Every remaining failure
+**189/257 inputs agree, 72 XFAIL, 4 grammars not building.** Every remaining failure
 is an **engine-scope refusal** — an internal-lookahead/backtracking construct the
 lexer-DFA routing *deliberately* rejects (`docs/LOOKAROUND_SCOPE.md`). A project may
-carry an `alt_grammar` in its `meta.json`: a supplementary workaround edit replayed
-when the original fails to build, with its own `build-alt:`/`parse-alt:`/`panic-alt:`
-xfail namespaces so an alt that builds but produces wrong trees can never hide behind
-the original's `parse:` entries.
+carry an `alt_grammar` in its `meta.json`: a workaround edit replayed when the
+original fails to build, proving "a valid edit exists in grammar land." The bar is
+strict and **structurally enforced**: the alt must build and be **tree-identical to
+the original grammar's Python oracle on every input** — its
+`build-alt:`/`parse-alt:`/`panic-alt:` failure namespaces are *not xfail-able*
+(`test_wild.rs` asserts none appear in `xfail.json`, and `LARK_WILD_WRITE_XFAIL`
+never writes them), so a divergent alt fails the build and must be removed, not
+allow-listed. A corpus-coincidental edit (matches the project's few inputs but is
+semantically divergent) does not qualify — that would instill false confidence and
+lean on honest caveats instead of tests. No current project has a qualifying alt;
+the investigated near-misses are recorded in each project's `meta.json`
+(`alt_grammar_finding`).
 
 **Cleared by the burndown round** (the wild bank's first payoff):
 
@@ -697,11 +704,15 @@ backtracking engine (4 of 16 wild grammars, all non-building):
   now classifies (unbounded *leading* lookahead is supported) — but the loader
   inlines the elements into `UNQUOTED_ARGUMENT : UNQUOTED_ELEMENT+`, which
   re-internalizes the guard, so the original grammar still fails the build.
-  `alt_grammar/cmake.lark` documents the closest buildable edit (drop the
-  guards); **Python Lark itself parses 3 of the 8 inputs differently under that
-  edit** (the guards are load-bearing), so the alt is recorded as divergent
-  (`parse-alt:` xfails), not as a workaround. lark-rs-on-alt ≡ Python-on-alt:
-  the residual gap is the grammar edit, not the engine.
+  **No qualifying alt grammar is committed** — both investigated edits fail the
+  tree-identity bar (recorded in `meta.json` `alt_grammar_finding`): dropping
+  the guards changes *Python Lark's own* trees on 3/8 inputs (the guards are
+  load-bearing), and hoisting a single leading guard onto `UNQUOTED_ARGUMENT`
+  (buildable here via the unbounded-leading lowering) is corpus-identical on
+  8/8 — lark-rs-on-edit ≡ Python-on-original, verified 2026-06-12 — but
+  provably divergent on inputs like `$[=[x]=]` (internal element boundaries
+  after `$`/escape/reference no longer re-check the guard), i.e. tree-identical
+  by corpus coincidence, not by construction.
 * **synapse_storm**: atomic groups `(?>…)` + recursive subpatterns `(?&NAME)`
   (`regex`-module-only; context-free lookahead — the one genuine
   backtracking-engine case in the bank).
