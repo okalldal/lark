@@ -60,17 +60,20 @@ cargo test test_json_corpus         # 293-file JSONTestSuite (requires submodule
 cargo test test_earley              # Earley oracle + Earley compliance bank (Phase 2)
 cargo test --test test_wild         # wild-grammar bank (real-world grammars, tests/wild/)
 
-# Deterministic super-linearity gate (#56) — needs the work-counter feature.
-cargo test --features perf-counters --test test_earley_scaling
-# CYK cubic-envelope gate (#87) — same feature; asserts O(n³) table fill.
-cargo test --features perf-counters --test test_cyk_scaling
-# Lexer linear-scan gate (#104) and dense-DFA build-cost gate (lookaround lowering).
-cargo test --features perf-counters --test test_lexer_scaling
-cargo test --features perf-counters --test test_lexer_dfa_build_scaling
+# Deterministic scaling gates — need the work-counter feature. One invocation,
+# one build (this is exactly CI's "Scaling gates" step): Earley super-linearity
+# (#56), CYK cubic envelope (#87), lexer linear scan (#104), dense-DFA build
+# cost (lookaround lowering). Each --test flag also works on its own.
+cargo test --features perf-counters --test test_earley_scaling \
+  --test test_cyk_scaling --test test_lexer_scaling \
+  --test test_lexer_dfa_build_scaling
 
 # L0 whole-lexer differential (the fancy-regex reference backend is TEST-ONLY,
 # behind the default-off `fancy-oracle` feature — docs/LOOKAROUND_SCOPE.md).
-cargo test -p lark-rs --features fancy-oracle
+# Named explicitly + --lib (the only fancy-oracle-gated target plus the lib's
+# cfg-gated unit tests) — running the whole suite under the feature would just
+# repeat `cargo test --all` under a second build.
+cargo test -p lark-rs --features fancy-oracle --lib --test test_scanner_differential
 ```
 
 **Perf regression net (`perf-counters` feature).** Suspected super-linearities are
@@ -84,7 +87,8 @@ per-position scan work via `lexer_scan_steps`; `tests/test_lexer_dfa_build_scali
 asserts the lookaround lowering's **dense-DFA build cost** (the L5 bake target) stays
 flat per terminal and per guard width via `dense_build_bytes` (summed
 `dense::DFA::memory_usage`); `examples/profile_parse.rs scaling` prints the same
-counters as a demonstration table. CI runs each gating variant as its own step.
+counters as a demonstration table. CI runs all four gates in one shared
+perf-counters step ("Scaling gates" in `.github/workflows/lark-rs.yml`).
 
 **Earley / ambiguity oracles (Phase 2).** `generate_oracles.py` and
 `extract_lark_compliance.py` already emit the Earley fixtures as part of their
@@ -101,25 +105,52 @@ To initialise the JSONTestSuite submodule:
 git submodule update --init tests/corpora/JSONTestSuite
 ```
 
-### Before Pushing — Local CI Gate
+### Finishing a Task — Review → Fast Gate → PR → CI Callback
 
-`lark-rs/scripts/check.sh` runs **exactly** what GitHub Actions runs (the `Format`
-pre-commit job, `cargo test --all`, and the oracle-freshness gate). Run it before
-pushing so a red CI is caught locally first:
+**Do NOT run the full CI locally before pushing** — that runs everything twice
+(once in the session, once in GitHub Actions). The intended end-of-task loop:
 
-```bash
-lark-rs/scripts/check.sh
-```
+1. Run **`/code-review`** on the branch diff and apply the findings. Do this
+   *before* creating the PR: the review runs in a fresh subagent either way
+   (it sees only the diff, not the session's reasoning), and fixing findings
+   pre-PR means CI runs once on the final diff instead of twice (pre-review +
+   post-fix). Summarize what the review flagged and how it was addressed in
+   the PR description.
+2. Run the **fast gate** (the Pareto cut — fmt + `cargo test --all` catches
+   nearly every red):
+   ```bash
+   lark-rs/scripts/check-fast.sh
+   ```
+3. Push the branch and **create the PR right away** — the `pull_request` run
+   IS the full CI (fancy-oracle differential, scaling gates, python.lark LALR
+   gate, oracle freshness, python/wasm binding jobs). Branch pushes alone do
+   not trigger CI; the PR does.
+4. Subscribe to the PR's activity (CI callback) and fix any red from there.
 
-Enable the committed pre-push hook once per clone so it runs automatically on
-every `git push` (and blocks the push if any gate fails):
+One review, one CI run per task; post-PR pushes should only be fixes for
+genuinely CI-environment-specific failures.
+
+Two cases where you should run more than the fast gate before pushing:
+
+* Touched `tools/` generators or `tests/fixtures/oracles/` → also run the
+  oracle-freshness regen (`check.sh` step 3) so a stale-oracle red doesn't cost
+  a CI round trip.
+* Touched `lark-rs/python/` or `lark-rs/wasm/` → also run that crate's own
+  tests (`maturin develop && pytest` / `npm test`).
+
+`lark-rs/scripts/check.sh` (the **full** gate, mirroring CI's `fmt` + `test`
+jobs exactly) still exists — for **reproducing a red CI locally**, not as a
+routine pre-push step.
+
+Enable the committed pre-push hook once per clone so the fast gate runs
+automatically on every `git push` (and blocks the push if it fails):
 
 ```bash
 git config core.hooksPath .githooks
 ```
 
-Requirements: `pip install lark pre-commit` and the JSONTestSuite submodule
-(above). **Never push without a green gate.**
+Requirements for the full gate: `pip install lark pre-commit` and the
+JSONTestSuite submodule (above).
 
 ---
 

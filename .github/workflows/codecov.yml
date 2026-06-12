@@ -1,6 +1,9 @@
 name: Compute coverage and push to Codecov
+# Coverage is a master trend, not a PR gate — master-only so branch pushes
+# don't spend a 3-OS matrix on it.
 on:
   push:
+    branches: [master]
     paths:
       - 'lark/**'
       - 'tests/**'

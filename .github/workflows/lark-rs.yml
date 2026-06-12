@@ -1,16 +1,28 @@
 name: lark-rs
 
+# PR branches are covered by the `pull_request` trigger alone; `push` is
+# master-only so a PR push doesn't run the whole workflow twice (once per
+# event). The intended flow is: push the branch, open the PR, and let the PR
+# run be THE CI run.
 on:
   push:
+    branches: [master]
     paths:
       - 'lark-rs/**'
       - 'lark/**'
+      - '.githooks/**'
       - '.github/workflows/lark-rs.yml'
   pull_request:
     paths:
       - 'lark-rs/**'
       - 'lark/**'
+      - '.githooks/**'
       - '.github/workflows/lark-rs.yml'
+
+# A newer push to the same branch/PR supersedes the in-flight run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 defaults:
   run:
@@ -39,6 +51,11 @@ jobs:
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lark-rs
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -52,40 +69,34 @@ jobs:
       # (tests/test_scanner_differential.rs, required-features = ["fancy-oracle"])
       # is skipped above and must run explicitly with the TEST-ONLY feature that
       # resurrects the Regex reference backend's fancy side-probes. `-p lark-rs`,
-      # not `--all`: the workspace siblings do not define the feature.
+      # not `--all`: the workspace siblings do not define the feature. The
+      # differential is the ONLY test target gated on the feature (Cargo.toml
+      # required-features), so name it explicitly — running every integration
+      # target here would just repeat the Cargo-test step above under a pointless
+      # rebuild. `--lib` keeps the lib unit tests in this feature build too:
+      # scanner.rs has #[cfg(feature = "fancy-oracle")] code whose unit tests
+      # (e.g. global_verbose_flag_refuses_lookaround_lowering) are documented in
+      # Cargo.toml as running under both builds.
       - name: Fancy-oracle differential (test-only reference)
-        run: cargo test -p lark-rs --features fancy-oracle
+        run: cargo test -p lark-rs --features fancy-oracle --lib --test test_scanner_differential
 
-      # Deterministic super-linearity gate (#56). The work counters in src/perf.rs
-      # only exist under the `perf-counters` feature, so the scaling regression net
-      # is a no-op in `cargo test --all` above and must be run explicitly here. It
-      # keys on counts (flat per byte / capped n²), never wall-clock — gateable on a
-      # shared runner, unlike the timing bench.
-      - name: Earley scaling gate (perf-counters)
-        run: cargo test --features perf-counters --test test_earley_scaling
-
-      # CYK scaling gate (#87). CYK is O(n³·|grammar|); this keys on the
-      # cyk_table_steps work counter and asserts a cubic envelope (flat per n³),
-      # catching a complexity regression in the CNF conversion or DP.
-      - name: CYK scaling gate (perf-counters)
-        run: cargo test --features perf-counters --test test_cyk_scaling
-
-      # Lexer linear-scan gate (#104 regression net). The `\G`-anchoring fix kept
-      # per-position lexing linear, but shipped with only a wall-clock bench. This
-      # keys on the lexer_scan_steps work counter and asserts flat-per-byte scan
-      # work, so an un-anchored fancy-regex forward-scan (the O(n²) pathology) is
-      # caught deterministically rather than by timing.
-      - name: Lexer scaling gate (perf-counters)
-        run: cargo test --features perf-counters --test test_lexer_scaling
-
-      # Dense-DFA build-cost gate (docs/LEXER_DFA_PLAN.md, determinization-blowup
-      # risk). Lowering bounded lookaround into the combined DFA is paid at build
-      # time, and the L5 bake serializes that determinized dense DFA — so a lowering
-      # that blows up determinization inflates the bake target invisibly to the
-      # runtime differential. This keys on the dense_build_bytes work counter and
-      # asserts the determinized size stays flat per terminal and per guard width.
-      - name: Lexer DFA build-cost gate (perf-counters)
-        run: cargo test --features perf-counters --test test_lexer_dfa_build_scaling
+      # Deterministic scaling gates. The work counters in src/perf.rs only exist
+      # under the `perf-counters` feature, so these regression nets are a no-op in
+      # `cargo test --all` above and must run explicitly. They key on counts (flat
+      # per byte / capped n² / cubic envelope), never wall-clock — gateable on a
+      # shared runner, unlike the timing bench. One invocation, one build:
+      #   * test_earley_scaling          — super-linearity gate (#56)
+      #   * test_cyk_scaling             — CYK O(n³·|grammar|) cubic envelope (#87)
+      #   * test_lexer_scaling           — flat-per-byte lexer scan work (#104)
+      #   * test_lexer_dfa_build_scaling — dense-DFA build cost (LEXER_DFA_PLAN.md,
+      #                                    determinization-blowup tripwire)
+      - name: Scaling gates (perf-counters)
+        run: >-
+          cargo test --features perf-counters
+          --test test_earley_scaling
+          --test test_cyk_scaling
+          --test test_lexer_scaling
+          --test test_lexer_dfa_build_scaling
 
       # python.lark LALR build gate (#79). The headline result of the EBNF-helper
       # dedup is that upstream python.lark's full LALR table now *builds* (without
@@ -129,6 +140,11 @@ jobs:
         with:
           components: rustfmt
 
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lark-rs/python
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -163,6 +179,11 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
           components: rustfmt
+
+      - name: Rust build cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: lark-rs/wasm
 
       - name: Set up Node
         uses: actions/setup-node@v4
