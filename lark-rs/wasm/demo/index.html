@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>lark-rs playground</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1>lark-rs <span class="thin">playground</span></h1>
+    <p class="sub">
+      The <a href="https://github.com/okalldal/lark">lark-rs</a> parsing engine,
+      compiled to WebAssembly and running entirely in your browser
+      <span id="version" class="version"></span>
+    </p>
+  </header>
+
+  <main>
+    <section class="panel">
+      <div class="controls">
+        <label>Example
+          <select id="example"></select>
+        </label>
+        <label>Parser
+          <select id="parser-opt">
+            <option value="lalr">lalr</option>
+            <option value="earley">earley</option>
+            <option value="cyk">cyk</option>
+          </select>
+        </label>
+        <label>Ambiguity
+          <select id="ambiguity">
+            <option value="resolve">resolve</option>
+            <option value="explicit">explicit</option>
+          </select>
+        </label>
+        <label class="check">
+          <input type="checkbox" id="keep-all-tokens"> keep all tokens
+        </label>
+      </div>
+
+      <label class="area-label" for="grammar">Grammar</label>
+      <textarea id="grammar" spellcheck="false" autocomplete="off"
+                autocorrect="off" autocapitalize="off" wrap="off"></textarea>
+
+      <details id="imports-details">
+        <summary>Imported files — targets for <code>%import .name (…)</code></summary>
+        <p class="hint">
+          Relative <code>%import</code> resolves against these in-memory files
+          (there is no filesystem in WASM). The bundled libraries
+          (<code>common</code>, <code>python</code>, <code>lark</code>,
+          <code>unicode</code>) always work without them.
+        </p>
+        <div id="imports-list"></div>
+        <button id="add-import" type="button">+ Add file</button>
+      </details>
+    </section>
+
+    <section class="panel">
+      <label class="area-label" for="input">Input</label>
+      <textarea id="input" spellcheck="false" autocomplete="off"
+                autocorrect="off" autocapitalize="off"></textarea>
+
+      <div class="out-controls">
+        <div class="tabs" role="tablist">
+          <button id="tab-tree" class="active" type="button">Tree</button>
+          <button id="tab-json" type="button">JSON</button>
+        </div>
+        <span id="status" class="status">loading WASM…</span>
+      </div>
+
+      <div id="error" class="error" hidden></div>
+      <div id="out-tree" class="output"></div>
+      <pre id="out-json" class="output" hidden></pre>
+    </section>
+  </main>
+
+  <footer>
+    <p>
+      No server-side parsing: the page is static files on GitHub Pages, and the
+      engine is the <code>lark-rs-wasm</code> package (built with
+      <code>wasm-pack</code>) instantiated by your browser.
+    </p>
+  </footer>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

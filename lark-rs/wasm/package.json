@@ -5,6 +5,8 @@
   "scripts": {
     "build": "wasm-pack build --target nodejs --out-dir pkg",
     "build:web": "wasm-pack build --target web --out-dir pkg-web",
+    "demo:build": "npm run build:web && node -e \"const fs=require('fs');fs.rmSync('demo/pkg',{recursive:true,force:true});fs.cpSync('pkg-web','demo/pkg',{recursive:true})\"",
+    "demo": "npm run demo:build && python3 -m http.server -d demo 8137",
     "test": "npm run build && node --test ../tests/wasm/*.test.mjs"
   },
   "devDependencies": {
