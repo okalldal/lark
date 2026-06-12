@@ -1303,51 +1303,66 @@ def generate_indenter():
     from lark.indenter import Indenter
 
     print("Generating Indenter / postlex oracles...")
+
+    def run_group(name, parser, lexer, open_types, close_types, cases):
+        grammar = load_grammar(name)
+
+        class _TI(Indenter):
+            NL_type = "_NL"
+            OPEN_PAREN_types = open_types
+            CLOSE_PAREN_types = close_types
+            INDENT_type = "_INDENT"
+            DEDENT_type = "_DEDENT"
+            tab_len = 8
+
+        built = []
+        for inp, should_parse in cases:
+            try:
+                lark = Lark(grammar, parser=parser, lexer=lexer,
+                            postlex=_TI(), start="start", maybe_placeholders=False)
+                tree = lark.parse(inp)
+                ok, payload = True, tree_to_dict(tree)
+            except Exception as e:
+                ok, payload = False, str(e)
+            if should_parse and not ok:
+                print(f"  WARNING: {name} ({parser}) expected to parse {inp!r}: {payload}")
+            if not should_parse and ok:
+                print(f"  WARNING: {name} ({parser}) expected to reject {inp!r}")
+            built.append({
+                "input": inp,
+                "should_parse": should_parse,
+                "ok": ok,
+                "tree": payload if ok else None,
+                "error": payload if not ok else None,
+            })
+        return {
+            "name": name,
+            "open_paren_types": open_types,
+            "close_paren_types": close_types,
+            "cases": built,
+        }
+
     # One oracle suite per grammar file (suite name == grammar stem) so the
     # oracle-coverage meta-test maps each tests/grammars/<name>.lark to its dir.
     # The `indent`/`indent_paren` grammars are generated with `lexer='basic'` (the
     # lexer lark-rs's materialized postlex path uses, and which produces trees
     # identical to the contextual lexer for them). The `indent_context` grammar is
     # generated with `lexer='contextual'` — the basic lexer cannot parse it (#67).
-    for groups, lexer in [(INDENTER_GROUPS, "basic"),
-                          (INDENTER_CONTEXTUAL_GROUPS, "contextual")]:
-        for name, open_types, close_types, cases in groups:
-            grammar = load_grammar(name)
-
-            class _TI(Indenter):
-                NL_type = "_NL"
-                OPEN_PAREN_types = open_types
-                CLOSE_PAREN_types = close_types
-                INDENT_type = "_INDENT"
-                DEDENT_type = "_DEDENT"
-                tab_len = 8
-
-            built = []
-            for inp, should_parse in cases:
-                try:
-                    lark = Lark(grammar, parser="lalr", lexer=lexer,
-                                postlex=_TI(), start="start", maybe_placeholders=False)
-                    tree = lark.parse(inp)
-                    ok, payload = True, tree_to_dict(tree)
-                except Exception as e:
-                    ok, payload = False, str(e)
-                if should_parse and not ok:
-                    print(f"  WARNING: {name} expected to parse {inp!r}: {payload}")
-                if not should_parse and ok:
-                    print(f"  WARNING: {name} expected to reject {inp!r}")
-                built.append({
-                    "input": inp,
-                    "should_parse": should_parse,
-                    "ok": ok,
-                    "tree": payload if ok else None,
-                    "error": payload if not ok else None,
-                })
-            save_oracle(name, "cases", {
-                "name": name,
-                "open_paren_types": open_types,
-                "close_paren_types": close_types,
-                "cases": built,
-            })
+    for name, open_types, close_types, cases in INDENTER_GROUPS:
+        save_oracle(name, "cases",
+                    run_group(name, "lalr", "basic", open_types, close_types, cases))
+        # Earley + CYK run postlex over the same materialized basic-lexer stream
+        # (issue #78); each gets its own fixture generated under that parser so
+        # the lark-rs replay is held to the configuration it actually runs, not
+        # to an assumed LALR-equivalence. (`indent_context` is excluded: it needs
+        # the contextual lexer, which only LALR has — Python rejects it too.)
+        save_oracle(name, "earley_cases",
+                    run_group(name, "earley", "basic", open_types, close_types, cases))
+        save_oracle(name, "cyk_cases",
+                    run_group(name, "cyk", "basic", open_types, close_types, cases))
+    for name, open_types, close_types, cases in INDENTER_CONTEXTUAL_GROUPS:
+        save_oracle(name, "cases",
+                    run_group(name, "lalr", "contextual", open_types, close_types, cases))
 
 
 def generate_json():

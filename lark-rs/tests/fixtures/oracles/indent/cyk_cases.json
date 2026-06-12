@@ -1,0 +1,249 @@
+{
+  "name": "indent",
+  "open_paren_types": [],
+  "close_paren_types": [],
+  "cases": [
+    {
+      "input": "a\n",
+      "should_parse": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "simple",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "NAME",
+                "value": "a"
+              }
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "a\nb\n",
+      "should_parse": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "simple",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "NAME",
+                "value": "a"
+              }
+            ]
+          },
+          {
+            "type": "tree",
+            "data": "simple",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "NAME",
+                "value": "b"
+              }
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "if x:\n    a\n",
+      "should_parse": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "block",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "NAME",
+                "value": "x"
+              },
+              {
+                "type": "tree",
+                "data": "simple",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "NAME",
+                    "value": "a"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "if x:\n    a\n    b\nc\n",
+      "should_parse": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "block",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "NAME",
+                "value": "x"
+              },
+              {
+                "type": "tree",
+                "data": "simple",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "NAME",
+                    "value": "a"
+                  }
+                ]
+              },
+              {
+                "type": "tree",
+                "data": "simple",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "NAME",
+                    "value": "b"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tree",
+            "data": "simple",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "NAME",
+                "value": "c"
+              }
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "if x:\n    if y:\n        a\n    b\nc\n",
+      "should_parse": true,
+      "ok": true,
+      "tree": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "block",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "NAME",
+                "value": "x"
+              },
+              {
+                "type": "tree",
+                "data": "block",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "NAME",
+                    "value": "y"
+                  },
+                  {
+                    "type": "tree",
+                    "data": "simple",
+                    "children": [
+                      {
+                        "type": "token",
+                        "token_type": "NAME",
+                        "value": "a"
+                      }
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "tree",
+                "data": "simple",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "NAME",
+                    "value": "b"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "type": "tree",
+            "data": "simple",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "NAME",
+                "value": "c"
+              }
+            ]
+          }
+        ]
+      },
+      "error": null
+    },
+    {
+      "input": "",
+      "should_parse": false,
+      "ok": false,
+      "tree": null,
+      "error": "Parsing failed."
+    },
+    {
+      "input": "a",
+      "should_parse": false,
+      "ok": false,
+      "tree": null,
+      "error": "Parsing failed."
+    },
+    {
+      "input": "if x:\nb\n",
+      "should_parse": false,
+      "ok": false,
+      "tree": null,
+      "error": "Parsing failed."
+    },
+    {
+      "input": "if x:\n    a\n  b\n",
+      "should_parse": false,
+      "ok": false,
+      "tree": null,
+      "error": "Unexpected dedent to column 2. Expected dedent to 0"
+    }
+  ]
+}

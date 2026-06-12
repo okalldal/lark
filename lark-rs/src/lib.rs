@@ -142,8 +142,11 @@ pub struct LarkOptions {
     /// Post-lexer hook applied to the token stream before it reaches the parser.
     /// Currently an [`Indenter`], which injects `%declare`d `INDENT` / `DEDENT`
     /// tokens for Python-style significant-whitespace grammars. Mirrors Python
-    /// Lark's `postlex` option. Only the LALR backend honours it. `None` (the
-    /// default) leaves the token stream untouched.
+    /// Lark's `postlex` option. Every parser honours it — LALR on both the basic
+    /// and contextual lexer, Earley and CYK on the basic lexer (issue #78) — but
+    /// never the dynamic lexer (no token stream exists to rewrite; Python Lark
+    /// refuses that pairing too). `None` (the default) leaves the token stream
+    /// untouched.
     pub postlex: Option<postlex::Indenter>,
     /// Which combined-scanner engine the lexer builds (see [`LexerBackend`]). This
     /// has **no** Lark equivalent — it selects between byte-for-byte equivalent
