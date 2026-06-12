@@ -107,34 +107,18 @@ To initialise the JSONTestSuite submodule:
 git submodule update --init tests/corpora/JSONTestSuite
 ```
 
-### Finishing a Task — Review → Fast Gate → PR → CI Callback
+### Finishing a Task
 
-Run **`/finish-task`** — the loop is codified in `.claude/commands/finish-task.md`.
-In short (do **NOT** run the full CI locally before pushing — that runs everything twice):
+Run **`/finish-task`** — review → fast gate → PR → CI callback, codified in
+`.claude/commands/finish-task.md`. The always-relevant rules:
 
-1. **`/code-review`** on the branch diff; apply findings *before* creating the PR
-   (one CI run on the final diff instead of two). Summarize what the review flagged
-   and how it was addressed in the PR description.
-2. **Fast gate** (the Pareto cut — fmt + `cargo test --all` catches nearly every red):
-   `lark-rs/scripts/check-fast.sh`
-3. Push and **create the PR right away** — the `pull_request` run IS the full CI
-   (fancy-oracle differential, scaling gates, python.lark LALR gate, oracle
-   freshness, python/wasm binding jobs). Branch pushes alone do not trigger CI.
-4. Subscribe to the PR's activity (CI callback) and fix any red from there.
-
-One review, one CI run per task. Run more than the fast gate before pushing only if:
-* you touched `tools/` generators or `tests/fixtures/oracles/` → also run the
-  oracle-freshness regen (`check.sh` step 3);
-* you touched `lark-rs/python/` or `lark-rs/wasm/` → also run that crate's own
-  tests (`maturin develop && pytest` / `npm test`).
-
-`lark-rs/scripts/check.sh` (the **full** gate, mirroring CI's `fmt` + `test` jobs
-exactly) is for **reproducing a red CI locally**, not a routine pre-push step.
-
-The committed pre-push hook runs the fast gate on every `git push` (enable once per
-clone with `git config core.hooksPath .githooks` — the SessionStart hook in
-`.claude/settings.json` does this automatically). Full-gate requirements:
-`pip install lark pre-commit` + the JSONTestSuite submodule.
+- Do **NOT** run the full CI locally before pushing — the `pull_request` run IS
+  the full CI (branch pushes alone don't trigger it). One review, one CI run
+  per task. `lark-rs/scripts/check.sh` (the full gate) is for reproducing a red
+  CI locally, not a routine pre-push step.
+- The fast gate is `lark-rs/scripts/check-fast.sh`; the committed pre-push hook
+  runs it on every `git push` (the SessionStart hook enables `.githooks`
+  automatically).
 
 ---
 
