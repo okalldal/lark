@@ -39,12 +39,12 @@ pushing — that runs everything twice (once here, once in GitHub Actions).
      #64, #59 came to exist. Label them per `lark-rs/docs/LABELS.md`.
    - **Write an ADR if you deviated from a §3 default**, or made an
      architecture / public-API call a future reader would have to reverse-engineer
-     (`lark-rs/docs/decisions/`, copy `0000-template.md`). Commit it in *this* PR
+     (`lark-rs/docs/decisions/`, copy `TEMPLATE.md`). Commit it in *this* PR
      and link it from the body. Skip it for routine, fully-gated work — the test
      is the record there.
    - **Point the PR at its issue:** the body must say `Closes #N`, and the
      done-when must actually be met.
-   - **Merge tier** (§6 / ADR 0003): if this is `auto`-tier (bugfix-with-oracle,
+   - **Merge tier** (§6 / ADR-0016): if this is `auto`-tier (bugfix-with-oracle,
      xfail burndown, perf-fix-behind-a-gate, docs, refactor with banks green) it
      can merge once green via `/review-pr`. If it's `escalate`-tier (new public
      API, new grammar semantics, architecture, or touches `PRINCIPLES.md`),

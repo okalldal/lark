@@ -32,7 +32,7 @@ Verify each, and say which are satisfied vs missing:
 Also confirm no §2 **invariant** is violated even if CI is green — if one is and
 CI didn't catch it, the gate is buggy: say so and file an issue.
 
-## 3. Decide the merge tier (`PRINCIPLES.md` §6, ADR 0003)
+## 3. Decide the merge tier (`PRINCIPLES.md` §6, ADR-0016)
 
 Compute, don't look up — tier from `kind:` + blast radius:
 

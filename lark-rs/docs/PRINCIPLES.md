@@ -80,7 +80,7 @@ architect audit the deviation later instead of catching it in review.
   large-blast-radius change is allowed but must say so and lean on the compliance
   banks as the net (`/next-task` rubric).
 - **Python `re` dialect fidelity over `regex`-crate convenience** where the two
-  disagree (see ADR 0003-adjacent notes in `CLAUDE.md`).
+  disagree (ADR-0004; notes in `CLAUDE.md`).
 - **No runtime backtracking engine** — bounded lookaround is *lowered* into the
   DFA; out-of-scope shapes take a categorized refusal through the single seam
   (`docs/LOOKAROUND_SCOPE.md`).
@@ -128,7 +128,7 @@ agents never *guess* on direction.
 6. An ADR exists if a §3 default was deviated from.
 7. The originating issue's *done-when* is satisfied, and the PR says `Closes #N`.
 
-**Merge tiers** (full rationale: ADR `0003-tiered-merge-autonomy.md`). The line is
+**Merge tiers** (full rationale: ADR-0016, `docs/decisions/`). The line is
 exactly *"is correctness fully captured by an existing gate?"*:
 
 - **`auto` — agent may merge** when DoD is met and the change is a bugfix-with-oracle,
