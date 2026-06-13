@@ -2291,10 +2291,11 @@ fn child_to_node_value(c: Child) -> NodeValue {
     match c {
         Child::Tree(t) => NodeValue::Tree(t),
         Child::Token(t) => NodeValue::Token(t),
-        // An `_ambig` alternative is never a placeholder; round-trip it exactly
-        // if one ever appears (a one-element Inline converts back to the bare
-        // child).
-        c @ Child::None => NodeValue::Inline(vec![c]),
+        // An `_ambig`'s children are full alternative derivations, never a
+        // `maybe_placeholders` slot — the same invariant the LALR expand1
+        // collapse relies on (the guarded `Child::None` arm in
+        // `tree_builder::TreeBuilder::shape`).
+        Child::None => unreachable!("an `_ambig` alternative is never a placeholder"),
     }
 }
 
