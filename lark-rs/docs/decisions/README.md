@@ -6,9 +6,11 @@ doesn't go stale, so unlike implementation prose these records need almost no
 maintenance. When you (the steerer) ask "why did we do it this way," this is the
 first place to look.
 
-The records here were **backfilled on 2026-06-13** from the design rationale
-already scattered through [`CLAUDE.md`](../../CLAUDE.md) and
-[`docs/STATUS.md`](../STATUS.md). New decisions get a new file from then on.
+The records here were **backfilled on 2026-06-13**: ADRs 0001–0009 from the
+rationale in [`CLAUDE.md`](../../CLAUDE.md) and [`docs/STATUS.md`](../STATUS.md),
+and ADRs 0010–0015 from a sweep of the PR history (#1–161) for decisions —
+especially *reversals and abandoned approaches* — that lived only in PR
+descriptions. New decisions get a new file from then on.
 
 ## Index
 
@@ -23,6 +25,12 @@ already scattered through [`CLAUDE.md`](../../CLAUDE.md) and
 | [0007](0007-deterministic-perf-counters.md) | Gate performance on deterministic work counters, not wall-clock | Accepted |
 | [0008](0008-standalone-shares-one-runtime.md) | Standalone parsers share one compiled runtime + the same scanner plan | Accepted |
 | [0009](0009-xfail-burndown-discipline.md) | Known gaps are XFAIL allow-lists that only shrink | Accepted |
+| [0010](0010-lookaround-strategy-history.md) | Lookaround strategy history — three approaches abandoned before the DFA | Accepted |
+| [0011](0011-parsing-is-allocation-bound.md) | Parsing is allocation-bound; tree representation is the deferred headroom | Accepted |
+| [0012](0012-differential-fuzzer-active-oracle.md) | Differential fuzzer — turn the static oracle into an active one | Accepted |
+| [0013](0013-ebnf-nullable-helper-distribution.md) | EBNF nullable helpers — distribute non-final, share only the recurse core | Accepted |
+| [0014](0014-patternstr-vs-patternre-classification.md) | Recover PatternStr/PatternRE structurally via a `string_type` flag | Accepted |
+| [0015](0015-one-shared-treebuilder-consolidate-before-features.md) | One shared tree shaper; consolidate seams before adding algorithms | Accepted |
 
 ## How to add one
 

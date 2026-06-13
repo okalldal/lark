@@ -15,6 +15,12 @@ Pike-VM). But that means a second, slower matching path with different complexit
 characteristics living on the hot lexer loop — and a runtime dependency carrying
 backtracking semantics we'd then have to reason about for every grammar.
 
+> This decision is the *endpoint* of a strategy that reversed three times
+> (fancy-regex overlay → Pike-VM → pure-elimination → DFA). The full record of
+> what was tried and why each leg was abandoned is
+> [ADR-0010](0010-lookaround-strategy-history.md) — read it before reopening any
+> of those doors.
+
 ## Decision
 
 Do **not** ship a backtracking runtime engine. Instead, **lower** the bounded
