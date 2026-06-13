@@ -1765,10 +1765,24 @@ impl<'a> Transformer<'a> {
                 let Ret::Lists(lists) = w.take_ret() else {
                     unreachable!("ExpandPacked returns Ret::Lists")
                 };
-                for list in lists {
-                    let v = self.builder.assemble(rule, list);
+                let mut push_deduped = |v: NodeValue| {
                     if keys.insert(node_value_key(&v)) {
                         derivs.push(v);
+                    }
+                };
+                for list in lists {
+                    // Python's `_collapse_ambig`: a derivation that assembles
+                    // to an `_ambig` (an expand1 rule whose single kept child
+                    // is ambiguous) contributes its alternatives flat, not as
+                    // a nested `_ambig` (#63). (`Tree` has a manual `Drop`, so
+                    // the children are taken, not moved out.)
+                    match self.builder.assemble(rule, list) {
+                        NodeValue::Tree(mut t) if t.data == "_ambig" => {
+                            for c in std::mem::take(&mut t.children) {
+                                push_deduped(child_to_node_value(c));
+                            }
+                        }
+                        v => push_deduped(v),
                     }
                 }
                 self.derivs_try_family(w, node, fams, idx + 1, derivs, keys);
@@ -1801,9 +1815,9 @@ impl<'a> Transformer<'a> {
             }
             Frame::ExpandCombine {
                 lefts,
-                transparent_right,
+                distribute_right,
             } => {
-                let right_alts: Vec<NodeValue> = if transparent_right {
+                let right_alts: Vec<NodeValue> = if distribute_right {
                     let Ret::Derivs(alts) = w.take_ret() else {
                         unreachable!("Derivs returns Ret::Derivs")
                     };
@@ -1958,23 +1972,30 @@ impl<'a> Transformer<'a> {
     /// tail half of the former `expand_packed`.
     ///
     /// The alternative values the right symbol contributes are normally one — but
-    /// a *transparent* (`_rule` / `__anon_*`) child that is itself ambiguous under
-    /// explicit ambiguity contributes one alternative per derivation, which is
-    /// distributed over the parent's child-lists. This is Lark's
-    /// `AmbiguousExpander`: rather than nest an `_ambig` under the spliced
+    /// an ambiguous child at one of Lark's `AmbiguousExpander` *to_expand*
+    /// positions contributes one alternative per derivation, distributed over
+    /// the parent's child-lists: rather than nest an `_ambig` under the child's
     /// position, the ambiguity is shifted up so the parent itself becomes the
     /// `_ambig` (`parent(_ambig(a, b))` → `_ambig(parent(a), parent(b))`).
+    /// to_expand covers a *transparent* (`_rule` / `__anon_*`) child always (its
+    /// alternatives are `Inline` splice values with no node to nest under) and —
+    /// since `keep_all_tokens` puts every position in to_expand — ANY child of a
+    /// `!` rule (#63). Both consume the node's derivation list (`Derivs`)
+    /// directly: it is exactly the list `Eval` would wrap in an `_ambig`, so
+    /// distributing it skips the wrap/unwrap and reuses `deriv_memo`.
     fn expand_right(&mut self, w: &mut Walk, packed: Packed, lefts: Vec<Vec<NodeValue>>) {
         match packed.right {
             // ε right: the child-lists are exactly the left prefixes.
             ForestRef::None => w.ret = Some(Ret::Lists(lefts)),
             ForestRef::Node(rid) => {
-                let transparent_right = !self.resolve && self.is_transparent_node(rid);
+                let distribute_right = !self.resolve
+                    && (self.is_transparent_node(rid)
+                        || self.grammar.rules[packed.rule].options.keep_all_tokens);
                 w.frames.push(Frame::ExpandCombine {
                     lefts,
-                    transparent_right,
+                    distribute_right,
                 });
-                if transparent_right {
+                if distribute_right {
                     w.frames.push(Frame::Derivs { node: rid });
                 } else {
                     w.frames.push(Frame::Eval { node: rid });
@@ -2132,12 +2153,15 @@ enum Frame {
     ExpandRight {
         packed: Packed,
     },
-    /// Resume after the right symbol's value(s); `transparent_right` records
+    /// Resume after the right symbol's value(s); `distribute_right` records
     /// which child item was pushed (`Derivs` vs `Eval`), i.e. which `Ret`
-    /// variant to consume.
+    /// variant to consume: a child at one of Python's `AmbiguousExpander`
+    /// to_expand positions — transparent, or any position of a
+    /// `keep_all_tokens` rule (#63) — distributes its derivation list over
+    /// the parent's child-lists instead of nesting an `_ambig`.
     ExpandCombine {
         lefts: Vec<Vec<NodeValue>>,
-        transparent_right: bool,
+        distribute_right: bool,
     },
     ExpandInter {
         node: usize,
@@ -2259,6 +2283,19 @@ fn node_value_key(v: &NodeValue) -> String {
         }
     }
     out
+}
+
+/// The inverse of [`node_value_to_child`], for an `_ambig` alternative being
+/// lifted back out and re-distributed into a parent derivation (#63).
+fn child_to_node_value(c: Child) -> NodeValue {
+    match c {
+        Child::Tree(t) => NodeValue::Tree(t),
+        Child::Token(t) => NodeValue::Token(t),
+        // An `_ambig` alternative is never a placeholder; round-trip it exactly
+        // if one ever appears (a one-element Inline converts back to the bare
+        // child).
+        c @ Child::None => NodeValue::Inline(vec![c]),
+    }
 }
 
 /// One `_ambig` alternative as a tree child.

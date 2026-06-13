@@ -421,6 +421,44 @@ b: X b | X
 X: "x"
 """
 
+# ── Flat N-way `_ambig` (issue #63) ───────────────────────────────────────────
+# Python's AmbiguousExpander lifts an ambiguous child's `_ambig` into the parent
+# whenever the child position is "to_expand" — with `!` (keep_all_tokens) that is
+# EVERY position — and the symbol-node `_collapse_ambig` then splices
+# `_ambig`-valued derivations flat. So a span ambiguous N>2 ways yields ONE
+# `_ambig` with N flat children, never a binarized nesting. Four shapes pin that
+# contract (each input's derivations are structurally distinct, so the shapes
+# don't depend on duplicate-derivation handling):
+#
+#   * ambig_flat_keep    — the #63 reproduction (`!start`, both left- and
+#                          right-recursive): "xxx" must be a root `_ambig` with
+#                          4 flat `start` children ("xxxx" → 8).
+#   * ambig_flat_nested  — the same ambiguity one level down: a plain parent
+#                          (no `!`, no transparency) keeps the flat `_ambig`
+#                          nested exactly one level — no lift without to_expand.
+#   * ambig_flat_expand1 — `?start: a`: an expand1 derivation that IS an
+#                          `_ambig` is spliced flat into the surrounding
+#                          `_ambig` (Python's `_collapse_ambig`).
+#   * ambig_flat_product — two ambiguous positions in one rule: the lift
+#                          distributes as a cartesian product across positions
+#                          ("yyy" → 4 flat, "yyyy" → 12 flat).
+EARLEY_AMBIG_FLAT_KEEP_GRAMMAR = r'!start: "x" start | start "x" | "x"'
+
+EARLEY_AMBIG_FLAT_NESTED_GRAMMAR = r"""
+start: a
+!a: "x" a | a "x" | "x"
+"""
+
+EARLEY_AMBIG_FLAT_EXPAND1_GRAMMAR = r"""
+?start: a
+!a: "x" a | a "x" | "x"
+"""
+
+EARLEY_AMBIG_FLAT_PRODUCT_GRAMMAR = r"""
+!start: a a
+!a: "y" a | a "y" | "y"
+"""
+
 # (name, grammar, [(input, should_parse)])
 EARLEY_GRAMMARS = [
     ("unambiguous", EARLEY_UNAMBIGUOUS_GRAMMAR, [
@@ -463,6 +501,25 @@ EARLEY_GRAMMARS = [
         ("x",   True),
         ("xx",  True),
         ("xxx", True),
+    ]),
+    ("ambig_flat_keep", EARLEY_AMBIG_FLAT_KEEP_GRAMMAR, [
+        ("x",    True),
+        ("xx",   True),
+        ("xxx",  True),
+        ("xxxx", True),
+    ]),
+    ("ambig_flat_nested", EARLEY_AMBIG_FLAT_NESTED_GRAMMAR, [
+        ("x",   True),
+        ("xxx", True),
+    ]),
+    ("ambig_flat_expand1", EARLEY_AMBIG_FLAT_EXPAND1_GRAMMAR, [
+        ("xx",  True),
+        ("xxx", True),
+    ]),
+    ("ambig_flat_product", EARLEY_AMBIG_FLAT_PRODUCT_GRAMMAR, [
+        ("yy",   True),
+        ("yyy",  True),
+        ("yyyy", True),
     ]),
 ]
 

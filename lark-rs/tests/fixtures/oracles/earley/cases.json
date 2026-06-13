@@ -2028,5 +2028,2241 @@
         "error": null
       }
     ]
+  },
+  {
+    "name": "ambig_flat_keep",
+    "grammar": "!start: \"x\" start | start \"x\" | \"x\"",
+    "ambiguity": "resolve",
+    "lexer": "basic",
+    "cases": [
+      {
+        "input": "x",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "X",
+              "value": "x"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "xx",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "X",
+              "value": "x"
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "xxx",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "X",
+              "value": "x"
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                },
+                {
+                  "type": "tree",
+                  "data": "start",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "xxxx",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "X",
+              "value": "x"
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                },
+                {
+                  "type": "tree",
+                  "data": "start",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "start",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      }
+    ]
+  },
+  {
+    "name": "ambig_flat_keep",
+    "grammar": "!start: \"x\" start | start \"x\" | \"x\"",
+    "ambiguity": "explicit",
+    "lexer": "basic",
+    "cases": [
+      {
+        "input": "x",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "X",
+              "value": "x"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "xx",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "_ambig",
+          "children": [
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                },
+                {
+                  "type": "tree",
+                  "data": "start",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "start",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    }
+                  ]
+                },
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "xxx",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "_ambig",
+          "children": [
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                },
+                {
+                  "type": "tree",
+                  "data": "start",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "start",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                },
+                {
+                  "type": "tree",
+                  "data": "start",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "start",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "start",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "start",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "start",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "start",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    }
+                  ]
+                },
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "xxxx",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "_ambig",
+          "children": [
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                },
+                {
+                  "type": "tree",
+                  "data": "start",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "start",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        },
+                        {
+                          "type": "tree",
+                          "data": "start",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "X",
+                              "value": "x"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                },
+                {
+                  "type": "tree",
+                  "data": "start",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "start",
+                      "children": [
+                        {
+                          "type": "tree",
+                          "data": "start",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "X",
+                              "value": "x"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                },
+                {
+                  "type": "tree",
+                  "data": "start",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "start",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        },
+                        {
+                          "type": "tree",
+                          "data": "start",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "X",
+                              "value": "x"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                },
+                {
+                  "type": "tree",
+                  "data": "start",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "start",
+                      "children": [
+                        {
+                          "type": "tree",
+                          "data": "start",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "X",
+                              "value": "x"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "start",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "start",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        },
+                        {
+                          "type": "tree",
+                          "data": "start",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "X",
+                              "value": "x"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "start",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "start",
+                      "children": [
+                        {
+                          "type": "tree",
+                          "data": "start",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "X",
+                              "value": "x"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "start",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "start",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        },
+                        {
+                          "type": "tree",
+                          "data": "start",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "X",
+                              "value": "x"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    }
+                  ]
+                },
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "start",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "start",
+                      "children": [
+                        {
+                          "type": "tree",
+                          "data": "start",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "X",
+                              "value": "x"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    }
+                  ]
+                },
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      }
+    ]
+  },
+  {
+    "name": "ambig_flat_nested",
+    "grammar": "\nstart: a\n!a: \"x\" a | a \"x\" | \"x\"\n",
+    "ambiguity": "resolve",
+    "lexer": "basic",
+    "cases": [
+      {
+        "input": "x",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "xxx",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      }
+    ]
+  },
+  {
+    "name": "ambig_flat_nested",
+    "grammar": "\nstart: a\n!a: \"x\" a | a \"x\" | \"x\"\n",
+    "ambiguity": "explicit",
+    "lexer": "basic",
+    "cases": [
+      {
+        "input": "x",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "xxx",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "_ambig",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        },
+                        {
+                          "type": "tree",
+                          "data": "a",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "X",
+                              "value": "x"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "tree",
+                          "data": "a",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "X",
+                              "value": "x"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        },
+                        {
+                          "type": "tree",
+                          "data": "a",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "X",
+                              "value": "x"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "tree",
+                          "data": "a",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "X",
+                              "value": "x"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      }
+    ]
+  },
+  {
+    "name": "ambig_flat_expand1",
+    "grammar": "\n?start: a\n!a: \"x\" a | a \"x\" | \"x\"\n",
+    "ambiguity": "resolve",
+    "lexer": "basic",
+    "cases": [
+      {
+        "input": "xx",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "a",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "X",
+              "value": "x"
+            },
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "xxx",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "a",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "X",
+              "value": "x"
+            },
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      }
+    ]
+  },
+  {
+    "name": "ambig_flat_expand1",
+    "grammar": "\n?start: a\n!a: \"x\" a | a \"x\" | \"x\"\n",
+    "ambiguity": "explicit",
+    "lexer": "basic",
+    "cases": [
+      {
+        "input": "xx",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "_ambig",
+          "children": [
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    }
+                  ]
+                },
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "xxx",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "_ambig",
+          "children": [
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    }
+                  ]
+                },
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      }
+    ]
+  },
+  {
+    "name": "ambig_flat_product",
+    "grammar": "\n!start: a a\n!a: \"y\" a | a \"y\" | \"y\"\n",
+    "ambiguity": "resolve",
+    "lexer": "basic",
+    "cases": [
+      {
+        "input": "yy",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "Y",
+                  "value": "y"
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "Y",
+                  "value": "y"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "yyy",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "Y",
+                  "value": "y"
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "Y",
+                  "value": "y"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "yyyy",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "Y",
+                  "value": "y"
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "Y",
+                          "value": "y"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "Y",
+                  "value": "y"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      }
+    ]
+  },
+  {
+    "name": "ambig_flat_product",
+    "grammar": "\n!start: a a\n!a: \"y\" a | a \"y\" | \"y\"\n",
+    "ambiguity": "explicit",
+    "lexer": "basic",
+    "cases": [
+      {
+        "input": "yy",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "Y",
+                  "value": "y"
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "Y",
+                  "value": "y"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "yyy",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "_ambig",
+          "children": [
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "Y",
+                          "value": "y"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "Y",
+                          "value": "y"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "Y",
+                          "value": "y"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "Y",
+                          "value": "y"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "yyyy",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "_ambig",
+          "children": [
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "Y",
+                          "value": "y"
+                        },
+                        {
+                          "type": "tree",
+                          "data": "a",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "Y",
+                              "value": "y"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "tree",
+                          "data": "a",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "Y",
+                              "value": "y"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "token",
+                          "token_type": "Y",
+                          "value": "y"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "Y",
+                          "value": "y"
+                        },
+                        {
+                          "type": "tree",
+                          "data": "a",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "Y",
+                              "value": "y"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "tree",
+                          "data": "a",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "Y",
+                              "value": "y"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "token",
+                          "token_type": "Y",
+                          "value": "y"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "Y",
+                          "value": "y"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "Y",
+                          "value": "y"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "Y",
+                          "value": "y"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "Y",
+                          "value": "y"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "Y",
+                          "value": "y"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "Y",
+                          "value": "y"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "Y",
+                          "value": "y"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "Y",
+                          "value": "y"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "Y",
+                          "value": "y"
+                        },
+                        {
+                          "type": "tree",
+                          "data": "a",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "Y",
+                              "value": "y"
+                            }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "tree",
+                          "data": "a",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "Y",
+                              "value": "y"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "token",
+                          "token_type": "Y",
+                          "value": "y"
+                        }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "Y",
+                          "value": "y"
+                        },
+                        {
+                          "type": "tree",
+                          "data": "a",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "Y",
+                              "value": "y"
+                            }
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "tree",
+                          "data": "a",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "Y",
+                              "value": "y"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "token",
+                          "token_type": "Y",
+                          "value": "y"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "Y",
+                      "value": "y"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      }
+    ]
   }
 ]
