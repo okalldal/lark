@@ -27,6 +27,14 @@ Earley 211/211, dynamic 454/454, CYK 124/124, JSONTestSuite 293/293.
 **Per-component tables, open follow-ups, the full lookaround-routing record, and
 wild-bank findings: [`docs/STATUS.md`](docs/STATUS.md).**
 
+**Governance / autonomous development.** This repo is developed under a written
+constitution — **[`docs/PRINCIPLES.md`](docs/PRINCIPLES.md)** (invariants,
+defaults, decision taxonomy, escalation, Definition of Done, merge tiers), with a
+decision log in [`docs/decisions/`](docs/decisions/) and the backlog label schema
+in [`docs/LABELS.md`](docs/LABELS.md). Cite it when making a non-obvious call;
+deviate from a §3 default only with an ADR. Operated by `/roadmap`, `/triage`,
+`/next-task`, `/finish-task`, `/review-pr`.
+
 ## Testing Philosophy
 
 > "Traditional computers automate what you can specify in code.
