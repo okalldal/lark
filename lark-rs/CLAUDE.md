@@ -1,5 +1,25 @@
 # lark-rs — Rust Rewrite of the Lark Parsing Toolkit
 
+## Documentation Map
+
+This file is the **agent-facing** operational reference. The companions:
+
+- **[`ARCHITECTURE.md`](ARCHITECTURE.md)** — human-facing tourist map: the
+  load→lower→build→parse pipeline and where each module lives. Start here to
+  orient.
+- **[`GLOSSARY.md`](GLOSSARY.md)** — one-page decoder ring for the parser/lexer
+  terms used everywhere.
+- **[`docs/decisions/`](docs/decisions/)** — Architecture Decision Records: the
+  dated *why* behind load-bearing choices (oracle-first, true-LALR, lookaround
+  lowering, …).
+- **[`docs/STATUS.md`](docs/STATUS.md)** — the status ledger: what's done, what's
+  open, full per-component history.
+
+**Doc-maintenance rule:** a change that alters a load-bearing decision must, in
+the same PR, add or supersede an ADR (`docs/decisions/`) and update
+`ARCHITECTURE.md` if a module's responsibility moved. Keep the fast-changing
+detail in tests, not prose.
+
 ## Goal
 
 Rewrite [Lark](https://github.com/lark-parser/lark) in Rust, preserving all its core
