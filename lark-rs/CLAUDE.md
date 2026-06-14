@@ -1,5 +1,25 @@
 # lark-rs — Rust Rewrite of the Lark Parsing Toolkit
 
+## Documentation Map
+
+This file is the **agent-facing** operational reference. The companions:
+
+- **[`ARCHITECTURE.md`](ARCHITECTURE.md)** — human-facing tourist map: the
+  load→lower→build→parse pipeline and where each module lives. Start here to
+  orient.
+- **[`GLOSSARY.md`](GLOSSARY.md)** — one-page decoder ring for the parser/lexer
+  terms used everywhere.
+- **[`docs/decisions/`](docs/decisions/)** — Architecture Decision Records: the
+  dated *why* behind load-bearing choices (oracle-first, true-LALR, lookaround
+  lowering, …).
+- **[`docs/STATUS.md`](docs/STATUS.md)** — the status ledger: what's done, what's
+  open, full per-component history.
+
+**Doc-maintenance rule:** a change that alters a load-bearing decision must, in
+the same PR, add or supersede an ADR (`docs/decisions/`) and update
+`ARCHITECTURE.md` if a module's responsibility moved. Keep the fast-changing
+detail in tests, not prose.
+
 ## Goal
 
 Rewrite [Lark](https://github.com/lark-parser/lark) in Rust, preserving all its core
@@ -388,6 +408,27 @@ strip, the `\G` history, and the superseded lookaround-elimination plan:
 [`docs/STATUS.md`](docs/STATUS.md) + [`docs/LEXER_DFA_STATUS.md`](docs/LEXER_DFA_STATUS.md).
 One standing exception to "verbatim upstream": `common.lark`'s `ESCAPED_STRING`
 keeps its hand-written lookaround-free adaptation (hottest terminal, already linear).
+
+**Interning collapses the rule and terminal namespaces — a release-only hazard.**
+`lower()` interns both namespaces into one `by_name` table, so a terminal that
+shadows a rule name made the rule resolve to the terminal's id. This is guarded
+only by a `debug_assert` in `intern.rs`, so it manifested **in release builds
+only** (#144). Anonymous symbols are now disambiguated via a closed `AnonKind`
+enum rather than name spelling; keep new interned names namespace-unambiguous.
+
+**Joop-Leo is reimplemented, not ported — and its laziness is load-bearing.**
+Python Lark's Leo optimization is dead code (it reads a nonexistent field;
+lark-parser/lark#397), so lark-rs's version (`earley.rs`) is an independent
+implementation. The lazy spine reconstruction (`load_leo_paths`) is mandatory:
+expanding all paths eagerly reintroduces O(n²) (#61) — the forest-size perf
+counter is what catches a regression here.
+
+**`dynamic_complete`'s resolve tie-break is a heuristic, not a structural fix.**
+The split-point tie-break in `sorted_families` (#90) is keyed on the observation
+that the dynamic lexer reverses segmentation order via LIFO completion; it
+restores Python's earliest-split-first order empirically. The principled fix
+(match Python's group/optional expansion structurally) is a filed follow-up — so
+treat this as a known soft spot if dynamic-lexer ambiguity ordering ever drifts.
 
 ---
 
