@@ -14,6 +14,11 @@ This file is the **agent-facing** operational reference. The companions:
   lowering, …).
 - **[`docs/STATUS.md`](docs/STATUS.md)** — the status ledger: what's done, what's
   open, full per-component history.
+- **[`docs/PRINCIPLES.md`](docs/PRINCIPLES.md)** + **[`docs/LABELS.md`](docs/LABELS.md)**
+  — the governance layer: the constitution (invariants, defaults, decision
+  taxonomy, escalation, Definition of Done, merge tiers) and the backlog label
+  schema. Operated by `/roadmap`, `/triage`, `/next-task`, `/finish-task`,
+  `/review-pr`.
 
 **Doc-maintenance rule:** a change that alters a load-bearing decision must, in
 the same PR, add or supersede an ADR (`docs/decisions/`) and update

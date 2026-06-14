@@ -31,6 +31,19 @@ descriptions. New decisions get a new file from then on.
 | [0013](0013-ebnf-nullable-helper-distribution.md) | EBNF nullable helpers — distribute non-final, share only the recurse core | Accepted |
 | [0014](0014-patternstr-vs-patternre-classification.md) | Recover PatternStr/PatternRE structurally via a `string_type` flag | Accepted |
 | [0015](0015-one-shared-treebuilder-consolidate-before-features.md) | One shared tree shaper; consolidate seams before adding algorithms | Accepted |
+| [0016](0016-tiered-merge-autonomy.md) | Tiered merge autonomy by blast radius | Proposed |
+
+## ADRs going forward — the governance audit trail
+
+The backfilled records above are history. New ones are *also* a control surface.
+Under the autonomy kit ([`../PRINCIPLES.md`](../PRINCIPLES.md)), an agent records an
+ADR when it deviates from a §3 default, or makes an architecture/policy call it
+can't fully ground in a test (`PRINCIPLES.md` §3–4). The architect reads these in
+arrears, in batch, and promotes any correction into `PRINCIPLES.md` §2/§3 — so the
+constitution sharpens over time instead of drifting. That is why the log is
+append-only, and why a `Proposed` *policy* ADR (e.g. ADR-0016) is legitimate here:
+an ADR is both the record of *why we did it* and the audit trail for *decisions an
+agent made without the architect in the loop*.
 
 ## How to add one
 
