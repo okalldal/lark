@@ -14,6 +14,11 @@ This file is the **agent-facing** operational reference. The companions:
   lowering, …).
 - **[`docs/STATUS.md`](docs/STATUS.md)** — the status ledger: what's done, what's
   open, full per-component history.
+- **[`docs/PRINCIPLES.md`](docs/PRINCIPLES.md)** + **[`docs/LABELS.md`](docs/LABELS.md)**
+  — the governance layer: the constitution (invariants, defaults, decision
+  taxonomy, escalation, Definition of Done, merge tiers) and the backlog label
+  schema. Operated by `/roadmap`, `/triage`, `/next-task`, `/finish-task`,
+  `/review-pr`.
 
 **Doc-maintenance rule:** a change that alters a load-bearing decision must, in
 the same PR, add or supersede an ADR (`docs/decisions/`) and update
@@ -46,6 +51,14 @@ Earley 211/211, dynamic 454/454, CYK 124/124, JSONTestSuite 293/293.
 
 **Per-component tables, open follow-ups, the full lookaround-routing record, and
 wild-bank findings: [`docs/STATUS.md`](docs/STATUS.md).**
+
+**Governance / autonomous development.** This repo is developed under a written
+constitution — **[`docs/PRINCIPLES.md`](docs/PRINCIPLES.md)** (invariants,
+defaults, decision taxonomy, escalation, Definition of Done, merge tiers), with a
+decision log in [`docs/decisions/`](docs/decisions/) and the backlog label schema
+in [`docs/LABELS.md`](docs/LABELS.md). Cite it when making a non-obvious call;
+deviate from a §3 default only with an ADR. Operated by `/roadmap`, `/triage`,
+`/next-task`, `/finish-task`, `/review-pr`.
 
 ## Testing Philosophy
 

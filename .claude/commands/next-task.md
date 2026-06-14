@@ -12,7 +12,11 @@ carry it through implementation and `/finish-task` in this session.
   is off the table; parallel web sessions must not collide. Also skim the last
   few merged PRs so you don't redo something that just landed.
 - **Open issues** (`mcp__github__list_issues`, state OPEN) — the primary
-  backlog. Most carry a done-when section and a stated priority.
+  backlog. Most carry a done-when section and a stated priority. If the backlog
+  has been triaged (`lark-rs/docs/LABELS.md`), prefer the labels: pull from
+  `good-autonomous` + `prio:now` first, and treat `needs-decision` as off-limits
+  for autonomous picks (it's the architect's inbox). Untriaged backlog → fall
+  back to reading the bodies as below, and consider running `/triage` first.
 - **`lark-rs/docs/STATUS.md`** — open follow-ups and wild-bank findings.
 - **XFAIL burndown state** — entry counts of
   `lark-rs/tests/fixtures/oracles/**/*xfail*.json`; every entry is a known
@@ -29,10 +33,12 @@ carry it through implementation and `/finish-task` in this session.
 3. Prefer **small blast radius** over big-bang rework when value is comparable.
    A large-blast-radius pick (e.g. loader-wide EBNF changes) is allowed, but
    say so explicitly and lean on the compliance banks as the net.
-4. **Skip as autonomous picks**: issues marked "priority: low", research-scoped
-   items with no validation story, and decision-checkpoint issues ("decision
-   needed", "assess & challenge") — those need the user; surface them via
-   `AskUserQuestion` only if nothing implementable remains.
+4. **Skip as autonomous picks**: `prio:later` / "priority: low" items,
+   research-scoped items with no validation story, and `needs-decision` /
+   decision-checkpoint issues ("decision needed", "assess & challenge") — those
+   need the architect (`PRINCIPLES.md` §4–5); surface them via `AskUserQuestion`
+   only if nothing implementable remains. Don't invent groundable work to avoid
+   asking.
 
 ## 3. Announce, then execute
 
