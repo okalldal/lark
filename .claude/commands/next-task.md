@@ -42,8 +42,12 @@ carry it through implementation and `/finish-task` in this session.
 
 ## 3. Announce, then execute
 
-State the pick in one short paragraph — what, why it beats the alternatives,
-and the done-when — then start immediately; do not wait for approval.
+State the pick in one short paragraph — what, why it beats the alternatives, and
+the done-when. Then **claim it before coding**: comment on the issue with your
+branch/session intent, self-assign if possible, and set `status:in-progress`. If it
+is already `status:in-progress` or carries another active claim, pick a different
+task — never double-work an issue (parallel web sessions must not collide). Then
+start immediately; do not wait for approval.
 
 Follow the repo discipline: oracle/failing test first (Testing Philosophy in
 `lark-rs/CLAUDE.md`), implement, `/xfail-burndown` if a bank shrank, then

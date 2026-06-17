@@ -44,11 +44,15 @@ pushing — that runs everything twice (once here, once in GitHub Actions).
      is the record there.
    - **Point the PR at its issue:** the body must say `Closes #N`, and the
      done-when must actually be met.
-   - **Merge tier** (§6 / ADR-0016): if this is `auto`-tier (bugfix-with-oracle,
-     xfail burndown, perf-fix-behind-a-gate, docs, refactor with banks green) it
-     can merge once green via `/review-pr`. If it's `escalate`-tier (new public
-     API, new grammar semantics, architecture, or touches `PRINCIPLES.md`),
-     surface it for the architect to merge — say so explicitly.
+   - **One PR, one concern** (§9): if your work touched both code and a
+     governance/policy doc (this constitution, ADRs, command behavior, `LABELS.md`),
+     split them — agents don't change their own authority while shipping code.
+   - **Merge tier** (§6 / ADR-0016): classify as `auto` (bugfix-with-oracle, xfail
+     burndown, perf-fix-behind-a-gate, *trivial* docs, refactor with banks green) or
+     `escalate` (new public API, new grammar semantics, architecture, or **any
+     governance/policy doc**). Run `/review-pr` for the verdict. **While ADR-0016 is
+     `Proposed`, every PR — `auto` included — is merged by the architect**; say so
+     explicitly and never self-merge.
 
 One review, one CI run per task; post-PR pushes should only be fixes for
 genuinely CI-environment-specific failures. `lark-rs/scripts/check.sh` (the

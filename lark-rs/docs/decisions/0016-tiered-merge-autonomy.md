@@ -32,6 +32,23 @@ Two tiers, decided per PR by `/review-pr` from `kind:` (`LABELS.md`) + blast rad
 The dividing line is exactly whether an existing, author-independent gate fully
 captures correctness.
 
+## Activation — staged, not switched on
+
+This ADR is **Proposed**, and merge authority does **not** turn on when it lands in
+the repo. The rollout is staged:
+
+1. **Verdict-only (now).** `/review-pr` classifies every PR and posts the
+   recommended tier, but the **architect merges all PRs** — `auto` included. This
+   exercises the classifier at zero risk.
+2. **Accept after dry runs.** Once a handful of verdict-only runs show the `auto`
+   tiering is trustworthy, the architect flips this ADR to **Accepted** and
+   `/review-pr` begins merging `auto`-tier PRs directly.
+3. **Widen by evidence.** The `auto` set starts conservative and grows only as the
+   banks/gates prove they cover a class (per the tripwire below).
+
+Until step 2, `PRINCIPLES.md` §6, `/review-pr`, and `/finish-task` all treat `auto`
+as a *recommendation*, not an authorization.
+
 ## Why this is even defensible here
 
 Rejected alternatives: *blanket auto-merge* (peer design-review is too weak a net

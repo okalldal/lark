@@ -39,7 +39,7 @@ That is what makes manual, vanilla-Claude-Code sessions sufficient.
 | Role | Owns | Does **not** do |
 |------|------|-----------------|
 | **Architect** (you) | Vision, this constitution, framework choices, approving roadmap direction, resolving `needs-decision` items, merging escalated PRs, promoting ADR corrections into §2 | Review every commit, assign every task, merge every PR |
-| **Agent** (a session) | Implementation, test/oracle authoring, bug fixing, refactoring, triage, drafting roadmap proposals, reviewing PRs against this doc, filing follow-ups, merging *auto-tier* PRs (§6) | Set product direction, edit this doc, guess on a `needs-decision`, merge an *escalate-tier* PR |
+| **Agent** (a session) | Implementation, test/oracle authoring, bug fixing, refactoring, triage, drafting roadmap proposals, reviewing PRs against this doc, filing follow-ups, recommending a merge tier — and, *once ADR-0016 is accepted*, merging `auto`-tier PRs (§6) | Set product direction, edit this doc, guess on a `needs-decision`, merge an *escalate-tier* PR (or any PR while ADR-0016 is Proposed) |
 
 ---
 
@@ -122,14 +122,12 @@ Two rules keep this from sliding into the aspirational hand-waving §2.7 forbids
 2. **A material judgment-only dimension must be *named* in the ADR.** That naming is
    the auditable, falsifiable substitute for a test.
 
-On NFRs: this *is* the NFR layer, deliberately built the repo's way — each quality
-resolves to an executable gate or a named ADR axis, never a prose aspiration. We do
-not adopt an external quality taxonomy (ISO/IEC 25010 etc.) as working vocabulary:
-most NFRs are unfalsifiable as written, a precision *downgrade* from "match the
-oracle" / "flat per-byte envelope." Such a taxonomy is useful only as a one-time
-coverage check — and the two bottom rows (security on untrusted input, grammar-author
-ergonomics) are exactly the gaps it surfaces, recorded here as known judgment-only
-axes and **candidate gates to build**, not as qualities to assert.
+On NFRs: this *is* the NFR layer, built the repo's way — each quality resolves to a
+gate or a named ADR axis, not a prose aspiration (an external taxonomy like ISO/IEC
+25010 is at most a one-time coverage check, never working vocabulary). The actionable
+residue: the two ungated bottom rows — **security/resource bounds on untrusted input**
+and **grammar-author ergonomics** — should become tracked issues and, eventually,
+gates.
 
 ## 5. Escalation — cheap, rare, batched
 
@@ -137,10 +135,9 @@ The escalation channel must be cheap enough that erring toward it costs little, 
 agents never *guess* on direction.
 
 - **Asynchronous / batched:** open or label an issue `needs-decision`. This is the
-  architect's inbox; `/triage` and `/roadmap` surface it. Real examples already in
-  the backlog: #159 (dedup an intentional improvement or a bug?), #101 (CYK
-  superset-of-oracle — match or document?), #95 (assess & challenge recovery
-  design). These are the canonical shape.
+  architect's inbox; `/triage` and `/roadmap` surface it. The canonical shape is a
+  semantic or policy fork an implementation can't settle — see `LABELS.md` and the
+  live `needs-decision` queue for current examples.
 - **Synchronous (only when it blocks the current session):** `AskUserQuestion`
   with enough context to answer without scrolling back, and a recommended option
   first. Use this sparingly — most direction questions can wait in the
@@ -153,24 +150,36 @@ agents never *guess* on direction.
 
 **Definition of Done** (the gate before an issue closes / a PR merges):
 
-1. A test that *failed first* now passes (the oracle/repro from invariant 1).
+1. **Verified the right way for its type.** *Code/behavior change:* a failing
+   oracle, repro, or scaling gate existed *first* and now passes (invariant 1).
+   *Docs/governance/triage change:* the affected command or policy path was walked
+   through by hand and any contradictions resolved — there is no failed-first test
+   to expect, and demanding one is the wrong gate.
 2. CI is green — the `pull_request` run, which is the full gate.
 3. `/code-review` ran on the diff and findings are addressed.
 4. Oracles / `STATUS.md` are fresh (the CI freshness gate is happy).
-5. Out-of-scope discoveries are filed as issues (§ below), not left in the diff.
+5. Out-of-scope discoveries are filed as issues (§7), not left in the diff.
 6. An ADR exists if a §3 default was deviated from.
 7. The originating issue's *done-when* is satisfied, and the PR says `Closes #N`.
 
-**Merge tiers** (full rationale: ADR-0016, `docs/decisions/`). The line is
-exactly *"is correctness fully captured by an existing gate?"*:
+**Merge tiers** (full rationale: ADR-0016, `docs/decisions/`). The line is exactly
+*"is correctness fully captured by an existing gate?"*
 
-- **`auto` — agent may merge** when DoD is met and the change is a bugfix-with-oracle,
-  xfail burndown, perf fix behind a gate, docs, or a refactor with no public-API
-  change and banks green. Here CI *is* the oracle; a human merge adds latency, not
-  safety.
-- **`escalate` — architect merges** for new public API, new grammar-feature
-  semantics, architecture changes, anything touching this constitution, or anything
-  labeled `needs-decision`. `/review-pr` may *approve* these but must not merge them.
+> **Activation gate.** ADR-0016 is **Proposed**, not accepted. Until the architect
+> accepts it, `auto` is a *recommendation only*: `/review-pr` posts the verdict but
+> **the architect merges every PR**. The tiers below define what auto-merge *will*
+> mean once enabled — after a few successful verdict-only dry runs.
+
+- **`auto` (agent may merge, once enabled)** when DoD is met and the change is a
+  bugfix-with-oracle, xfail burndown, perf fix behind a gate, a refactor with no
+  public-API change and banks green, or **trivial docs** (typo, link, status
+  refresh, non-normative clarification). Here CI *is* the oracle; a human merge adds
+  latency, not safety.
+- **`escalate` (architect merges)** for new public API, new grammar-feature
+  semantics, architecture changes, **any governance/policy doc** (this constitution,
+  ADRs, command behavior, `LABELS.md`, roadmap, `CLAUDE.md`, public claims, or
+  architectural responsibility boundaries), or anything labeled `needs-decision`.
+  `/review-pr` may *approve* these but never merges them.
 
 ## 7. The issue contract
 
@@ -185,8 +194,8 @@ the de-facto shape already used across this backlog:
 
 Out-of-scope rule: when an agent finds a bug or follow-up outside the current
 task, it **files an issue** (with the above), never silently fixes it (blast-radius
-discipline) and never silently drops it. This is how the backlog stays honest —
-e.g. #159, #101, #64, #59 were all filed this way mid-task.
+discipline) and never silently drops it. Much of the current follow-up backlog was
+filed this way mid-task — that is how the backlog stays honest.
 
 ## 8. How this constitution evolves
 
@@ -203,3 +212,21 @@ agent makes a semi-groundable call  →  records an ADR (docs/decisions/)
 That loop is the answer to "did I formulate my vision well enough?" — you don't
 have to get §2/§3 right up front; each correction tightens them. The ADR log is
 the audit trail that lets you stay in control *without* being in the loop.
+
+## 9. Operating safety net — rollback, audit, policy isolation
+
+Three hard rules protect master and keep agents from quietly widening their own
+authority:
+
+- **Policy changes ride their own PR.** A code/behavior PR must **not** also edit
+  this constitution, the merge tiers, command behavior, or label semantics. Agents
+  do not change the rules they operate under while shipping work; governance changes
+  are separate, `escalate`-tier PRs.
+- **Rollback first, diagnose second.** An auto-merged PR that turns master red is
+  reverted immediately (`git revert`) and an incident issue opened. *Then:* if the
+  failure escaped a gate, add or fix the gate before retrying; if it was a mis-tier
+  (an `escalate` change merged as `auto`), record an ADR or tighten §6.
+- **Periodic autonomy audit.** Every ~10–20 merged PRs, the architect (or an audit
+  pass) reviews the auto-merges, escalations, reverts, and "agent guessed wrong"
+  cases. The ADR log captures *explicit* deviations; this audit catches the
+  *routine* auto-tier mistakes the log would miss.

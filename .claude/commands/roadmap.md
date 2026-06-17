@@ -39,10 +39,14 @@ Present the candidate epics and ask the architect to choose direction with
 `AskUserQuestion` (recommended option first; enough context to decide without
 scrolling). This is the "principal engineer proposes, architect signs off" gate.
 
-Only **after** approval: file the approved issues (`mcp__github__issue_write`),
-applying labels per `lark-rs/docs/LABELS.md` (`kind:`, `prio:`, topic, and
-`good-autonomous` vs `needs-decision`), and group them under the relevant
-`phase-N` label. Report back the filed issue numbers.
+Only **after** approval: **record the approval durably** — chat is not durable
+state (`PRINCIPLES.md` §0). Capture the architect's go/no-go and the chosen
+direction in GitHub — a tracking issue (or milestone) for the epic, or a roadmap ADR
+for a phase-level direction call — referenced from each child. Then file the
+approved issues (`mcp__github__issue_write`), applying labels per
+`lark-rs/docs/LABELS.md` (`kind:`, `prio:`, topic, and `good-autonomous` vs
+`needs-decision`), grouped under the relevant `phase-N` label / tracking issue.
+Report back the filed issue numbers.
 
 Anything genuinely undecidable (a real product/taste fork) is filed as
 `needs-decision` rather than guessed — that is the correct outcome, not a failure.

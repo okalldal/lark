@@ -6,16 +6,24 @@ Keep the backlog's durable state (`lark-rs/docs/LABELS.md`) accurate so
 `/next-task` and `/review-pr` can read it instead of re-deriving priority every
 run. Triage **labels and orders**; it does not implement anything.
 
-## 1. Ensure the labels exist
+**Dry-run by default.** Labels drive autonomy (task selection *and* merge-tiering),
+so a bad mass-triage is high-blast-radius. A bare `/triage` is **report-only**: it
+prints the labels it *would* create and the per-issue changes it *would* make, then
+stops for the architect. Only **`/triage apply`** mutates anything — and only after
+the architect has approved the dry-run.
+
+## 1. Ensure the labels exist (apply mode only)
 
 The process labels may not exist on the repo yet. For each label in
-`lark-rs/docs/LABELS.md` that a `mcp__github__get_label` lookup misses, create it
-(`mcp__github__issue_write`/label API) before use — idempotent, one-time in
-practice. Leave the existing topic labels (`lark-rs`, `earley`, …) untouched.
+`lark-rs/docs/LABELS.md` that a `mcp__github__get_label` lookup misses: in **apply**
+mode create it (`mcp__github__issue_write`/label API, idempotent); in **dry-run**
+list it as "would create". Leave the existing topic labels (`lark-rs`, `earley`, …)
+untouched.
 
 ## 2. Walk the open issues (`mcp__github__list_issues`, state OPEN)
 
-For each, set/confirm:
+For each, determine the intended labels (**apply:** set them; **dry-run:** report
+them):
 
 - **`kind:`** — bug / feat / refactor / perf / docs / infra (drives merge tier).
 - **`prio:`** — `now` (next up) / `next` / `later`. Map the existing inline
@@ -34,5 +42,7 @@ Flag (don't act on) likely **duplicates** or **stale** items for the architect.
 
 Output a short ranked list: the `prio:now` / `good-autonomous` picks at the top
 (what `/next-task` will pull next), the `needs-decision` queue called out
-separately as the architect's inbox, and anything `blocked` with its blocker. Note
-what labels you changed and why. Do not start implementing — `/next-task` does that.
+separately as the architect's inbox, and anything `blocked` with its blocker. In
+**dry-run**, list the changes you *would* make and stop for the architect's
+go-ahead before `/triage apply`; in **apply**, note what you changed and why. Do not
+start implementing — `/next-task` does that.
