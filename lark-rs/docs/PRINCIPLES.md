@@ -98,6 +98,39 @@ For any decision, find its row. This is the operational form of the thesis.
 
 When unsure which row you are in, you are in the bottom row. Escalate.
 
+### The decision lens — how to reason inside the middle row
+
+The taxonomy *routes* a decision; it doesn't say how to weigh the "decide + ADR"
+row. These are the dimensions a non-trivial design decision is judged on. **This is
+not a scorecard — you do not tally it.** Each dimension is either a *gate* (then the
+gate decides; don't argue it in prose — run or add the gate) or *judgment-only*
+(then your reasoning is the artifact, and you name it in the ADR).
+
+| Dimension | Its gate (if any) | When it's judgment-only |
+|---|---|---|
+| **Correctness & Python parity** | Oracle + compliance/wild banks (§2.1–2.2) — *the dominant axis* | A legitimate superset-of-Lark divergence → `needs-decision`, not a free win (#101, #159) |
+| **Performance & complexity class** | Work-counters + scaling gates (§2.5) | A new algorithm with no envelope yet → propose the gate *first* |
+| **Maintainability & simplicity** | `/code-review`; consolidate-seams-before-features (ADR-0015); new-driver-not-match-arms (§3) | Reuse vs. new abstraction is mostly taste — argue it in the ADR |
+| **Portability (PyO3 / WASM / C / standalone)** | CI binding jobs; const-bakeability | "Does this bake into every target?" — e.g. the Tree worklist rewrite (#151) was a WASM-stack call |
+| **Security / robustness on adversarial input** | Scaling gates catch *algorithmic-complexity* DoS | Resource bounds on untrusted input via the public API — **largely ungated; judgment + flag the gap** |
+| **API & grammar-author ergonomics** | — none | Error-message quality, modifier semantics — **ungated; judgment-only** |
+
+Two rules keep this from sliding into the aspirational hand-waving §2.7 forbids:
+
+1. **A gated dimension is decided by its gate, not by argument.** If you're weighing
+   it in prose, you're missing a gate — add it.
+2. **A material judgment-only dimension must be *named* in the ADR.** That naming is
+   the auditable, falsifiable substitute for a test.
+
+On NFRs: this *is* the NFR layer, deliberately built the repo's way — each quality
+resolves to an executable gate or a named ADR axis, never a prose aspiration. We do
+not adopt an external quality taxonomy (ISO/IEC 25010 etc.) as working vocabulary:
+most NFRs are unfalsifiable as written, a precision *downgrade* from "match the
+oracle" / "flat per-byte envelope." Such a taxonomy is useful only as a one-time
+coverage check — and the two bottom rows (security on untrusted input, grammar-author
+ergonomics) are exactly the gaps it surfaces, recorded here as known judgment-only
+axes and **candidate gates to build**, not as qualities to assert.
+
 ## 5. Escalation — cheap, rare, batched
 
 The escalation channel must be cheap enough that erring toward it costs little, so
