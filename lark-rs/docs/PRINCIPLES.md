@@ -5,7 +5,9 @@
 > read it and cite it but never rewrite it (§7). Everything else in the autonomy
 > kit — the `/roadmap`, `/triage`, `/review-pr`, `/next-task`, `/finish-task`
 > commands, the label schema, the ADR log — exists to enforce or extend what is
-> written here.
+> written here. The *binding core* (thesis, decide/ADR/escalate routing, the §2
+> invariants, the staged-merge rule) is mirrored into the always-loaded `CLAUDE.md`
+> so it shapes every session; this file is the full text agents cite for depth.
 
 ---
 
