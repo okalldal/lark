@@ -47,12 +47,15 @@ pushing — that runs everything twice (once here, once in GitHub Actions).
    - **One PR, one concern** (§9): if your work touched both code and a
      governance/policy doc (this constitution, ADRs, command behavior, `LABELS.md`),
      split them — agents don't change their own authority while shipping code.
-   - **Merge tier** (§6 / ADR-0016): classify as `auto` (bugfix-with-oracle, xfail
-     burndown, perf-fix-behind-a-gate, *trivial* docs, refactor with banks green) or
-     `escalate` (new public API, new grammar semantics, architecture, or **any
-     governance/policy doc**). Run `/review-pr` for the verdict. **While ADR-0016 is
-     `Proposed`, every PR — `auto` included — is merged by the architect**; say so
-     explicitly and never self-merge.
+   - **Merge tier** (§6 / ADR-0016, **Accepted**): classify as `auto` (bugfix-with-oracle,
+     xfail burndown, perf-fix-behind-a-gate, *trivial* docs, refactor with banks green)
+     or `escalate` (new public API, new grammar semantics, architecture, or **any
+     governance/policy doc**). Run `/review-pr` for the verdict. With ADR-0016 accepted,
+     `/review-pr` **merges an `auto`-tier PR directly once the DoD is met**; an
+     `escalate`-tier PR (and anything `needs-decision`) is left for the **architect** to
+     merge — never self-merge those. Governance/policy PRs are always `escalate`.
+     (Inside a `/start-sprint` run the rules differ — review is verdict-only and nothing
+     merges to `master` outside the omnibus PR; see `.claude/commands/start-sprint.md`.)
 
 One review, one CI run per task; post-PR pushes should only be fixes for
 genuinely CI-environment-specific failures. `lark-rs/scripts/check.sh` (the
