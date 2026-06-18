@@ -348,6 +348,16 @@ After each REDUCE, `apply_rule_options()` post-processes children:
 
 ## Key Design Decisions & Gotchas
 
+**Oracle fidelity is for *intended* behavior, not implementation artifacts (ADR-0017).**
+When lark-rs diverges from Python Lark, route it on two axes — *intentional contract
+vs. circumstantial leakage* × *cheap vs. expensive to match* — and match in every cell
+except **circumstantial + expensive** ("diverge & document": an ADR + a pinning test).
+Corollary: being *more permissive* than the oracle (accepting input Python rejects)
+is unfalsifiable, so match the rejection unless a documented reason says otherwise.
+The `\<`/`\>` dialect normalization (below) and the lookaround-scope refusals are
+existing instances; #159 (keep our `_ambig` dedup) and #101 (reject a nullable CYK
+rule Python rejects) were decided by this rule.
+
 **Terminal ordering matters.** Terminals are sorted `(-priority, -pattern_len, name)` before
 the combined regex is built. Higher priority and longer patterns come first so that, e.g.,
 `OCT` (`0[oO][0-7]…`) beats `INT` (`[0-9]…`) at `"0o777"`. Get this wrong and the lexer
