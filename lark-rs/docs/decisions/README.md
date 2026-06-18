@@ -33,6 +33,7 @@ descriptions. New decisions get a new file from then on.
 | [0015](0015-one-shared-treebuilder-consolidate-before-features.md) | One shared tree shaper; consolidate seams before adding algorithms | Accepted |
 | [0016](0016-tiered-merge-autonomy.md) | Tiered merge autonomy by blast radius | Accepted |
 | [0017](0017-oracle-fidelity-is-for-intended-behavior.md) | Oracle fidelity is for *intended* behavior, not implementation artifacts | Accepted |
+| [0018](0018-start-sprint-orchestration.md) | `/start-sprint` — whole-backlog autonomy via a thin orchestrator over worker sub-agents | Proposed |
 
 ## ADRs going forward — the governance audit trail
 
