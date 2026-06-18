@@ -32,7 +32,7 @@ descriptions. New decisions get a new file from then on.
 | [0014](0014-patternstr-vs-patternre-classification.md) | Recover PatternStr/PatternRE structurally via a `string_type` flag | Accepted |
 | [0015](0015-one-shared-treebuilder-consolidate-before-features.md) | One shared tree shaper; consolidate seams before adding algorithms | Accepted |
 | [0016](0016-tiered-merge-autonomy.md) | Tiered merge autonomy by blast radius | Proposed |
-| [0017](0017-oracle-fidelity-is-for-intended-behavior.md) | Oracle fidelity is for *intended* behavior, not implementation artifacts | Proposed |
+| [0017](0017-oracle-fidelity-is-for-intended-behavior.md) | Oracle fidelity is for *intended* behavior, not implementation artifacts | Accepted |
 
 ## ADRs going forward — the governance audit trail
 

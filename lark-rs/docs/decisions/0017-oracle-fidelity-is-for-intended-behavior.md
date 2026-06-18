@@ -1,6 +1,6 @@
 # ADR-0017: Oracle fidelity is for *intended* behavior, not implementation artifacts
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-06-18)
 - **Date:** 2026-06-18
 
 ## Context
