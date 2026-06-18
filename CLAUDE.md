@@ -52,9 +52,15 @@ are the always-in-context core; cite PRINCIPLES.md for the depth.
 
 Operated by **`/roadmap`** (propose epics for approval), **`/triage`** (label &
 order; dry-run by default), **`/next-task`** (claim & execute), **`/finish-task`**
-(review → gate → PR → close-out), **`/review-pr`** (DoD gate + merge tier). Backlog
+(review → gate → PR → close-out), **`/review-pr`** (DoD gate + merge tier), and
+**`/start-sprint`** (whole-backlog sprint). Backlog
 labels: [`lark-rs/docs/LABELS.md`](lark-rs/docs/LABELS.md); decision log:
 [`lark-rs/docs/decisions/`](lark-rs/docs/decisions/).
+
+- **`/start-sprint` is the whole-backlog flow (ADR-0018).** Inside it the normal merge
+  authority above is *overridden*: workers do **not** run `/finish-task`, reviews are
+  **verdict-only**, and **no automation merges to `master`** — child PRs stage onto a
+  sprint integration branch and only the architect merges the single omnibus PR.
 
 ## Python Lark is Our Oracle
 

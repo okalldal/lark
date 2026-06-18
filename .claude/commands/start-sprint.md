@@ -80,12 +80,22 @@ rather than proceeding:
 ## 3. Build the plan (thin, from GitHub state)
 
 In parallel: `mcp__github__list_issues` (OPEN) + `mcp__github__list_pull_requests`
-(OPEN). From the labels (`lark-rs/docs/LABELS.md`), classify each open issue:
+(OPEN). From the labels (`lark-rs/docs/LABELS.md`), classify each open issue. An issue is
+**schedulable** only if **all** hold (the sprint forbids mid-run architect questions, so
+the bar is higher than a single `/next-task` pick):
 
-- `needs-decision` → already terminal; collect for the memo, **never pick**.
-- `status:in-progress` / already has a linked PR → claimed; skip.
-- `status:blocked` → defer until its named blocker reaches a terminal state.
-- everything else → **work to schedule**.
+- labelled **`good-autonomous`** — fully groundable, safe for unattended work (a done-when
+  with an oracle and no open fork);
+- **not** `needs-decision` (architect's inbox — collect for the memo, never pick);
+- **not** `status:in-progress` / `status:needs-review`, and has **no** open linked PR
+  (already claimed → skip);
+- **not** `status:blocked` (defer until its named blocker is terminal);
+- has a **parseable Done-when and Files/blast-radius** in the issue body.
+
+Triaged but **not `good-autonomous`** → report as *not sprint-schedulable* (it needs an
+architect call or more grounding); do not dispatch it. An otherwise-schedulable issue
+**missing Done-when or Files** → stop before dispatch and report that triage repair is
+needed — never hand a worker an issue without a falsifiable done-when.
 
 Group the schedulable issues into **waves by blast-radius overlap** so parallel workers
 don't collide: use each issue's *Files* section + topic labels as the key — same-module
@@ -119,10 +129,14 @@ omnibus PR:         #M
 The worker brief:
 
 > **Before editing**, read issue **#N**'s body, comments, labels, and any linked PRs, and
-> restate its **Done-when** and **Files / blast radius** to yourself. If the issue is no
-> longer schedulable — already `status:in-progress` or otherwise claimed, `blocked`, or
-> it contains an unresolved decision fork — **stop and return `NEEDS_DECISION:` or
-> `BLOCKED:`; do not code.**
+> restate its **Done-when** and **Files / blast radius** to yourself. Also read the repo
+> rules a normal session would have in context (you start with none): `CLAUDE.md`
+> (repo-level active-work + binding autonomy core), `lark-rs/CLAUDE.md` (testing, oracle,
+> generated-file, architecture notes), `lark-rs/docs/PRINCIPLES.md` §2/§4/§6/§7
+> (invariants, decision routing, DoD, the issue contract), and `lark-rs/docs/LABELS.md`
+> (the label state machine). If the issue is no longer schedulable — already
+> `status:in-progress` or otherwise claimed, `blocked`, or it contains an unresolved
+> decision fork — **stop and return `NEEDS_DECISION:` or `BLOCKED:`; do not code.**
 >
 > **Claim it before coding** (the `/next-task` protocol, not just the label): comment on
 > the issue with your branch/session intent, self-assign if possible, and set
@@ -146,10 +160,12 @@ The worker brief:
 > forbidden here. You stop at "child PR opened against the sprint branch."
 >
 > Open a **child PR whose base is `<sprint-branch>`** (NOT `master`). Its body **must
-> include**: the issue link as **`Refs #N`** (or `Part of #<omnibus>`); a one-line
-> Done-when summary; the **failed-first / oracle / repro evidence** (what now passes that
-> failed before); the **`/code-review` summary and how findings were addressed**; the
-> local gate run (`lark-rs/scripts/check-fast.sh`); and any follow-ups filed. Its body
+> include both** links — **`Refs #N`** for the originating issue **and** **`Part of #M`**
+> for the omnibus PR (`Part of #M` is *not* a substitute for `Refs #N`; the reviewer
+> follows `Refs #N` to the issue) — plus: a one-line Done-when summary; the **failed-first
+> / oracle / repro evidence** (what now passes that failed before); the **`/code-review`
+> summary and how findings were addressed**; the local gate run
+> (`lark-rs/scripts/check-fast.sh`); and any follow-ups filed. Its body
 > **must not contain `Closes #N`, `Fixes #N`, or `Resolves #N`** — only the omnibus owns
 > closing keywords (and on a non-default base they would not fire anyway). Putting this
 > evidence *in the PR body* is what lets the independent verdict-only reviewer (§5) judge
@@ -173,12 +189,31 @@ output never enter this session.
 ## 5. Review — verdict-only, in a throwaway sub-agent (never merges)
 
 The orchestrator owns review. For each child PR, run a **sprint-only, verdict-only**
-review in a fresh review sub-agent (the diff stays out of this session's context). This
-is *not* `/review-pr`'s normal flow: the review sub-agent
+review in a fresh review sub-agent (the diff stays out of this session's context), handing
+it a **review startup context packet** (it inherits no memory, and this carries the issue
+number even if the PR body is malformed — a malformed link then becomes a DoD failure, not
+a context failure):
+
+```
+repo:           okalldal/lark
+child PR:       #P
+issue:          #N
+issue title:    <title>
+issue labels:   <labels>
+sprint branch:  <sprint-branch>
+omnibus PR:     #M
+expected base:  <sprint-branch>
+closure rule:   child carries `Refs #N` + `Part of #M`; omnibus owns `Closes #N`
+```
+
+This is *not* `/review-pr`'s normal flow: the review sub-agent
 
 - **must not call `merge_pull_request`**,
 - **must not ask the architect synchronously** (no `AskUserQuestion`),
-- **must not mutate the PR** except optionally labels/comments.
+- **must not mutate GitHub state at all** — no labels, no comments, no PR edits. It
+  **returns the verdict only**; the **orchestrator** owns every durable write (comments,
+  labels, parking, ledger), so all state changes happen in one place and resume has one
+  source of truth.
 
 **The review sub-agent must read** (it inherits no context): the child PR diff + CI
 status + body; the referenced issue's body, comments, and labels; `lark-rs/docs/PRINCIPLES.md`
@@ -197,7 +232,8 @@ in this throwaway sub-agent and **return the verdict only**.
 normal "PR body says `Closes #N`" item with the sprint-child closure contract:
 
 - the child PR **targets `<sprint-branch>`**, not `master`;
-- the body **links the issue** via `Refs #N` or `Part of #<omnibus>`;
+- the body carries **both** `Refs #N` (originating issue) **and** `Part of #M` (omnibus) —
+  a missing `Refs #N` is a **DoD failure**, not just a context gap;
 - the body contains **no closing keyword** (`Closes #N` / `Fixes #N` / `Resolves #N`);
 - the eventual `Closes #N` is owned by the **omnibus ledger**, not the child PR.
 
@@ -245,10 +281,15 @@ This is staging onto the sprint branch, **not** landing to `master`:
   - if a rebase conflicts, **dispatch a worker** to resolve it in-worktree and re-push,
     then continue the queue;
   - keep going until the wave's eligible PRs are all staged.
-- **The sprint branch must stay based on the current `master`.** If `master` moves
-  during the sprint, refresh the sprint branch against current `master`, resolve any
-  conflicts **inside the sprint** (dispatch a worker), and rerun the relevant checks —
-  the omnibus diff must always be "what lands on top of today's `master`".
+- **The sprint branch must stay based on the current `master` — but never by rewriting
+  it.** Once any child PR exists, **do not rebase or force-push the sprint integration
+  branch** (child PRs target it; rewriting it would break their bases). If `master` moves
+  during the sprint, **merge `origin/master` *into* the sprint branch** (a real merge
+  commit), resolve any conflicts **inside the sprint** (dispatch a worker), **record the
+  synced `master` SHA in the omnibus ledger**, and rerun the relevant checks. Child PR
+  *branches* are rebased onto the sprint branch (§ above); the sprint branch itself only
+  ever moves forward. The omnibus diff must always be "what lands on top of today's
+  `master`".
 
 Wait on CI without polling-by-sleep: after a wave, wait on in-flight child PRs and the
 omnibus with the **`Monitor`** tool's until-loop over `mcp__github__pull_request_read`
@@ -271,7 +312,8 @@ The conflict-fix and CI-fix dispatches are **not** first-pass workers — they u
 > or `BLOCKED:`.** Do **not** open a new PR, retarget to `master`, or merge anything.
 > Return the result + a `RETRO:` block.
 
-> **CI-fix worker.** Context: child PR `#P` (issue `#N`), failing check(s) `<names>`,
+> **CI-fix worker.** Context: child PR `#P` (issue `#N`), sprint branch `<sprint-branch>`,
+> sprint tip SHA `<current-sprint-tip-sha>`, failing check(s) `<names>`,
 > log excerpt `<failure summary>`. **Before editing, read child PR `#P`'s body + diff,
 > issue `#N`'s body/comments/labels, and the current sprint-branch state, and restate
 > `#P`'s intended scope and the exact CI failure to yourself.** Task: in your own worktree
@@ -388,6 +430,7 @@ it's felt and surfaced to the architect at the end — the point is to fix the *
   the integration branch immediately (and open an incident issue) — *then* diagnose.
   Because nothing reaches `master` until the omnibus merge, a bad stage never escapes
   the sprint branch.
-- One review + one CI run per child task; never run the full CI locally (the
-  `pull_request` run is the gate).
+- One pre-PR `/code-review` (worker, bug-hunting), one verdict-only sprint review
+  (orchestrator-owned, DoD/tier/governance), and one normal `pull_request` CI run per
+  child task; never run the full CI locally (the `pull_request` run is the gate).
 - The sprint only *parks* `needs-decision` issues — it never resolves their substance.

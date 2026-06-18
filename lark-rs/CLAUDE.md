@@ -58,7 +58,9 @@ defaults, decision taxonomy, escalation, Definition of Done, merge tiers), with 
 decision log in [`docs/decisions/`](docs/decisions/) and the backlog label schema
 in [`docs/LABELS.md`](docs/LABELS.md). Cite it when making a non-obvious call;
 deviate from a §3 default only with an ADR. Operated by `/roadmap`, `/triage`,
-`/next-task`, `/finish-task`, `/review-pr`.
+`/next-task`, `/finish-task`, `/review-pr`, and `/start-sprint` (the whole-backlog
+sprint, ADR-0018 — inside it workers don't run `/finish-task`, reviews are verdict-only,
+and nothing automated merges to `master`; only the architect merges the omnibus PR).
 
 ## Testing Philosophy
 
