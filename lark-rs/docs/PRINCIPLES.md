@@ -179,10 +179,11 @@ agents never *guess* on direction.
 **Merge tiers** (full rationale: ADR-0016, `docs/decisions/`). The line is exactly
 *"is correctness fully captured by an existing gate?"*
 
-> **Activation gate.** ADR-0016 is **Proposed**, not accepted. Until the architect
-> accepts it, `auto` is a *recommendation only*: `/review-pr` posts the verdict but
-> **the architect merges every PR**. The tiers below define what auto-merge *will*
-> mean once enabled — after a few successful verdict-only dry runs.
+> **Activation gate — ACTIVE.** ADR-0016 is **Accepted** (2026-06-18). `/review-pr`
+> merges `auto`-tier PRs directly once the Definition of Done is met; the architect
+> merges only `escalate`-tier PRs and `needs-decision` items. The `auto` set stays
+> conservative and widens only by evidence (ADR-0016 tripwire); governance/policy
+> PRs are never `auto` (§9); §9 rollback-first + the periodic audit are the net.
 
 - **`auto` (agent may merge, once enabled)** when DoD is met and the change is a
   bugfix-with-oracle, xfail burndown, perf fix behind a gate, a refactor with no

@@ -43,9 +43,12 @@ are the always-in-context core; cite PRINCIPLES.md for the depth.
   by picking the easiest-to-implement option.
 - **Out-of-scope finds → file an issue** (never silently fix or drop), and
   **governance/policy changes ride their own PR** (§9).
-- **Merge authority is staged.** ADR-0016 is *Proposed*, so **the architect merges
-  every PR**; `/review-pr` only posts a verdict (`auto`/`escalate`) until the
-  architect accepts ADR-0016.
+- **Merge authority (ADR-0016 Accepted).** `/review-pr` **merges `auto`-tier PRs**
+  directly once the DoD is met (bugfix-with-oracle, xfail burndown, perf-behind-a-gate,
+  docs, no-public-API refactor with banks green). The **architect merges
+  `escalate`-tier** PRs (new API/semantics, architecture, any governance/policy doc)
+  and anything `needs-decision`. The `auto` set stays conservative; §9 rollback-first
+  is the net.
 
 Operated by **`/roadmap`** (propose epics for approval), **`/triage`** (label &
 order; dry-run by default), **`/next-task`** (claim & execute), **`/finish-task`**
