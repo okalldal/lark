@@ -1,7 +1,7 @@
 # ADR-0016: Tiered merge autonomy by blast radius
 
-- **Status:** Proposed (architect to accept/tune — sets how much merge authority agents have)
-- **Date:** 2026-06-13
+- **Status:** Accepted (2026-06-18; was Proposed — architect ratified, activating the §6 `auto`-tier merge)
+- **Date:** 2026-06-13 (accepted 2026-06-18)
 
 > Forward-looking *policy* ADR (not a backfilled historical record). It defines
 > `PRINCIPLES.md` §6 merge tiers and is the one decision in the governance kit that
@@ -48,6 +48,16 @@ the repo. The rollout is staged:
 
 Until step 2, `PRINCIPLES.md` §6, `/review-pr`, and `/finish-task` all treat `auto`
 as a *recommendation*, not an authorization.
+
+**Accepted 2026-06-18 (step 2 reached).** The architect ratified this ADR to enable
+autonomous whole-backlog sprints. This is ahead of the suggested "handful of
+verdict-only dry runs" above — a deliberate architect call, traded against the
+guardrails that remain in force: the `auto` set stays at the conservative list in
+the Decision above and widens only by evidence (the tripwire below); governance /
+policy PRs are **never** `auto` (§6 / §9); and §9 rollback-first + the periodic
+autonomy audit are the net. From here, `/review-pr` merges `auto`-tier PRs directly
+once the Definition of Done is met; `escalate`-tier and `needs-decision` still go to
+the architect.
 
 ## Why this is even defensible here
 
