@@ -41,8 +41,11 @@ rather than proceeding:
 - **ADR-0018 Accepted** — this command *is* the ADR-0018 policy; refuse to run if its own
   ADR is not Accepted (matches ADR-0016's staged-activation style).
 - **Green `master` CI** — never sprint on a broken base.
-- **Triaged backlog** — run `/triage` first if issues are unlabeled; the labels are the
-  state machine this loop reads.
+- **Triaged backlog** — the labels are the state machine this loop reads. `/triage` is
+  **dry-run by default** and only `/triage apply` mutates labels (after architect
+  approval), and a sprint forbids mid-run `AskUserQuestion` — so if backlog labels are
+  missing/stale, **stop before creating the sprint branch** and report that the architect
+  must run `/triage apply` first. Do **not** start a sprint from an untriaged state.
 - **Capture the current `master` SHA** as the immutable **sprint base**.
 
 ## 2. Create the integration branch + draft omnibus PR (early)
@@ -136,10 +139,21 @@ The worker brief:
 > review sub-agent over your branch diff** and address its findings before opening the
 > child PR. Run the fast gate (`lark-rs/scripts/check-fast.sh`).
 >
-> Open a **child PR whose base is `<sprint-branch>`** (NOT `master`); its body links the
-> issue with **`Refs #N`** (or `Part of #<omnibus>`) and **must not contain `Closes #N`,
-> `Fixes #N`, or `Resolves #N`** — only the omnibus owns closing keywords (and on a
-> non-default base they would not fire anyway).
+> **Do NOT run `/finish-task`.** This brief *replaces* it for sprint work. `/finish-task`
+> (and `lark-rs/CLAUDE.md`'s "finishing a task" pointer) targets ordinary single-issue
+> work: it requires `Closes #N`, classifies a merge tier, and invokes `/review-pr` —
+> which, now that ADR-0016 is Accepted, can **merge** an `auto` PR. All of that is
+> forbidden here. You stop at "child PR opened against the sprint branch."
+>
+> Open a **child PR whose base is `<sprint-branch>`** (NOT `master`). Its body **must
+> include**: the issue link as **`Refs #N`** (or `Part of #<omnibus>`); a one-line
+> Done-when summary; the **failed-first / oracle / repro evidence** (what now passes that
+> failed before); the **`/code-review` summary and how findings were addressed**; the
+> local gate run (`lark-rs/scripts/check-fast.sh`); and any follow-ups filed. Its body
+> **must not contain `Closes #N`, `Fixes #N`, or `Resolves #N`** — only the omnibus owns
+> closing keywords (and on a non-default base they would not fire anyway). Putting this
+> evidence *in the PR body* is what lets the independent verdict-only reviewer (§5) judge
+> the child without inferring or failing it for missing evidence.
 >
 > **Do NOT run `/review-pr` in any acting/merge mode. Do NOT merge anything.** If you hit
 > a fork only the architect can settle — a genuine `needs-decision` (taste, product
@@ -167,11 +181,17 @@ is *not* `/review-pr`'s normal flow: the review sub-agent
 - **must not mutate the PR** except optionally labels/comments.
 
 **The review sub-agent must read** (it inherits no context): the child PR diff + CI
-status + body; the referenced issue's body, comments, and labels; `PRINCIPLES.md` §6
-(the DoD + merge-tier rules — `auto` is gated bugfix/xfail/perf/refactor/trivial-docs;
+status + body; the referenced issue's body, comments, and labels; `lark-rs/docs/PRINCIPLES.md`
+§6 (the DoD + merge-tier rules — `auto` is gated bugfix/xfail/perf/refactor/trivial-docs;
 `escalate` is new API, new grammar semantics, architecture, governance/policy docs, and
-anything `needs-decision`); `LABELS.md`; and `.claude/commands/start-sprint.md` §0, §5,
-§6.
+anything `needs-decision`); `lark-rs/docs/LABELS.md`; and
+`.claude/commands/start-sprint.md` §0, §5, §6.
+
+**Do not invoke the normal `/review-pr` command** unless the environment explicitly
+provides a *verified* verdict-only mode that cannot merge. The repo's `/review-pr` is
+`/review-pr <number>` and its normal action path **merges** `auto` PRs now that ADR-0016
+is Accepted — exactly what a sprint forbids. So perform the DoD checklist below manually
+in this throwaway sub-agent and **return the verdict only**.
 
 **Sprint-child DoD override.** Apply the §6 Definition of Done **except** replace the
 normal "PR body says `Closes #N`" item with the sprint-child closure contract:
@@ -185,16 +205,23 @@ A faithful reviewer must **not** fail a child PR for "missing `Closes #N`" — t
 *required* here. The review returns exactly: **DoD status** (against the override above),
 **tier** (`auto` | `escalate` | `needs-decision`), a **short rationale**, **missing
 items** if any, and a closing **`RETRO:` block** (process quirks worth surfacing, or
-`RETRO: none`). (If you prefer a flag, this is the behavior of a `/review-pr
---verdict-only` invocation; the contract above is what "verdict-only" means.) Route the
-verdict:
+`RETRO: none`). Route the verdict:
 
 - **`auto`** — eligible to stage into the integration branch (§6).
 - **`escalate`** — *also* eligible to stage into the integration branch, but final
   approval is **deferred to the architect through the omnibus PR**; it is never merged
   to `master` mid-sprint. (Governance/policy child PRs are always `escalate`.)
-- **`needs-decision`** — **not staged.** Park it (file/label the `needs-decision`
-  issue) and include it in the close-out memo.
+- **`needs-decision`** — **not staged.** Park it via the **parking protocol** below.
+
+**Parking protocol (do all of it in the same step the issue is parked).** Because workers
+claim issues with `status:in-progress`, a parked issue left with a stale claim would
+confuse resume and future `/next-task` runs (the label schema *is* the backlog state
+machine). So whenever an issue becomes `needs-decision` or `blocked` — here, or via the
+§6 CI path — update GitHub atomically: **remove the stale `status:in-progress` /
+`status:needs-review`**, **add `needs-decision`** (or **`status:blocked` with the named
+blocker**), **post the self-contained memo** (context + options + recommendation) on the
+issue, and **append the parked row + its `RETRO:` bullets to the omnibus ledger**. Only
+then move on.
 
 ## 6. Staging queue — serially merge child PRs into the integration branch
 
@@ -226,26 +253,33 @@ This is staging onto the sprint branch, **not** landing to `master`:
 Wait on CI without polling-by-sleep: after a wave, wait on in-flight child PRs and the
 omnibus with the **`Monitor`** tool's until-loop over `mcp__github__pull_request_read`
 (`get_status` / `get_check_runs`) — **never** Bash `sleep`. A child PR red on CI →
-dispatch a CI-fix worker (≤2 rounds); still red and out of scope → convert its issue to
-`needs-decision` (or `status:blocked` with the blocker named), park it, and move on so
-one stuck PR doesn't stall the sprint.
+dispatch a CI-fix worker (≤2 rounds); still red and out of scope → **park it via the §5
+parking protocol** (`needs-decision`, or `status:blocked` with the blocker named) and
+move on so one stuck PR doesn't stall the sprint.
 
 The conflict-fix and CI-fix dispatches are **not** first-pass workers — they update an
 *existing* child PR and must not broaden scope or open/merge PRs. Brief them explicitly:
 
 > **Conflict-resolution worker.** Context: child PR `#P` (issue `#N`), sprint branch
 > `<branch>`, conflict caused by staging child PR `#Q`, conflict files `<files / GitHub
-> conflict summary>`. Task: in your own worktree on `#P`'s branch, **resolve only the
-> conflict**, preserving `#P`'s original intent; run the narrowest relevant tests + the
-> fast gate if the change warrants it; **push to the existing `#P` branch**. Do **not**
-> open a new PR, retarget to `master`, or merge anything. Return the result + a `RETRO:`
-> block.
+> conflict summary>`. **Before editing, read child PR `#P`'s body + diff, issue `#N`'s
+> body/comments/labels, and the current `<branch>` state, and restate `#P`'s intended
+> scope and the exact conflict to yourself.** Task: in your own worktree on `#P`'s branch,
+> **resolve only the conflict**, preserving `#P`'s original intent; run the narrowest
+> relevant tests + the fast gate if the change warrants it; **push to the existing `#P`
+> branch**. **If resolving it would change `#N`'s scope, stop and return `NEEDS_DECISION:`
+> or `BLOCKED:`.** Do **not** open a new PR, retarget to `master`, or merge anything.
+> Return the result + a `RETRO:` block.
 
 > **CI-fix worker.** Context: child PR `#P` (issue `#N`), failing check(s) `<names>`,
-> log excerpt `<failure summary>`. Task: in your own worktree on `#P`'s branch, **fix
-> only the CI failure**, preserving `#P`'s issue scope; rerun the relevant local gate;
-> **push to the existing `#P` branch**. After **two** failed rounds, return `BLOCKED:` or
-> `NEEDS_DECISION:` with evidence. Do **not** open a new PR, retarget to `master`, or
+> log excerpt `<failure summary>`. **Before editing, read child PR `#P`'s body + diff,
+> issue `#N`'s body/comments/labels, and the current sprint-branch state, and restate
+> `#P`'s intended scope and the exact CI failure to yourself.** Task: in your own worktree
+> on `#P`'s branch, **fix only the CI failure**, preserving `#P`'s issue scope; rerun the
+> relevant local gate; **push to the existing `#P` branch**. **If the fix would change
+> `#N`'s scope, stop and return `NEEDS_DECISION:` or `BLOCKED:`.** After **two** failed
+> rounds, return `BLOCKED:` or `NEEDS_DECISION:` with evidence. Do **not** open a new PR,
+> retarget to `master`, or
 > merge anything. Return the result + a `RETRO:` block.
 
 ## 7. The omnibus PR — the one and only landing PR
