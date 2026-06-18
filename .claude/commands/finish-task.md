@@ -31,6 +31,29 @@ pushing — that runs everything twice (once here, once in GitHub Actions).
 4. **Subscribe to the PR's activity** (`subscribe_pr_activity`) and fix any red
    from the CI callback.
 
+5. **Close out against the Definition of Done** (`lark-rs/docs/PRINCIPLES.md`
+   §6). Before considering the task finished:
+   - **File follow-ups, don't bury them.** Any bug or out-of-scope work found
+     mid-task is filed as an issue in the §7 contract shape (Done-when / Priority
+     / Files / Notes), never silently fixed or dropped — this is how #159, #101,
+     #64, #59 came to exist. Label them per `lark-rs/docs/LABELS.md`.
+   - **Write an ADR if you deviated from a §3 default**, or made an
+     architecture / public-API call a future reader would have to reverse-engineer
+     (`lark-rs/docs/decisions/`, copy `TEMPLATE.md`). Commit it in *this* PR
+     and link it from the body. Skip it for routine, fully-gated work — the test
+     is the record there.
+   - **Point the PR at its issue:** the body must say `Closes #N`, and the
+     done-when must actually be met.
+   - **One PR, one concern** (§9): if your work touched both code and a
+     governance/policy doc (this constitution, ADRs, command behavior, `LABELS.md`),
+     split them — agents don't change their own authority while shipping code.
+   - **Merge tier** (§6 / ADR-0016): classify as `auto` (bugfix-with-oracle, xfail
+     burndown, perf-fix-behind-a-gate, *trivial* docs, refactor with banks green) or
+     `escalate` (new public API, new grammar semantics, architecture, or **any
+     governance/policy doc**). Run `/review-pr` for the verdict. **While ADR-0016 is
+     `Proposed`, every PR — `auto` included — is merged by the architect**; say so
+     explicitly and never self-merge.
+
 One review, one CI run per task; post-PR pushes should only be fixes for
 genuinely CI-environment-specific failures. `lark-rs/scripts/check.sh` (the
 full gate, mirroring CI's `fmt` + `test` jobs exactly) is for reproducing a
