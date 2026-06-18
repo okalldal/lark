@@ -1,6 +1,6 @@
 # ADR-0018: `/start-sprint` — whole-backlog autonomy via an integration branch + one architect-approved omnibus PR
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-06-18)
 - **Date:** 2026-06-18
 
 ## Context
@@ -83,9 +83,11 @@ off the architect's desk **without** letting automation write to `master`.
 - **Tripwire — omnibus too big to review.** If an `escalate` child PR (or the omnibus as
   a whole) is too large for a meaningful final review, split the sprint or require
   per-`escalate` architect approval *before* staging that child, rather than batching it.
-- Depends on **ADR-0016 Accepted** (so the eventual omnibus *can* be merged) and
-  **ADR-0017 Accepted** (the divergence-routing rule workers apply). If ADR-0016 is ever
-  reverted, `/start-sprint` refuses to start (its §1 preflight) rather than staging work
-  that can never land.
+- **Self-gated activation.** `/start-sprint`'s §1 preflight requires **ADR-0016**,
+  **ADR-0017**, *and* **this ADR (0018)** to be Accepted before it will run. Accepting
+  0018 in the same PR that adds the command is deliberate (Option A of the activation
+  question): merging the command *is* adopting the policy, so the two move together rather
+  than landing a live command whose own ADR still says Proposed. If 0016 is ever reverted,
+  the preflight refuses to start rather than staging work that can never land.
 - This is a command/policy artifact, so per §9 it ships on its own PR and is
-  escalate-tier.
+  escalate-tier (the architect merges it).
