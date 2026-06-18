@@ -53,8 +53,13 @@ rather than proceeding:
    - **base:** `master`
    - **head:** the sprint integration branch
    - **title:** `sprint: omnibus <date/short-sha>`
+   - **body:** seed it as the **live sprint ledger** (see §6) — the sprint base SHA,
+     and empty sections for *Staged*, *In-flight child PRs*, *Parked needs-decision*,
+     *Follow-ups filed*, and *Retrospective* (see the Retrospective section). This body
+     is the sprint's durable state from now on, not a thing assembled at the end.
 3. The omnibus PR is the **only** PR that will ever target `master`, and the **only**
-   PR that carries `Closes #N` lines (added in §7). Child PRs do not.
+   PR that carries `Closes #N` lines (filled in as children are staged, §6). Child PRs
+   do not.
 
 ## 3. Build the plan (thin, from GitHub state)
 
@@ -89,7 +94,11 @@ concurrently. The worker brief:
 > direction, a real trade-off with no oracle) — **STOP, do not guess**, and return
 > `NEEDS_DECISION:` plus a crisp, self-contained writeup (context + options +
 > recommendation). Otherwise return **only**: child PR number, issue number, the test
-> evidence (what now passes that failed before), and a one-line summary.
+> evidence (what now passes that failed before), and a one-line summary. **End every
+> return with a `RETRO:` block** (see the Retrospective section): terse bullets on any
+> process quirk you hit — a wrong/stale instruction, a confusing step, a missing piece of
+> know-how, a tool that misbehaved, anything that wasted effort or context that a future
+> run should be warned about. Write `RETRO: none` if there was nothing.
 
 Record each compact result in the plan table. The worker's file reads, diffs, and test
 output never enter this session.
@@ -105,9 +114,10 @@ is *not* `/review-pr`'s normal flow: the review sub-agent
 - **must not mutate the PR** except optionally labels/comments,
 
 and returns exactly: **DoD status**, **tier** (`auto` | `escalate` | `needs-decision`),
-a **short rationale**, and **missing items** if any. (If you prefer a flag, this is the
-behavior of a `/review-pr --verdict-only` invocation; the contract above is what
-"verdict-only" means.) Route the verdict:
+a **short rationale**, **missing items** if any, and a closing **`RETRO:` block** (same
+as the worker brief — process quirks worth surfacing, or `RETRO: none`). (If you prefer a
+flag, this is the behavior of a `/review-pr --verdict-only` invocation; the contract
+above is what "verdict-only" means.) Route the verdict:
 
 - **`auto`** — eligible to stage into the integration branch (§6).
 - **`escalate`** — *also* eligible to stage into the integration branch, but final
@@ -122,6 +132,16 @@ This is staging onto the sprint branch, **not** landing to `master`:
 
 - The orchestrator merges eligible child PRs (`auto` or `escalate`) into the sprint
   integration branch **one at a time**.
+- **Update the omnibus ledger in the same step you stage a child PR** — this is the
+  load-bearing move for resumability (§ guardrails). The instant a child PR is merged
+  into the sprint branch it stops being an *open* PR, so the omnibus body is the **only**
+  durable record that it happened. After each stage, append to the omnibus body a
+  *Staged* row carrying: the child PR number, the issue(s) it covers as a `Closes #N`
+  line, its tier (`auto` | `escalate`), and its review + CI evidence. Do this **before**
+  moving to the next child PR, so a roll-over between stages never loses a staged child.
+  In the same step, **append the child's (and its review's) `RETRO:` bullets to the
+  omnibus *Retrospective* section** (see the Retrospective section) — and likewise when
+  you harvest a parked or failed result — so no retro note depends on conversation memory.
 - After each child PR is staged:
   - **rebase/update the remaining open child PRs** onto the new sprint-branch tip
     (`mcp__github__update_pull_request_branch`) so any conflict surfaces **now**;
@@ -144,19 +164,27 @@ one stuck PR doesn't stall the sprint.
 
 Re-evaluate the §3 plan against GitHub each cycle; schedule the next wave (newly
 unblocked issues, each rebased on the new sprint tip) until no schedulable issue is
-non-terminal. **Then** prepare the omnibus PR for the architect. Before marking it
-**ready for review** (out of draft), confirm:
+non-terminal. **Then** prepare the omnibus PR for the architect.
+
+By this point the omnibus body is **already** the complete record — every staged child
+appended its ledger row in §6, and parked `needs-decision` items were recorded as they
+arose. So this step **finalizes and verifies**, it does not assemble. Before marking the
+omnibus **ready for review** (out of draft), confirm:
 
 - current `master` is an **ancestor** of the sprint integration branch;
 - the **omnibus PR CI is green**;
 - **all staged child PRs are merged** into the sprint branch;
 - **no child PR remains in a non-terminal state** (each is staged, or parked as
-  `needs-decision`, or `blocked` with a named blocker).
+  `needs-decision`, or `blocked` with a named blocker);
+- the ledger is **complete and consistent** with GitHub: every staged child has a
+  *Staged* row with a `Closes #N` line and tier; reconcile any gaps (e.g. a child staged
+  just before a roll-over) by reading the sprint branch's merge history against the
+  ledger, then add the missing rows.
 
-Then update the **omnibus PR body** so it owns the whole sprint's record:
+The finalized omnibus body therefore owns the whole sprint's record:
 
-- the list of **included child PRs**, each with its tier (`auto` | `escalate`);
-- the list of **included issues as `Closes #N`** (these live on the omnibus *only*);
+- the **included child PRs**, each with its tier (`auto` | `escalate`);
+- the **included issues as `Closes #N`** (these live on the omnibus *only*);
 - **review + CI evidence** per child;
 - any **`needs-decision` items excluded** from the sprint, with their memos;
 - any **follow-up issues** filed during the sprint.
@@ -187,17 +215,53 @@ The sprint is finished only once the omnibus PR is merged by the architect. Afte
   superseded** by the omnibus (comment + close);
 - **clean up the sprint integration branch** if appropriate;
 - post the single batched close-out: what landed, the parked `needs-decision` inbox
-  (each with a recommendation, `/triage`-shaped), and any follow-ups filed.
+  (each with a recommendation, `/triage`-shaped), any follow-ups filed, and the
+  **aggregated Retrospective** (deduped + grouped, per the Retrospective section) so the
+  architect sees every process quirk the sprint surfaced in one place.
+
+## Retrospective — a live, aggregated process ledger (everyone contributes)
+
+The sprint keeps a running **retrospective** so process friction is captured the moment
+it's felt and surfaced to the architect at the end — the point is to fix the *kit*
+(instructions, steps, tooling, missing know-how) over time, not just to ship issues.
+
+- **Everyone contributes.** Each worker and each review sub-agent ends its return with a
+  `RETRO:` block (§4/§5). The **orchestrator** adds its own bullets too — anything in
+  *this* command or the wider kit that proved wrong, stale, ambiguous, or context-draining
+  while running the sprint (e.g. a brief that had to be re-explained, a tool that needed
+  an undocumented argument, a step that was actually a no-op).
+- **What's worth a note:** incorrect or stale instructions; steps that misfire or are
+  redundant; know-how a future run needs up front to avoid rediscovering it; anything
+  that burned context or tokens. Keep each bullet terse and *actionable* ("X said Y, but
+  Z — suggest updating §N / ADR-NNNN"). Skip praise and routine status.
+- **Durability = the omnibus body, harvested immediately.** Because sub-agent context is
+  discarded and a staged child stops being an open PR, the **only** safe home for a retro
+  note is the **`Retrospective` section of the omnibus PR body**. When the orchestrator
+  harvests *any* sub-agent result (staged, parked, or failed), it appends that result's
+  `RETRO:` bullets to that section **in the same step** — exactly like the §6 ledger
+  rows, and for the same resumability reason. A roll-over therefore loses no retro notes:
+  resume reads them straight back from the omnibus body.
+- **Presented at close-out (§9).** The aggregated retrospective is part of the final
+  report: deduped and grouped (instructions / steps / tooling / know-how), each item with
+  a concrete suggested fix. Persistent fixes that change the constitution or a command
+  ride their **own** governance PR (§9 / PRINCIPLES.md §9) — file them as follow-up
+  issues rather than smuggling them into the omnibus.
 
 ## Guardrails (binding)
 
 - **No `AskUserQuestion` mid-sprint** — a blocking prompt defeats "run until the target
   is met". Forks are parked as `needs-decision` issues (a terminal state) and surfaced
   together in the close-out.
-- **Resumable.** All durable state lives in GitHub branches, child PRs, labels, and the
-  omnibus PR body (PRINCIPLES.md §0). If this session is summarized or restarted
-  mid-sprint, the next invocation rebuilds the plan from the integration branch + open
-  child PRs and continues — no progress lives in conversation memory.
+- **Resumable — the omnibus body is the live ledger.** All durable state lives in GitHub
+  branches, child PRs, labels, and the **continuously-updated omnibus PR body**
+  (PRINCIPLES.md §0). This works *only because* §6 appends a *Staged* row the moment each
+  child PR is merged into the sprint branch: once staged, a child is no longer an open PR,
+  so the ledger is the sole record of which PRs were staged, which issues they covered,
+  their tier, and their review/CI evidence. On a summarize/restart, the next invocation
+  **first reads the omnibus ledger + open child PRs + labels**, reconstructs the
+  issue→state table (staged ↔ ledger rows, in-flight ↔ open child PRs, parked ↔
+  `needs-decision`), reconciles it against the sprint branch's merge history, and only
+  *then* schedules more work — no progress lives in conversation memory.
 - **Rollback-first (§9).** If a staged change reddens the omnibus CI, revert it out of
   the integration branch immediately (and open an incident issue) — *then* diagnose.
   Because nothing reaches `master` until the omnibus merge, a bad stage never escapes
