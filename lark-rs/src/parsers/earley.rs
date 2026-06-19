@@ -306,6 +306,16 @@ pub struct EarleyParser {
     grammar: CompiledGrammar,
     /// Non-terminal id → indices of the rules producing it (the predictor index).
     rules_by_origin: HashMap<SymbolId, Vec<usize>>,
+    /// `nullable[id.index()]` = the symbol can derive ε. Indexed by `SymbolId`.
+    /// Used by [`Self::eps_node`] to rebuild a skipped ε-tail.
+    nullable: Vec<bool>,
+    /// `eps_only[id.index()]` = the symbol can derive **only** ε (nullable *and*
+    /// cannot derive any non-empty string). Used by the Joop-Leo completer
+    /// (`is_quasi_complete`) to admit a nullable tail after the recognized symbol
+    /// (#64) ONLY when the tail is ε-only: an *optional* tail (nullable but able
+    /// to match real tokens, e.g. `opt: Y |`) must NOT be linearized, or the
+    /// non-empty derivation becomes unreachable and valid input is rejected.
+    eps_only: Vec<bool>,
 }
 
 impl EarleyParser {
@@ -314,9 +324,13 @@ impl EarleyParser {
         for (i, rule) in grammar.rules.iter().enumerate() {
             rules_by_origin.entry(rule.origin).or_default().push(i);
         }
+        let nullable = crate::grammar::analysis::nullable_set(&grammar);
+        let eps_only = crate::grammar::analysis::eps_only_set(&grammar);
         EarleyParser {
             grammar,
             rules_by_origin,
+            nullable,
+            eps_only,
         }
     }
 
@@ -714,26 +728,49 @@ impl EarleyParser {
         }
     }
 
-    /// A reduction path through `item` is taken by Leo only when consuming the
-    /// symbol at the dot *completes* the rule — i.e. the recognized symbol is the
-    /// rule's final symbol (strict right recursion). Scott/Leo also permit a
-    /// nullable tail after the recognized symbol, but the topmost item is then
-    /// non-complete and the SPPF spine reconstruction must thread the nullable
-    /// completions through it — a subtle case upstream Lark never finished. We
-    /// deliberately decline it: such a tail is bounded extra work the regular
-    /// completer handles correctly, so the linearization target (`a: X a | X`,
-    /// including a nullable base like `a: X a | ε`) is covered while the
-    /// nullable-tail interaction that breaks the forest is avoided. The `start_id`
-    /// guard refuses to special-case a directly self-recursive start.
+    /// A reduction path through `item` is taken by Leo only when advancing past
+    /// the symbol at the dot leaves the rule *deterministically completable* — i.e.
+    /// consuming the recognized symbol either completes the rule (strict right
+    /// recursion, `a: X a | X`) or leaves only a **nullable tail** that ε-derives
+    /// to completion (`a: X a opt | X` with `opt:` ε-only, the minimal
+    /// nullable-tail shape — #64). The topmost item is then non-complete, and the
+    /// SPPF spine reconstruction threads the tail's ε-completions through it
+    /// (`materialize_leo_paths`), the case upstream Lark never finished
+    /// (lark-parser/lark#397).
+    ///
+    /// **The tail must be ε-ONLY, not merely nullable.** Linearizing collapses the
+    /// tail to ε on the Leo shortcut and skips the regular completer's cascade; if
+    /// a tail symbol could also match real tokens (an *optional* tail like
+    /// `opt: Y |`), that non-empty derivation would become unreachable and valid
+    /// input (`a: X a opt | X`, `opt: Y |` on `"xxy"`) would be wrongly rejected.
+    /// So `eps_only` (strictly stronger than nullable) is the admission test.
+    /// (Python Lark's reference uses `NULLABLE` here, but its Leo completer is dead
+    /// code — lark-parser/lark#397 — so it never exercised this distinction; ours
+    /// is a live reimplementation and must get it right.)
+    ///
+    /// The `start_id` guard refuses to special-case a directly self-recursive
+    /// start — at the recognized position OR anywhere in the tail (matches the
+    /// original reference guard), falling back to the regular completer there.
     fn is_quasi_complete(&self, item: &Item, start_id: SymbolId) -> bool {
         let expansion = &self.grammar.rules[item.rule].expansion;
         let origin = self.grammar.rules[item.rule].origin;
-        // The recognized symbol (at `item.dot`) must be the last in the rule.
-        if item.dot + 1 != expansion.len() {
+        // Refuse a directly self-recursive start at the recognized position.
+        if origin == start_id && expansion[item.dot] == start_id {
             return false;
         }
-        // Refuse a directly self-recursive start (matches the reference guard).
-        origin != start_id || expansion[item.dot] != start_id
+        // Walk the tail after the recognized symbol (positions `item.dot + 1 ..`).
+        // Each must be ε-only (so the rule completes with no further input AND the
+        // Leo collapse cannot drop a real derivation), and none may re-enter the
+        // recursive start.
+        for &sym in &expansion[item.dot + 1..] {
+            if !self.eps_only[sym.index()] {
+                return false;
+            }
+            if origin == start_id && sym == start_id {
+                return false;
+            }
+        }
+        true
     }
 
     /// Memoize (or extend) the Joop-Leo transitive chain for completing
@@ -786,11 +823,17 @@ impl EarleyParser {
                 break;
             }
             to_create.push((rec, col, o));
-            // The topmost item the chain reaches is the advance of the highest
-            // unique originator seen so far (its `node` is unused downstream).
+            // The topmost item the chain reaches is the *completed* form of the
+            // highest unique originator seen so far — its dot at the end of the
+            // rule (its `node` is unused downstream). For strict right recursion
+            // `o.dot + 1` already equals the length; with a nullable tail (#64) the
+            // tail's ε-completions are consumed here so `top` lands on the
+            // completed `Sym(origin)` node, exactly as the regular completer would
+            // after held-ε-advancing through the tail. `materialize_leo_paths`
+            // rebuilds the skipped intermediate + ε-tail spine lazily.
             top = Some(Item {
                 rule: o.rule,
-                dot: o.dot + 1,
+                dot: self.grammar.rules[o.rule].expansion.len(),
                 origin: o.origin,
                 node: ForestRef::None,
             });
@@ -872,21 +915,120 @@ impl EarleyParser {
             }
             for &t in chain.iter().rev() {
                 let tr = trans_arena[t];
-                let cur_node = forest.get_or_create(
+                // Build the node for the originator advanced past the recognized
+                // symbol: `[red.rule → … recognized • γ]`. With strict right
+                // recursion γ is empty, so this is already the completed
+                // `Sym(origin)`; with a nullable tail it is the intermediate
+                // `Inter(red.rule, red.dot + 1)`.
+                let mut prev_node = forest.get_or_create(
                     self.node_key(tr.red.rule, tr.red.dot + 1),
                     tr.red.origin,
                     end,
                 );
                 let right = forest.get_or_create(NodeKey::Sym(tr.recognized), tr.key_start, end);
                 forest.add_family(
-                    cur_node,
+                    prev_node,
                     tr.red.rule,
                     tr.red.node,
                     ForestRef::Node(right),
                     tr.red.dot,
                 );
+                // Thread the nullable tail (#64): each remaining symbol after the
+                // recognized one is nullable (guaranteed by `is_quasi_complete`),
+                // so it ε-completes at `end`. Advance one binarized level per tail
+                // position, each carrying the tail symbol's ε-node as the right
+                // child — exactly the spine the regular completer's held-ε
+                // advancing would have built, but materialized once here. The empty
+                // span `(end, end)` reuses any ε-node the chart already built.
+                let expansion = &self.grammar.rules[tr.red.rule].expansion;
+                for pos in (tr.red.dot + 1)..expansion.len() {
+                    let tail_sym = expansion[pos];
+                    let mut building = HashSet::new();
+                    let eps = self.eps_node(forest, tail_sym, end, &mut building);
+                    let next_node = forest.get_or_create(
+                        self.node_key(tr.red.rule, pos + 1),
+                        tr.red.origin,
+                        end,
+                    );
+                    forest.add_family(
+                        next_node,
+                        tr.red.rule,
+                        ForestRef::Node(prev_node),
+                        ForestRef::Node(eps),
+                        pos,
+                    );
+                    prev_node = next_node;
+                }
             }
         }
+    }
+
+    /// Build (or reuse) the SPPF node for a *nullable* symbol's ε-derivation at the
+    /// empty span `(col, col)`, returning its node id. Mirrors the ε-nodes the
+    /// regular completer materializes for a held ε-completion: a node keyed by its
+    /// global `(Sym(sym), col, col)` identity, carrying one family per fully
+    /// nullable rule of `sym`, each binarized over that rule's own (nullable)
+    /// children. Used by the Joop-Leo nullable-tail spine reconstruction (#64) to
+    /// thread the skipped ε-tail. Idempotent: a node whose families are already
+    /// present is returned untouched (it merges with the chart's own ε-node when
+    /// the chart built one), and recursion terminates because every ε-child spans
+    /// the same empty column and is dedup-guarded by the global index.
+    ///
+    /// `building` is a per-reconstruction "already descended into" set guarding a
+    /// nullable ε-cycle (e.g. `a: b |`, `b: a`): a symbol already entered returns
+    /// its node without re-descending, so the reconstruction terminates. It is
+    /// monotonic (never un-set) — safe because every symbol this builds ends with
+    /// non-empty `families`, so any later visit short-circuits at the
+    /// `families.is_empty()` check above rather than relying on the guard. Such
+    /// mutually-ε-recursive nullable symbols are outside the linearization target;
+    /// the regular completer still builds their canonical ε-node, which this node
+    /// merges into by global identity (`add_family` dedups by `(left, right)`).
+    fn eps_node(
+        &self,
+        forest: &mut Forest,
+        sym: SymbolId,
+        col: usize,
+        building: &mut HashSet<SymbolId>,
+    ) -> usize {
+        let id = forest.get_or_create(NodeKey::Sym(sym), col, col);
+        // Already populated (by the chart or an earlier call): reuse as-is.
+        if !forest.nodes[id].families.is_empty() {
+            return id;
+        }
+        // ε-cycle guard: this symbol is already being built further up the stack.
+        if !building.insert(sym) {
+            return id;
+        }
+        // Build a family for each fully nullable production of `sym`.
+        let Some(prods) = self.rules_by_origin.get(&sym) else {
+            return id;
+        };
+        let prods = prods.clone();
+        for ri in prods {
+            let expansion = &self.grammar.rules[ri].expansion;
+            // Only productions that derive ε wholesale (every symbol nullable)
+            // contribute an ε-derivation.
+            if !expansion.iter().all(|s| self.nullable[s.index()]) {
+                continue;
+            }
+            if expansion.is_empty() {
+                // The empty production: Scott's (None, None) ε family.
+                forest.add_family(id, ri, ForestRef::None, ForestRef::None, 0);
+            } else {
+                // A non-empty all-nullable production: binarize its ε-children
+                // left to right, mirroring the regular completer's spine.
+                let mut left = ForestRef::None;
+                let len = expansion.len();
+                for pos in 0..len {
+                    let child = self.eps_node(forest, expansion[pos], col, building);
+                    let key = self.node_key(ri, pos + 1);
+                    let node = forest.get_or_create(key, col, col);
+                    forest.add_family(node, ri, left, ForestRef::Node(child), pos);
+                    left = ForestRef::Node(node);
+                }
+            }
+        }
+        id
     }
 
     /// Scott's scanner: advance every terminal-expecting item that matches

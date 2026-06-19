@@ -382,6 +382,15 @@ start: "(" inner ")"
 #                            `a: X a |` is valid Lark but lark-rs's loader does not
 #                            accept it yet — a separate gap — so we use a named
 #                            empty rule, which both engines accept.)
+#   * right_rec_nulltail   — the recursive symbol is followed by a NULLABLE tail
+#                            (`a: X a opt | X`, `opt:`), the dangling-else shape:
+#                            the recursive `a` is NOT the rule's last symbol, so
+#                            advancing it lands NON-complete (`a: X a . opt`) and
+#                            the Leo spine reconstruction must thread the ε-`opt`
+#                            completion through every level (#64 — the case
+#                            upstream Lark's Leo never finished). The tree is the
+#                            non-Leo ground truth; Leo must reproduce it byte-for-
+#                            byte while linearizing the forest.
 #   * right_rec_transparent— recursion through a transparent `_tail` helper, whose
 #                            node is inlined away: the tree is identical to
 #                            right_rec, so the Leo path-reconstruction must rebuild
@@ -404,6 +413,68 @@ EARLEY_RIGHT_REC_NULLABLE_GRAMMAR = r"""
 start: a
 a: X a | empty
 empty:
+X: "x"
+"""
+
+EARLEY_RIGHT_REC_NULLTAIL_GRAMMAR = r"""
+start: a
+a: X a opt | X
+opt:
+X: "x"
+"""
+
+# An OPTIONAL (nullable-but-not-ε-only) tail: `opt: Y |` derives ε OR a real token.
+# This is the genuine dangling-else shape, and the hard case: the Leo path must
+# NOT force the tail to ε — `"xxy"` parses as the inner `a` carrying `opt -> Y`,
+# while `"x"` / `"xxx"` take the ε tail. If the Leo recognizer collapses the tail
+# to ε unconditionally, the non-ε derivation becomes unreachable and `"xxy"` is
+# wrongly rejected (#64 correctness pin).
+EARLEY_RIGHT_REC_OPTTAIL_GRAMMAR = r"""
+start: a
+a: X a opt | X
+opt: Y |
+X: "x"
+Y: "y"
+"""
+
+# The textbook dangling-else via EBNF `(ELSE stmt)?` — the optional tail lowers to
+# a nullable helper that can ALSO derive `ELSE stmt`, so it is nullable but NOT
+# ε-only. Leo must decline (the regular completer handles it), and every nesting
+# must parse + shape correctly. The #64 issue notes this shape is already linear
+# (its base case anchors the recursion), so declining costs nothing.
+EARLEY_DANGLING_ELSE_GRAMMAR = r"""
+start: stmt
+stmt: IF stmt (ELSE stmt)? | OTHER
+IF: "i"
+ELSE: "e"
+OTHER: "o"
+"""
+
+# A multi-symbol nullable tail (`opt opt2`, both ε): the Leo spine reconstruction
+# must thread *two* ε-completions per level, advancing through two intermediate
+# binarized nodes before reaching the completed `a`. Pins that `materialize_leo_
+# paths` walks the whole tail, not just the first nullable symbol (#64).
+EARLEY_RIGHT_REC_NULLTAIL2_GRAMMAR = r"""
+start: a
+a: X a opt opt2 | X
+opt:
+opt2:
+X: "x"
+"""
+
+# Directly self-recursive START (`start: X start | X`), strict and with a
+# nullable tail. The Leo `start_id` guard refuses to special-case a recursion
+# that re-enters the start symbol (matching Python's `is_quasi_complete`), so
+# these must fall back to the regular completer and still produce the right
+# right-nested tree — the #64 guard rewrite must not break this fallback.
+EARLEY_RIGHT_REC_START_GRAMMAR = r"""
+start: X start | X
+X: "x"
+"""
+
+EARLEY_RIGHT_REC_START_NULLTAIL_GRAMMAR = r"""
+start: X start opt | X
+opt:
 X: "x"
 """
 
@@ -515,6 +586,46 @@ EARLEY_GRAMMARS = [
         ("x",   True),
         ("xx",  True),
         ("xxx", True),
+    ]),
+    ("right_rec_nulltail", EARLEY_RIGHT_REC_NULLTAIL_GRAMMAR, [
+        ("x",    True),
+        ("xx",   True),
+        ("xxx",  True),
+        ("xxxx", True),
+        ("",     False),
+    ]),
+    ("right_rec_nulltail2", EARLEY_RIGHT_REC_NULLTAIL2_GRAMMAR, [
+        ("x",    True),
+        ("xx",   True),
+        ("xxx",  True),
+        ("xxxx", True),
+        ("",     False),
+    ]),
+    ("right_rec_opttail", EARLEY_RIGHT_REC_OPTTAIL_GRAMMAR, [
+        ("x",    True),
+        ("xxy",  True),
+        ("xxxy", True),
+        ("xxx",  True),
+        ("",     False),
+    ]),
+    ("dangling_else", EARLEY_DANGLING_ELSE_GRAMMAR, [
+        ("o",     True),
+        ("io",    True),
+        ("ioeo",  True),
+        ("iioeo", True),
+        ("",      False),
+    ]),
+    ("right_rec_start", EARLEY_RIGHT_REC_START_GRAMMAR, [
+        ("x",    True),
+        ("xx",   True),
+        ("xxx",  True),
+        ("",     False),
+    ]),
+    ("right_rec_start_nulltail", EARLEY_RIGHT_REC_START_NULLTAIL_GRAMMAR, [
+        ("x",    True),
+        ("xx",   True),
+        ("xxx",  True),
+        ("",     False),
     ]),
     ("right_rec_transparent", EARLEY_RIGHT_REC_TRANSPARENT_GRAMMAR, [
         ("x",   True),
@@ -655,8 +766,27 @@ NAME: /[a-z]+/
 %ignore " "
 """
 
+# Nullable-tail right recursion under the DYNAMIC lexer with `%ignore` (#64). The
+# ignored spaces between the `x`s force the dynamic scanner's `%ignore` carry-over
+# to run through `materialize_leo_paths` — the same Leo spine reconstruction the
+# basic lexer uses, but reached via a carried completed item. Pins that the
+# nullable-tail ε-threading is correct on the dynamic path too.
+DYN_NULLTAIL_GRAMMAR = r"""
+start: a
+a: X a opt | X
+opt:
+X: /x/
+%ignore " "
+"""
+
 # (name, grammar, lexer, [(input, should_parse)])
 EARLEY_DYNAMIC_GRAMMARS = [
+    ("nulltail", DYN_NULLTAIL_GRAMMAR, "dynamic", [
+        ("x", True),
+        ("x x", True),
+        ("x x x", True),
+        ("x x x x", True),
+    ]),
     ("overlap", DYN_OVERLAP_GRAMMAR, "dynamic", [
         ("aa", False),    # greedy A eats everything → B starves
         ("aaa", False),
