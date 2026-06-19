@@ -360,6 +360,25 @@ The `\<`/`\>` dialect normalization (below) and the lookaround-scope refusals ar
 existing instances; #159 (keep our `_ambig` dedup) and #101 (reject a nullable CYK
 rule Python rejects) were decided by this rule.
 
+**Explicit-mode `_ambig` is deduped — distinct alternatives only (#159, ADR-0017).**
+With `ambiguity='explicit'`, lark-rs's forest walk dedups derivation values by a
+structural key (`node_value_key`, applied in `DerivsNext` in `earley.rs`), so it
+returns only the **distinct** `_ambig` alternatives. Python Lark's `ForestToParseTree`
+does *not* dedup, so it can repeat **byte-identical** `_ambig` children: distinct SPPF
+derivations that assemble to the same tree because the distinguishing tokens are
+filtered out (repro: `start: "x" start | start "x" | "x"` on `"xxx"` — Python yields a
+nested `_ambig` of byte-identical `start(start(start))` shapes; lark-rs yields a single
+tree, no `_ambig`). This divergence is **intentional and kept** (architect verdict
+2026-06-18): the dedup compensates for lark-rs's SPPF over-sharing, and matching
+Python's duplicates is expensive forest-structure work for output that carries zero
+information — the "diverge & document" quadrant. **Invariant:** the dedup may only ever
+collapse byte-identical trees, *never* structurally-distinct derivations (that would be
+a real bug). Pinned by the guard tests in `parsers/earley.rs`
+(`node_value_key_separates_distinct_collapses_identical`,
+`explicit_keeps_structurally_distinct_ambig_alternatives`,
+`explicit_collapses_byte_identical_ambig_alternatives`), which trip if the keying ever
+over-merges.
+
 **Terminal ordering matters.** Terminals are sorted `(-priority, -pattern_len, name)` before
 the combined regex is built. Higher priority and longer patterns come first so that, e.g.,
 `OCT` (`0[oO][0-7]…`) beats `INT` (`[0-9]…`) at `"0o777"`. Get this wrong and the lexer

@@ -2613,4 +2613,123 @@ mod tests {
         }
         assert!(!p.recognize(&[], Some("start")));
     }
+
+    // ── #159 guard: the explicit-mode `_ambig` dedup (`node_value_key` keyed in
+    //    `DerivsNext`) must ONLY ever collapse BYTE-IDENTICAL derivations, never
+    //    structurally-distinct ones. lark-rs intentionally diverges from Python
+    //    Lark here: Python's `ForestToParseTree` does not dedup, so its `_ambig`
+    //    may repeat byte-identical children; we drop those (they carry zero
+    //    information — see ADR-0017 "diverge & document" and `docs/STATUS.md`).
+    //    Collapsing a *distinct* derivation would be a real bug; these tests are
+    //    the tripwire. DO NOT relax them to make the dedup do more.
+
+    /// The keying function is the dedup's decision procedure: equal keys collapse,
+    /// distinct keys survive. Pin both directions directly on `node_value_key`.
+    #[test]
+    fn node_value_key_separates_distinct_collapses_identical() {
+        let leaf = |data: &str| Child::Tree(Tree::new(data, vec![]));
+        // Two byte-identical trees → identical keys (these are the ONLY thing the
+        // dedup is allowed to collapse).
+        let a1 = NodeValue::Tree(Tree::new("start", vec![leaf("x"), leaf("x")]));
+        let a2 = NodeValue::Tree(Tree::new("start", vec![leaf("x"), leaf("x")]));
+        assert_eq!(
+            node_value_key(&a1),
+            node_value_key(&a2),
+            "byte-identical derivations must key equal (so they collapse)"
+        );
+
+        // Same node name, DIFFERENT child structure → distinct keys (must survive).
+        let b = NodeValue::Tree(Tree::new("start", vec![leaf("y")]));
+        assert_ne!(
+            node_value_key(&a1),
+            node_value_key(&b),
+            "structurally-distinct derivations must key apart (never collapse)"
+        );
+
+        // Same shape, DIFFERENT kept token value → distinct keys (must survive).
+        // `node_value_key` keys tokens by `type_` + `value` (not the interned id).
+        let c = NodeValue::Tree(Tree::new("n", vec![Child::Token(Token::new("A", "a"))]));
+        let d = NodeValue::Tree(Tree::new("n", vec![Child::Token(Token::new("A", "b"))]));
+        assert_ne!(
+            node_value_key(&c),
+            node_value_key(&d),
+            "derivations differing only in a kept token value must key apart"
+        );
+    }
+
+    /// End-to-end tripwire: a grammar whose ambiguity yields two
+    /// STRUCTURALLY-DISTINCT derivations (`start(x x)` vs `start(y(A A))`) must
+    /// keep BOTH `_ambig` alternatives — the dedup must not over-merge them.
+    #[test]
+    fn explicit_keeps_structurally_distinct_ambig_alternatives() {
+        let cg = compile("start: x x | y\nx: A\ny: A A\nA: \"a\"\n");
+        let p = EarleyParser::new(cg.clone());
+        let parsed = p
+            .parse(
+                &[tok(&cg, "A", "a"), tok(&cg, "A", "a")],
+                Some("start"),
+                false,
+            )
+            .expect("parses");
+        let tree = parsed.as_tree().expect("root is a tree");
+        assert_eq!(
+            tree.data, "_ambig",
+            "the two readings are genuinely ambiguous"
+        );
+        // Collect each alternative's shape (its sole child's `data`).
+        let mut shapes: Vec<&str> = tree
+            .children
+            .iter()
+            .filter_map(Child::as_tree)
+            .flat_map(|alt: &Tree| alt.children.iter().filter_map(Child::as_tree))
+            .map(|t| t.data.as_str())
+            .collect();
+        shapes.sort_unstable();
+        shapes.dedup();
+        assert_eq!(
+            shapes,
+            vec!["x", "y"],
+            "both distinct derivations (x x and y(A A)) must survive the dedup, got {:?}",
+            tree.pretty(0)
+        );
+    }
+
+    /// End-to-end pin of the #159 *current* (intentional) behavior: when every
+    /// derivation is BYTE-IDENTICAL (the distinguishing tokens are filtered out),
+    /// the dedup collapses them to a single tree — no `_ambig`. Python Lark keeps
+    /// the duplicates; we diverge by design (ADR-0017). This is the behavior the
+    /// architect verdict says to KEEP; if it ever changes, that is a real decision,
+    /// not an accident.
+    #[test]
+    fn explicit_collapses_byte_identical_ambig_alternatives() {
+        // The issue's repro: `start: "x" start | start "x" | "x"` on "xxx". The
+        // `"x"` tokens are filtered, so all derivations assemble byte-identically.
+        let cg = compile("start: \"x\" start | start \"x\" | \"x\"\n");
+        let p = EarleyParser::new(cg.clone());
+        // The `"x"` literal lowers to an anonymous string terminal; resolve its
+        // interned name by its pattern value rather than guessing the spelling.
+        let term = cg
+            .terminals
+            .iter()
+            .find(|t| matches!(&t.pattern, crate::grammar::terminal::Pattern::Str(s) if s.value == "x"))
+            .expect("the \"x\" literal interned as a terminal")
+            .name
+            .clone();
+        let input: Vec<Token> = (0..3).map(|_| tok(&cg, &term, "x")).collect();
+        let parsed = p.parse(&input, Some("start"), false).expect("parses");
+        let tree = parsed.as_tree().expect("root is a tree");
+        assert_ne!(
+            tree.data,
+            "_ambig",
+            "byte-identical derivations collapse to a single tree (no _ambig); got {}",
+            tree.pretty(0)
+        );
+        assert_eq!(tree.data, "start");
+        // No `_ambig` anywhere in the collapsed result.
+        assert!(
+            tree.iter_subtrees().all(|t| t.data != "_ambig"),
+            "no nested _ambig should survive the collapse; got {}",
+            tree.pretty(0)
+        );
+    }
 }
