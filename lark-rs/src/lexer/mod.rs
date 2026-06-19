@@ -313,6 +313,61 @@ impl BasicLexer {
         })
     }
 
+    /// Lex the single token the combined scanner matches **exactly** at byte offset
+    /// `pos` (1-based `line`/`col` carry the position into the produced token). The
+    /// returned token may be an `%ignore` terminal — the caller decides whether to
+    /// keep or skip it via [`is_ignored`](Self::is_ignored) — so this does *not*
+    /// advance past ignored runs and never mutates any state. `Err(())` when no
+    /// terminal matches here (an un-lexable character the caller recovers from); the
+    /// caller stops the loop at end of input before calling this.
+    ///
+    /// This is the lazy, one-token-at-a-time seam the recovering basic-lexer postlex
+    /// source ([`crate::parsers::BasicRecovering`]) drives, so a char skip can be
+    /// interleaved with the streaming indenter + parser resume exactly as Python
+    /// Lark's lazy `lexer → PostLexConnector → parser` pipeline does — rather than
+    /// the eager [`lex_recovering`](Self::lex_recovering) which skips every
+    /// un-lexable character up front, before the indenter runs. It mirrors
+    /// [`ContextualLexer::next_token`](ContextualLexer::next_token)'s contract: no
+    /// state, ignored tokens surfaced to the caller.
+    ///
+    /// [`lex_recovering`]: Self::lex_recovering
+    pub fn next_token_at(
+        &self,
+        text: &str,
+        pos: usize,
+        line: usize,
+        col: usize,
+    ) -> Result<Token, ()> {
+        match self.scanner.match_at(text, pos) {
+            Some((id, value)) => {
+                let mut cur = LexCursor { pos, line, col };
+                let start_pos = cur.pos;
+                let start_line = cur.line;
+                let start_col = cur.col;
+                cur.feed(value);
+                Ok(Token {
+                    type_id: id,
+                    type_: self.names[&id].clone(),
+                    value: value.to_string(),
+                    line: start_line,
+                    column: start_col,
+                    end_line: cur.line,
+                    end_column: cur.col,
+                    start_pos,
+                    end_pos: cur.pos,
+                })
+            }
+            None => Err(()),
+        }
+    }
+
+    /// Whether `id` is an `%ignore` terminal (whitespace/comments the parser skips).
+    /// Mirrors [`ContextualLexer::is_ignored`](ContextualLexer::is_ignored) for the
+    /// lazy basic-recovering source.
+    pub fn is_ignored(&self, id: SymbolId) -> bool {
+        self.ignore.contains(&id)
+    }
+
     /// Lex with character-level error recovery (issue #93). Mirrors [`lex`] but,
     /// at an un-lexable position (no terminal matches), records an
     /// [`UnexpectedCharacter`] error, consults `on_error`, and — if it returns

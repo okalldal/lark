@@ -1663,6 +1663,146 @@ def generate_indenter():
                     run_group(name, "lalr", "contextual", open_types, close_types, cases))
 
 
+# ─── Indenter / postlex error recovery (issue #94, sub-target 1) ─────────────
+#
+# Extends single-token-deletion recovery to the LALR + Indenter (postlex) path.
+# Python Lark wires `lexer → PostLexConnector(postlex) → parser`, so `on_error`/
+# `resume_parse` operate on the *post-indenter* token stream: the Indenter injects
+# INDENT/DEDENT over the clean lex, and token-deletion recovery happens DOWNSTREAM
+# of that injection (a deleted token never reaches the indenter, so its
+# bracket/indent bookkeeping cannot desync). lark-rs mirrors that ordering exactly:
+# lex (with char-skip recovery) → Indenter::process over the survivors → the
+# recovering LALR loop over the indented stream.
+#
+# Each case captures, with `on_error=lambda e: True`, the tree Python recovers to
+# and how many times the handler fired (= deleted tokens + skipped chars). A case
+# Python re-raises on (premature `$END`, or a `DedentError` the Indenter itself
+# raises before any parser error) is recorded `recovered: false`; the Rust test
+# pins `tree: None` there (no fabricated derivation — issue #167), and for an
+# Indenter-raised error that recovery never even begins on, `error_count: 0`.
+#
+# (grammar_file, open_paren_types, close_paren_types, [input, ...])
+INDENTER_RECOVERY_GROUPS = [
+    ("indent", [], [], [
+        "a\n",                       # clean: no recovery
+        "if x:\n    a\n",            # clean block
+        "a a\n",                     # stray NAME on one line -> delete it
+        "if x:\n    a\nb b\nc\n",    # stray NAME after a dedent -> delete it
+        "if x:\n    a\n    b\nc\n",  # clean nested block + dedent
+        "if x:\n    a a\n    b\n",   # stray NAME inside a block -> EOF re-raise
+        "a @ b\n",                   # un-lexable char (skip) + stray NAME (delete)
+        # Un-lexable char *inside an indented block*: the char-skip resume re-runs
+        # the Indenter from indent_level=[0] (Python routes UnexpectedCharacters
+        # through resume_parse → a fresh Indenter.process), so the block can't
+        # complete and recovery re-raises at $END. Pins that skip_char resets the
+        # indenter, not just token deletion.
+        "if x:\n    @a\n    b\nc\n",
+        "if x:\n    a\n    @\n    b\nc\n",
+        "if x:\n    a\n   b\n",      # Indenter DedentError: re-raised before recovery
+    ]),
+    ("indent_paren", ["LPAR"], ["RPAR"], [
+        "f (x)\n",                   # clean paren group
+        "f (x) (y)\n",               # stray second group -> delete LPAR NAME RPAR
+        "f (\n   x\n)\n",            # newline inside parens ignored (clean)
+        "f (x) y\n",                 # stray NAME after the group -> delete it
+    ]),
+]
+
+# Indenter recovery where the *contextual* lexer's state-narrowing is load-bearing
+# (the `indent_context` grammar, #67): NAME and VALUE share a regex but are split
+# by parser state, so the *basic* lexer can't even parse a clean `x = y`. Recovery
+# must run over the contextual stream (issue #166's root-lexer fallback) *with* the
+# streaming indenter, or it would mis-tokenize VALUE as NAME and diverge — this is
+# the case that the basic-lexer recovery path cannot serve. Generated under
+# `lexer='contextual'` only.
+#
+# (grammar_file, open_paren_types, close_paren_types, [input, ...])
+INDENTER_RECOVERY_CONTEXTUAL_GROUPS = [
+    ("indent_context", [], [], [
+        "x = y\n",                       # clean top-level assign (VALUE needs state)
+        "x = y z\n",                     # stray VALUE -> delete it (contextual-only)
+        "x x = y\n",                     # stray leading NAME -> delete it
+        "if a:\n    x = y\n    p q\nz = w\n",  # stray inside a block -> EOF re-raise
+        "if a:\n    x = y\nz = w\n",     # clean block + dedent
+    ]),
+]
+
+
+def generate_indenter_recovery():
+    from lark.indenter import Indenter
+
+    print("Generating Indenter / postlex error-recovery oracles (#94)...")
+
+    def run_group(name, lexer_type, open_types, close_types, inputs):
+        grammar = load_grammar(name)
+
+        class _TI(Indenter):
+            NL_type = "_NL"
+            OPEN_PAREN_types = open_types
+            CLOSE_PAREN_types = close_types
+            INDENT_type = "_INDENT"
+            DEDENT_type = "_DEDENT"
+            tab_len = 8
+
+        built = []
+        for inp in inputs:
+            # The `indent`/`indent_paren` groups generate against 'basic' — basic and
+            # contextual lexers produce byte-identical recovery there (the contextual
+            # lexer's root-lexer fallback yields the same global stream), so 'basic'
+            # makes the parity explicit (as `generate_recovery` does). The
+            # `indent_context` group needs 'contextual': the basic lexer can't parse
+            # it at all (NAME/VALUE overlap, split only by parser state).
+            lark = Lark(grammar, parser="lalr", lexer=lexer_type, postlex=_TI(),
+                        start="start", maybe_placeholders=False)
+            count = {"n": 0}
+
+            def on_error(e):
+                count["n"] += 1
+                return True
+
+            try:
+                tree = lark.parse(inp, on_error=on_error)
+                built.append({
+                    "input": inp,
+                    "recovered": True,
+                    "error_count": count["n"],
+                    # `postlex` when the Indenter itself raised before recovery
+                    # could begin (e.g. a DedentError), `parser` for a re-raised
+                    # premature-$END (or no re-raise at all on success).
+                    "error_kind": "parser",
+                    "tree": tree_to_dict(tree),
+                })
+            except Exception as e:
+                # An Indenter DedentError is raised *through the postlex generator*,
+                # before any parser `UnexpectedToken`, so `on_error` is never
+                # consulted (error_count stays 0). lark-rs surfaces that as a hard
+                # `LarkError` (Err), whereas a re-raised premature-$END is the
+                # `Ok(tree: None)` convention. Distinguish them by exception type so
+                # the Rust replay holds each to the right contract.
+                kind = "postlex" if type(e).__name__ == "DedentError" else "parser"
+                built.append({
+                    "input": inp,
+                    "recovered": False,
+                    "error_count": count["n"],
+                    "error_kind": kind,
+                    "tree": None,
+                })
+        return {
+            "name": name,
+            "open_paren_types": open_types,
+            "close_paren_types": close_types,
+            "cases": built,
+        }
+
+    groups = [run_group(name, "basic", ot, ct, inputs)
+              for name, ot, ct, inputs in INDENTER_RECOVERY_GROUPS]
+    groups += [run_group(name, "contextual", ot, ct, inputs)
+               for name, ot, ct, inputs in INDENTER_RECOVERY_CONTEXTUAL_GROUPS]
+    save_oracle("indenter_recovery", "cases", groups)
+    n_cases = sum(len(g["cases"]) for g in groups)
+    print(f"  {len(groups)} groups, {n_cases} cases")
+
+
 def generate_json():
     print("Generating JSON oracles...")
     grammar = load_grammar("json")
@@ -1733,6 +1873,7 @@ if __name__ == "__main__":
     generate_lookaround()
     generate_imports()
     generate_indenter()
+    generate_indenter_recovery()
     generate_python_numbers()
     generate_lalr_core()
     generate_recovery()

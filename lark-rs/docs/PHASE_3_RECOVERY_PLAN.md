@@ -46,10 +46,22 @@ nodes, validated against Python Lark's `on_error` callback where applicable.*
   is the correct stream for it.)
 - An oracle suite gating the recovered trees + deletion counts against Python
   (both grammatically-misplaced tokens and stray un-lexable `@`/`#` characters).
+- Recovery over the **LALR + postlex (Indenter)** path (issue #94) — every LALR
+  configuration (basic/contextual lexer × with/without an Indenter) recovers. It
+  mirrors Python's `lexer → PostLexConnector(postlex) → parser` wiring: the
+  streaming indenter sits upstream of the parser's token deletion and **resets on
+  every resume** (`indent_stack=[0]`, `paren_level=0`) exactly as Python's
+  `Indenter.process` does per `resume_parse` — for token deletions *and* char
+  skips, so a multi-deletion or a char-skip-inside-a-block re-raises at `$END`
+  where Python does. One streaming-indenter machine (`PostlexContextual<S>`) drives
+  the clean parse, contextual recovery (`ContextualRecovering`), and basic recovery
+  (`BasicRecovering`) alike; a `DedentError` surfaces as a hard error. Oracle:
+  `indenter_recovery/cases.json`, replayed by `test_indenter_recovery.rs`. ADR-0020.
 
-**Out of scope (follow-ups):**
+**Out of scope (won't-do per the #94 architect verdict):**
 
-- Recovery on the Earley/CYK backends and on the LALR+postlex (indenter) path.
+- Recovery on the **Earley/CYK** backends — Python exposes no `on_error` there, so
+  there is no oracle; building it would be unfalsifiable.
 - Inline error nodes spliced into the tree (see §3).
 
 ---

@@ -209,10 +209,37 @@ pub(crate) struct IndenterStream<'a> {
     /// kept, so the loop never clones a whole `Token` for the EOF flush.
     last_pos: Option<Pos>,
     out: VecDeque<Token>,
+    /// Whether this stream drives error recovery (issue #94). It relaxes the
+    /// unbalanced-close-bracket guard: Python's `_process` decrements `paren_level`
+    /// and asserts `>= 0` *lazily*, on the iteration *after* it yields the close
+    /// bracket — but during recovery the parser may delete that bracket and resume
+    /// with a *fresh* generator, abandoning the old one *before* the decrement/assert
+    /// runs. So an underflowing close bracket is yielded (the parser deletes it) and
+    /// its decrement is never observed. We mirror that by saturating `paren_level` at
+    /// 0 instead of erroring while recovering; a clean parse keeps the hard error.
+    recovering: bool,
 }
 
 impl<'a> IndenterStream<'a> {
     pub(crate) fn new(cfg: &'a Indenter, symbols: &SymbolTable) -> Result<Self, ParseError> {
+        Self::new_inner(cfg, symbols, false)
+    }
+
+    /// As [`new`](Self::new), but for error recovery (issue #94): relaxes the
+    /// unbalanced-close-bracket guard (see the `recovering` field) so the streaming
+    /// indenter matches Python Lark's generator-abandonment behavior on resume.
+    pub(crate) fn new_recovering(
+        cfg: &'a Indenter,
+        symbols: &SymbolTable,
+    ) -> Result<Self, ParseError> {
+        Self::new_inner(cfg, symbols, true)
+    }
+
+    fn new_inner(
+        cfg: &'a Indenter,
+        symbols: &SymbolTable,
+        recovering: bool,
+    ) -> Result<Self, ParseError> {
         let indent_id = cfg.declared_id(symbols, &cfg.indent_type)?;
         let dedent_id = cfg.declared_id(symbols, &cfg.dedent_type)?;
         Ok(IndenterStream {
@@ -223,7 +250,27 @@ impl<'a> IndenterStream<'a> {
             indent_stack: vec![0],
             last_pos: None,
             out: VecDeque::new(),
+            recovering,
         })
+    }
+
+    /// Reset the indenter to its initial state for an error-recovery *resume*
+    /// (issue #94). Python Lark's recovery re-invokes `Indenter.process` on each
+    /// `resume_parse`, and `process` resets `indent_level = [0]` and
+    /// `paren_level = 0` every call — so after the parser deletes an offending
+    /// token, the *fresh* indenter generator continues pulling real tokens from the
+    /// lexer's current position but with a cleared indent/paren stack. Reproducing
+    /// that reset is what makes recovery over a postlex hook byte-for-byte faithful
+    /// (a multi-deletion recovery otherwise diverges: the trailing DEDENTs that
+    /// close a block are never re-emitted once the stack keeps resetting). The
+    /// output queue is cleared too: any tokens the fresh generator hasn't re-derived
+    /// yet must not leak across the resume boundary. The underlying lexer position
+    /// is **not** touched — only the indenter's own bookkeeping.
+    pub(crate) fn reset_for_resume(&mut self) {
+        self.paren_level = 0;
+        self.indent_stack.clear();
+        self.indent_stack.push(0);
+        self.out.clear();
     }
 
     /// Feed one real (non-`$END`) token. Appends its postlex result to the queue.
@@ -251,15 +298,22 @@ impl<'a> IndenterStream<'a> {
         match delta {
             1 => self.paren_level += 1,
             -1 => {
-                self.paren_level =
-                    self.paren_level
-                        .checked_sub(1)
-                        .ok_or_else(|| ParseError::Postlex {
+                self.paren_level = match self.paren_level.checked_sub(1) {
+                    Some(n) => n,
+                    // Underflow. During recovery this close bracket has already been
+                    // yielded (the parser deletes it and resumes with a fresh
+                    // generator), so Python never reaches its lazy `>= 0` assert —
+                    // saturate at 0 and carry on. A clean parse keeps the hard error.
+                    None if self.recovering => 0,
+                    None => {
+                        return Err(ParseError::Postlex {
                             msg: format!(
                                 "unbalanced closing bracket at line {}, column {}",
                                 cur.line, cur.column
                             ),
-                        })?
+                        })
+                    }
+                }
             }
             _ => {}
         }
