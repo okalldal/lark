@@ -80,21 +80,23 @@ impl Lark {
     ///
     /// Instead of aborting on the first parse error, the parser deletes the
     /// offending token and continues (single-token-deletion recovery), returning a
-    /// best-effort [`RecoveredTree`]: the partial tree plus every error recovered
-    /// from. This is exactly Python Lark's `parse(text, on_error=lambda e: True)`.
+    /// [`RecoveredTree`]: `tree` is `Some` when recovery reached a valid parse and
+    /// `None` when it could not (premature `$END`), plus every error recovered
+    /// from. This is exactly Python Lark's `parse(text, on_error=lambda e: True)`
+    /// (which likewise re-raises at premature `$END`, our `None`).
     ///
     /// Only the LALR backend without a postlex hook supports recovery; other
-    /// configurations return an error. See [`RecoveredTree`] for the partial-tree
-    /// and error-node semantics.
+    /// configurations return an error. See [`RecoveredTree`] for the tree
+    /// (`Option`) and error-node semantics.
     pub fn parse_with_recovery(&self, text: &str) -> Result<RecoveredTree, LarkError> {
         self.parse_on_error(text, |_| true)
     }
 
     /// Parse with a custom `on_error` handler, mirroring Python Lark's `on_error`
     /// callback. The handler is invoked for each parse error; return `true` to
-    /// recover (delete the offending token and resume) or `false` to stop and
-    /// return the partial tree built so far. The recovered errors are collected in
-    /// the returned [`RecoveredTree::errors`].
+    /// recover (delete the offending token and resume) or `false` to stop. Stopping
+    /// before a valid parse yields `tree: None` (no fabricated derivation); the
+    /// recovered errors are collected in the returned [`RecoveredTree::errors`].
     pub fn parse_on_error(
         &self,
         text: &str,

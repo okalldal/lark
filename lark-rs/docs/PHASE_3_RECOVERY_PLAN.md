@@ -30,7 +30,8 @@ nodes, validated against Python Lark's `on_error` callback where applicable.*
   (`s.line_ctr.feed(text[p:p+1])`). The skip fires `on_error` once per skipped
   character and is recorded in `RecoveredTree.errors` alongside the token-level
   deletions, so both deletion kinds are counted.
-- A `RecoveredTree { tree, errors }` result type (the "partial-tree error type").
+- A `RecoveredTree { tree: Option<…>, errors }` result type (the "partial-tree
+  error type"); `tree` is `None` when recovery can't reach a valid parse (#167).
 - `Lark::parse_with_recovery` (the built-in strategy) and `Lark::parse_on_error`
   (a custom handler) — the `on_error` extensibility Python Lark exposes.
 - An oracle suite gating the recovered trees + deletion counts against Python
@@ -63,10 +64,14 @@ deleted), and assert lark-rs matches both. See
 
 The one divergence: a `$END` error (premature end of input) can't be fixed by
 deletion — there is no token after `$END`. Python's loop has an infinite-loop
-guard that re-raises there. lark-rs instead returns a best-effort partial tree
-(the issue's "produce a partial tree rather than abort"), so the oracle marks
-those cases `recovered: false` and the Rust test checks only that recovery fired,
-not the partial's shape.
+guard that re-raises there. lark-rs returns `Ok` rather than aborting, but with
+`RecoveredTree.tree == None` — **no** fabricated derivation (issue #167, ADR-0019;
+it once synthesized a partial from the value stack, which was not a real
+derivation and a caller could not tell apart from a clean parse). The oracle marks
+those cases `recovered: false` / `tree: null`, and the Rust test pins `tree.is_none()`
+against it. `tree: Some(..)` therefore always means a real parse the surviving
+tokens produced; the non-empty `errors` list with `tree: None` is the
+distinguishable partial.
 
 ---
 
@@ -97,8 +102,9 @@ Lark::parse_with_recovery / parse_on_error          (src/lib.rs)
       → LalrParser::parse_recovering                 (src/parsers/lalr.rs)
           → run_recovering: the shared LALR loop, but on a no-action token:
               record the error, ask on_error, delete the token, resume
-          → synthesize_partial when ACCEPT is unreachable
-  → RecoveredTree { tree, errors }   (char-skips + token-deletions, one list)
+          → Some(tree) on ACCEPT; None when ACCEPT is unreachable (premature
+            $END, or on_error stopping) — no fabricated partial (issue #167)
+  → RecoveredTree { tree: Option<..>, errors }   (char-skips + token-deletions, one list)
 ```
 
 - **`src/lexer/mod.rs`** — `BasicLexer::lex_recovering` is `lex` with one extra arm

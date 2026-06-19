@@ -40,13 +40,26 @@ fn test_recovery_oracle() {
         );
 
         if recovered {
-            // Python recovered to a full tree — lark-rs must produce the same one.
-            tree_matches_oracle(&result.tree, &case["tree"])
+            // Python recovered to a full tree — lark-rs must produce the same one,
+            // and it must be a real `Some` derivation.
+            let tree = result
+                .tree
+                .as_ref()
+                .unwrap_or_else(|| panic!("input {input:?}: expected Some(tree), got None"));
+            tree_matches_oracle(tree, &case["tree"])
                 .unwrap_or_else(|e| panic!("input {input:?}: tree mismatch vs oracle: {e}"));
         } else {
-            // Premature-EOF: Python re-raises; lark-rs intentionally returns a
-            // best-effort partial instead of aborting. Only the recovery itself
-            // (a non-empty error list) is asserted, not the partial's shape.
+            // Premature-EOF: Python re-raises (`recovered: false`, `tree: null`).
+            // lark-rs pins that exactly (issue #167): no fabricated derivation —
+            // `tree` is `None` — only the recovered errors are surfaced.
+            assert!(
+                case["tree"].is_null(),
+                "oracle bug: recovered:false case {input:?} should have tree:null"
+            );
+            assert!(
+                result.tree.is_none(),
+                "input {input:?}: premature-EOF must yield tree:None, not a fabricated partial"
+            );
             assert!(
                 !result.errors.is_empty(),
                 "input {input:?}: expected at least one recovered error"
@@ -62,14 +75,16 @@ fn test_clean_parse_records_no_errors() {
     let lark = recovery_parser();
     let result = lark.parse_with_recovery("1 + 2").unwrap();
     assert!(result.errors.is_empty());
+    let tree = result.tree.expect("clean parse yields Some(tree)");
     let normal = lark.parse("1 + 2").unwrap();
-    assert_eq!(format!("{}", result.tree), format!("{normal}"));
+    assert_eq!(format!("{tree}"), format!("{normal}"));
 }
 
 #[test]
-fn test_on_error_stop_returns_partial() {
-    // Returning `false` from the handler stops at the first error and returns the
-    // partial tree built so far — without deleting anything further.
+fn test_on_error_stop_returns_no_tree() {
+    // Returning `false` from the handler stops at the first error before reaching
+    // ACCEPT, so there is no real derivation: `tree` is `None` (issue #167 — we no
+    // longer fabricate a partial) and the single error is recorded.
     let lark = recovery_parser();
     let mut seen = 0;
     let result = lark
@@ -80,16 +95,25 @@ fn test_on_error_stop_returns_partial() {
         .unwrap();
     assert_eq!(seen, 1, "handler called exactly once before stopping");
     assert_eq!(result.errors.len(), 1);
+    assert!(
+        result.tree.is_none(),
+        "stopping before ACCEPT yields no derivation"
+    );
 }
 
 #[test]
 fn test_recovery_never_aborts_on_trailing_error() {
     // The premature-EOF case (`1 + 2 +`) is where Python re-raises. lark-rs returns
-    // Ok with a partial tree and the error recorded — the issue's "produce a partial
-    // tree on failure rather than aborting".
+    // Ok rather than aborting, but with no fabricated derivation: `tree` is `None`
+    // (issue #167) and the error is recorded — a partial the caller can distinguish
+    // from a clean parse.
     let lark = recovery_parser();
     let result = lark.parse_with_recovery("1 + 2 +").unwrap();
     assert_eq!(result.errors.len(), 1);
+    assert!(
+        result.tree.is_none(),
+        "premature EOF must not fabricate a tree"
+    );
 }
 
 #[test]
@@ -110,8 +134,9 @@ fn test_char_level_recovery_records_unexpected_character() {
         other => panic!("expected UnexpectedCharacter, got {other:?}"),
     }
     // The survivors `1 + 2` still form a valid sum.
+    let tree = result.tree.expect("survivors form a valid sum");
     let clean = lark.parse("1 + 2").unwrap();
-    assert_eq!(format!("{}", result.tree), format!("{clean}"));
+    assert_eq!(format!("{tree}"), format!("{clean}"));
 }
 
 #[test]
