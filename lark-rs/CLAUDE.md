@@ -46,7 +46,7 @@ Phases 1–3 are ✅ complete: LALR + contextual lexer, Earley + SPPF + dynamic 
 and full feature parity (common.lark + the bundled stdlib grammars, `%import` file
 paths, `%declare`, Indenter/postlex on all parsers, error recovery, CYK, standalone
 parser generation). Phase 4 distribution: PyO3 ✅, WASM ✅, C API ✅, benchmarks ✅,
-`include_lark!` 🟡 (const-table bake pending). Bank scores: LALR compliance 512/512,
+`include_lark!` ✅ (bakes via the unified `generate_standalone` emitter, #85). Bank scores: LALR compliance 512/512,
 Earley 211/211, dynamic 454/454, CYK 124/124, JSONTestSuite 293/293.
 
 **Per-component tables, open follow-ups, the full lookaround-routing record, and
