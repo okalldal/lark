@@ -65,6 +65,63 @@ impl GrammarAnalysis {
     }
 }
 
+/// NULLABLE set only, indexed by `SymbolId` (`nullable[id.index()]`), without the
+/// FIRST-set fixpoint. The Earley engine (`EarleyParser`) needs nullability for
+/// its Joop-Leo nullable-tail completer (#64) but never consults FIRST, so it
+/// builds this directly instead of the full [`GrammarAnalysis::compute`].
+pub(crate) fn nullable_set(grammar: &CompiledGrammar) -> Vec<bool> {
+    compute_nullable(grammar, grammar.symbols.len())
+}
+
+/// "ε-only" set, indexed by `SymbolId` (`eps_only[id.index()]`): the symbol can
+/// derive **only** the empty string — it is nullable *and* cannot derive any
+/// non-empty string. Strictly stronger than [`nullable_set`]: an *optional*
+/// symbol like `opt: Y |` is nullable but NOT ε-only (it can derive `Y`).
+///
+/// The Joop-Leo completer (#64) may linearize a right-recursive rule with a
+/// nullable tail only when that tail is ε-**only**: if the tail could also match
+/// real tokens, collapsing it to ε on the Leo shortcut would make the non-empty
+/// derivation unreachable and wrongly reject valid input (e.g. `a: X a opt | X`,
+/// `opt: Y |` on `"xxy"`). A terminal is never ε-only.
+///
+/// Greatest fixpoint: every non-terminal starts ε-only, then a non-terminal is
+/// knocked out as soon as it has a production containing a non-ε-only symbol
+/// (any terminal, or an already-knocked-out non-terminal). Iterate to closure.
+///
+/// The greatest fixpoint marks a *productionless* or *cyclic-useless* symbol
+/// (e.g. `A: A`, which derives the empty *language*, not ε) as ε-only — an
+/// imprecision that is harmless to the only caller: such a symbol is non-nullable,
+/// and the Leo spine reconstruction's `eps_node` builds an ε-family only from
+/// nullable productions, so a non-nullable "ε-only" tail symbol contributes no
+/// family and cannot fabricate an accept. `is_quasi_complete` may admit it, but
+/// the resulting Leo `top` is a derivation the regular completer cannot produce
+/// either, so no spurious parse results.
+pub(crate) fn eps_only_set(grammar: &CompiledGrammar) -> Vec<bool> {
+    let n_terminals = grammar.n_terminals();
+    let mut eps_only = vec![false; grammar.symbols.len()];
+    // Seed: non-terminals are tentatively ε-only; terminals never are.
+    for i in n_terminals..grammar.symbols.len() {
+        eps_only[i] = true;
+    }
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for rule in &grammar.rules {
+            let o = rule.origin.index();
+            if !eps_only[o] {
+                continue;
+            }
+            // A production with any symbol that is not (yet) ε-only — including
+            // any terminal — disqualifies the origin from being ε-only.
+            if rule.expansion.iter().any(|s| !eps_only[s.index()]) {
+                eps_only[o] = false;
+                changed = true;
+            }
+        }
+    }
+    eps_only
+}
+
 fn compute_nullable(grammar: &CompiledGrammar, n_symbols: usize) -> Vec<bool> {
     let mut nullable = vec![false; n_symbols];
     let mut changed = true;
