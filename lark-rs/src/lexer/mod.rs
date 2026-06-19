@@ -420,6 +420,13 @@ pub struct ContextualLexer {
     state_to_scanner: HashMap<usize, usize>,
     /// One entry per distinct terminal set, built lazily on first use.
     scanners: Vec<LazyScanner>,
+    /// The root (fallback) scanner over the **full** terminal set, built lazily on
+    /// first use — Python Lark's `ContextualLexer.root_lexer`. It is consulted only
+    /// during error recovery (see [`Self::next_root_token`]): when the per-state
+    /// scanner refuses a position, the root scanner says whether the input there is
+    /// an out-of-context-but-valid *token* (deletable) or a genuinely un-lexable
+    /// character. A normal (non-recovering) parse never touches it.
+    root: LazyScanner,
     /// Owned terminal definitions the lazy builds draw from.
     terminals: HashMap<SymbolId, TerminalDef>,
     global_flags: u32,
@@ -499,6 +506,17 @@ impl ContextualLexer {
             ScannerBackend::build(&all, conf.global_flags, conf.backend)?;
         }
 
+        // The root (fallback) scanner over the full terminal set, built lazily —
+        // Python Lark's `root_lexer`. Recovery consults it when a per-state scanner
+        // refuses a position (see `next_root_token`); a normal parse never builds it.
+        let mut root_ids: Vec<SymbolId> = conf.terminals.iter().map(|(id, _)| *id).collect();
+        root_ids.sort_unstable();
+        root_ids.dedup();
+        let root = LazyScanner {
+            term_ids: root_ids,
+            cell: std::cell::OnceCell::new(),
+        };
+
         let mut key_to_idx: HashMap<Vec<SymbolId>, usize> = HashMap::new();
         let mut scanners: Vec<LazyScanner> = Vec::new();
         let mut state_to_scanner = HashMap::new();
@@ -527,6 +545,7 @@ impl ContextualLexer {
         Ok(ContextualLexer {
             state_to_scanner,
             scanners,
+            root,
             terminals,
             global_flags: conf.global_flags,
             backend: conf.backend,
@@ -538,6 +557,33 @@ impl ContextualLexer {
     #[inline]
     pub fn is_ignored(&self, id: SymbolId) -> bool {
         self.ignore.contains(&id)
+    }
+
+    /// Build a [`Token`] for a `(id, value)` the scanner matched starting at `pos`,
+    /// with newline-aware end position. Shared by the per-state [`Self::next_token`]
+    /// and the root-fallback [`Self::next_root_token`] so the two cannot drift on
+    /// position bookkeeping.
+    fn build_token(&self, id: SymbolId, value: &str, pos: usize, line: usize, col: usize) -> Token {
+        let (mut end_line, mut end_column) = (line, col);
+        for ch in value.chars() {
+            if ch == '\n' {
+                end_line += 1;
+                end_column = 1;
+            } else {
+                end_column += 1;
+            }
+        }
+        Token {
+            type_id: id,
+            type_: self.names[&id].clone(),
+            value: value.to_string(),
+            line,
+            column: col,
+            end_line,
+            end_column,
+            start_pos: pos,
+            end_pos: pos + value.len(),
+        }
     }
 
     /// Lex the next token at `pos` given the current parser state.
@@ -561,29 +607,7 @@ impl ContextualLexer {
         };
 
         if let Some((id, value)) = scanner.match_at(text, pos) {
-            let end = pos + value.len();
-            // End position is char-based and newline-aware: a token spanning a
-            // newline advances the line and resets the column.
-            let (mut end_line, mut end_column) = (line, col);
-            for ch in value.chars() {
-                if ch == '\n' {
-                    end_line += 1;
-                    end_column = 1;
-                } else {
-                    end_column += 1;
-                }
-            }
-            return Ok(Some(Token {
-                type_id: id,
-                type_: self.names[&id].clone(),
-                value: value.to_string(),
-                line,
-                column: col,
-                end_line,
-                end_column,
-                start_pos: pos,
-                end_pos: end,
-            }));
+            return Ok(Some(self.build_token(id, value, pos, line, col)));
         }
 
         if pos >= text.len() {
@@ -598,6 +622,30 @@ impl ContextualLexer {
             pos,
             expected: "valid token for this state".to_string(),
         })
+    }
+
+    /// Match the next token at `pos` against the **root** (full) terminal set —
+    /// Python Lark's `ContextualLexer.lex` exception branch, which falls back to
+    /// `root_lexer.next_token` when the per-state lexer refuses a position. Used
+    /// only during error recovery (see the contextual recovery source): a `Some`
+    /// here means the input at `pos` is an out-of-context-but-valid token (the
+    /// parser will surface it as an `UnexpectedToken` the recovery loop can delete),
+    /// while `None` means even the full set can't lex `pos` — a genuinely un-lexable
+    /// character to be skipped. Unlike [`Self::next_token`] this never returns an
+    /// `$END` token or an error; the caller handles both end-of-input and the miss.
+    pub fn next_root_token(
+        &self,
+        text: &str,
+        pos: usize,
+        line: usize,
+        col: usize,
+    ) -> Option<Token> {
+        let scanner = self
+            .root
+            .get_or_build(&self.terminals, self.global_flags, self.backend);
+        scanner
+            .match_at(text, pos)
+            .map(|(id, value)| self.build_token(id, value, pos, line, col))
     }
 }
 

@@ -1,0 +1,202 @@
+[
+  {
+    "input": "[foo bar] {baz qux}",
+    "recovered": true,
+    "error_count": 0,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "a_part",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "AWORD",
+              "value": "foo"
+            },
+            {
+              "type": "token",
+              "token_type": "AWORD",
+              "value": "bar"
+            }
+          ]
+        },
+        {
+          "type": "tree",
+          "data": "b_part",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "BWORD",
+              "value": "baz"
+            },
+            {
+              "type": "token",
+              "token_type": "BWORD",
+              "value": "qux"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "input": "[foo 1 bar] {baz}",
+    "recovered": true,
+    "error_count": 1,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "a_part",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "AWORD",
+              "value": "foo"
+            },
+            {
+              "type": "token",
+              "token_type": "AWORD",
+              "value": "bar"
+            }
+          ]
+        },
+        {
+          "type": "tree",
+          "data": "b_part",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "BWORD",
+              "value": "baz"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "input": "[foo } bar] {baz}",
+    "recovered": true,
+    "error_count": 1,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "a_part",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "AWORD",
+              "value": "foo"
+            },
+            {
+              "type": "token",
+              "token_type": "AWORD",
+              "value": "bar"
+            }
+          ]
+        },
+        {
+          "type": "tree",
+          "data": "b_part",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "BWORD",
+              "value": "baz"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "input": "[foo bar] {baz @ qux}",
+    "recovered": true,
+    "error_count": 1,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "a_part",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "AWORD",
+              "value": "foo"
+            },
+            {
+              "type": "token",
+              "token_type": "AWORD",
+              "value": "bar"
+            }
+          ]
+        },
+        {
+          "type": "tree",
+          "data": "b_part",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "BWORD",
+              "value": "baz"
+            },
+            {
+              "type": "token",
+              "token_type": "BWORD",
+              "value": "qux"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "input": "[foo {  bar] {baz}",
+    "recovered": true,
+    "error_count": 1,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "a_part",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "AWORD",
+              "value": "foo"
+            },
+            {
+              "type": "token",
+              "token_type": "AWORD",
+              "value": "bar"
+            }
+          ]
+        },
+        {
+          "type": "tree",
+          "data": "b_part",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "BWORD",
+              "value": "baz"
+            }
+          ]
+        }
+      ]
+    }
+  }
+]

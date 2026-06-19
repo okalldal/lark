@@ -7,7 +7,7 @@ pub mod tree_builder;
 pub use cyk::CykParser;
 pub use earley::EarleyParser;
 pub use lalr::{build_lalr_table, LalrParser, ParseTable};
-pub use token_source::{Contextual, LexFailure, PreLexed, TokenSource};
+pub use token_source::{Contextual, ContextualRecovering, LexFailure, PreLexed, TokenSource};
 pub use tree_builder::{NodeValue, TreeBuilder};
 
 use crate::error::{GrammarError, LarkError, ParseError, RecoveredTree};
@@ -90,18 +90,19 @@ fn recovery_unsupported() -> LarkError {
     })
 }
 
-/// Shared recovery body for the LALR drivers (issues #43 + #93): lex with the
-/// basic (global) lexer — so an out-of-context-but-valid token is a *deletable
-/// token* rather than a lexer error, mirroring Python Lark's contextual-lexer root
-/// fallback during recovery — then drive the recovering LALR loop. Lexing uses the
-/// recovering entry point ([`BasicLexer::lex_recovering`]): a genuinely un-lexable
-/// character is no longer a hard error but is *skipped one char at a time*,
-/// recording each skip in `errors` (Python's `UnexpectedCharacters` branch). The
-/// character-level skips and the token-level deletions both flow through the same
-/// `on_error` handler and accumulate into one `errors` list, so editor tooling
-/// sees a complete diagnostic record. `lexer` is `None` only if the recovery
-/// lexer's construction failed at build time (not expected in practice); recovery
-/// is then unavailable rather than the whole build failing.
+/// Shared recovery body for the **basic-lexer** LALR driver (issues #43 + #93):
+/// lex the whole stream with the basic (global) lexer, then drive the recovering
+/// LALR loop. (The contextual driver does not use this — it recovers over its own
+/// contextual lexer via [`LalrParser::parse_contextual_recovering`], issue #166.)
+/// Lexing uses the recovering entry point ([`BasicLexer::lex_recovering`]): a
+/// genuinely un-lexable character is no longer a hard error but is *skipped one
+/// char at a time*, recording each skip in `errors` (Python's
+/// `UnexpectedCharacters` branch). The character-level skips and the token-level
+/// deletions both flow through the same `on_error` handler and accumulate into one
+/// `errors` list, so editor tooling sees a complete diagnostic record. `lexer` is
+/// `None` only if the recovery lexer's construction failed at build time (not
+/// expected in practice); recovery is then unavailable rather than the whole build
+/// failing.
 ///
 /// [`BasicLexer::lex_recovering`]: crate::lexer::BasicLexer::lex_recovering
 fn lalr_recover(
@@ -155,7 +156,6 @@ impl ParserDriver for LalrBasic {
 struct LalrContextual {
     parser: LalrParser,
     lexer: ContextualLexer,
-    recovery_lexer: Option<BasicLexer>,
 }
 
 impl ParserDriver for LalrContextual {
@@ -163,19 +163,28 @@ impl ParserDriver for LalrContextual {
         self.parser.parse_contextual(text, &self.lexer, start)
     }
 
+    /// Recover over the *contextual* stream (issue #166), not a stored basic lexer:
+    /// the contextual lexer narrows terminals by parser state and falls back to its
+    /// root (full-terminal) scanner only where the per-state scanner refuses —
+    /// Python Lark's `ContextualLexer.lex` except-branch. This makes recovery
+    /// faithful for grammars whose contextual lexer is load-bearing (overlapping
+    /// terminals disambiguated only by parser state); a stored basic lexer would
+    /// mis-tokenize them and diverge from a contextual parse.
     fn parse_recovering(
         &self,
         text: &str,
         start: Option<&str>,
         on_error: &mut dyn FnMut(&ParseError) -> bool,
     ) -> Result<RecoveredTree, LarkError> {
-        lalr_recover(
-            &self.parser,
-            self.recovery_lexer.as_ref(),
+        let mut errors = Vec::new();
+        let tree = self.parser.parse_contextual_recovering(
             text,
+            &self.lexer,
             start,
             on_error,
-        )
+            &mut errors,
+        )?;
+        Ok(RecoveredTree { tree, errors })
     }
 }
 
@@ -438,24 +447,22 @@ fn build_lalr(
         };
     }
 
-    // Keep a basic lexer for error recovery (issue #43). Building it can't
-    // fail here — the same construction already succeeded above for the
-    // basic-lexer path, and zero-width/collision checks ran earlier.
-    let recovery_lexer = BasicLexer::new(&lexer_conf).ok();
     match options.lexer {
         LexerType::Contextual | LexerType::Auto => {
+            // The contextual driver recovers over its own contextual lexer (issue
+            // #166, via its root-lexer fallback), so it needs no stored basic lexer.
             let state_terminals = parser.state_terminals();
             let always_accept = cg.ignore.clone();
             let lexer = ContextualLexer::new(&lexer_conf, &state_terminals, always_accept)?;
-            Ok(Box::new(LalrContextual {
-                parser,
-                lexer,
-                recovery_lexer,
-            }))
+            Ok(Box::new(LalrContextual { parser, lexer }))
         }
         // `Basic`, and any other explicit choice, takes the basic lexer.
         _ => {
             let lexer = BasicLexer::new(&lexer_conf)?;
+            // Keep a basic lexer for error recovery (issue #43); for the basic-lexer
+            // driver the recovery lexer is the global terminal set too. Building it
+            // can't fail here — the construction just above already succeeded.
+            let recovery_lexer = BasicLexer::new(&lexer_conf).ok();
             Ok(Box::new(LalrBasic {
                 parser,
                 lexer,

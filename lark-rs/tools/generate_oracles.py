@@ -807,6 +807,60 @@ def generate_recovery():
     save_oracle("recovery", "cases", results)
 
 
+# ─── Contextual-lexer error recovery (issue #166) ────────────────────────────
+#
+# The `recovery_contextual` grammar's AWORD/BWORD terminals share one pattern but
+# are valid only in disjoint parser states, so the contextual lexer is load-bearing:
+# the basic/global lexer would retype every word to a single terminal and fail to
+# parse `[...] {...}` at all. We therefore build with `lexer='contextual'` and
+# capture Python's `on_error` recovery over the contextual stream — exercising its
+# `ContextualLexer.lex` root-lexer fallback (a stray `}` inside `[...]` is an
+# out-of-context-but-valid *token* it deletes; a stray digit is un-lexable even by
+# the root set, so it is skipped one character at a time). lark-rs must match this
+# contextual recovery (issue #166), not the basic-lexer recovery that diverges.
+
+RECOVERY_CONTEXTUAL_CASES = [
+    "[foo bar] {baz qux}",   # clean parse, no recovery
+    "[foo 1 bar] {baz}",     # stray un-lexable digit -> 1 char skip, then parses
+    "[foo } bar] {baz}",     # stray '}' inside [...] -> root-lexer token, deleted
+    "[foo bar] {baz @ qux}", # stray '@' inside {...} -> un-lexable, 1 char skip
+    "[foo {  bar] {baz}",    # stray '{' inside [...] -> root-lexer token, deleted
+]
+
+
+def generate_recovery_contextual():
+    print("Generating contextual-lexer error-recovery oracles (#166)...")
+    grammar = load_grammar("recovery_contextual")
+    results = []
+    for inp in RECOVERY_CONTEXTUAL_CASES:
+        # `lexer='contextual'`: the contextual lexer is load-bearing here (AWORD and
+        # BWORD overlap), and Python recovers over it via its root-lexer fallback.
+        lark = Lark(grammar, parser="lalr", lexer="contextual", start="start",
+                    maybe_placeholders=False)
+        count = {"n": 0}
+
+        def on_error(e):
+            count["n"] += 1
+            return True  # delete the offending token / skip the un-lexable char
+
+        try:
+            tree = lark.parse(inp, on_error=on_error)
+            results.append({
+                "input": inp,
+                "recovered": True,
+                "error_count": count["n"],
+                "tree": tree_to_dict(tree),
+            })
+        except Exception:
+            results.append({
+                "input": inp,
+                "recovered": False,
+                "error_count": count["n"],
+                "tree": None,
+            })
+    save_oracle("recovery_contextual", "cases", results)
+
+
 def generate_arithmetic():
     print("Generating arithmetic oracles...")
     grammar = load_grammar("arithmetic")
@@ -1552,6 +1606,7 @@ if __name__ == "__main__":
     generate_python_numbers()
     generate_lalr_core()
     generate_recovery()
+    generate_recovery_contextual()
     generate_earley()
     generate_earley_dynamic()
     generate_fuzz_corpus()

@@ -166,6 +166,86 @@ fn test_on_error_false_stops_at_unlexable_char() {
     assert_eq!(result.errors.len(), 1);
 }
 
+// ─── Contextual-lexer recovery (issue #166) ──────────────────────────────────
+
+/// The `recovery_contextual` grammar's AWORD/BWORD terminals share one pattern but
+/// are valid only in disjoint parser states, so the contextual lexer is
+/// load-bearing: a stored basic/global lexer would retype every word to one
+/// terminal and fail to parse `[...] {...}` at all. Recovery must therefore lex
+/// over the *contextual* stream (with the root-lexer fallback), matching Python
+/// Lark's `on_error` recovery under `lexer='contextual'`.
+#[test]
+fn test_recovery_contextual_oracle() {
+    let lark = make_lalr_from_file("recovery_contextual");
+    let cases = load_oracle("recovery_contextual", "cases");
+    let cases = cases.as_array().expect("oracle is a JSON array");
+
+    for case in cases {
+        let input = case["input"].as_str().unwrap();
+        let recovered = case["recovered"].as_bool().unwrap();
+        let error_count = case["error_count"].as_u64().unwrap() as usize;
+
+        let result = lark
+            .parse_with_recovery(input)
+            .unwrap_or_else(|e| panic!("recovery should not hard-error on {input:?}: {e}"));
+
+        assert_eq!(
+            result.errors.len(),
+            error_count,
+            "input {input:?}: recovered {} errors, oracle had {error_count}",
+            result.errors.len(),
+        );
+
+        if recovered {
+            let tree = result
+                .tree
+                .as_ref()
+                .unwrap_or_else(|| panic!("input {input:?}: expected Some(tree), got None"));
+            tree_matches_oracle(tree, &case["tree"])
+                .unwrap_or_else(|e| panic!("input {input:?}: tree mismatch vs oracle: {e}"));
+        } else {
+            assert!(
+                result.tree.is_none(),
+                "input {input:?}: non-recovered case must yield tree:None"
+            );
+            assert!(
+                !result.errors.is_empty(),
+                "input {input:?}: expected at least one recovered error"
+            );
+        }
+    }
+}
+
+/// Pin the divergence #166 is about: with the contextual lexer, a clean
+/// `[...] {...}` parses without any recovery (0 errors) — the recovery path lexes
+/// AWORD/BWORD by parser state, where a basic-lexer recovery would mis-tokenize
+/// BWORD and fail entirely.
+#[test]
+fn test_contextual_recovery_clean_parse_is_contextual() {
+    let lark = make_lalr_from_file("recovery_contextual");
+    let result = lark.parse_with_recovery("[foo bar] {baz qux}").unwrap();
+    assert!(
+        result.errors.is_empty(),
+        "a well-formed contextual input recovers nothing"
+    );
+    let tree = result.tree.expect("clean parse yields Some(tree)");
+    let normal = lark.parse("[foo bar] {baz qux}").unwrap();
+    assert_eq!(format!("{tree}"), format!("{normal}"));
+}
+
+/// The root-lexer fallback's *token* branch: a stray `}` inside `[...]` is
+/// out-of-context (AWORD/`]` expected) but globally valid, so the root scanner
+/// yields it as a deletable token — Python deletes it and parses the rest.
+#[test]
+fn test_contextual_recovery_root_fallback_deletes_token() {
+    let lark = make_lalr_from_file("recovery_contextual");
+    let result = lark.parse_with_recovery("[foo } bar] {baz}").unwrap();
+    assert_eq!(result.errors.len(), 1, "one out-of-context token deleted");
+    let tree = result.tree.expect("survivors form a valid parse");
+    let clean = lark.parse("[foo bar] {baz}").unwrap();
+    assert_eq!(format!("{tree}"), format!("{clean}"));
+}
+
 #[test]
 fn test_recovery_unsupported_on_earley() {
     // Recovery is LALR-only; other backends report it clearly rather than silently

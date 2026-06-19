@@ -23,7 +23,8 @@ use crate::lexer::ContextualLexer;
 use crate::tree::{ParseTree, Token};
 
 use super::token_source::{
-    postlex_contextual_source, Contextual, LexFailure, PreLexed, SourceError, TokenSource,
+    postlex_contextual_source, Contextual, ContextualRecovering, LexFailure, PreLexed, SourceError,
+    TokenSource,
 };
 use super::tree_builder::{NodeValue, TreeBuilder};
 
@@ -742,13 +743,32 @@ impl LalrParser {
             let state = *state_stack.last().unwrap();
             let token = match source.peek(state) {
                 Ok(tok) => tok,
-                // Character-level recovery (issue #93) happens *before* this loop:
-                // the recovery driver pre-lexes via `BasicLexer::lex_recovering`,
-                // which skips un-lexable characters and feeds the survivors here as
-                // a `PreLexed` source that never yields a lex failure. This arm is
-                // the defensive fallback for any future token source that surfaces a
-                // raw lexer error mid-stream (e.g. a contextual recovering path).
-                Err(SourceError::Lex(failure)) => return Err(self.lex_failure(state, failure)),
+                // Character-level recovery (issue #93). For the basic-lexer recovery
+                // path the un-lexable characters are skipped up front by
+                // `BasicLexer::lex_recovering`, so its `PreLexed` source never lands
+                // here. The contextual recovery source ([`ContextualRecovering`]),
+                // which lexes lazily, *does* surface a lex failure here when neither
+                // the per-state nor the root scanner matches a position (issue #166):
+                // record it as an `UnexpectedCharacter`, consult `on_error`, and skip
+                // one character before resuming — Python's re-raised
+                // `UnexpectedCharacters` branch. `on_error` returning `false` stops
+                // with no derivation, exactly like a token-level stop.
+                Err(SourceError::Lex(failure)) => {
+                    let err = ParseError::UnexpectedCharacter {
+                        ch: failure.ch,
+                        line: failure.line,
+                        col: failure.col,
+                        pos: failure.pos,
+                        expected: "any token".to_string(),
+                    };
+                    let cont = on_error(&err);
+                    errors.push(err);
+                    if !cont {
+                        return Ok(None);
+                    }
+                    source.skip_char();
+                    continue;
+                }
                 Err(SourceError::Postlex(e)) => return Err(e),
             };
 
@@ -794,7 +814,18 @@ impl LalrParser {
         self.run_recovering(&mut PreLexed::new(tokens), start, on_error, errors)
     }
 
-    /// Recovering parse over the contextual lexer.
+    /// Recovering parse over the **contextual** lexer (issue #166). Unlike the
+    /// basic-lexer recovery path (which pre-lexes the whole stream with the global
+    /// terminal set), this recovers over the contextual token stream: the
+    /// [`ContextualRecovering`] source narrows terminals by parser state at each
+    /// position and falls back to the root (full-terminal) scanner only where the
+    /// per-state scanner refuses — Python Lark's `ContextualLexer.lex` except-branch.
+    /// A root match there is an out-of-context-but-valid token the recovery loop
+    /// deletes; a root miss is an un-lexable character it skips. So a grammar whose
+    /// contextual lexer is load-bearing recovers to the same tree a clean contextual
+    /// parse would build.
+    ///
+    /// [`ContextualRecovering`]: crate::parsers::ContextualRecovering
     pub fn parse_contextual_recovering(
         &self,
         text: &str,
@@ -803,7 +834,12 @@ impl LalrParser {
         on_error: &mut dyn FnMut(&ParseError) -> bool,
         errors: &mut Vec<ParseError>,
     ) -> Result<Option<ParseTree>, ParseError> {
-        self.run_recovering(&mut Contextual::new(text, lexer), start, on_error, errors)
+        self.run_recovering(
+            &mut ContextualRecovering::new(text, lexer),
+            start,
+            on_error,
+            errors,
+        )
     }
 
     /// Parse a pre-tokenized sequence (basic lexer).
