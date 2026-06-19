@@ -1,0 +1,21 @@
+// Grammar for the *contextual-lexer* error-recovery oracle (issue #166).
+//
+// AWORD and BWORD share the SAME pattern (`/[a-z]+/`) but are distinct terminals,
+// each valid only in a distinct parser state: AWORD inside `[...]`, BWORD inside
+// `{...}`. The basic/global lexer compiles them together, so its tie-break retypes
+// EVERY word to one of them — BWORD then never matches and a `[...] {...}` input
+// can't parse at all. The contextual lexer narrows by parser state and types each
+// word correctly, so recovery over the contextual stream (with the root-lexer
+// fallback) reaches the same tree a clean contextual parse would build.
+//
+// This is the load-bearing-contextual-lexer case #166 is about: recovery must lex
+// contextually, not with a stored basic lexer. The two recovery branches both fire
+// in the test cases: a stray `}` inside `[...]` is an out-of-context-but-valid
+// token (root lexer matches it -> deletable), and a stray digit is un-lexable even
+// by the root set (-> one-character skip).
+start: a_part b_part
+a_part: "[" AWORD+ "]"
+b_part: "{" BWORD+ "}"
+AWORD: /[a-z]+/
+BWORD: /[a-z]+/
+%ignore " "

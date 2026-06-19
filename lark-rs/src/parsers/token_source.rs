@@ -29,6 +29,10 @@ pub struct LexFailure {
     pub ch: char,
     pub line: usize,
     pub col: usize,
+    /// Byte offset of the un-lexable character. Used by character-level recovery to
+    /// build a position-carrying `UnexpectedCharacter`; the non-recovering
+    /// `lex_failure` path ignores it.
+    pub pos: usize,
 }
 
 /// Why a [`TokenSource`] could not yield the next token.
@@ -62,6 +66,17 @@ pub trait TokenSource {
 
     /// Consume the current token (called on SHIFT).
     fn advance(&mut self);
+
+    /// Character-level recovery hook: skip the one un-lexable character that caused
+    /// the most recent [`SourceError::Lex`] and resume lexing after it (issue #93).
+    /// Only a lazily-lexing recovery source ([`ContextualRecovering`]) can hit a
+    /// `Lex` failure mid-stream and therefore overrides this; every other source
+    /// (the pre-lexed basic-recovery stream already has its un-lexable characters
+    /// skipped up front) never surfaces a `Lex` failure to the recovery loop, so the
+    /// default is unreachable and panics rather than silently spinning.
+    fn skip_char(&mut self) {
+        unreachable!("skip_char called on a source that does not lex lazily during recovery");
+    }
 }
 
 // ─── PreLexed: replay a fully lexed token vector ──────────────────────────────
@@ -148,6 +163,7 @@ impl<'a> Contextual<'a> {
                         ch,
                         line: self.state.line,
                         col: self.state.col,
+                        pos: self.state.pos,
                     });
                 }
             }
@@ -167,6 +183,135 @@ impl<'a> TokenSource for Contextual<'a> {
         if let Some(tok) = self.current.take() {
             self.state.advance_by(tok.value.len());
         }
+    }
+}
+
+// ─── ContextualRecovering: contextual lexing with root-lexer recovery (#166) ──
+
+/// A recovery-aware contextual [`TokenSource`]: it lexes contextually like
+/// [`Contextual`], but when the per-state scanner refuses a position it consults
+/// the contextual lexer's **root** (full-terminal) scanner — Python Lark's
+/// `ContextualLexer.lex` exception branch — to decide what the failure *means*:
+///
+///   * the root scanner matches a token → the input is an out-of-context-but-valid
+///     token; yield it so the parser surfaces it as an `UnexpectedToken` the
+///     recovery loop can *delete* (Python's `raise UnexpectedToken(...)`);
+///   * the root scanner also misses → a genuinely un-lexable character; record an
+///     `UnexpectedCharacter`, consult `on_error`, and skip exactly one character
+///     before resuming (Python's re-raised `UnexpectedCharacters` / lark-rs's
+///     [`BasicLexer::lex_recovering`](crate::lexer::BasicLexer::lex_recovering)).
+///
+/// This recovers over the *contextual* token stream, so a grammar whose contextual
+/// lexer is load-bearing (overlapping terminals disambiguated only by parser state)
+/// recovers to the same tree a clean contextual parse would have produced — the
+/// fix for issue #166. The character-skips this source records and the token
+/// deletions [`run_recovering`](super::lalr::LalrParser) records both flow into the
+/// one `errors` list, exactly as the basic-lexer recovery path already does.
+pub struct ContextualRecovering<'a> {
+    lexer: &'a ContextualLexer,
+    state: LexerState<'a>,
+    current: Option<Token>,
+}
+
+impl<'a> ContextualRecovering<'a> {
+    pub fn new(text: &'a str, lexer: &'a ContextualLexer) -> Self {
+        ContextualRecovering {
+            lexer,
+            state: LexerState::new(text),
+            current: None,
+        }
+    }
+
+    /// Lex the next actionable token for `parser_state`, applying contextual
+    /// scanning with root-lexer fallback. The two outcomes the recovery loop acts
+    /// on:
+    ///
+    ///   * `Ok(token)` — a real token, or (via the root scanner) an
+    ///     out-of-context-but-valid one the parser will delete, or `$END`;
+    ///   * `Err(LexFailure)` — a genuinely un-lexable character (neither the
+    ///     per-state nor the root scanner matched), which the recovery loop records
+    ///     and resolves by [`skip_char`](Self::skip_char).
+    fn lex_next(&mut self, parser_state: usize) -> Result<Token, LexFailure> {
+        loop {
+            if self.state.is_done() {
+                return Ok(Token::end().with_position(
+                    self.state.line,
+                    self.state.col,
+                    self.state.pos,
+                    self.state.pos,
+                ));
+            }
+            match self.lexer.next_token(
+                self.state.text,
+                self.state.pos,
+                parser_state,
+                self.state.line,
+                self.state.col,
+            ) {
+                // Ignored terminal (whitespace, comment): consume and keep going.
+                Ok(Some(tok)) if self.lexer.is_ignored(tok.type_id) => {
+                    self.state.advance_by(tok.value.len());
+                }
+                Ok(Some(tok)) => return Ok(tok),
+                // No scanner for this state, or no terminal valid here: fall back to
+                // the root (full-terminal) lexer — Python's `ContextualLexer.lex`
+                // except-branch. A root match is an out-of-context-but-valid token
+                // the parser will surface as `UnexpectedToken` and the recovery loop
+                // will delete; a root miss is a genuinely un-lexable character.
+                //
+                // The root token is returned without an `is_ignored` check, and that
+                // is sound only because every state's scanner already includes the
+                // `%ignore` terminals (they ride `always_accept`, set in
+                // `build_lalr`): an ignored terminal therefore always matches in the
+                // per-state branch above, so control never reaches here for one. If
+                // that invariant ever changes, this branch must filter ignored types.
+                Ok(None) | Err(_) => {
+                    if let Some(tok) = self.lexer.next_root_token(
+                        self.state.text,
+                        self.state.pos,
+                        self.state.line,
+                        self.state.col,
+                    ) {
+                        return Ok(tok);
+                    }
+                    let ch = self.state.text[self.state.pos..].chars().next().unwrap();
+                    return Err(LexFailure {
+                        ch,
+                        line: self.state.line,
+                        col: self.state.col,
+                        pos: self.state.pos,
+                    });
+                }
+            }
+        }
+    }
+}
+
+impl TokenSource for ContextualRecovering<'_> {
+    fn peek(&mut self, state: usize) -> Result<Token, SourceError> {
+        if self.current.is_none() {
+            self.current = Some(self.lex_next(state)?);
+        }
+        Ok(self.current.clone().unwrap())
+    }
+
+    fn advance(&mut self) {
+        if let Some(tok) = self.current.take() {
+            self.state.advance_by(tok.value.len());
+        }
+    }
+
+    /// Skip exactly one character at the current position and drop the cached
+    /// lookahead, so the next [`peek`](TokenSource::peek) re-lexes from the
+    /// character after the un-lexable one (the recovery loop's char-level skip,
+    /// issue #93 — Python's `s.line_ctr.feed(text[p:p+1])`). `peek` only ever
+    /// surfaces a `Lex` failure when neither the per-state nor the root scanner
+    /// matched, so there is always a character here to skip.
+    fn skip_char(&mut self) {
+        if let Some(ch) = self.state.text[self.state.pos..].chars().next() {
+            self.state.advance_by(ch.len_utf8());
+        }
+        self.current = None;
     }
 }
 
