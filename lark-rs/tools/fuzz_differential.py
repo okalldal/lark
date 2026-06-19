@@ -27,8 +27,18 @@ Three things live here:
      find is reproducible and triageable without committing the haystack.
 
   2. Minimizing a find (`--minimize`) — ddmin-style shrink to the smallest input
-     that still parses (or still rejects). Run this on the offending input from a
-     red replay to get a tight repro before recording it.
+     that *still diverges* between lark-rs and Python Lark. Run this on the
+     offending input from a red replay to get a tight repro before recording it.
+
+     The minimizer calls into lark-rs via the thin `differ` binary
+     (`src/bin/differ.rs`, parses stdin → prints the tree as oracle-shaped JSON)
+     and diffs that tree against the Python oracle at every shrink step, accepting
+     a candidate only when the divergence is PRESERVED — not merely when lark-rs
+     still parses. Without that check the shrink could over-minimize to an input
+     the two engines AGREE on, silently losing the divergence signal (issue #37).
+     If the differ is unavailable or the seed input does not actually diverge, the
+     minimizer falls back to the legacy parse/reject-preserving predicate and says
+     so, so it is never silently weaker than before.
 
   3. Recording a find (`--record`) — append the single minimized input to the
      committed corpus so it is guarded forever:
@@ -56,6 +66,8 @@ Usage:
 import argparse
 import json
 import random
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -217,13 +229,103 @@ def parses(parser, text):
         return False
 
 
+def tree_to_dict(node):
+    """Serialise a Python-Lark parse tree to the same dict shape the differ binary
+    prints (and generate_oracles.py freezes), so the two are directly comparable."""
+    # Imported lazily: only the divergence-preserving minimize path needs it.
+    from lark import Tree, Token
+    if isinstance(node, Tree):
+        return {"type": "tree", "data": node.data,
+                "children": [tree_to_dict(c) for c in node.children]}
+    if isinstance(node, Token):
+        return {"type": "token", "token_type": str(node.type), "value": str(node)}
+    return {"type": "unknown", "repr": repr(node)}
+
+
+def oracle_result(parser, text):
+    """The Python-Lark oracle verdict for `text`: (ok, tree_dict | None)."""
+    try:
+        return True, tree_to_dict(parser.parse(text))
+    except LarkError:
+        return False, None
+
+
+# ─── lark-rs bridge (the online differ) ──────────────────────────────────────
+#
+# The minimizer asks lark-rs what it produces for a candidate via the thin
+# `differ` binary, then compares that against the Python oracle. This is the
+# "online Rust-side differ" of issue #37: it lets the shrink loop *preserve the
+# divergence* rather than merely preserving parse-success.
+
+def find_differ_binary(explicit=None):
+    """Locate (building if needed) the `differ` binary. Returns its path, or None
+    if it cannot be built (the caller then falls back to the legacy predicate)."""
+    if explicit:
+        p = Path(explicit)
+        return str(p) if p.exists() else None
+
+    # Prefer an already-built binary (release, then debug) to stay fast.
+    for profile in ("release", "debug"):
+        cand = LARK_RS_DIR / "target" / profile / "differ"
+        if cand.exists():
+            return str(cand)
+
+    # Not built yet — build it once (debug is enough for a tree print).
+    if shutil.which("cargo") is None:
+        return None
+    print("building the `differ` binary (cargo build --bin differ)...",
+          file=sys.stderr)
+    proc = subprocess.run(
+        ["cargo", "build", "--bin", "differ"],
+        cwd=str(LARK_RS_DIR), capture_output=True, text=True, encoding="utf-8")
+    if proc.returncode != 0:
+        print(f"  cargo build failed:\n{proc.stderr}", file=sys.stderr)
+        return None
+    cand = LARK_RS_DIR / "target" / "debug" / "differ"
+    return str(cand) if cand.exists() else None
+
+
+def larkrs_result(differ_bin, grammar, text):
+    """Run `text` through lark-rs via the differ binary: (ok, tree_dict | None).
+
+    Raises RuntimeError if the differ cannot be invoked or returns malformed
+    output — a hard failure the caller surfaces rather than silently treating as
+    'no divergence' (which would re-introduce the over-minimization bug)."""
+    # Force UTF-8 so a non-ASCII candidate or token value can't raise a locale
+    # encode/decode error under a C/POSIX locale (nightly cron/CI).
+    proc = subprocess.run(
+        [differ_bin, "--grammar", grammar],
+        input=text, capture_output=True, text=True, encoding="utf-8")
+    if proc.returncode != 0:
+        raise RuntimeError(
+            f"differ exited {proc.returncode} for grammar {grammar!r}: "
+            f"{proc.stderr.strip()}")
+    try:
+        out = json.loads(proc.stdout)
+        return bool(out["ok"]), out.get("tree")
+    except (json.JSONDecodeError, KeyError) as e:
+        raise RuntimeError(f"differ produced malformed output {proc.stdout!r}: {e}")
+
+
+def diverges(parser, differ_bin, grammar, text):
+    """True iff lark-rs and Python Lark disagree on `text` — either on accept/reject
+    or on the produced tree. This is the predicate the minimizer preserves."""
+    py_ok, py_tree = oracle_result(parser, text)
+    rs_ok, rs_tree = larkrs_result(differ_bin, grammar, text)
+    if py_ok != rs_ok:
+        return True
+    # Both accepted or both rejected; a tree mismatch (only meaningful when both
+    # accepted) is also a divergence.
+    return py_ok and py_tree != rs_tree
+
+
 def minimize(parser, text, predicate):
     """ddmin-style shrink: smallest substring still satisfying `predicate`.
 
-    The default predicate preserves parse-success, which trims a find down to a
-    minimal *valid* core before committing it. A divergence-preserving predicate
-    (one that also runs lark-rs) is the natural upgrade once an online Rust differ
-    lands; the shrink loop itself is identical.
+    The divergence-preserving predicate (`diverges`, which also runs lark-rs via
+    the differ binary) is what `--minimize` uses by default; the legacy
+    parse/reject-preserving predicate is the documented fallback. The shrink loop
+    itself is predicate-agnostic.
     """
     best = text
     changed = True
@@ -287,7 +389,16 @@ def main():
                     help="write the generated batch to FILE (a scratch corpus for "
                          "replay/nightly discovery); never the committed corpus")
     ap.add_argument("--minimize", metavar="INPUT",
-                    help="shrink INPUT to a minimal parse-preserving core and exit")
+                    help="shrink INPUT to a minimal core that still DIVERGES between "
+                         "lark-rs and Python Lark (via the differ binary), and exit; "
+                         "falls back to parse/reject-preserving if the input does not "
+                         "diverge or the differ is unavailable")
+    ap.add_argument("--differ-bin", metavar="PATH",
+                    help="path to the lark-rs `differ` binary (default: build/locate "
+                         "target/{release,debug}/differ)")
+    ap.add_argument("--no-differ", action="store_true",
+                    help="force the legacy parse/reject-preserving minimize (skip the "
+                         "online lark-rs differ entirely)")
     ap.add_argument("--record", action="store_true",
                     help="append a single minimized find (--input/--note) to the "
                          "committed regression corpus and exit")
@@ -323,9 +434,53 @@ def main():
         if args.grammar == "all":
             ap.error("--minimize requires a concrete --grammar")
         parser = load_parser(args.grammar)
-        pred = (lambda s: parses(parser, s)) if parses(parser, args.minimize) \
-            else (lambda s: not parses(parser, s) and s != "")
-        small = minimize(parser, args.minimize, pred)
+        seed = args.minimize
+
+        # Legacy parse/reject-preserving predicate (the documented fallback).
+        def parse_pred(s):
+            if parses(parser, seed):
+                return parses(parser, s)
+            return not parses(parser, s) and s != ""
+
+        mode = "parse/reject-preserving (legacy)"
+        pred = parse_pred
+
+        # Default: divergence-preserving. Only engage it when (a) the differ is
+        # available and (b) the SEED input actually diverges — otherwise there is
+        # no divergence to preserve and the parse-preserving fallback is correct.
+        if not args.no_differ:
+            differ_bin = find_differ_binary(args.differ_bin)
+            if differ_bin is None:
+                print("warning: differ binary unavailable — falling back to the "
+                      "legacy parse/reject-preserving minimize.", file=sys.stderr)
+            else:
+                try:
+                    seed_diverges = diverges(parser, differ_bin, args.grammar, seed)
+                except RuntimeError as e:
+                    print(f"warning: differ call failed ({e}) — falling back to the "
+                          "legacy parse/reject-preserving minimize.", file=sys.stderr)
+                    seed_diverges = None
+                if seed_diverges is True:
+                    mode = "divergence-preserving (lark-rs vs Python Lark)"
+                    # Only accept a candidate that still diverges. A differ error
+                    # mid-shrink is treated as 'does not satisfy' (reject the
+                    # reduction) so a flaky call can never silently widen the input
+                    # down to an agreeing case.
+                    def diverge_pred(s):
+                        if s == "":
+                            return False
+                        try:
+                            return diverges(parser, differ_bin, args.grammar, s)
+                        except RuntimeError:
+                            return False
+                    pred = diverge_pred
+                elif seed_diverges is False:
+                    print("warning: the seed input does NOT diverge (lark-rs agrees "
+                          "with Python Lark) — nothing to preserve; using the legacy "
+                          "parse/reject-preserving minimize.", file=sys.stderr)
+
+        print(f"minimizing under: {mode}", file=sys.stderr)
+        small = minimize(parser, seed, pred)
         print(json.dumps({"grammar": args.grammar, "input": small}, ensure_ascii=False))
         return
 
