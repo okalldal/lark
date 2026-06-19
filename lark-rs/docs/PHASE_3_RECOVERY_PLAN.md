@@ -1,7 +1,8 @@
 # Phase 3 — Error Recovery: Scope & Implementation
 
-**Status:** ✅ done (issue #43). Panic-mode single-token-deletion recovery on the
-LALR backend, oracle-gated against Python Lark's `on_error` driver.
+**Status:** ✅ done (issues #43 + #93). Panic-mode single-token-deletion recovery
+plus character-level recovery (skipping un-lexable characters) on the LALR backend,
+oracle-gated against Python Lark's `on_error` driver.
 
 This document records what error recovery means for lark-rs, the design choices
 that fall out of the LR model, and exactly how the implementation stays
@@ -22,17 +23,21 @@ nodes, validated against Python Lark's `on_error` callback where applicable.*
 **In scope (shipped):**
 
 - Single-token-deletion panic-mode recovery in the LALR parse loop.
+- Character-level recovery — skipping an un-lexable character (issue #93,
+  shipped). At a position no terminal matches, the recovery lexer records an
+  `UnexpectedCharacter` and skips **one character at a time**, then resumes,
+  mirroring Python's `UnexpectedCharacters` branch of `on_error`
+  (`s.line_ctr.feed(text[p:p+1])`). The skip fires `on_error` once per skipped
+  character and is recorded in `RecoveredTree.errors` alongside the token-level
+  deletions, so both deletion kinds are counted.
 - A `RecoveredTree { tree, errors }` result type (the "partial-tree error type").
 - `Lark::parse_with_recovery` (the built-in strategy) and `Lark::parse_on_error`
   (a custom handler) — the `on_error` extensibility Python Lark exposes.
-- An oracle suite gating the recovered trees + deletion counts against Python.
+- An oracle suite gating the recovered trees + deletion counts against Python
+  (both grammatically-misplaced tokens and stray un-lexable `@`/`#` characters).
 
 **Out of scope (follow-ups):**
 
-- Character-level recovery (skipping an un-lexable character, Python's
-  `UnexpectedCharacters` branch). lark-rs's recovery lexes with the basic/global
-  lexer, so out-of-context-but-valid tokens are deletable, but a genuinely
-  un-lexable character is still a hard error.
 - Recovery on the Earley/CYK backends and on the LALR+postlex (indenter) path.
 - Inline error nodes spliced into the tree (see §3).
 
@@ -86,21 +91,30 @@ the "partial tree clearly marked with error nodes" the issue asks for.
 ```
 Lark::parse_with_recovery / parse_on_error          (src/lib.rs)
   → ParsingFrontend::parse_recovering               (src/parsers/mod.rs)
-      → basic/global lexer  →  Vec<Token>            (recovery_lexer field)
+      → BasicLexer::lex_recovering  →  Vec<Token>    (recovery_lexer field)
+          → at an un-lexable position: record an UnexpectedCharacter, ask
+            on_error, skip ONE char, resume  (Python's line_ctr.feed(text[p:p+1]))
       → LalrParser::parse_recovering                 (src/parsers/lalr.rs)
           → run_recovering: the shared LALR loop, but on a no-action token:
               record the error, ask on_error, delete the token, resume
           → synthesize_partial when ACCEPT is unreachable
-  → RecoveredTree { tree, errors }                   (src/error.rs)
+  → RecoveredTree { tree, errors }   (char-skips + token-deletions, one list)
 ```
 
+- **`src/lexer/mod.rs`** — `BasicLexer::lex_recovering` is `lex` with one extra arm
+  on the `None` (no-match) position: record an `UnexpectedCharacter`, consult
+  `on_error`, and skip exactly one character (advancing toward end-of-input).
+  `lex` and `lex_recovering` share the token-construction (`make_token`) and the
+  newline-aware `LexCursor`, so the two paths cannot drift on position bookkeeping.
 - **`src/parsers/lalr.rs`** — `run_recovering` is `run` with one extra arm on the
   `None` (error) action: push the error, consult `on_error`, and `source.advance()`
   to delete the token (staying in the same state). Termination is guaranteed:
   every iteration shifts, reduces, deletes (advancing toward `$END`), or stops.
 - **`src/parsers/mod.rs`** — the frontend keeps a basic `recovery_lexer` (LALR,
-  no-postlex only) so recovery lexes the global terminal set; `parse_recovering`
-  rejects unsupported configurations with a clear `GrammarError::Other`.
+  no-postlex only) so recovery lexes the global terminal set; `lalr_recover` lexes
+  via `lex_recovering` (char-skips into `errors`) then drives the token loop over
+  the survivors; `parse_recovering` rejects unsupported configurations with a clear
+  `GrammarError::Other`.
 - **`src/error.rs`** — `RecoveredTree`.
 - **`src/lib.rs`** — `parse_with_recovery` / `parse_on_error`
   (+ `parse_on_error_with_start`).
@@ -111,7 +125,11 @@ Lark::parse_with_recovery / parse_on_error          (src/lib.rs)
 
 - `tests/test_recovery.rs::test_recovery_oracle` — tree + deletion-count parity
   vs Python for the `recovery/cases.json` bank (stray/leading/mid-stream tokens,
-  multi-deletion, clean control, premature-EOF).
+  multi-deletion, clean control, premature-EOF, **and the un-lexable-character
+  cases**: stray `@`/`#`, consecutive bad chars, a char-skip that uncovers a
+  token-level deletion — both counted).
 - Behaviour tests: clean input records no errors; `on_error` returning `false`
   stops at the first error; trailing-`+` never aborts; recovery on Earley reports
-  the unsupported-configuration error.
+  the unsupported-configuration error. Character-level pins (#93): an un-lexable
+  char is recorded as `UnexpectedCharacter`; char + token deletions both count;
+  `on_error` returning `false` at an un-lexable position stops lexing.

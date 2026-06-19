@@ -90,13 +90,20 @@ fn recovery_unsupported() -> LarkError {
     })
 }
 
-/// Shared recovery body for the LALR drivers (issue #43): lex with the basic
-/// (global) lexer — so an out-of-context-but-valid token is a *deletable token*
-/// rather than a lexer error, mirroring Python Lark's contextual-lexer root
-/// fallback during recovery — then drive the recovering LALR loop. `lexer` is
-/// `None` only if the recovery lexer's construction failed at build time (not
-/// expected in practice); recovery is then unavailable rather than the whole
-/// build failing.
+/// Shared recovery body for the LALR drivers (issues #43 + #93): lex with the
+/// basic (global) lexer — so an out-of-context-but-valid token is a *deletable
+/// token* rather than a lexer error, mirroring Python Lark's contextual-lexer root
+/// fallback during recovery — then drive the recovering LALR loop. Lexing uses the
+/// recovering entry point ([`BasicLexer::lex_recovering`]): a genuinely un-lexable
+/// character is no longer a hard error but is *skipped one char at a time*,
+/// recording each skip in `errors` (Python's `UnexpectedCharacters` branch). The
+/// character-level skips and the token-level deletions both flow through the same
+/// `on_error` handler and accumulate into one `errors` list, so editor tooling
+/// sees a complete diagnostic record. `lexer` is `None` only if the recovery
+/// lexer's construction failed at build time (not expected in practice); recovery
+/// is then unavailable rather than the whole build failing.
+///
+/// [`BasicLexer::lex_recovering`]: crate::lexer::BasicLexer::lex_recovering
 fn lalr_recover(
     parser: &LalrParser,
     lexer: Option<&BasicLexer>,
@@ -107,8 +114,8 @@ fn lalr_recover(
     let Some(lexer) = lexer else {
         return Err(recovery_unsupported());
     };
-    let tokens = lexer.lex(text)?;
     let mut errors = Vec::new();
+    let tokens = lexer.lex_recovering(text, on_error, &mut errors);
     let tree = parser.parse_recovering(tokens, start, on_error, &mut errors)?;
     Ok(RecoveredTree { tree, errors })
 }
@@ -310,8 +317,12 @@ impl ParsingFrontend {
     /// Only the LALR backend without a postlex hook supports recovery; other
     /// configurations return a [`GrammarError::Other`]. Lexing uses the basic
     /// (global) lexer so out-of-context-but-valid tokens are deletable tokens
-    /// rather than lexer errors. A genuinely un-lexable character is still a hard
-    /// error (character-level recovery is a follow-up).
+    /// rather than lexer errors. A genuinely un-lexable character (issue #93) is
+    /// likewise recovered from: it is skipped one character at a time, each skip
+    /// recorded in [`RecoveredTree::errors`] just like a deleted token (Python
+    /// Lark's `UnexpectedCharacters` branch of `on_error`).
+    ///
+    /// [`RecoveredTree::errors`]: crate::error::RecoveredTree::errors
     ///
     /// [`GrammarError::Other`]: crate::error::GrammarError::Other
     pub fn parse_recovering(

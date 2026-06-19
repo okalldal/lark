@@ -93,6 +93,55 @@ fn test_recovery_never_aborts_on_trailing_error() {
 }
 
 #[test]
+fn test_char_level_recovery_records_unexpected_character() {
+    // Issue #93: an un-lexable character is skipped (one char at a time) and
+    // recorded as an `UnexpectedCharacter` error, rather than aborting. Here the
+    // stray `@` is the only error and the surviving `1 + 2` parses to an `add`.
+    use lark_rs::ParseError;
+    let lark = recovery_parser();
+    let result = lark.parse_with_recovery("1 + @ 2").unwrap();
+    assert_eq!(
+        result.errors.len(),
+        1,
+        "exactly one un-lexable char skipped"
+    );
+    match &result.errors[0] {
+        ParseError::UnexpectedCharacter { ch, .. } => assert_eq!(*ch, '@'),
+        other => panic!("expected UnexpectedCharacter, got {other:?}"),
+    }
+    // The survivors `1 + 2` still form a valid sum.
+    let clean = lark.parse("1 + 2").unwrap();
+    assert_eq!(format!("{}", result.tree), format!("{clean}"));
+}
+
+#[test]
+fn test_char_and_token_deletions_both_counted() {
+    // Issue #93: character-level skips and token-level deletions accumulate into
+    // one error list. `1 @ 2`: skip the `@` (char), then the surviving `1 2` has a
+    // stray NUMBER the parser deletes (token) — two errors total, matching Python.
+    let lark = recovery_parser();
+    let result = lark.parse_with_recovery("1 @ 2").unwrap();
+    assert_eq!(result.errors.len(), 2);
+}
+
+#[test]
+fn test_on_error_false_stops_at_unlexable_char() {
+    // Returning `false` from the handler at an un-lexable position stops lexing
+    // there (the lexer-side equivalent of stopping the token loop), returning the
+    // tokens collected so far with the single error recorded.
+    let lark = recovery_parser();
+    let mut seen = 0;
+    let result = lark
+        .parse_on_error("1 @ 2", |_| {
+            seen += 1;
+            false
+        })
+        .unwrap();
+    assert_eq!(seen, 1, "handler called once before stopping");
+    assert_eq!(result.errors.len(), 1);
+}
+
+#[test]
 fn test_recovery_unsupported_on_earley() {
     // Recovery is LALR-only; other backends report it clearly rather than silently
     // ignoring the request.

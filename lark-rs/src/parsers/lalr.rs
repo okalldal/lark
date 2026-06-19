@@ -739,8 +739,12 @@ impl LalrParser {
             let state = *state_stack.last().unwrap();
             let token = match source.peek(state) {
                 Ok(tok) => tok,
-                // Lexer-level (character) recovery is a follow-up; a genuinely
-                // un-lexable position is still a hard error.
+                // Character-level recovery (issue #93) happens *before* this loop:
+                // the recovery driver pre-lexes via `BasicLexer::lex_recovering`,
+                // which skips un-lexable characters and feeds the survivors here as
+                // a `PreLexed` source that never yields a lex failure. This arm is
+                // the defensive fallback for any future token source that surfaces a
+                // raw lexer error mid-stream (e.g. a contextual recovering path).
                 Err(SourceError::Lex(failure)) => return Err(self.lex_failure(state, failure)),
                 Err(SourceError::Postlex(e)) => return Err(e),
             };

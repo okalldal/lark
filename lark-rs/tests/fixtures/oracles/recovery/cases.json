@@ -177,5 +177,156 @@
     "recovered": false,
     "error_count": 1,
     "tree": null
+  },
+  {
+    "input": "1 + @ 2",
+    "recovered": true,
+    "error_count": 1,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "add",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "1"
+            },
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "2"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "input": "@ 1 + 2",
+    "recovered": true,
+    "error_count": 1,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "add",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "1"
+            },
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "2"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "input": "1 + 2 @",
+    "recovered": true,
+    "error_count": 1,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "add",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "1"
+            },
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "2"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "input": "#1 + 2",
+    "recovered": true,
+    "error_count": 1,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "add",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "1"
+            },
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "2"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "input": "1 @@ 2",
+    "recovered": true,
+    "error_count": 3,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "token",
+          "token_type": "NUMBER",
+          "value": "1"
+        }
+      ]
+    }
+  },
+  {
+    "input": "1 @ + 2",
+    "recovered": true,
+    "error_count": 1,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "add",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "1"
+            },
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "2"
+            }
+          ]
+        }
+      ]
+    }
   }
 ]
