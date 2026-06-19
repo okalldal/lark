@@ -440,12 +440,21 @@ implementation. The lazy spine reconstruction (`load_leo_paths`) is mandatory:
 expanding all paths eagerly reintroduces O(n²) (#61) — the forest-size perf
 counter is what catches a regression here.
 
-**`dynamic_complete`'s resolve tie-break is a heuristic, not a structural fix.**
-The split-point tie-break in `sorted_families` (#90) is keyed on the observation
-that the dynamic lexer reverses segmentation order via LIFO completion; it
-restores Python's earliest-split-first order empirically. The principled fix
-(match Python's group/optional expansion structurally) is a filed follow-up — so
-treat this as a known soft spot if dynamic-lexer ambiguity ordering ever drifts.
+**EBNF `+`/`*` inline their inner arms into the recurse rule — Python's
+`EBNF_to_BNF` (#91).** A grouped repetition `(A | B)+` lowers to the inlined
+recurse rule `_p: A | B | _p A | _p B` (base arms first, then `_p arm`), *not* a
+nested `(A|B)` group helper under a single-symbol `_p: g | _p g`; and `x*`
+distributes its empty case into the parent (`start: _p | ε`) reusing the same
+recurse rule — there is no `__star: __plus | ε` wrapper (one survives only for a
+`*` nested where a single symbol is mandatory, e.g. inside `~n`). This makes the
+last symbol of the recursion a *terminal* built during the scan (matching Python),
+so `dynamic_complete` resolve ties fall out of `rule.order` + insertion order.
+Consequently `sorted_families` is pure `(is_empty, -priority, rule.order)` +
+insertion order for **both** lexers: the dynamic-lexer split-point tie-break #32/#90
+added (and this note used to flag as a soft spot) is **removed**. Pinned by
+`grouped_plus_inlines_arms_into_recurse_rule` (loader/compiler.rs) and
+`dynamic_complete_resolves_longest_segmentation_without_tiebreak`
+(tests/test_earley_dynamic.rs).
 
 ---
 

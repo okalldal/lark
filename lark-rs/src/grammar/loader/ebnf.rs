@@ -196,11 +196,14 @@ impl GrammarCompiler {
     /// Compile one position of an expansion into either a single fixed symbol
     /// sequence (the common case) or, for a distributable nullable, the set of
     /// present-form alternatives to fan out across the parent (see
-    /// [`compile_expansion`](Self::compile_expansion)). Trailing `X*` is the
-    /// only case suppressed: its shared plus-helper prevents R/R conflicts when
-    /// two otherwise-identical star wrappers appear in the same LALR state.
-    /// Trailing `X?` is distributed like Python Lark's `SimplifyRule_Visitor`
-    /// does — no such R/R risk exists.
+    /// [`compile_expansion`](Self::compile_expansion)). Every nullable — leading or
+    /// trailing, `X?` / `X*` / `[X]` — is distributed exactly like Python Lark's
+    /// `SimplifyRule_Visitor`: the empty case goes into the parent's alternatives.
+    /// A trailing `X*` no longer keeps a `__star: __plus | ε` wrapper (#91/#32); its
+    /// ε now lives in the parent, distinguished by parent context, so the duplicate-ε
+    /// reduce/reduce the wrapper used to dodge cannot arise (two `*` in different
+    /// parents distribute ε onto different origins). `is_last` is therefore unused
+    /// here — distribution is position-independent.
     fn compile_slot(
         &mut self,
         expr: Expr,
@@ -219,21 +222,19 @@ impl GrammarCompiler {
                 }
             }
         }
-        // Suppress distribution only for a trailing `X*` (the shared plus-helper
-        // it creates is necessary to prevent R/R conflicts). Everything else —
-        // including trailing `X?` — distributes exactly like Python Lark.
-        // `try_distribute` never compiles anything on its `None` path, so the
-        // fall-through `compile_expr` below compiles the position exactly once.
-        let suppress_trailing = is_last
-            && matches!(
-                &expr,
-                Expr::Repeat {
-                    min: 0,
-                    max: None,
-                    ..
-                }
-            );
-        if !suppress_trailing && !Self::expr_contains_alias(&expr) {
+        // Every nullable — leading *or* trailing, `X?` / `X*` / `[X]` — distributes
+        // exactly like Python Lark's `SimplifyRule_Visitor`: the empty case is
+        // pushed into the parent's alternatives and the present case is the shared
+        // recurse helper (for `*`) or the inner symbol(s). The trailing `*` no
+        // longer keeps a `__star: __plus | ε` wrapper — its ε now lives in the
+        // parent, distinguished by parent context, which is both structurally
+        // faithful and free of the duplicate-ε R/R the wrapper used to dodge
+        // (#91/#32). `is_last` is unused on this path now; the `*`/`?`/`[…]`
+        // distribution is position-independent. `try_distribute` never compiles
+        // anything on its `None` path, so the fall-through `compile_expr` below
+        // compiles the position exactly once.
+        let _ = is_last;
+        if !Self::expr_contains_alias(&expr) {
             if let Some(slot) = self.try_distribute(&expr, parent)? {
                 return Ok(slot);
             }
@@ -259,14 +260,16 @@ impl GrammarCompiler {
                     present,
                     absent_nones: 0,
                 })),
-            // `X*` → the shared one-or-more recurse helper.
+            // `X*` → the shared one-or-more recurse helper (inner arms inlined),
+            // with the empty case distributed into the parent — exactly Python's
+            // `EBNF_to_BNF` (`a: b c* d` → `_c: <recurse>` + `a: b _c d | b d`).
             Expr::Repeat {
                 inner,
                 min: 0,
                 max: None,
             } => {
-                let inner_sym = self.compile_expr((**inner).clone(), parent)?;
-                let plus = self.plus_helper(inner_sym);
+                let arms = self.inner_alternatives(inner, parent)?;
+                let plus = self.recurse_helper(arms);
                 Ok(Some(Slot::Nullable {
                     present: vec![(vec![plus], vec![0, 0])],
                     absent_nones: 0,
@@ -334,7 +337,8 @@ impl GrammarCompiler {
                 min: 0,
                 max: Some(1),
             } => self.present_forms(*inner, parent),
-            // `X*` / `X+` present form is the shared one-or-more recurse helper.
+            // `X*` / `X+` present form is the shared one-or-more recurse helper
+            // (inner arms inlined, Python's `EBNF_to_BNF`).
             Expr::Repeat {
                 inner,
                 min: 0,
@@ -345,8 +349,8 @@ impl GrammarCompiler {
                 min: 1,
                 max: None,
             } => {
-                let inner_sym = self.compile_expr(*inner, parent)?;
-                let plus = self.plus_helper(inner_sym);
+                let arms = self.inner_alternatives(&inner, parent)?;
+                let plus = self.recurse_helper(arms);
                 Ok(single(plus))
             }
             // Exact / bounded repetition: a single helper symbol.
@@ -501,32 +505,24 @@ impl GrammarCompiler {
         kind: HelperKind,
         alts: Vec<(CompiledAlt, Option<String>)>,
     ) -> Symbol {
-        // What to share is anchored to Python Lark's `rules_cache`, but with one
-        // structural caveat worth stating precisely. Python caches only the
-        // *non-nullable* recurse core (`_c: _c c | c`, keyed on the inner
-        // expression) — shared by both `+` and `*` — and has *no* nullable `*`
-        // rule at all: `SimplifyRule_Visitor` distributes `c*`'s empty case into
-        // each parent (`a: b c* d` → `_c: _c c | c` + `a: b _c d | b d`). lark-rs
-        // instead lowers `x*` to a nullable wrapper `__star: __plus | ε` over that
-        // same core, so what we cache is not a verbatim mirror of `rules_cache`:
+        // What to share is anchored to Python Lark's `rules_cache`. Python caches
+        // only the *non-nullable* recurse core (`_c: _c c | c`, keyed on the inner
+        // expression) — shared by both `+` and `*` — and has *no* nullable `*` rule
+        // at all: `SimplifyRule_Visitor` distributes `c*`'s empty case into each
+        // parent (`a: b c* d` → `_c: _c c | c` + `a: b _c d | b d`). After #91 the
+        // [`recurse_helper`](Self::recurse_helper) does exactly that, and `*`
+        // distributes its ε into the parent via `compile_slot`/`try_distribute`, so
+        // a `Star` wrapper reaches `intern_helper` only on the rare fallback where a
+        // `*` is nested where a *single symbol* is mandatory (inside `~n`).
         //
         //   * `Group` / `Star` — share. Sharing the `(",", X)` group lets the
-        //     pre-existing `recurse_cache` share its `+`-recurse `__plus` in turn
-        //     (keyed on that one inner symbol). That makes every `(",", X)*`
-        //     wrapper *byte-identical* (`__plus | ε`), and two identical nullable
-        //     wrappers collide as an unresolvable reduce/reduce the moment two of
-        //     them reduce on the *same* lookahead in a common state (witnessed on
-        //     `python.lark`: state 716, `__anon_star_102 -> ε` vs
-        //     `__anon_star_106 -> ε` on COMMA). Sharing the wrapper *resolves* that
-        //     collision by recognizing the two rules are one rule — it is forced by
-        //     the shared core, not a free choice. It does not over-narrow: the
-        //     collision is the proof the parser already cannot tell the wrappers
-        //     apart (they merge via the shared `__plus`, exactly as Python's shared
-        //     `_c` merges its parents' contexts), so unifying them widens no state's
-        //     contextual scanner. Pinned against the oracle by
-        //     `test_shared_star_wrapper_matches_oracle`: a grammar whose two
-        //     `(NAME ";")*` wrappers *do* collide without sharing parses, rejects,
-        //     and narrows byte-for-byte like Python Lark.
+        //     `recurse_cache` share its `+`-recurse `__plus` in turn (keyed on the
+        //     inner arms). Two byte-identical fallback `Star` wrappers would collide
+        //     as an unresolvable reduce/reduce the moment they reduce ε on the same
+        //     lookahead in a common state; sharing recognizes they are one rule. It
+        //     does not over-narrow — the collision is proof the parser already
+        //     cannot tell the wrappers apart (they merge via the shared `__plus`,
+        //     like Python's shared `_c`), so unifying widens no contextual scanner.
         //   * `Opt` / `Maybe` / `GroupOptional` — do *not* share. These are the
         //     `?`/`[...]` helpers Python inlines into parents. Unlike the `*`
         //     wrapper there is no pre-shared core forcing their states together, so
@@ -537,15 +533,11 @@ impl GrammarCompiler {
         //     `NON_SEPARATOR_STRING` over `WORD`). Leaving them per-parent keeps
         //     lark-rs byte-identical to the oracle, which never shares them either.
         //
-        // #97 took the principled convergence *partway*: a *leading* (non-final)
-        // `*`/`?`/`[...]` is now distributed into its parent's alternatives by
-        // `compile_expansion`, exactly as Python's `SimplifyRule` does, so it never
-        // reaches `intern_helper` as a `Star`/`Opt`/`GroupOptional` at all. What
-        // still flows here is the *trailing* nullable — which causes no LR(0)
-        // closure hiding and so keeps its shared helper (Python distributes those
-        // too, but the helper form is conflict-free and tree-identical). The
-        // forced-identical trailing `*` wrapper is still shared for the same R/R
-        // reason above; the leading case that motivated the workaround is gone.
+        // #97 distributed *leading* (non-final) `*`/`?`/`[...]` into the parent;
+        // #91 completed the convergence — *trailing* `*`/`?` now distribute too
+        // (`(A|B)+`'s arms inline straight into the recurse rule), so the only
+        // nullables that still reach `intern_helper` are the `?`/`[...]` per-parent
+        // helpers and the `~n`-nested `Star` fallback above.
         let cacheable = matches!(kind, HelperKind::Group | HelperKind::Star);
         let key: HelperKey = (kind.clone(), self.current_keep_all, alts.clone());
         if cacheable {
@@ -678,26 +670,80 @@ impl GrammarCompiler {
         }
     }
 
-    /// The shared one-or-more recurse helper `P: inner | P inner` for `inner`,
-    /// cached by `(inner, keep_all)` so identical `x+`/`x*` occurrences reuse one
-    /// rule (Python Lark's `rules_cache`). Sharing collapses what would otherwise be
-    /// duplicate, conflicting recurse rules into one, keeping `a+ b | a+` LALR.
+    /// The compiled inner alternatives of a `+`/`*` repetition, used to build the
+    /// shared recurse helper. Python Lark's `EBNF_to_BNF` inlines a grouped
+    /// repetition's arms directly into the recurse rule (`(A | B)+` →
+    /// `_p: A | B | _p A | _p B`), so the recurse helper is keyed on, and built
+    /// from, the *cartesian-expanded alternatives* of the inner expression — not a
+    /// single nested group-helper symbol. A plain single-symbol inner is just one
+    /// one-symbol arm; a non-aliased group fans out (and may itself distribute a
+    /// nested leading nullable). An inner that carries an alias keeps the helper
+    /// form (its named subtree must survive), so it falls through to `compile_expr`
+    /// and lowers to a single arm over the group helper symbol.
+    fn inner_alternatives(
+        &mut self,
+        inner: &Expr,
+        parent: &str,
+    ) -> Result<Vec<CompiledAlt>, GrammarError> {
+        // A non-aliased group inlines its arms; everything else (including an
+        // aliased group) becomes a single arm via `compile_expr`. `tail_ctx: false`
+        // — the arms are spliced mid-rule into the recurse rule, so a trailing
+        // nullable inside an arm is not actually trailing and must distribute too
+        // (mirrors `distributable_alternatives`).
+        if let Expr::Group(alts) = inner {
+            if !Self::expr_contains_alias(inner) {
+                let mut out = Vec::new();
+                for alt in alts.clone() {
+                    out.extend(self.compile_expansion(alt.expansion, parent, false)?);
+                }
+                return Ok(out);
+            }
+        }
+        Ok(vec![(
+            vec![self.compile_expr(inner.clone(), parent)?],
+            vec![0, 0],
+        )])
+    }
+
+    /// The shared one-or-more recurse helper for the inner `arms`, inlined exactly
+    /// as Python Lark's `EBNF_to_BNF` does: for arms `[a0, a1, …]` the helper is
+    /// `P: a0 | a1 | … | P a0 | P a1 | …` — every base arm (orders `0..k`) followed
+    /// by every recurse arm `P ai` (orders `k..2k`). Cached by `(arms, keep_all)`
+    /// so identical `x+`/`x*` occurrences reuse one rule (Python's `rules_cache`).
+    /// Sharing collapses what would otherwise be duplicate, conflicting recurse
+    /// rules into one, keeping `a+ b | a+` LALR.
     ///
-    /// When `inner_sym` is a **named terminal** (`filter_out=false`), `keep_all` is
-    /// irrelevant to token filtering (named terminals are always kept regardless) and
-    /// is normalized to `false` in the cache key. This makes e.g. `DECIMAL+` in a
-    /// `!float_lit` and `DECIMAL+` in a plain `int_lit` share one helper rule,
-    /// matching Python Lark's grammar-wide `rules_cache` key (the inner expression
-    /// only, no `keep_all` context). Without this normalization, two separate helpers
-    /// with identical bodies cause an unresolvable LALR reduce/reduce conflict.
-    fn plus_helper(&mut self, inner_sym: Symbol) -> Symbol {
-        // Named (non-filtered) terminals are always kept regardless of keep_all, so
-        // the rule options difference is semantically invisible → normalize key.
-        let effective_keep_all = match &inner_sym {
-            Symbol::Terminal(t) if !t.filter_out => false,
-            _ => self.current_keep_all,
+    /// Inlining the arms (rather than nesting a `(A|B)` group helper under a
+    /// single-symbol `P: g | P g`) is the structural fix for #91/#32: it makes the
+    /// last symbol of the recursion a **terminal** built during the scan — matching
+    /// Python — instead of a nonterminal group node the dynamic lexer's LIFO
+    /// completer reverses, so the `dynamic_complete` resolve order falls out of
+    /// `rule.order` + insertion order with no `sorted_families` split-point
+    /// heuristic.
+    ///
+    /// When every arm is a single **named terminal** (`filter_out=false`),
+    /// `keep_all` is irrelevant to token filtering (named terminals are always kept
+    /// regardless) and is normalized to `false` in the cache key. This makes e.g.
+    /// `DECIMAL+` in a `!float_lit` and `DECIMAL+` in a plain `int_lit` share one
+    /// helper rule, matching Python Lark's grammar-wide `rules_cache` key (the inner
+    /// expression only, no `keep_all` context). Without this normalization, two
+    /// separate helpers with identical bodies cause an unresolvable LALR
+    /// reduce/reduce conflict.
+    fn recurse_helper(&mut self, arms: Vec<CompiledAlt>) -> Symbol {
+        // Named (non-filtered) single-terminal arms are always kept regardless of
+        // keep_all, so the rule options difference is semantically invisible →
+        // normalize the cache key (the common `WORD+` / `DECIMAL+` case).
+        let all_named_terms = arms.iter().all(|(syms, gaps)| {
+            syms.len() == 1
+                && gaps.iter().all(|&g| g == 0)
+                && matches!(&syms[0], Symbol::Terminal(t) if !t.filter_out)
+        });
+        let effective_keep_all = if all_named_terms {
+            false
+        } else {
+            self.current_keep_all
         };
-        let key = (inner_sym.clone(), effective_keep_all);
+        let key = (arms.clone(), effective_keep_all);
         if let Some(name) = self.recurse_cache.get(&key) {
             return Symbol::NonTerminal(NonTerminal::new(name));
         }
@@ -707,20 +753,32 @@ impl GrammarCompiler {
             keep_all_tokens: effective_keep_all,
             ..self.anon_opts()
         };
-        self.rules.push(Rule::new(
-            nt.clone(),
-            vec![inner_sym.clone()],
-            None,
-            opts.clone(),
-            0,
-        ));
-        self.rules.push(Rule::new(
-            nt.clone(),
-            vec![Symbol::NonTerminal(nt.clone()), inner_sym],
-            None,
-            opts,
-            1,
-        ));
+        let k = arms.len();
+        // Base arms first (orders 0..k), then the recurse arms `P a_i`
+        // (orders k..2k) — Python's `EBNF_to_BNF` order, which drives the
+        // `rule.order` disambiguation the resolve cases (#49/#72) rely on.
+        for (i, (syms, gaps)) in arms.iter().enumerate() {
+            let rule_opts = RuleOptions {
+                nones_before: Self::stored_gaps(gaps.clone()),
+                ..opts.clone()
+            };
+            self.rules
+                .push(Rule::new(nt.clone(), syms.clone(), None, rule_opts, i));
+        }
+        for (i, (syms, gaps)) in arms.iter().enumerate() {
+            let mut rec = vec![Symbol::NonTerminal(nt.clone())];
+            rec.extend_from_slice(syms);
+            // The leading recurse symbol contributes no placeholder gap; shift the
+            // arm's gap vector right by one to stay aligned with `rec`.
+            let mut rec_gaps = vec![0];
+            rec_gaps.extend_from_slice(gaps);
+            let rule_opts = RuleOptions {
+                nones_before: Self::stored_gaps(rec_gaps),
+                ..opts.clone()
+            };
+            self.rules
+                .push(Rule::new(nt.clone(), rec, None, rule_opts, k + i));
+        }
         self.recurse_cache.insert(key, name);
         Symbol::NonTerminal(nt)
     }
@@ -732,15 +790,33 @@ impl GrammarCompiler {
         max: Option<usize>,
         parent: &str,
     ) -> Result<Symbol, GrammarError> {
-        let inner_sym = self.compile_expr(inner, parent)?;
-
         match (min, max) {
+            (1, None) => {
+                // inner+ → one-or-more, via the shared recurse helper with the
+                // inner's alternatives inlined (Python's `EBNF_to_BNF`).
+                let arms = self.inner_alternatives(&inner, parent)?;
+                Ok(self.recurse_helper(arms))
+            }
+            (0, None) => {
+                // inner* reached here only when a *single symbol* is required (the
+                // common rule-position case distributes via `compile_slot`/
+                // `try_distribute`, which never falls through to `compile_repeat`).
+                // A `*` nested where a symbol is mandatory — e.g. inside `~n` — keeps
+                // a nullable wrapper `P: <recurse> | ε` over the same shared recurse
+                // helper (it cannot push its empty case up to a parent). Repeated
+                // such `x*` share the wrapper, so they collapse instead of colliding
+                // under LALR.
+                let arms = self.inner_alternatives(&inner, parent)?;
+                let plus = self.recurse_helper(arms);
+                Ok(self.intern_helper(HelperKind::Star, vec![((vec![plus], vec![0, 0]), None)]))
+            }
             (0, Some(1)) => {
                 // inner? → optional rule. `?` adds no placeholders of its own, but
                 // when nested inside a `[...]` it contributes its inner size to the
                 // outer maybe's count (Lark's `FindRuleSize` takes the present arm).
                 // If `inner` is *already* a nullable `?`/`*` helper, the extra `?` is
                 // redundant — collapse it so `(X?)?` is just `X?`.
+                let inner_sym = self.compile_expr(inner, parent)?;
                 if let Symbol::NonTerminal(nt) = &inner_sym {
                     if self.nullable_opts.contains(&nt.name) {
                         return Ok(inner_sym);
@@ -753,20 +829,9 @@ impl GrammarCompiler {
                     ),
                 )
             }
-            (1, None) => {
-                // inner+ → one-or-more, via the shared recurse helper.
-                Ok(self.plus_helper(inner_sym))
-            }
-            (0, None) => {
-                // inner* → optional wrapper around the *same* shared recurse helper,
-                // so `x*` and `x+` reuse one `P: inner | P inner` rule (Lark's model).
-                // The wrapper itself is shared too, so repeated `x*` collapse to one
-                // nullable helper instead of colliding under LALR.
-                let plus = self.plus_helper(inner_sym);
-                Ok(self.intern_helper(HelperKind::Star, vec![((vec![plus], vec![0, 0]), None)]))
-            }
             (n, Some(m)) if n == m => {
                 // exact repetition: inline n copies
+                let inner_sym = self.compile_expr(inner, parent)?;
                 let name = self.fresh_anon_rule(AnonKind::Rep);
                 let nt = NonTerminal::new(&name);
                 let syms: Vec<Symbol> = std::iter::repeat(inner_sym).take(n).collect();
@@ -776,6 +841,7 @@ impl GrammarCompiler {
             }
             (n, max_opt) => {
                 // Range: generate rules for n..m repetitions
+                let inner_sym = self.compile_expr(inner, parent)?;
                 let max_count = max_opt.unwrap_or(n + 10); // cap at n+10 for unbounded
                 let name = self.fresh_anon_rule(AnonKind::RepRange);
                 let nt = NonTerminal::new(&name);

@@ -162,12 +162,6 @@ struct Packed {
 /// (packed nodes); more than one means the node is ambiguous.
 struct SymbolNode {
     is_intermediate: bool,
-    /// The input span `[start, end)` this node covers (column steps for the
-    /// dynamic lexer, token indices for the basic lexer). Used only to break
-    /// `sort_key` ties among a node's derivations by split point — see
-    /// [`Transformer::sorted_families`].
-    start: usize,
-    end: usize,
     families: Vec<Packed>,
     family_set: HashSet<(ForestRef, ForestRef)>,
     /// Joop-Leo deferred reconstructions: `(transitive, bottom_node, end_col)`. A
@@ -234,8 +228,6 @@ impl Forest {
         let id = self.nodes.len();
         self.nodes.push(SymbolNode {
             is_intermediate: key.is_intermediate(),
-            start,
-            end,
             families: Vec::new(),
             family_set: HashSet::new(),
             paths: Vec::new(),
@@ -1268,11 +1260,6 @@ struct Transformer<'a> {
     /// dynamic lexer is used (the basic lexer consumes terminal priorities in its
     /// terminal ordering). Empty otherwise.
     term_priority: HashMap<SymbolId, i32>,
-    /// Whether the dynamic lexer produced this forest. Gates the split-point
-    /// tie-break in [`Transformer::sorted_families`], which compensates for the
-    /// way lark-rs's EBNF helper nodes reverse the insertion order of equal-rank
-    /// `dynamic_complete` segmentation derivations relative to Python Lark.
-    dynamic: bool,
     /// Memoized symbol-node values (final assembled trees).
     memo: HashMap<usize, NodeValue>,
     /// Memoized per-symbol-node derivation lists (the deduped alternative values
@@ -1311,7 +1298,6 @@ impl<'a> Transformer<'a> {
         term_priority: bool,
     ) -> Self {
         // `term_priority` is set exactly when the dynamic lexer built the forest.
-        let dynamic = term_priority;
         // Map each terminal id to its declared priority (only consulted under the
         // dynamic lexer; built empty otherwise so the lookup is a no-op).
         let term_priority = if term_priority {
@@ -1329,7 +1315,6 @@ impl<'a> Transformer<'a> {
             forest,
             builder: TreeBuilder::new(&grammar.rules),
             resolve,
-            dynamic,
             term_priority,
             memo: HashMap::new(),
             deriv_memo: HashMap::new(),
@@ -1450,21 +1435,20 @@ impl<'a> Transformer<'a> {
     /// equal derivations — its `StableSymbolNode` stores packed children in an
     /// `OrderedSet`, so insertion order is the final tie-break there too).
     ///
-    /// Under the **dynamic lexer** a further tie-break is applied: among otherwise
-    /// equal-rank derivations of the same span, the one whose last symbol (the
-    /// packed node's right child) covers the most input — i.e. the earliest split —
-    /// wins. The dynamic lexer's `dynamic_complete` re-tokenization makes a single
-    /// span reachable by many segmentations; Python Lark inserts these last-symbol
-    /// families in earliest-split-first order during its scan, but lark-rs builds
-    /// them through an EBNF helper node whose LIFO completion reverses that order,
-    /// so the split key restores Python's choice (e.g. `WORD+` over `"bc"` resolves
-    /// to one `WORD "bc"`, not `WORD "b"`, `WORD "c"`). The basic lexer keeps pure
-    /// insertion order, where it already matches Python on genuine grammar ambiguity.
+    /// This is pure `(is_empty, -priority, rule.order)` + insertion order for *both*
+    /// lexers. The dynamic-lexer split-point tie-break that #32/#90 added here is
+    /// gone: it compensated for lark-rs building a grouped repetition through a
+    /// nested `(A|B)` group node whose LIFO completion reversed Python's
+    /// earliest-split-first segmentation order. With the EBNF expansion now inlining
+    /// the group arms straight into the recurse rule (#91 — matching Python's
+    /// `EBNF_to_BNF`), the last symbol of the recursion is a *terminal* built during
+    /// the scan, so the segmentations already arrive in Python's order and the
+    /// `rule.order` key alone disambiguates `dynamic_complete` ties (e.g. `WORD+`
+    /// over `"bc"` resolves to one `WORD "bc"`, the `parse:49/72` cases).
     fn sorted_families(&mut self, node_id: usize) -> Vec<usize> {
         let forest = self.forest;
         let node = &forest.nodes[node_id];
         let parent_inter = node.is_intermediate;
-        let node_start = node.start;
         let prios: Vec<i32> = (0..node.families.len())
             .map(|k| {
                 let p = node.families[k];
@@ -1474,15 +1458,6 @@ impl<'a> Transformer<'a> {
         let mut idx: Vec<usize> = (0..node.families.len()).collect();
         let fams = &forest.nodes[node_id].families;
         let grammar = self.grammar;
-        let dynamic = self.dynamic;
-        // The split position of a derivation: where its right (last) symbol starts,
-        // i.e. the end of its left prefix. A smaller split means a longer right child.
-        let split = |p: &Packed| -> usize {
-            match p.left {
-                ForestRef::Node(lid) => forest.nodes[lid].end,
-                _ => node_start,
-            }
-        };
         idx.sort_by(|&a, &b| {
             let empty = |p: &Packed| {
                 matches!(p.left, ForestRef::None) && matches!(p.right, ForestRef::None)
@@ -1495,11 +1470,6 @@ impl<'a> Transformer<'a> {
                         .order
                         .cmp(&grammar.rules[fams[b].rule].order),
                 )
-                .then(if dynamic {
-                    split(&fams[a]).cmp(&split(&fams[b]))
-                } else {
-                    std::cmp::Ordering::Equal
-                })
         });
         idx
     }

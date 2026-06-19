@@ -89,3 +89,62 @@ fn test_earley_dynamic_oracle() {
         );
     }
 }
+
+/// The flattened `(token_type, value)` of a resolved `start` tree — both canonical
+/// `dynamic_complete` resolve cases produce exactly two terminal children.
+fn token_pairs(lark: &lark_rs::Lark, input: &str) -> Vec<(String, String)> {
+    let tree = match lark.parse(input).expect("should parse") {
+        lark_rs::ParseTree::Tree(t) => t,
+        other => panic!("expected a `start` tree, got {other:?}"),
+    };
+    tree.children
+        .iter()
+        .map(|c| {
+            let t = c.as_token().expect("child is a token");
+            (t.type_.clone(), t.value.clone())
+        })
+        .collect()
+}
+
+/// #91/#32 regression pin: the `dynamic_complete` resolve cases the old
+/// `sorted_families` split-point tie-break protected (`parse:49 / 72`) must still
+/// resolve correctly with the heuristic **removed** — now purely via the inlined
+/// recurse rule's `rule.order` + insertion order. Were the tie-break still load-
+/// bearing, removing it would flip these to the wrong (shorter-first) segmentation.
+#[test]
+fn dynamic_complete_resolves_longest_segmentation_without_tiebreak() {
+    if earley_unimplemented() {
+        return;
+    }
+    // parse:49 — `(A | WORD)+` over "abc": one `A "a"`, then `WORD "bc"` (earliest
+    // split first), NOT `A "a"`, `WORD "b"`, `WORD "c"`.
+    let g49 = make_earley_dynamic(
+        "A.2: \"a\"\nWORD: (\"a\"..\"z\")+\nstart: (A | WORD)+\n",
+        "dynamic_complete",
+        Ambiguity::Resolve,
+    )
+    .expect("grammar 49 builds");
+    assert_eq!(
+        token_pairs(&g49, "abc"),
+        vec![
+            ("A".to_string(), "a".to_string()),
+            ("WORD".to_string(), "bc".to_string()),
+        ]
+    );
+
+    // parse:72 — `A A?` with `A: "a"+` over "aaa": `A "a"` then `A "aa"` (the
+    // order-0 `A A` expansion, earliest split first).
+    let g72 = make_earley_dynamic(
+        "start: A A?\nA: \"a\"+\n",
+        "dynamic_complete",
+        Ambiguity::Resolve,
+    )
+    .expect("grammar 72 builds");
+    assert_eq!(
+        token_pairs(&g72, "aaa"),
+        vec![
+            ("A".to_string(), "a".to_string()),
+            ("A".to_string(), "aa".to_string()),
+        ]
+    );
+}
