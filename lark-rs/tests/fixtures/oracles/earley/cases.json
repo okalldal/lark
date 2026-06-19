@@ -4,6 +4,7 @@
     "grammar": "\nstart: sum\n?sum: product\n    | sum \"+\" product   -> add\n?product: atom\n        | product \"*\" atom -> mul\natom: NUMBER\nNUMBER: /[0-9]+/\n%ignore \" \"\n",
     "ambiguity": "resolve",
     "lexer": "basic",
+    "maybe_placeholders": false,
     "cases": [
       {
         "input": "1",
@@ -146,6 +147,7 @@
     "grammar": "\nstart: sum\n?sum: product\n    | sum \"+\" product   -> add\n?product: atom\n        | product \"*\" atom -> mul\natom: NUMBER\nNUMBER: /[0-9]+/\n%ignore \" \"\n",
     "ambiguity": "explicit",
     "lexer": "basic",
+    "maybe_placeholders": false,
     "cases": [
       {
         "input": "1",
@@ -288,6 +290,7 @@
     "grammar": "!start: start start | \"a\"",
     "ambiguity": "resolve",
     "lexer": "basic",
+    "maybe_placeholders": false,
     "cases": [
       {
         "input": "a",
@@ -405,6 +408,7 @@
     "grammar": "!start: start start | \"a\"",
     "ambiguity": "explicit",
     "lexer": "basic",
+    "maybe_placeholders": false,
     "cases": [
       {
         "input": "a",
@@ -573,6 +577,7 @@
     "grammar": "\nstart: \"(\" inner \")\"\n!inner: inner inner | \"a\"\n%ignore \" \"\n",
     "ambiguity": "resolve",
     "lexer": "basic",
+    "maybe_placeholders": false,
     "cases": [
       {
         "input": "(a)",
@@ -668,6 +673,7 @@
     "grammar": "\nstart: \"(\" inner \")\"\n!inner: inner inner | \"a\"\n%ignore \" \"\n",
     "ambiguity": "explicit",
     "lexer": "basic",
+    "maybe_placeholders": false,
     "cases": [
       {
         "input": "(a)",
@@ -814,6 +820,7 @@
     "grammar": "\nstart: a\na: X a | X\nX: \"x\"\n",
     "ambiguity": "resolve",
     "lexer": "basic",
+    "maybe_placeholders": false,
     "cases": [
       {
         "input": "x",
@@ -987,6 +994,7 @@
     "grammar": "\nstart: a\na: X a | X\nX: \"x\"\n",
     "ambiguity": "explicit",
     "lexer": "basic",
+    "maybe_placeholders": false,
     "cases": [
       {
         "input": "x",
@@ -1160,6 +1168,7 @@
     "grammar": "\nstart: a\na: X a | empty\nempty:\nX: \"x\"\n",
     "ambiguity": "resolve",
     "lexer": "basic",
+    "maybe_placeholders": false,
     "cases": [
       {
         "input": "",
@@ -1326,6 +1335,7 @@
     "grammar": "\nstart: a\na: X a | empty\nempty:\nX: \"x\"\n",
     "ambiguity": "explicit",
     "lexer": "basic",
+    "maybe_placeholders": false,
     "cases": [
       {
         "input": "",
@@ -1492,6 +1502,7 @@
     "grammar": "\nstart: a\na: X _tail | X\n_tail: a\nX: \"x\"\n",
     "ambiguity": "resolve",
     "lexer": "basic",
+    "maybe_placeholders": false,
     "cases": [
       {
         "input": "x",
@@ -1602,6 +1613,7 @@
     "grammar": "\nstart: a\na: X _tail | X\n_tail: a\nX: \"x\"\n",
     "ambiguity": "explicit",
     "lexer": "basic",
+    "maybe_placeholders": false,
     "cases": [
       {
         "input": "x",
@@ -1712,6 +1724,7 @@
     "grammar": "\nstart: a | b\na: X a | X\nb: X b | X\nX: \"x\"\n",
     "ambiguity": "resolve",
     "lexer": "basic",
+    "maybe_placeholders": false,
     "cases": [
       {
         "input": "x",
@@ -1822,6 +1835,7 @@
     "grammar": "\nstart: a | b\na: X a | X\nb: X b | X\nX: \"x\"\n",
     "ambiguity": "explicit",
     "lexer": "basic",
+    "maybe_placeholders": false,
     "cases": [
       {
         "input": "x",
@@ -2034,6 +2048,7 @@
     "grammar": "!start: \"x\" start | start \"x\" | \"x\"",
     "ambiguity": "resolve",
     "lexer": "basic",
+    "maybe_placeholders": false,
     "cases": [
       {
         "input": "x",
@@ -2176,6 +2191,7 @@
     "grammar": "!start: \"x\" start | start \"x\" | \"x\"",
     "ambiguity": "explicit",
     "lexer": "basic",
+    "maybe_placeholders": false,
     "cases": [
       {
         "input": "x",
@@ -2765,6 +2781,7 @@
     "grammar": "\nstart: a\n!a: \"x\" a | a \"x\" | \"x\"\n",
     "ambiguity": "resolve",
     "lexer": "basic",
+    "maybe_placeholders": false,
     "cases": [
       {
         "input": "x",
@@ -2841,6 +2858,7 @@
     "grammar": "\nstart: a\n!a: \"x\" a | a \"x\" | \"x\"\n",
     "ambiguity": "explicit",
     "lexer": "basic",
+    "maybe_placeholders": false,
     "cases": [
       {
         "input": "x",
@@ -3022,6 +3040,7 @@
     "grammar": "\n?start: a\n!a: \"x\" a | a \"x\" | \"x\"\n",
     "ambiguity": "resolve",
     "lexer": "basic",
+    "maybe_placeholders": false,
     "cases": [
       {
         "input": "xx",
@@ -3097,6 +3116,7 @@
     "grammar": "\n?start: a\n!a: \"x\" a | a \"x\" | \"x\"\n",
     "ambiguity": "explicit",
     "lexer": "basic",
+    "maybe_placeholders": false,
     "cases": [
       {
         "input": "xx",
@@ -3305,6 +3325,7 @@
     "grammar": "\n!start: a a\n!a: \"y\" a | a \"y\" | \"y\"\n",
     "ambiguity": "resolve",
     "lexer": "basic",
+    "maybe_placeholders": false,
     "cases": [
       {
         "input": "yy",
@@ -3448,6 +3469,7 @@
     "grammar": "\n!start: a a\n!a: \"y\" a | a \"y\" | \"y\"\n",
     "ambiguity": "explicit",
     "lexer": "basic",
+    "maybe_placeholders": false,
     "cases": [
       {
         "input": "yy",
@@ -4258,6 +4280,336 @@
                   ]
                 }
               ]
+            }
+          ]
+        },
+        "error": null
+      }
+    ]
+  },
+  {
+    "name": "maybe_transparent",
+    "grammar": "\nstart: _t\n_t: A [B]\nA: \"a\"\nB: \"b\"\n",
+    "ambiguity": "resolve",
+    "lexer": "basic",
+    "maybe_placeholders": true,
+    "cases": [
+      {
+        "input": "a",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "unknown",
+              "repr": "None"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "ab",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "token",
+              "token_type": "B",
+              "value": "b"
+            }
+          ]
+        },
+        "error": null
+      }
+    ]
+  },
+  {
+    "name": "maybe_transparent",
+    "grammar": "\nstart: _t\n_t: A [B]\nA: \"a\"\nB: \"b\"\n",
+    "ambiguity": "explicit",
+    "lexer": "basic",
+    "maybe_placeholders": true,
+    "cases": [
+      {
+        "input": "a",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "unknown",
+              "repr": "None"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "ab",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "token",
+              "token_type": "B",
+              "value": "b"
+            }
+          ]
+        },
+        "error": null
+      }
+    ]
+  },
+  {
+    "name": "maybe_transparent_plus",
+    "grammar": "\nstart: _t+\n_t: A [B]\nA: \"a\"\nB: \"b\"\n",
+    "ambiguity": "resolve",
+    "lexer": "basic",
+    "maybe_placeholders": true,
+    "cases": [
+      {
+        "input": "a",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "unknown",
+              "repr": "None"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "ab",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "token",
+              "token_type": "B",
+              "value": "b"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "aa",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "unknown",
+              "repr": "None"
+            },
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "unknown",
+              "repr": "None"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "aab",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "unknown",
+              "repr": "None"
+            },
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "token",
+              "token_type": "B",
+              "value": "b"
+            }
+          ]
+        },
+        "error": null
+      }
+    ]
+  },
+  {
+    "name": "maybe_transparent_plus",
+    "grammar": "\nstart: _t+\n_t: A [B]\nA: \"a\"\nB: \"b\"\n",
+    "ambiguity": "explicit",
+    "lexer": "basic",
+    "maybe_placeholders": true,
+    "cases": [
+      {
+        "input": "a",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "unknown",
+              "repr": "None"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "ab",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "token",
+              "token_type": "B",
+              "value": "b"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "aa",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "unknown",
+              "repr": "None"
+            },
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "unknown",
+              "repr": "None"
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "aab",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "unknown",
+              "repr": "None"
+            },
+            {
+              "type": "token",
+              "token_type": "A",
+              "value": "a"
+            },
+            {
+              "type": "token",
+              "token_type": "B",
+              "value": "b"
             }
           ]
         },

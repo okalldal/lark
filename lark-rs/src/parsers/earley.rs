@@ -1280,6 +1280,16 @@ struct Transformer<'a> {
     /// [`Transformer::eval_symbol`] and the transparent-child ambiguity lifting in
     /// [`Transformer::expand_packed`].
     deriv_memo: HashMap<usize, Vec<NodeValue>>,
+    /// Explicit mode (#59): memoized "is this node's whole subtree unambiguous?"
+    /// (every reachable node has ≤ 1 family, no forest cycle). A `true` node has
+    /// exactly one derivation, so the explicit walk would produce the *same* single
+    /// value resolve mode does — letting a distributed *transparent* such node be
+    /// **spliced** into the parent in one streaming pass (the `Stream*` frames)
+    /// instead of re-materializing a growing `Inline` per spine level (the O(n²)
+    /// the issue tracked). Genuine ambiguity (any node with > 1 family) stays
+    /// `false` and keeps the cartesian `Derivs` distribution that the `_ambig`
+    /// oracles pin. Computed once per node by [`Transformer::single_deriv`].
+    single_deriv: HashMap<usize, bool>,
     /// Memoized node priorities + the in-progress set for cycle-safe summing.
     prio: HashMap<usize, i32>,
     prio_visiting: HashSet<usize>,
@@ -1323,6 +1333,7 @@ impl<'a> Transformer<'a> {
             term_priority,
             memo: HashMap::new(),
             deriv_memo: HashMap::new(),
+            single_deriv: HashMap::new(),
             prio: HashMap::new(),
             prio_visiting: HashSet::new(),
             seen: HashSet::new(),
@@ -1504,6 +1515,76 @@ impl<'a> Transformer<'a> {
             .first()
             .map(|p| self.grammar.rules[p.rule].transparent)
             .unwrap_or(false)
+    }
+
+    /// Explicit mode (#59): does `id`'s whole subtree have exactly one derivation
+    /// — every reachable node ≤ 1 family, and no forest cycle through it? Such a
+    /// node's explicit value is identical to the value resolve mode would build (no
+    /// ambiguity to fan out), so a distributed *transparent* one can be spliced in a
+    /// single streaming pass instead of re-materializing a growing `Inline` per
+    /// spine level. Iterative two-phase DFS (`Enter`/`Exit`), memoized in
+    /// `single_deriv` and bounded to O(1) native stack per #33: a node reached while
+    /// still in-progress is a cycle → not single-derivation (conservatively `false`,
+    /// so the cartesian `Derivs` path — which already handles cycles by discarding —
+    /// keeps owning it). A node is single-derivation iff it has exactly one family
+    /// and every `Node` child of that family is single-derivation.
+    fn single_deriv(&mut self, id: usize) -> bool {
+        if let Some(&b) = self.single_deriv.get(&id) {
+            return b;
+        }
+        enum Step {
+            Enter(usize),
+            Exit(usize),
+        }
+        // In-progress set: a re-entry is a cycle (→ false). Local to this query
+        // chain; every node we settle lands in `single_deriv`, so a later query
+        // short-circuits at the memo.
+        let mut on_stack: HashSet<usize> = HashSet::new();
+        let mut stack = vec![Step::Enter(id)];
+        while let Some(step) = stack.pop() {
+            match step {
+                Step::Enter(n) => {
+                    if self.single_deriv.contains_key(&n) {
+                        continue;
+                    }
+                    if !on_stack.insert(n) {
+                        // Cycle edge: this node participates in a forest cycle.
+                        self.single_deriv.insert(n, false);
+                        continue;
+                    }
+                    let node = &self.forest.nodes[n];
+                    if node.families.len() != 1 {
+                        // 0 families (a discarded/empty node) or > 1 (ambiguous):
+                        // not a single clean derivation.
+                        on_stack.remove(&n);
+                        self.single_deriv.insert(n, node.families.len() == 1);
+                        continue;
+                    }
+                    stack.push(Step::Exit(n));
+                    let p = node.families[0];
+                    for r in [p.left, p.right] {
+                        if let ForestRef::Node(c) = r {
+                            stack.push(Step::Enter(c));
+                        }
+                    }
+                }
+                Step::Exit(n) => {
+                    on_stack.remove(&n);
+                    // Already decided as a cycle while on the stack? Keep it.
+                    if self.single_deriv.contains_key(&n) {
+                        continue;
+                    }
+                    let p = self.forest.nodes[n].families[0];
+                    let child_ok = |r: ForestRef, this: &Self| match r {
+                        ForestRef::Node(c) => this.single_deriv.get(&c).copied() == Some(true),
+                        _ => true,
+                    };
+                    let ok = child_ok(p.left, self) && child_ok(p.right, self);
+                    self.single_deriv.insert(n, ok);
+                }
+            }
+        }
+        self.single_deriv.get(&id).copied().unwrap_or(false)
     }
 
     // ─── The de-recursed walk (issue #33) ──────────────────────────────────────
@@ -1734,6 +1815,39 @@ impl<'a> Transformer<'a> {
                     self.memo.insert(node, v.clone());
                 }
                 w.ret = Some(Ret::Value(result));
+            }
+
+            // ── stream a single-derivation transparent child (explicit, #59):
+            //    splice `node` into a fresh buffer with the *resolve* transparent
+            //    splice (`Frame::Splice` → `SpliceTail`) — one linear pass down the
+            //    spine, no growing per-level `Inline` — then hand the buffer back
+            //    wrapped as the lone `Inline` derivation alternative `ExpandCombine`
+            //    expects. Reusing `Splice` (not bare `AppendRule`) is what makes the
+            //    streamed value byte-identical to the `Derivs` + `assemble` value it
+            //    replaces: `SpliceTail` appends the transparent rule's rule-level
+            //    `placeholder_count` and trailing `nones_before` `None` slots that
+            //    `AppendRule` alone omits. Sound because `single_deriv(node)`
+            //    guaranteed exactly one derivation (no ambiguity to fan out).
+            Frame::StreamDistribute { node } => {
+                w.bufs.push(Vec::new());
+                w.frames.push(Frame::StreamDistributeDone);
+                w.frames.push(Frame::Splice { node });
+            }
+            Frame::StreamDistributeDone => {
+                let children = w.bufs.pop().expect("StreamDistribute pushed a buffer");
+                let derivs = match w.take_ret() {
+                    // A discarded family would mean a cycle, which `single_deriv`
+                    // already excludes — but stay defensive: no derivation, no
+                    // alternative.
+                    Ret::Rule(None) => Vec::new(),
+                    Ret::Rule(Some(_)) => vec![NodeValue::Inline(children)],
+                    _ => unreachable!("Splice returns Ret::Rule"),
+                };
+                #[cfg(feature = "perf-counters")]
+                crate::perf::add_explicit_node_children(
+                    derivs.iter().map(node_value_size).sum::<u64>(),
+                );
+                w.ret = Some(Ret::Derivs(derivs));
             }
 
             // ── symbol_derivations (explicit): the deduped list of derivation
@@ -1996,7 +2110,21 @@ impl<'a> Transformer<'a> {
                     distribute_right,
                 });
                 if distribute_right {
-                    w.frames.push(Frame::Derivs { node: rid });
+                    // #59: a *transparent* distributed child whose whole subtree is
+                    // unambiguous has exactly one derivation, so its explicit value
+                    // equals the value resolve mode would build — splice it into a
+                    // fresh buffer in one streaming pass (yielding the single
+                    // `Inline` alternative) instead of materializing a growing
+                    // per-spine-level `Inline` through `Derivs` (the O(n²) on a
+                    // transparent left-recursive helper that #59 fixes). Ambiguous
+                    // children (> 1 derivation anywhere in the subtree) and the
+                    // `keep_all_tokens` distribution of a non-transparent child keep
+                    // the cartesian `Derivs` path, which the `_ambig` oracles pin.
+                    if self.is_transparent_node(rid) && self.single_deriv(rid) {
+                        w.frames.push(Frame::StreamDistribute { node: rid });
+                    } else {
+                        w.frames.push(Frame::Derivs { node: rid });
+                    }
                 } else {
                     w.frames.push(Frame::Eval { node: rid });
                 }
@@ -2093,6 +2221,7 @@ impl<'a> Transformer<'a> {
 /// | `symbol_derivations`   | `Derivs`       | `DerivsNext`                  |
 /// | `expand_packed`        | `ExpandPacked` | `ExpandRight`, `ExpandCombine`|
 /// | `expand_intermediate`  | `ExpandInter`  | `InterNext`                   |
+/// | stream single-deriv child (#59) | `StreamDistribute` | `StreamDistributeDone` (reuses the resolve `Splice`/`SpliceTail` frames) |
 enum Frame {
     Eval {
         node: usize,
@@ -2133,6 +2262,13 @@ enum Frame {
     EvalAmbig {
         node: usize,
     },
+    /// #59: stream a single-derivation transparent distributed child into a fresh
+    /// buffer (via the resolve `Splice`/`SpliceTail` frames), then wrap it as the
+    /// lone `Inline` derivation alternative — the explicit reuse of resolve's splice.
+    StreamDistribute {
+        node: usize,
+    },
+    StreamDistributeDone,
     Derivs {
         node: usize,
     },
