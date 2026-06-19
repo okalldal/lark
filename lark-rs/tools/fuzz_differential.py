@@ -9,7 +9,21 @@ generates. The committed regression corpus
 small set of inputs that actually exposed a lark-rs ↔ Python-Lark divergence —
 exactly like the compliance bank holds real bugs, not random samples.
 
-Three things live here:
+Four things live here:
+
+  0. Random GRAMMAR fuzzing (`--fuzz-grammars`) — the grammar-level counterpart to
+     the input fuzzing below. Instead of perturbing inputs to a FIXED grammar, it
+     generates random small grammars (parameterized by production count, terminal
+     set, and EBNF operator mix: `*`, `+`, `?`, `|`, `~N`, templates), keeps only
+     those Python Lark (the oracle) builds, generates random inputs for each, and
+     diffs lark-rs against the oracle ONLINE via the `differ` binary
+     (`--grammar-file`). Finds are routed through the same divergence-preserving
+     minimize as `--minimize`. This surfaces template-expansion, EBNF-operator,
+     nullable-edge and rule-priority bugs no fixed grammar can. Deterministic given
+     `--seed`; exits non-zero on a divergence (a nightly RED == a find to triage):
+
+        python3 tools/fuzz_differential.py --fuzz-grammars --seed 7 -n 200 \
+            --gg-finds-out /tmp/grammar_finds.json
 
   1. Discovery (default) — generate grammar-directed + mutated inputs for the
      trusted grammars and validate them against Python Lark (the oracle). This
@@ -57,6 +71,7 @@ Determinism: generation is fully determined by `--seed`, so a nightly RED is
 reproducible by re-running with the seed printed in its log.
 
 Usage:
+    python3 tools/fuzz_differential.py --fuzz-grammars --seed 7 -n 200
     python3 tools/fuzz_differential.py --grammar arithmetic -n 200
     python3 tools/fuzz_differential.py --grammar all -n 4000 --seed 7 --out batch.json
     python3 tools/fuzz_differential.py --grammar arithmetic --minimize "1 +++ 2"
@@ -213,6 +228,122 @@ def mutate(rng, s):
     return "".join(chars)
 
 
+# ─── Random grammar generation (issue #38) ───────────────────────────────────
+#
+# Input fuzzing (above) hunts for divergences in a FIXED, trusted grammar. Random
+# *grammar* fuzzing instead perturbs the grammar itself — that is where
+# template-expansion, EBNF-operator-interaction, nullable-edge and rule-priority
+# bugs live, none of which a fixed grammar can surface. The generator emits small
+# grammars parameterized by:
+#
+#   * production count        (--gg-rules)
+#   * terminal set            (a small alphabet of single-char string terminals)
+#   * EBNF operator mix       (`*`, `+`, `?`, `|`, `~N`, and a template instance)
+#
+# It deliberately stays in the LALR-buildable, contextual-lexable subset the fuzz
+# oracle uses (`load_parser`): a `start` rule plus N helper rules over a handful
+# of literal terminals. Many random grammars are still LALR-rejected (conflicts)
+# or otherwise unbuildable — Python Lark is the oracle, so any grammar IT rejects
+# is skipped (step 2 of the Done-when). Generation is fully seeded, so a nightly
+# find replays from the seed in its log.
+
+# Single-character literal terminals the generated rules are built from. Kept tiny
+# and unambiguous so the LALR contextual lexer has a fighting chance to build, and
+# so a divergence lands on a legible input.
+_GG_TERMINALS = ["a", "b", "c", "d"]
+
+
+def _gg_atom(rng, nonterminals):
+    """A single grammar symbol: a literal terminal or a reference to a helper rule."""
+    if nonterminals and rng.random() < 0.45:
+        return rng.choice(nonterminals)
+    return f'"{rng.choice(_GG_TERMINALS)}"'
+
+
+def _gg_term_with_op(rng, nonterminals, allow_template_ref):
+    """One item in a rule alternative: an atom optionally wrapped in an EBNF
+    operator (`*`, `+`, `?`, `~N`, or a grouped run), or a template instantiation."""
+    if allow_template_ref and rng.random() < 0.2:
+        # Instantiate the generated template `rep{X}` with a random argument.
+        return f'rep{{{_gg_atom(rng, nonterminals)}}}'
+
+    atom = _gg_atom(rng, nonterminals)
+    r = rng.random()
+    if r < 0.30:
+        return atom                      # bare
+    if r < 0.45:
+        return atom + "?"                # optional (nullable edge)
+    if r < 0.60:
+        return atom + "*"                # zero-or-more (nullable edge)
+    if r < 0.72:
+        return atom + "+"                # one-or-more
+    if r < 0.85:
+        n = rng.randint(1, 3)
+        return atom + f"~{n}"            # exact repetition ~N
+    # A grouped alternation run, itself optionally repeated.
+    inner = " | ".join(_gg_atom(rng, nonterminals) for _ in range(rng.randint(2, 3)))
+    suffix = rng.choice(["", "*", "+", "?"])
+    return f"({inner}){suffix}"
+
+
+def _gg_alternative(rng, nonterminals, allow_template_ref):
+    """One alternative of a rule: a sequence of 1-3 operator-wrapped items."""
+    n = rng.randint(1, 3)
+    return " ".join(
+        _gg_term_with_op(rng, nonterminals, allow_template_ref) for _ in range(n))
+
+
+def generate_grammar(rng, n_rules):
+    """Build one random small grammar (as `.lark` text), deterministically given
+    `rng`. Always has a `start` rule and `n_rules` helper rules `r0..r{n-1}`, plus
+    a parameterized template `rep{x}: x x?` to exercise template expansion.
+
+    Returns the grammar text. Whether it actually BUILDS is decided by Python Lark
+    (the oracle) at the call site — unbuildable grammars are skipped."""
+    nonterminals = [f"r{i}" for i in range(n_rules)]
+
+    lines = []
+    # start references the helper rules + literals; `|` gives it 1-2 alternatives.
+    start_alts = [_gg_alternative(rng, nonterminals, allow_template_ref=True)
+                  for _ in range(rng.randint(1, 2))]
+    lines.append("start: " + " | ".join(start_alts))
+
+    for i, nt in enumerate(nonterminals):
+        # A helper rule may reference rules defined AFTER it (forward refs are fine
+        # in Lark) but never itself-only-recursively in a way that can't terminate;
+        # an alternative containing a bare literal keeps every rule reachable to a
+        # terminal. Each rule gets 1-2 `|` alternatives.
+        peers = [p for p in nonterminals if p != nt]
+        alts = []
+        for _ in range(rng.randint(1, 2)):
+            alts.append(_gg_alternative(rng, peers, allow_template_ref=False))
+        # Guarantee a non-recursive escape hatch (a bare literal alternative) so the
+        # rule's language is non-empty and inputs are generatable.
+        alts.append(f'"{rng.choice(_GG_TERMINALS)}"')
+        lines.append(f"{nt}: " + " | ".join(alts))
+
+    # A parameterized template exercising template expansion (`rep{x}: x x?`).
+    lines.append("rep{x}: x x?")
+
+    lines.append('%ignore " "')
+    return "\n".join(lines) + "\n"
+
+
+def generate_grammar_input(rng, parser, max_len=12):
+    """Generate a random input string for a built grammar. The generator is
+    grammar-agnostic: it samples short strings over the terminal alphabet (plus a
+    little whitespace), so most are near-valid and some are rejects — both
+    exercise the differ. Bounded length keeps a find legible."""
+    n = rng.randint(0, max_len)
+    pieces = []
+    for _ in range(n):
+        if rng.random() < 0.2:
+            pieces.append(" ")
+        else:
+            pieces.append(rng.choice(_GG_TERMINALS))
+    return "".join(pieces)
+
+
 # ─── Oracle plumbing ─────────────────────────────────────────────────────────
 
 def load_parser(grammar):
@@ -285,17 +416,23 @@ def find_differ_binary(explicit=None):
     return str(cand) if cand.exists() else None
 
 
-def larkrs_result(differ_bin, grammar, text):
+def larkrs_result(differ_bin, grammar, text, grammar_file=None):
     """Run `text` through lark-rs via the differ binary: (ok, tree_dict | None).
+
+    When `grammar_file` is given, the differ loads the grammar from that path
+    (`--grammar-file`, used by --fuzz-grammars for random grammars that have no
+    committed fixture); otherwise it loads the trusted fixture by name
+    (`--grammar <grammar>`).
 
     Raises RuntimeError if the differ cannot be invoked or returns malformed
     output — a hard failure the caller surfaces rather than silently treating as
     'no divergence' (which would re-introduce the over-minimization bug)."""
+    args = ([differ_bin, "--grammar-file", grammar_file] if grammar_file
+            else [differ_bin, "--grammar", grammar])
     # Force UTF-8 so a non-ASCII candidate or token value can't raise a locale
     # encode/decode error under a C/POSIX locale (nightly cron/CI).
     proc = subprocess.run(
-        [differ_bin, "--grammar", grammar],
-        input=text, capture_output=True, text=True, encoding="utf-8")
+        args, input=text, capture_output=True, text=True, encoding="utf-8")
     if proc.returncode != 0:
         raise RuntimeError(
             f"differ exited {proc.returncode} for grammar {grammar!r}: "
@@ -307,11 +444,11 @@ def larkrs_result(differ_bin, grammar, text):
         raise RuntimeError(f"differ produced malformed output {proc.stdout!r}: {e}")
 
 
-def diverges(parser, differ_bin, grammar, text):
+def diverges(parser, differ_bin, grammar, text, grammar_file=None):
     """True iff lark-rs and Python Lark disagree on `text` — either on accept/reject
     or on the produced tree. This is the predicate the minimizer preserves."""
     py_ok, py_tree = oracle_result(parser, text)
-    rs_ok, rs_tree = larkrs_result(differ_bin, grammar, text)
+    rs_ok, rs_tree = larkrs_result(differ_bin, grammar, text, grammar_file=grammar_file)
     if py_ok != rs_ok:
         return True
     # Both accepted or both rejected; a tree mismatch (only meaningful when both
@@ -373,6 +510,143 @@ def generate_batch(grammars, count, seed, depth, do_mutate):
     return batch
 
 
+def fuzz_grammars(args, ap):
+    """`--fuzz-grammars` mode: generate random grammars, validate each against the
+    Python-Lark oracle (skip rejects), generate inputs, diff lark-rs against the
+    oracle online (via the differ binary), and route any find through
+    minimize+record.
+
+    This is the grammar-level counterpart to input fuzzing: it surfaces
+    template-expansion, EBNF-operator, nullable-edge and priority bugs a fixed
+    grammar cannot. Deterministic given --seed: a nightly find replays from the
+    seed in its log.
+    """
+    rng = random.Random(args.seed)
+
+    # --fuzz-grammars has no legacy fallback: the only way to diff lark-rs against
+    # the oracle for a random grammar is the online differ, so --no-differ is
+    # meaningless here. Reject it up front rather than crashing mid-batch when the
+    # first diverges() call hits a None binary.
+    if args.no_differ:
+        ap.error("--fuzz-grammars requires the differ binary; --no-differ is not "
+                 "supported (there is no legacy fallback for a random grammar)")
+
+    differ_bin = find_differ_binary(args.differ_bin)
+    if differ_bin is None:
+        print("error: --fuzz-grammars needs the `differ` binary to diff lark-rs "
+              "against the oracle; build failed or cargo is unavailable.",
+              file=sys.stderr)
+        return 2
+
+    # A scratch dir to hold each random grammar as a real `.lark` file so the
+    # differ (`--grammar-file`) and Python Lark load IDENTICAL text. Never committed.
+    # Clear stale `gg_*.lark` from a prior run so a leftover file (e.g. from a
+    # larger earlier count, or a same-seed re-run) can never be mistaken for a find
+    # of THIS run — the grammar_file path in a report must point at this run's text.
+    scratch_dir = Path(args.gg_scratch_dir) if args.gg_scratch_dir else \
+        Path(LARK_RS_DIR) / "target" / "fuzz_grammars"
+    scratch_dir.mkdir(parents=True, exist_ok=True)
+    for stale in scratch_dir.glob("gg_*.lark"):
+        stale.unlink()
+
+    n_generated = 0
+    n_built = 0
+    n_inputs = 0
+    finds = []  # (grammar_text, grammar_file, input) tuples that diverged
+
+    for gi in range(args.count):
+        n_rules = rng.randint(1, args.gg_rules)
+        grammar_text = generate_grammar(rng, n_rules)
+        n_generated += 1
+
+        # Step 2: Python Lark is the oracle — skip any grammar IT rejects.
+        try:
+            parser = Lark(grammar_text, parser="lalr", lexer="contextual",
+                          start="start", maybe_placeholders=False)
+        except LarkError:
+            continue
+        except Exception:
+            # Non-LarkError build failures (e.g. an unsupported template shape) are
+            # also "the oracle won't build it" — skip, don't crash the batch.
+            continue
+        n_built += 1
+
+        # Write the exact built text to a scratch file for the differ.
+        grammar_file = scratch_dir / f"gg_{args.seed}_{gi}.lark"
+        grammar_file.write_text(grammar_text)
+        grammar_file_str = str(grammar_file)
+
+        # Step 3: generate inputs and diff lark-rs against the oracle.
+        for _ in range(args.gg_inputs):
+            inp = generate_grammar_input(rng, parser)
+            n_inputs += 1
+            try:
+                # Pass the scratch path as the grammar *label* too, so a differ
+                # RuntimeError names the exact .lark file (reproducibility), not an
+                # opaque '<random>'.
+                if diverges(parser, differ_bin, grammar_file_str, inp,
+                            grammar_file=grammar_file_str):
+                    finds.append((grammar_text, grammar_file_str, inp))
+                    break  # one find per grammar is plenty to triage
+            except RuntimeError as e:
+                # A differ invocation failure is a real, reportable problem (e.g. a
+                # grammar lark-rs cannot build that Python can) — surface it as a
+                # find so it is not silently lost.
+                print(f"differ error on grammar {grammar_file_str} input {inp!r}: {e}",
+                      file=sys.stderr)
+                finds.append((grammar_text, grammar_file_str, inp))
+                break
+
+    print(f"fuzz-grammars (seed={args.seed}): generated {n_generated}, "
+          f"{n_built} built in Python Lark, {n_inputs} inputs diffed, "
+          f"{len(finds)} grammar(s) diverged")
+
+    if not finds:
+        print("(no divergence — clean run)")
+        return 0
+
+    # Step 4: route each find through the existing minimize workflow and emit a
+    # ready-to-record report. We do NOT auto-commit (recording a random grammar's
+    # find needs a human-written grammar fixture + note); we print the minimized
+    # input and the grammar so a maintainer can triage and `--record` it.
+    print(f"\n{len(finds)} divergence(s) found — minimized repros:")
+    reports = []
+    for grammar_text, grammar_file_str, inp in finds:
+        parser = Lark(grammar_text, parser="lalr", lexer="contextual",
+                      start="start", maybe_placeholders=False)
+
+        # Divergence-preserving shrink (the #37 predicate), reused verbatim: only
+        # accept a candidate that STILL diverges; a differ error mid-shrink counts
+        # as 'does not satisfy' so a flaky call can never over-minimize to an
+        # agreeing input.
+        def diverge_pred(s, _parser=parser, _gf=grammar_file_str):
+            if s == "":
+                return False
+            try:
+                return diverges(_parser, differ_bin, _gf, s, grammar_file=_gf)
+            except RuntimeError:
+                return False
+
+        small = minimize(parser, inp, diverge_pred)
+        report = {
+            "grammar": grammar_text,
+            "grammar_file": grammar_file_str,
+            "input": inp,
+            "minimized_input": small,
+        }
+        reports.append(report)
+        print(json.dumps(report, ensure_ascii=False))
+
+    if args.gg_finds_out:
+        Path(args.gg_finds_out).write_text(
+            json.dumps(reports, indent=2, ensure_ascii=False) + "\n")
+        print(f"wrote {len(reports)} find(s) -> {args.gg_finds_out}")
+
+    # A divergence is the signal the nightly job keys on: exit non-zero so CI flags
+    # it (RED == a new find to triage), mirroring the input-fuzz replay's RED.
+    return 1
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -405,7 +679,28 @@ def main():
     ap.add_argument("--input", metavar="STR", help="the input to --record")
     ap.add_argument("--note", metavar="STR",
                     help="why this find is guarded (required by --record)")
+    # ── Random GRAMMAR fuzzing (issue #38) ───────────────────────────────────
+    ap.add_argument("--fuzz-grammars", action="store_true",
+                    help="generate random small grammars (skip those Python Lark "
+                         "rejects), generate inputs, and diff lark-rs against the "
+                         "oracle online via the differ binary; routes finds through "
+                         "minimize. Exits non-zero on a divergence (a nightly find).")
+    ap.add_argument("--gg-rules", type=int, default=4, metavar="N",
+                    help="max helper-rule (production) count per generated grammar "
+                         "(--fuzz-grammars); each grammar gets 1..N")
+    ap.add_argument("--gg-inputs", type=int, default=20, metavar="N",
+                    help="random inputs to diff per built grammar (--fuzz-grammars)")
+    ap.add_argument("--gg-scratch-dir", metavar="DIR",
+                    help="where to write the random `.lark` files the differ reads "
+                         "(default: target/fuzz_grammars; never committed)")
+    ap.add_argument("--gg-finds-out", metavar="FILE",
+                    help="write the minimized grammar-fuzz finds to FILE as JSON "
+                         "(for the nightly artifact upload)")
     args = ap.parse_args()
+
+    # ── Random grammar fuzzing (its own self-contained discovery loop) ───────
+    if args.fuzz_grammars:
+        sys.exit(fuzz_grammars(args, ap))
 
     grammars = sorted(GENERATORS) if args.grammar == "all" else [args.grammar]
 

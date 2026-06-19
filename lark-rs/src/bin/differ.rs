@@ -19,6 +19,13 @@
 //! Usage:
 //!     echo -n "1 + 2" | differ --grammar arithmetic
 //!     printf '%s' "$INPUT" | differ --grammar json
+//!     printf '%s' "$INPUT" | differ --grammar-file /tmp/random_grammar.lark
+//!
+//! `--grammar <name>` loads `tests/grammars/<name>.lark` (the trusted fixtures);
+//! `--grammar-file <path>` loads an arbitrary grammar file by path. The latter is
+//! what the `--fuzz-grammars` mode uses: a randomly generated grammar has no
+//! committed fixture to name, so the fuzzer writes it to a scratch `.lark` and
+//! diffs lark-rs against the Python oracle through this same online differ.
 //!
 //! Output (stdout, one line):
 //!     {"ok": true,  "tree": {"type": "tree", "data": "start", "children": [...]}}
@@ -36,14 +43,16 @@ use lark_rs::{Child, Lark, LarkOptions, LexerType, ParseTree, ParserAlgorithm, T
 
 fn main() -> ExitCode {
     let mut grammar_name: Option<String> = None;
+    let mut grammar_file: Option<String> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--grammar" => grammar_name = args.next(),
+            "--grammar-file" => grammar_file = args.next(),
             "-h" | "--help" => {
                 eprintln!(
-                    "usage: differ --grammar <name>   (reads input from stdin, \
-                     prints {{\"ok\":bool,\"tree\":...}} as JSON)"
+                    "usage: differ (--grammar <name> | --grammar-file <path>)   \
+                     (reads input from stdin, prints {{\"ok\":bool,\"tree\":...}} as JSON)"
                 );
                 return ExitCode::SUCCESS;
             }
@@ -54,16 +63,33 @@ fn main() -> ExitCode {
         }
     }
 
-    let Some(grammar_name) = grammar_name else {
-        eprintln!("differ: --grammar <name> is required");
-        return ExitCode::FAILURE;
+    // Resolve the grammar source path: --grammar-file <path> wins (an arbitrary
+    // file, used by --fuzz-grammars), else --grammar <name> maps to the trusted
+    // fixture tests/grammars/<name>.lark (the same source the fuzz oracle,
+    // `tools/fuzz_differential.py::load_parser`, reads). The two are mutually
+    // exclusive; exactly one is required.
+    let grammar_label;
+    let grammar_path: std::path::PathBuf = match (grammar_file, grammar_name) {
+        (Some(_), Some(_)) => {
+            eprintln!("differ: pass only one of --grammar / --grammar-file");
+            return ExitCode::FAILURE;
+        }
+        (Some(path), None) => {
+            grammar_label = path.clone();
+            std::path::PathBuf::from(path)
+        }
+        (None, Some(name)) => {
+            grammar_label = name.clone();
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/grammars")
+                .join(format!("{name}.lark"))
+        }
+        (None, None) => {
+            eprintln!("differ: one of --grammar <name> / --grammar-file <path> is required");
+            return ExitCode::FAILURE;
+        }
     };
-
-    // Load the grammar from tests/grammars/<name>.lark, the same source the fuzz
-    // oracle (`tools/fuzz_differential.py::load_parser`) reads.
-    let grammar_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/grammars")
-        .join(format!("{grammar_name}.lark"));
+    let grammar_name = grammar_label;
     let grammar_text = match std::fs::read_to_string(&grammar_path) {
         Ok(t) => t,
         Err(e) => {

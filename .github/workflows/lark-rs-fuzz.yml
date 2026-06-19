@@ -56,6 +56,38 @@ jobs:
             python3 tools/generate_oracles.py
           cargo test --test test_fuzz_corpus
 
+      # Random GRAMMAR fuzzing (issue #38) — the grammar-level discovery tier. It
+      # generates random small grammars, keeps only those Python Lark builds, and
+      # diffs lark-rs against the oracle online via the `differ` binary, routing
+      # finds through minimize. A find is written to a JSON artifact for triage
+      # (minimize → record). It runs alongside the input-mutation fuzz above but
+      # does NOT gate the job: known grammar-class gaps would otherwise turn the
+      # nightly permanently red and mask an input-fuzz regression — the find
+      # artifact (and the step summary) is the discovery signal, mirroring the
+      # discovery-tier philosophy.
+      - name: Random grammar fuzz (generate grammars, skip Python rejects, diff lark-rs)
+        run: |
+          SEED="${{ github.event.inputs.seed }}"
+          [ -z "$SEED" ] && SEED=$(( (${{ github.run_id }} + 1) % 2147483647 ))
+          # Fewer grammars than inputs: each grammar is a Python-Lark build + a
+          # cargo-driven differ build per input, so this is heavier per unit.
+          GG_COUNT=400
+          echo "::notice::grammar fuzz seed=$SEED count=$GG_COUNT (re-run: --fuzz-grammars --seed $SEED)"
+
+          set +e
+          python3 tools/fuzz_differential.py --fuzz-grammars --seed "$SEED" \
+            -n "$GG_COUNT" --gg-finds-out "$RUNNER_TEMP/grammar_finds.json" \
+            | tee "$RUNNER_TEMP/grammar_fuzz.log"
+          status=${PIPESTATUS[0]}
+          set -e
+          # Surface a find as a workflow notice; the artifact carries the repros.
+          if [ "$status" -eq 1 ]; then
+            echo "::warning::random grammar fuzz found divergence(s) — see the grammar-fuzz-find artifact (minimize → record)"
+          elif [ "$status" -ne 0 ]; then
+            echo "::error::random grammar fuzz failed to run (exit $status)"
+            exit "$status"
+          fi
+
       - name: Upload batch on a find
         if: failure()
         uses: actions/upload-artifact@v4
@@ -64,3 +96,17 @@ jobs:
           path: |
             ${{ runner.temp }}/fuzz_batch.json
             lark-rs/tests/fixtures/oracles/fuzz/corpus.json
+
+      # Always attempt the upload (hashFiles can't see runner.temp — it only
+      # resolves paths under GITHUB_WORKSPACE — so we cannot gate on the file's
+      # existence here). `if-no-files-found: ignore` makes a clean run (no
+      # grammar_finds.json written) a no-op rather than a warning/failure.
+      - name: Upload grammar-fuzz finds
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grammar-fuzz-find-${{ github.run_id }}
+          if-no-files-found: ignore
+          path: |
+            ${{ runner.temp }}/grammar_finds.json
+            ${{ runner.temp }}/grammar_fuzz.log
