@@ -34,6 +34,7 @@ descriptions. New decisions get a new file from then on.
 | [0016](0016-tiered-merge-autonomy.md) | Tiered merge autonomy by blast radius | Accepted |
 | [0017](0017-oracle-fidelity-is-for-intended-behavior.md) | Oracle fidelity is for *intended* behavior, not implementation artifacts | Accepted |
 | [0018](0018-start-sprint-orchestration.md) | `/start-sprint` — whole-backlog autonomy via an integration branch + omnibus PR | Accepted |
+| [0019](0019-recovered-tree-is-optional-at-premature-eof.md) | `RecoveredTree.tree` is `Option`, `None` at premature `$END` (no fabricated partial) | Proposed |
 
 ## ADRs going forward — the governance audit trail
 

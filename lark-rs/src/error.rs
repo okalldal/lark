@@ -92,15 +92,21 @@ pub enum ParseError {
 /// the offending token(s) and continues, so an editor / LSP gets *both* a tree to
 /// work with and the diagnostics to surface. The two halves are:
 ///
-///   * `tree` — a best-effort parse tree. When recovery reached a normal ACCEPT
-///     (the surviving tokens form a valid parse), this is the real tree, identical
+///   * `tree` — `Some(tree)` only when recovery reached a normal ACCEPT (the
+///     surviving tokens form a valid parse); this is a *real* derivation, identical
 ///     to what Python Lark's `parse(text, on_error=lambda e: True)` returns. When
-///     recovery could not reach ACCEPT (e.g. a premature end of input), it is a
-///     best-effort scaffold wrapping whatever fragments remain — lark-rs returns a
-///     partial tree here instead of raising, where Python re-raises.
+///     recovery could **not** reach ACCEPT — a premature end of input (`$END`), or
+///     `on_error` returning `false` mid-parse — it is `None`. lark-rs deliberately
+///     does **not** fabricate a partial here (it once wrapped leftover value-stack
+///     fragments under the start-symbol name, which is not a real derivation and a
+///     caller cannot tell apart from a clean parse). `None` keeps the result
+///     honest and matches Python's `recovered: false` behavior at `$END`, where
+///     Python re-raises rather than returning a tree (issue #167; ADR-0019).
 ///   * `errors` — every error recovered from, in source order. These are the
 ///     "error nodes": each carries the offending token and its line/column. An
-///     empty list means the input parsed cleanly with no recovery.
+///     empty list means the input parsed cleanly with no recovery. A non-empty
+///     `errors` with `tree: None` is the distinguishable partial: the parse failed
+///     to complete, and the diagnostics say where.
 ///
 /// lark-rs does not splice error nodes *inline* into the tree: an LR value stack
 /// has no symbol/state slot for a synthetic node without a yacc-style `error`
@@ -110,7 +116,9 @@ pub enum ParseError {
 /// and leaves the caller to collect the errors).
 #[derive(Debug, Clone)]
 pub struct RecoveredTree {
-    pub tree: ParseTree,
+    /// The recovered derivation, or `None` when recovery could not reach ACCEPT
+    /// (premature `$END`, or `on_error` stopping the parse). See the type docs.
+    pub tree: Option<ParseTree>,
     pub errors: Vec<ParseError>,
 }
 

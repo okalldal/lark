@@ -312,7 +312,8 @@ impl ParsingFrontend {
     /// Parse with panic-mode error recovery (issue #43). On a token the parser
     /// can't act on, `on_error` is consulted; returning `true` deletes that token
     /// and resumes (single-token-deletion recovery, identical to Python Lark's
-    /// `on_error` driver), `false` stops with the partial tree built so far.
+    /// `on_error` driver), `false` stops with `tree: None` (no fabricated
+    /// derivation — issue #167) and the errors collected so far.
     ///
     /// Only the LALR backend without a postlex hook supports recovery; other
     /// configurations return a [`GrammarError::Other`]. Lexing uses the basic
