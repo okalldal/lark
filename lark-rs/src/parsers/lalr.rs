@@ -19,10 +19,11 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use crate::error::{GrammarError, ParseError};
 use crate::grammar::analysis::GrammarAnalysis;
 use crate::grammar::intern::{CompiledGrammar, CompiledRule, SymbolId, SymbolTable};
-use crate::lexer::ContextualLexer;
+use crate::lexer::{BasicLexer, ContextualLexer};
 use crate::tree::{ParseTree, Token};
 
 use super::token_source::{
+    postlex_basic_recovering_source, postlex_contextual_recovering_source,
     postlex_contextual_source, Contextual, ContextualRecovering, LexFailure, PreLexed, SourceError,
     TokenSource,
 };
@@ -796,6 +797,12 @@ impl LalrParser {
                         return Ok(None);
                     }
                     source.advance(); // delete the offending token, retry in same state
+                                      // Generic resume hook (issue #94), invoked for every recovering
+                                      // source: a no-op for the plain sources (PreLexed /
+                                      // ContextualRecovering), and the indenter reset for a
+                                      // PostlexContextual source — mirroring Python's fresh
+                                      // `Indenter.process` per `resume_parse`.
+                    source.on_delete();
                 }
             }
         }
@@ -874,5 +881,56 @@ impl LalrParser {
     ) -> Result<ParseTree, ParseError> {
         let mut source = postlex_contextual_source(text, lexer, postlex, symbols)?;
         self.run(&mut source, start)
+    }
+
+    /// Recovering parse over the contextual lexer **with** a streaming [`Indenter`]
+    /// postlex hook (issue #94, sub-target 1). The streaming indenter runs over the
+    /// recovering contextual stream ([`ContextualRecovering`], issue #166), and the
+    /// shared [`run_recovering`](Self::run_recovering) loop deletes offending tokens
+    /// *downstream* of the INDENT/DEDENT injection — exactly Python Lark's
+    /// `lexer → PostLexConnector(postlex) → parser` wiring, where `on_error`/
+    /// `resume_parse` operate on the post-indenter stream. A deleted token therefore
+    /// never reaches the indenter, so its bracket/indent bookkeeping cannot desync,
+    /// and a contextual-load-bearing grammar recovers to the same tree a clean parse
+    /// would build. An indenter error (e.g. a bad dedent) surfaces as a hard
+    /// [`ParseError`] via [`SourceError::Postlex`], as Python re-raises it.
+    ///
+    /// [`Indenter`]: crate::postlex::Indenter
+    /// [`ContextualRecovering`]: crate::parsers::ContextualRecovering
+    pub fn parse_contextual_postlex_recovering(
+        &self,
+        text: &str,
+        lexer: &ContextualLexer,
+        postlex: &crate::postlex::Indenter,
+        symbols: &SymbolTable,
+        start: Option<&str>,
+        on_error: &mut dyn FnMut(&ParseError) -> bool,
+        errors: &mut Vec<ParseError>,
+    ) -> Result<Option<ParseTree>, ParseError> {
+        let mut source = postlex_contextual_recovering_source(text, lexer, postlex, symbols)?;
+        self.run_recovering(&mut source, start, on_error, errors)
+    }
+
+    /// Recovering parse over the **basic** (global) lexer with a streaming
+    /// [`Indenter`] postlex hook (issue #94, sub-target 1) — the basic-lexer postlex
+    /// driver. A lazy [`BasicRecovering`] source feeds the same streaming indenter +
+    /// per-resume-reset machine the contextual path uses, so both postlex recovery
+    /// paths share the exact Python semantics (`Indenter.process` reset on each
+    /// `resume_parse`), including interleaving char skips with the indenter reset.
+    ///
+    /// [`Indenter`]: crate::postlex::Indenter
+    /// [`BasicRecovering`]: crate::parsers::token_source::BasicRecovering
+    pub fn parse_basic_postlex_recovering(
+        &self,
+        text: &str,
+        lexer: &BasicLexer,
+        postlex: &crate::postlex::Indenter,
+        symbols: &SymbolTable,
+        start: Option<&str>,
+        on_error: &mut dyn FnMut(&ParseError) -> bool,
+        errors: &mut Vec<ParseError>,
+    ) -> Result<Option<ParseTree>, ParseError> {
+        let mut source = postlex_basic_recovering_source(text, lexer, postlex, symbols)?;
+        self.run_recovering(&mut source, start, on_error, errors)
     }
 }

@@ -234,6 +234,9 @@ tests/
   test_cyk_scaling.rs Deterministic cubic-envelope gate (#87, perf-counters feature)
   test_recovery.rs    Error-recovery oracle (#43) — single-token-deletion recovery
                       vs Python Lark's `on_error` driver
+  test_indenter_recovery.rs  Error recovery over the LALR + Indenter (postlex) path
+                      (#94, ADR-0020) — streaming indenter resets per resume, both
+                      lexers + the contextual-load-bearing grammar, vs oracle
   test_common.rs      common.lark terminal library vs oracle
   test_indenter.rs    %declare + Indenter/postlex vs oracle (both lexers, all parsers)
   test_lookaround.rs  Lookaround behavioral oracles — engine-agnostic semantics pins

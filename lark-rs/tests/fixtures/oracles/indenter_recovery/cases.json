@@ -1,0 +1,592 @@
+[
+  {
+    "name": "indent",
+    "open_paren_types": [],
+    "close_paren_types": [],
+    "cases": [
+      {
+        "input": "a\n",
+        "recovered": true,
+        "error_count": 0,
+        "error_kind": "parser",
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "simple",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NAME",
+                  "value": "a"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "input": "if x:\n    a\n",
+        "recovered": true,
+        "error_count": 0,
+        "error_kind": "parser",
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "block",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NAME",
+                  "value": "x"
+                },
+                {
+                  "type": "tree",
+                  "data": "simple",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "NAME",
+                      "value": "a"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "input": "a a\n",
+        "recovered": true,
+        "error_count": 1,
+        "error_kind": "parser",
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "simple",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NAME",
+                  "value": "a"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "input": "if x:\n    a\nb b\nc\n",
+        "recovered": true,
+        "error_count": 1,
+        "error_kind": "parser",
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "block",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NAME",
+                  "value": "x"
+                },
+                {
+                  "type": "tree",
+                  "data": "simple",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "NAME",
+                      "value": "a"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "simple",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NAME",
+                  "value": "b"
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "simple",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NAME",
+                  "value": "c"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "input": "if x:\n    a\n    b\nc\n",
+        "recovered": true,
+        "error_count": 0,
+        "error_kind": "parser",
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "block",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NAME",
+                  "value": "x"
+                },
+                {
+                  "type": "tree",
+                  "data": "simple",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "NAME",
+                      "value": "a"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "simple",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "NAME",
+                      "value": "b"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "simple",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NAME",
+                  "value": "c"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "input": "if x:\n    a a\n    b\n",
+        "recovered": false,
+        "error_count": 3,
+        "error_kind": "parser",
+        "tree": null
+      },
+      {
+        "input": "a @ b\n",
+        "recovered": true,
+        "error_count": 2,
+        "error_kind": "parser",
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "simple",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NAME",
+                  "value": "a"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "input": "if x:\n    @a\n    b\nc\n",
+        "recovered": false,
+        "error_count": 3,
+        "error_kind": "parser",
+        "tree": null
+      },
+      {
+        "input": "if x:\n    a\n    @\n    b\nc\n",
+        "recovered": false,
+        "error_count": 3,
+        "error_kind": "parser",
+        "tree": null
+      },
+      {
+        "input": "if x:\n    a\n   b\n",
+        "recovered": false,
+        "error_count": 0,
+        "error_kind": "postlex",
+        "tree": null
+      }
+    ]
+  },
+  {
+    "name": "indent_paren",
+    "open_paren_types": [
+      "LPAR"
+    ],
+    "close_paren_types": [
+      "RPAR"
+    ],
+    "cases": [
+      {
+        "input": "f (x)\n",
+        "recovered": true,
+        "error_count": 0,
+        "error_kind": "parser",
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "simple",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NAME",
+                  "value": "f"
+                },
+                {
+                  "type": "tree",
+                  "data": "args",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "LPAR",
+                      "value": "("
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "NAME",
+                      "value": "x"
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "RPAR",
+                      "value": ")"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "input": "f (x) (y)\n",
+        "recovered": true,
+        "error_count": 3,
+        "error_kind": "parser",
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "simple",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NAME",
+                  "value": "f"
+                },
+                {
+                  "type": "tree",
+                  "data": "args",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "LPAR",
+                      "value": "("
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "NAME",
+                      "value": "x"
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "RPAR",
+                      "value": ")"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "input": "f (\n   x\n)\n",
+        "recovered": true,
+        "error_count": 0,
+        "error_kind": "parser",
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "simple",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NAME",
+                  "value": "f"
+                },
+                {
+                  "type": "tree",
+                  "data": "args",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "LPAR",
+                      "value": "("
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "NAME",
+                      "value": "x"
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "RPAR",
+                      "value": ")"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "input": "f (x) y\n",
+        "recovered": true,
+        "error_count": 1,
+        "error_kind": "parser",
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "simple",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NAME",
+                  "value": "f"
+                },
+                {
+                  "type": "tree",
+                  "data": "args",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "LPAR",
+                      "value": "("
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "NAME",
+                      "value": "x"
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "RPAR",
+                      "value": ")"
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  },
+  {
+    "name": "indent_context",
+    "open_paren_types": [],
+    "close_paren_types": [],
+    "cases": [
+      {
+        "input": "x = y\n",
+        "recovered": true,
+        "error_count": 0,
+        "error_kind": "parser",
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "assign",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NAME",
+                  "value": "x"
+                },
+                {
+                  "type": "token",
+                  "token_type": "VALUE",
+                  "value": "y"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "input": "x = y z\n",
+        "recovered": true,
+        "error_count": 1,
+        "error_kind": "parser",
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "assign",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NAME",
+                  "value": "x"
+                },
+                {
+                  "type": "token",
+                  "token_type": "VALUE",
+                  "value": "y"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "input": "x x = y\n",
+        "recovered": true,
+        "error_count": 1,
+        "error_kind": "parser",
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "assign",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NAME",
+                  "value": "x"
+                },
+                {
+                  "type": "token",
+                  "token_type": "VALUE",
+                  "value": "y"
+                }
+              ]
+            }
+          ]
+        }
+      },
+      {
+        "input": "if a:\n    x = y\n    p q\nz = w\n",
+        "recovered": false,
+        "error_count": 4,
+        "error_kind": "parser",
+        "tree": null
+      },
+      {
+        "input": "if a:\n    x = y\nz = w\n",
+        "recovered": true,
+        "error_count": 0,
+        "error_kind": "parser",
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "block",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NAME",
+                  "value": "a"
+                },
+                {
+                  "type": "tree",
+                  "data": "assign",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "NAME",
+                      "value": "x"
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "VALUE",
+                      "value": "y"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "tree",
+              "data": "assign",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "NAME",
+                  "value": "z"
+                },
+                {
+                  "type": "token",
+                  "token_type": "VALUE",
+                  "value": "w"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ]
+  }
+]

@@ -76,7 +76,7 @@ impl Lark {
         self.frontend.parse(text, Some(start))
     }
 
-    /// Parse with built-in panic-mode error recovery (issue #43).
+    /// Parse with built-in panic-mode error recovery (issues #43, #94).
     ///
     /// Instead of aborting on the first parse error, the parser deletes the
     /// offending token and continues (single-token-deletion recovery), returning a
@@ -85,9 +85,9 @@ impl Lark {
     /// from. This is exactly Python Lark's `parse(text, on_error=lambda e: True)`
     /// (which likewise re-raises at premature `$END`, our `None`).
     ///
-    /// Only the LALR backend without a postlex hook supports recovery; other
-    /// configurations return an error. See [`RecoveredTree`] for the tree
-    /// (`Option`) and error-node semantics.
+    /// Every LALR configuration supports recovery — basic or contextual lexer, with
+    /// or without a postlex (Indenter) hook (issue #94). Only Earley/CYK return an
+    /// error. See [`RecoveredTree`] for the tree (`Option`) and error-node semantics.
     pub fn parse_with_recovery(&self, text: &str) -> Result<RecoveredTree, LarkError> {
         self.parse_on_error(text, |_| true)
     }

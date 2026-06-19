@@ -16,7 +16,7 @@
 
 use crate::error::ParseError;
 use crate::grammar::intern::SymbolId;
-use crate::lexer::{ContextualLexer, LexerState};
+use crate::lexer::{BasicLexer, ContextualLexer, LexerState};
 use crate::postlex::{Indenter, IndenterStream};
 use crate::tree::Token;
 
@@ -77,6 +77,15 @@ pub trait TokenSource {
     fn skip_char(&mut self) {
         unreachable!("skip_char called on a source that does not lex lazily during recovery");
     }
+
+    /// Recovery resume hook (issue #94): called by the recovering parse loop right
+    /// after it deletes an offending token, mirroring Python Lark's `resume_parse`.
+    /// A plain token source has nothing to do (the next token is just the next one),
+    /// so the default is a no-op. A *postlex* source ([`PostlexContextual`])
+    /// overrides it to reset its indenter — Python re-invokes `Indenter.process` on
+    /// each resume, which clears `indent_level`/`paren_level`; reproducing that is
+    /// what keeps recovery over an Indenter byte-for-byte faithful.
+    fn on_delete(&mut self) {}
 }
 
 // ─── PreLexed: replay a fully lexed token vector ──────────────────────────────
@@ -315,6 +324,96 @@ impl TokenSource for ContextualRecovering<'_> {
     }
 }
 
+// ─── BasicRecovering: lazy basic (global) lexing with char-skip recovery ──────
+
+/// A recovery-aware **basic-lexer** [`TokenSource`]: it lexes the global terminal
+/// set lazily, one token at a time, surfacing a [`SourceError::Lex`] at an
+/// un-lexable position rather than skipping it up front. It is the basic-lexer
+/// analogue of [`ContextualRecovering`], and exists so the basic-lexer postlex
+/// recovery path can interleave char skips with the streaming indenter + parser
+/// resume — Python Lark's lazy `lexer → PostLexConnector → parser` pipeline resets
+/// the indenter on a char skip too, which an eager "skip every char up front, then
+/// indent once" model ([`BasicLexer::lex_recovering`]) cannot reproduce.
+///
+/// [`BasicLexer::lex_recovering`]: crate::lexer::BasicLexer::lex_recovering
+pub struct BasicRecovering<'a> {
+    lexer: &'a BasicLexer,
+    state: LexerState<'a>,
+    current: Option<Token>,
+}
+
+impl<'a> BasicRecovering<'a> {
+    pub fn new(text: &'a str, lexer: &'a BasicLexer) -> Self {
+        BasicRecovering {
+            lexer,
+            state: LexerState::new(text),
+            current: None,
+        }
+    }
+
+    /// Lex the next non-ignored token, or `$END` at end of input; `Err(LexFailure)`
+    /// at an un-lexable character the recovery loop records and skips. Like
+    /// [`Contextual::lex_next`], an `%ignore` token is consumed (the cursor advances)
+    /// and scanning continues; the returned real token is *not* consumed (the cursor
+    /// still sits at its start) — [`advance`](TokenSource::advance) moves past it.
+    fn lex_next(&mut self) -> Result<Token, LexFailure> {
+        loop {
+            if self.state.is_done() {
+                return Ok(Token::end().with_position(
+                    self.state.line,
+                    self.state.col,
+                    self.state.pos,
+                    self.state.pos,
+                ));
+            }
+            match self.lexer.next_token_at(
+                self.state.text,
+                self.state.pos,
+                self.state.line,
+                self.state.col,
+            ) {
+                Ok(tok) if self.lexer.is_ignored(tok.type_id) => {
+                    self.state.advance_by(tok.value.len());
+                }
+                Ok(tok) => return Ok(tok),
+                Err(()) => {
+                    let ch = self.state.text[self.state.pos..].chars().next().unwrap();
+                    return Err(LexFailure {
+                        ch,
+                        line: self.state.line,
+                        col: self.state.col,
+                        pos: self.state.pos,
+                    });
+                }
+            }
+        }
+    }
+}
+
+impl TokenSource for BasicRecovering<'_> {
+    fn peek(&mut self, _state: usize) -> Result<Token, SourceError> {
+        if self.current.is_none() {
+            self.current = Some(self.lex_next()?);
+        }
+        Ok(self.current.clone().unwrap())
+    }
+
+    fn advance(&mut self) {
+        if let Some(tok) = self.current.take() {
+            self.state.advance_by(tok.value.len());
+        }
+    }
+
+    /// Skip exactly one character and drop the cached lookahead (issue #93), so the
+    /// next [`peek`](TokenSource::peek) re-lexes after the un-lexable character.
+    fn skip_char(&mut self) {
+        if let Some(ch) = self.state.text[self.state.pos..].chars().next() {
+            self.state.advance_by(ch.len_utf8());
+        }
+        self.current = None;
+    }
+}
+
 // ─── PostlexContextual: contextual lexing with a streaming postlex hook ────────
 
 /// A [`TokenSource`] that lexes lazily with the [`Contextual`] lexer *and* runs a
@@ -335,8 +434,15 @@ impl TokenSource for ContextualRecovering<'_> {
 /// The two are decoupled: a real token is only pulled once the queue drains, so
 /// every pull happens at the parser state that follows the previously injected
 /// tokens — exactly the state at which that token must be lexed.
-pub struct PostlexContextual<'a> {
-    inner: Contextual<'a>,
+///
+/// The inner source is generic so the *same* streaming-indenter machine drives
+/// both a clean parse (over [`Contextual`]) and recovery (over
+/// [`ContextualRecovering`], issue #94): the indenter sits upstream of the parser's
+/// token-deletion recovery exactly as Python's `PostLexConnector` sits upstream of
+/// `resume_parse`, so a deleted token never reaches the indenter and its
+/// bracket/indent bookkeeping cannot desync.
+pub struct PostlexContextual<'a, S: TokenSource> {
+    inner: S,
     stream: IndenterStream<'a>,
     /// The token currently offered to the parser (cached across REDUCEs).
     current: Option<Token>,
@@ -347,8 +453,8 @@ pub struct PostlexContextual<'a> {
     finished: bool,
 }
 
-impl<'a> PostlexContextual<'a> {
-    pub(crate) fn new(inner: Contextual<'a>, stream: IndenterStream<'a>) -> Self {
+impl<'a, S: TokenSource> PostlexContextual<'a, S> {
+    pub(crate) fn new(inner: S, stream: IndenterStream<'a>) -> Self {
         PostlexContextual {
             inner,
             stream,
@@ -359,7 +465,7 @@ impl<'a> PostlexContextual<'a> {
     }
 }
 
-impl<'a> TokenSource for PostlexContextual<'a> {
+impl<S: TokenSource> TokenSource for PostlexContextual<'_, S> {
     fn peek(&mut self, state: usize) -> Result<Token, SourceError> {
         if let Some(tok) = &self.current {
             return Ok(tok.clone());
@@ -397,17 +503,93 @@ impl<'a> TokenSource for PostlexContextual<'a> {
     fn advance(&mut self) {
         self.current = None;
     }
+
+    /// Forward a character-level skip to the inner (lazily-lexing) source. Reached
+    /// only during recovery over a [`ContextualRecovering`] inner source, when the
+    /// inner `peek` surfaced a `Lex` failure *through* this adapter (the indenter
+    /// queue was empty, so the failure was not masked by a pending injected token).
+    ///
+    /// A char skip is *also* a recovery resume: Python Lark routes both
+    /// `UnexpectedToken` (token deletion) **and** `UnexpectedCharacters` (char skip)
+    /// through `resume_parse`, which re-invokes `Indenter.process` and so resets
+    /// `indent_level`/`paren_level` either way (`lalr_parser.py`'s `on_error` loop).
+    /// We mirror that by resetting the indenter here too — not just in
+    /// [`on_delete`](Self::on_delete) — so a char skip *inside an indented block*
+    /// stays byte-for-byte faithful (otherwise the surviving block measures
+    /// indentation against a stale stack and the recovered tree diverges). Then drop
+    /// our cached lookahead so the next `peek` re-pulls from the inner lexer.
+    fn skip_char(&mut self) {
+        self.inner.skip_char();
+        self.stream.reset_for_resume();
+        self.current = None;
+    }
+
+    /// Reset the streaming indenter on a recovery resume (issue #94). Python Lark's
+    /// `resume_parse` re-invokes `Indenter.process`, which clears the indent/paren
+    /// stack each call — so after the parser deletes an offending token, a *fresh*
+    /// indenter continues over the lexer's current position with `indent_stack=[0]`.
+    /// We mirror that exactly: reset the [`IndenterStream`]'s bookkeeping and drop
+    /// our cached lookahead, leaving the inner lexer position untouched. This is the
+    /// step that makes a *multi-deletion* recovery byte-for-byte faithful — without
+    /// it the trailing DEDENTs that close a block are never re-emitted, so lark-rs
+    /// would (wrongly) recover a tree Python re-raises on.
+    fn on_delete(&mut self) {
+        self.stream.reset_for_resume();
+        self.current = None;
+    }
 }
 
 /// Drive the LALR parser over the contextual lexer with a streaming [`Indenter`]
 /// postlex hook. Resolves the indenter's `%declare`d ids up front, then loops the
-/// shared parser driver against a [`PostlexContextual`] source.
+/// shared parser driver against a [`PostlexContextual`] source over a clean
+/// [`Contextual`] lexer.
 pub fn postlex_contextual_source<'a>(
     text: &'a str,
     lexer: &'a ContextualLexer,
     postlex: &'a Indenter,
     symbols: &crate::grammar::intern::SymbolTable,
-) -> Result<PostlexContextual<'a>, ParseError> {
+) -> Result<PostlexContextual<'a, Contextual<'a>>, ParseError> {
     let stream = IndenterStream::new(postlex, symbols)?;
     Ok(PostlexContextual::new(Contextual::new(text, lexer), stream))
+}
+
+/// As [`postlex_contextual_source`], but over the **recovering** contextual lexer
+/// ([`ContextualRecovering`]) for error recovery (issue #94, sub-target 1). The
+/// streaming indenter runs over the recovering contextual stream, and the parser's
+/// token-deletion recovery happens downstream of the injection — mirroring Python's
+/// `lexer → PostLexConnector(postlex) → parser` wiring, where `on_error` deletes
+/// from the post-indenter stream. A grammar whose contextual lexer is load-bearing
+/// (overlapping terminals disambiguated only by parser state) therefore recovers to
+/// the same tree a clean contextual parse would build, *with* INDENT/DEDENT.
+pub fn postlex_contextual_recovering_source<'a>(
+    text: &'a str,
+    lexer: &'a ContextualLexer,
+    postlex: &'a Indenter,
+    symbols: &crate::grammar::intern::SymbolTable,
+) -> Result<PostlexContextual<'a, ContextualRecovering<'a>>, ParseError> {
+    let stream = IndenterStream::new_recovering(postlex, symbols)?;
+    Ok(PostlexContextual::new(
+        ContextualRecovering::new(text, lexer),
+        stream,
+    ))
+}
+
+/// As [`postlex_contextual_recovering_source`], but over the **basic** (global)
+/// lexer (the basic-lexer postlex driver, issue #94). It drives the *same* streaming
+/// indenter + per-resume-reset machine over a lazy [`BasicRecovering`] source, so
+/// the basic-lexer postlex recovery path is byte-for-byte identical to Python's
+/// (whose `Indenter.process` resets per `resume_parse`) — including interleaving
+/// char skips with the indenter reset, which an eager "lex_recovering up front, then
+/// indent once" model cannot reproduce.
+pub fn postlex_basic_recovering_source<'a>(
+    text: &'a str,
+    lexer: &'a BasicLexer,
+    postlex: &'a Indenter,
+    symbols: &crate::grammar::intern::SymbolTable,
+) -> Result<PostlexContextual<'a, BasicRecovering<'a>>, ParseError> {
+    let stream = IndenterStream::new_recovering(postlex, symbols)?;
+    Ok(PostlexContextual::new(
+        BasicRecovering::new(text, lexer),
+        stream,
+    ))
 }
