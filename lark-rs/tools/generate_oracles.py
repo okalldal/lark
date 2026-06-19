@@ -703,6 +703,13 @@ def save_oracle(suite, name, data):
 # lark-rs intentionally returns a best-effort partial tree instead of aborting
 # (the issue's "produce a partial tree on failure"), so the Rust test only checks
 # that it recovered (non-empty errors), not the tree shape.
+#
+# Character-level recovery (issue #93): an un-lexable position (no terminal matches,
+# e.g. a stray `@`/`#`) is also recoverable. Python's `on_error` loop has an
+# `UnexpectedCharacters` branch that feeds exactly one char forward
+# (`s.line_ctr.feed(text[p:p+1])`) and resumes — so the handler fires once per
+# *skipped character* (two consecutive bad chars = two invocations). Both the
+# character-level skips and the token-level deletions are counted in `error_count`.
 
 RECOVERY_CASES = [
     "1 + 2",          # clean parse, no recovery
@@ -712,6 +719,13 @@ RECOVERY_CASES = [
     "+ 1 + 2",        # leading '+' -> delete it
     "1 + 2 3 + 4",    # stray NUMBER mid-stream -> delete it
     "1 + 2 +",        # trailing '+' -> premature EOF, Python re-raises
+    # ─── Character-level recovery (issue #93): un-lexable positions ───
+    "1 + @ 2",        # stray '@' mid-stream -> skip 1 char, then 1+2 parses
+    "@ 1 + 2",        # leading un-lexable char -> skip it, then 1+2 parses
+    "1 + 2 @",        # trailing un-lexable char -> skip it, sum stays valid
+    "#1 + 2",         # a different un-lexable char ('#') -> skip it
+    "1 @@ 2",         # two consecutive bad chars -> 2 char skips (+ stray NUMBER)
+    "1 @ + 2",        # un-lexable then a misplaced '+' -> char skip recovers the rest
 ]
 
 
