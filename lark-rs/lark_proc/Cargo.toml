@@ -9,10 +9,17 @@ repository = "https://github.com/lark-parser/lark"
 [lib]
 proc-macro = true
 
-# `lark-rs` is a *build-time* dependency here: the proc-macro loads and validates
-# the .lark grammar while the user's crate is compiling, so a malformed grammar
-# fails `cargo build` rather than `parser.parse(...)`. The generated parser also
-# references `::lark_rs` at the user's runtime, so any crate using `include_lark!`
-# must depend on `lark-rs` too (exactly as `serde_derive` users depend on `serde`).
+# `lark-rs` is a *build-time* dependency here: the proc-macro bakes the .lark
+# grammar into a self-contained standalone parser while the user's crate is
+# compiling (the same `generate_standalone` emitter the CLI uses, issue #85), so a
+# malformed grammar fails `cargo build` rather than `parser.parse(...)`. The baked
+# parser depends only on `regex` + std at the user's runtime — so any crate using
+# `include_lark!` must depend on `regex` (it no longer needs `lark-rs`).
 [dependencies]
 lark-rs = { path = ".." }
+
+# The baked parser uses the `regex` crate at runtime; the integration tests below
+# compile that output, so they need `regex` available exactly as a downstream user
+# would.
+[dev-dependencies]
+regex = "1.10"

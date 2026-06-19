@@ -11,6 +11,9 @@ version = "0.0.0"
 edition = "2021"
 publish = false
 
+# The baked parser depends on `regex` (not lark-rs) at runtime under the unified
+# emitter (#85). This fixture fails at macro expansion before any code is emitted,
+# but it carries `regex` to mirror a real downstream consumer's dependency set.
 [dependencies]
 lark_proc = { path = "../../.." }
-lark-rs = { path = "../../../.." }
+regex = "1.10"
