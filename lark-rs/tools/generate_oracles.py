@@ -459,6 +459,30 @@ EARLEY_AMBIG_FLAT_PRODUCT_GRAMMAR = r"""
 !a: "y" a | a "y" | "y"
 """
 
+# ── maybe_placeholders × a transparent helper, explicit walk (#59) ─────────────
+# A transparent rule (`_t`) carrying a `maybe_placeholders` optional `[B]` — when
+# absent, the empty `[...]` contributes a `None` placeholder slot. This pins the
+# #59 streaming fix: a single-derivation transparent child distributed into its
+# parent is now spliced in one pass, and that splice MUST still emit the rule's
+# rule-level placeholder / trailing-`None` slots (the resolve `SpliceTail` tail)
+# — dropping them silently diverged from this oracle (regression that motivated
+# routing the stream through `Splice`, not bare `AppendRule`). `_t: A [B]` puts
+# the optional at the *end* (the trailing-None case the bug dropped); the `+`
+# variant exercises the same on a left-recursive transparent spine.
+EARLEY_MAYBE_TRANSPARENT_GRAMMAR = r"""
+start: _t
+_t: A [B]
+A: "a"
+B: "b"
+"""
+
+EARLEY_MAYBE_TRANSPARENT_PLUS_GRAMMAR = r"""
+start: _t+
+_t: A [B]
+A: "a"
+B: "b"
+"""
+
 # (name, grammar, [(input, should_parse)])
 EARLEY_GRAMMARS = [
     ("unambiguous", EARLEY_UNAMBIGUOUS_GRAMMAR, [
@@ -523,18 +547,36 @@ EARLEY_GRAMMARS = [
     ]),
 ]
 
+# Groups that must be built with `maybe_placeholders=True` (the rest use False).
+# (name, grammar, [(input, should_parse)])
+EARLEY_MAYBE_GRAMMARS = [
+    ("maybe_transparent", EARLEY_MAYBE_TRANSPARENT_GRAMMAR, [
+        ("a",  True),   # `[B]` absent → trailing `None` slot
+        ("ab", True),   # `[B]` present
+    ]),
+    ("maybe_transparent_plus", EARLEY_MAYBE_TRANSPARENT_PLUS_GRAMMAR, [
+        ("a",   True),
+        ("ab",  True),
+        ("aa",  True),  # two transparent helpers, each contributing a trailing slot
+        ("aab", True),
+    ]),
+]
+
 
 def generate_earley():
     print("Generating Earley + SPPF oracles (resolve + explicit ambiguity)...")
     groups = []
-    for name, grammar, cases in EARLEY_GRAMMARS:
+    catalog = [(g, False) for g in EARLEY_GRAMMARS] + [
+        (g, True) for g in EARLEY_MAYBE_GRAMMARS
+    ]
+    for (name, grammar, cases), maybe_placeholders in catalog:
         for ambiguity in ("resolve", "explicit"):
             built = []
             for inp, should_parse in cases:
                 try:
                     lark = Lark(grammar, parser="earley", lexer="basic",
                                 ambiguity=ambiguity, start="start",
-                                maybe_placeholders=False)
+                                maybe_placeholders=maybe_placeholders)
                     tree = lark.parse(inp)
                     ok, payload = True, tree_to_dict(tree)
                 except Exception as e:
@@ -553,6 +595,7 @@ def generate_earley():
                 "grammar": grammar,
                 "ambiguity": ambiguity,
                 "lexer": "basic",
+                "maybe_placeholders": maybe_placeholders,
                 "cases": built,
             })
     save_oracle("earley", "cases", groups)
