@@ -1,6 +1,6 @@
 # ADR-0020: LALR error recovery over a postlex (Indenter) hook — mirror Python's per-resume `Indenter.process` reset
 
-- **Status:** Proposed (2026-06-19; pending architect ratification)
+- **Status:** Accepted (2026-06-19; ratified by the architect on merge of omnibus #172)
 - **Date:** 2026-06-19
 
 ## Context
