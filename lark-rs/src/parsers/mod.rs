@@ -7,7 +7,9 @@ pub mod tree_builder;
 pub use cyk::CykParser;
 pub use earley::EarleyParser;
 pub use lalr::{build_lalr_table, LalrParser, ParseTable};
-pub use token_source::{Contextual, LexFailure, PreLexed, TokenSource};
+pub use token_source::{
+    BasicRecovering, Contextual, ContextualRecovering, LexFailure, PreLexed, TokenSource,
+};
 pub use tree_builder::{NodeValue, TreeBuilder};
 
 use crate::error::{GrammarError, LarkError, ParseError, RecoveredTree};
@@ -65,12 +67,13 @@ trait ParserDriver: Send {
     /// Parse the full input from `start` (or the grammar's default start).
     fn parse(&self, text: &str, start: Option<&str>) -> Result<ParseTree, ParseError>;
 
-    /// Parse with panic-mode single-token-deletion recovery (issue #43). The
+    /// Parse with panic-mode single-token-deletion recovery (issues #43, #94). The
     /// default is the typed refusal — a driver that supports recovery overrides
-    /// this. Only the LALR drivers without a postlex hook do: recovery deletes
-    /// tokens from the stream, which would desync an indenter's synthetic
-    /// INDENT/DEDENT injection, and the Earley/CYK engines have no equivalent of
-    /// Python Lark's `on_error` resume.
+    /// this. All four LALR drivers do (basic / contextual × plain / postlex): the
+    /// postlex (Indenter) drivers recover by injecting INDENT/DEDENT *upstream* of
+    /// the parser's token deletion, so a deleted token never reaches the indenter
+    /// (issue #94). Only the Earley/CYK engines refuse — they have no equivalent of
+    /// Python Lark's `on_error`/`resume_parse` (recovery is LALR-only upstream).
     fn parse_recovering(
         &self,
         _text: &str,
@@ -83,20 +86,29 @@ trait ParserDriver: Send {
 
 /// The typed refusal for a configuration without recovery support — shared by
 /// the trait default and [`lalr_recover`]'s missing-lexer arm so the message
-/// cannot drift between them.
+/// cannot drift between them. Recovery is LALR-only (on every lexer/postlex
+/// wiring); Earley and CYK have no `on_error` resume to mirror.
 fn recovery_unsupported() -> LarkError {
     LarkError::Grammar(GrammarError::Other {
-        msg: "error recovery requires parser='lalr' without a postlex hook".to_string(),
+        msg: "error recovery requires parser='lalr'".to_string(),
     })
 }
 
-/// Shared recovery body for the LALR drivers (issue #43): lex with the basic
-/// (global) lexer — so an out-of-context-but-valid token is a *deletable token*
-/// rather than a lexer error, mirroring Python Lark's contextual-lexer root
-/// fallback during recovery — then drive the recovering LALR loop. `lexer` is
+/// Shared recovery body for the **basic-lexer** LALR driver (issues #43 + #93):
+/// lex the whole stream with the basic (global) lexer, then drive the recovering
+/// LALR loop. (The contextual driver does not use this — it recovers over its own
+/// contextual lexer via [`LalrParser::parse_contextual_recovering`], issue #166.)
+/// Lexing uses the recovering entry point ([`BasicLexer::lex_recovering`]): a
+/// genuinely un-lexable character is no longer a hard error but is *skipped one
+/// char at a time*, recording each skip in `errors` (Python's
+/// `UnexpectedCharacters` branch). The character-level skips and the token-level
+/// deletions both flow through the same `on_error` handler and accumulate into one
+/// `errors` list, so editor tooling sees a complete diagnostic record. `lexer` is
 /// `None` only if the recovery lexer's construction failed at build time (not
-/// expected in practice); recovery is then unavailable rather than the whole
-/// build failing.
+/// expected in practice); recovery is then unavailable rather than the whole build
+/// failing.
+///
+/// [`BasicLexer::lex_recovering`]: crate::lexer::BasicLexer::lex_recovering
 fn lalr_recover(
     parser: &LalrParser,
     lexer: Option<&BasicLexer>,
@@ -107,9 +119,56 @@ fn lalr_recover(
     let Some(lexer) = lexer else {
         return Err(recovery_unsupported());
     };
-    let tokens = lexer.lex(text)?;
     let mut errors = Vec::new();
+    let tokens = lexer.lex_recovering(text, on_error, &mut errors);
     let tree = parser.parse_recovering(tokens, start, on_error, &mut errors)?;
+    Ok(RecoveredTree { tree, errors })
+}
+
+/// Shared recovery body for the **basic-lexer + Indenter (postlex)** driver (issue
+/// #94, sub-target 1). Mirrors Python Lark's `lexer → PostLexConnector(postlex) →
+/// parser` wiring: `on_error`/`resume_parse` operate on the *post-indenter* token
+/// stream, so the [`Indenter`] injects INDENT/DEDENT over the clean lex and
+/// token-deletion recovery happens *downstream* of that injection — a deleted token
+/// never reaches the indenter, so its bracket/indent bookkeeping cannot desync.
+///
+/// Concretely: lex with the basic recovery lexer ([`BasicLexer::lex_recovering`], so
+/// an un-lexable character is skipped one at a time, issue #93), run the indenter
+/// over the surviving stream, then drive the recovering LALR loop over the indented
+/// tokens. An indenter error (e.g. a `DedentError`: a dedent to an unknown column) is
+/// raised by the postlex hook itself, *before* any parser token error — Python
+/// re-raises it through the postlex generator without consulting `on_error`. lark-rs
+/// surfaces it the same way: as a hard [`ParseError`] → `LarkError`, distinct from the
+/// `Ok(tree: None)` premature-`$END` convention.
+///
+/// [`BasicLexer::lex_recovering`]: crate::lexer::BasicLexer::lex_recovering
+fn lalr_recover_postlex(
+    parser: &LalrParser,
+    lexer: &BasicLexer,
+    postlex: &Indenter,
+    symbols: &SymbolTable,
+    text: &str,
+    start: Option<&str>,
+    on_error: &mut dyn FnMut(&ParseError) -> bool,
+) -> Result<RecoveredTree, LarkError> {
+    let mut errors = Vec::new();
+    // Lazily lex the global terminal set and drive the streaming indenter +
+    // per-resume-reset machine over it (a `BasicRecovering` source). The indenter
+    // sits upstream of the parser's token deletion and resets on each resume exactly
+    // as Python's `Indenter.process` does — so a multi-deletion recovery, and a char
+    // skip interleaved with the indenter, both stay byte-for-byte faithful (an "indent
+    // the whole stream once" model would not). A char skip and a token deletion both
+    // accumulate into `errors`; an indenter error (e.g. a bad dedent) surfaces as a
+    // hard error.
+    let tree = parser.parse_basic_postlex_recovering(
+        text,
+        lexer,
+        postlex,
+        symbols,
+        start,
+        on_error,
+        &mut errors,
+    )?;
     Ok(RecoveredTree { tree, errors })
 }
 
@@ -148,7 +207,6 @@ impl ParserDriver for LalrBasic {
 struct LalrContextual {
     parser: LalrParser,
     lexer: ContextualLexer,
-    recovery_lexer: Option<BasicLexer>,
 }
 
 impl ParserDriver for LalrContextual {
@@ -156,19 +214,28 @@ impl ParserDriver for LalrContextual {
         self.parser.parse_contextual(text, &self.lexer, start)
     }
 
+    /// Recover over the *contextual* stream (issue #166), not a stored basic lexer:
+    /// the contextual lexer narrows terminals by parser state and falls back to its
+    /// root (full-terminal) scanner only where the per-state scanner refuses —
+    /// Python Lark's `ContextualLexer.lex` except-branch. This makes recovery
+    /// faithful for grammars whose contextual lexer is load-bearing (overlapping
+    /// terminals disambiguated only by parser state); a stored basic lexer would
+    /// mis-tokenize them and diverge from a contextual parse.
     fn parse_recovering(
         &self,
         text: &str,
         start: Option<&str>,
         on_error: &mut dyn FnMut(&ParseError) -> bool,
     ) -> Result<RecoveredTree, LarkError> {
-        lalr_recover(
-            &self.parser,
-            self.recovery_lexer.as_ref(),
+        let mut errors = Vec::new();
+        let tree = self.parser.parse_contextual_recovering(
             text,
+            &self.lexer,
             start,
             on_error,
-        )
+            &mut errors,
+        )?;
+        Ok(RecoveredTree { tree, errors })
     }
 }
 
@@ -176,8 +243,9 @@ impl ParserDriver for LalrContextual {
 /// whole token stream, the [`Indenter`] rewrites it (injecting INDENT/DEDENT),
 /// then the parser replays it. The contextual lexer is bypassed because postlex
 /// needs the materialized stream, and `symbols` lets the indenter resolve its
-/// `%declare`d terminal ids. No recovery (the trait default's typed refusal):
-/// deletion could desync the indenter's synthetic tokens.
+/// `%declare`d terminal ids. Recovery (issue #94) lexes with the basic recovery
+/// lexer, injects INDENT/DEDENT over the survivors, then deletes offending tokens
+/// downstream of the indenter — see [`lalr_recover_postlex`].
 struct LalrPostlex {
     parser: LalrParser,
     lexer: BasicLexer,
@@ -190,6 +258,23 @@ impl ParserDriver for LalrPostlex {
         let tokens = self.lexer.lex(text)?;
         let tokens = self.postlex.process(tokens, &self.symbols)?;
         self.parser.parse(tokens, start)
+    }
+
+    fn parse_recovering(
+        &self,
+        text: &str,
+        start: Option<&str>,
+        on_error: &mut dyn FnMut(&ParseError) -> bool,
+    ) -> Result<RecoveredTree, LarkError> {
+        lalr_recover_postlex(
+            &self.parser,
+            &self.lexer,
+            &self.postlex,
+            &self.symbols,
+            text,
+            start,
+            on_error,
+        )
     }
 }
 
@@ -209,6 +294,32 @@ impl ParserDriver for LalrContextualPostlex {
     fn parse(&self, text: &str, start: Option<&str>) -> Result<ParseTree, ParseError> {
         self.parser
             .parse_contextual_postlex(text, &self.lexer, &self.postlex, &self.symbols, start)
+    }
+
+    /// Recover over the streaming indenter on the *contextual* stream (issue #94):
+    /// the indenter injects INDENT/DEDENT into the recovering contextual lexer's
+    /// output (root-lexer fallback included, issue #166), and the parser deletes
+    /// offending tokens downstream of that injection. This keeps recovery faithful
+    /// for grammars whose contextual lexer is load-bearing (overlapping terminals
+    /// disambiguated only by parser state) — a stored basic lexer would mis-tokenize
+    /// them and diverge — exactly as the non-postlex contextual driver does.
+    fn parse_recovering(
+        &self,
+        text: &str,
+        start: Option<&str>,
+        on_error: &mut dyn FnMut(&ParseError) -> bool,
+    ) -> Result<RecoveredTree, LarkError> {
+        let mut errors = Vec::new();
+        let tree = self.parser.parse_contextual_postlex_recovering(
+            text,
+            &self.lexer,
+            &self.postlex,
+            &self.symbols,
+            start,
+            on_error,
+            &mut errors,
+        )?;
+        Ok(RecoveredTree { tree, errors })
     }
 }
 
@@ -302,16 +413,22 @@ impl ParsingFrontend {
         self.driver.parse(text, start)
     }
 
-    /// Parse with panic-mode error recovery (issue #43). On a token the parser
+    /// Parse with panic-mode error recovery (issues #43, #94). On a token the parser
     /// can't act on, `on_error` is consulted; returning `true` deletes that token
     /// and resumes (single-token-deletion recovery, identical to Python Lark's
-    /// `on_error` driver), `false` stops with the partial tree built so far.
+    /// `on_error` driver), `false` stops with `tree: None` (no fabricated
+    /// derivation — issue #167) and the errors collected so far.
     ///
-    /// Only the LALR backend without a postlex hook supports recovery; other
-    /// configurations return a [`GrammarError::Other`]. Lexing uses the basic
-    /// (global) lexer so out-of-context-but-valid tokens are deletable tokens
-    /// rather than lexer errors. A genuinely un-lexable character is still a hard
-    /// error (character-level recovery is a follow-up).
+    /// Every LALR configuration supports recovery — basic or contextual lexer, with
+    /// or without a postlex (Indenter) hook (issue #94: the indenter injects
+    /// INDENT/DEDENT *upstream* of the parser's token deletion, mirroring Python's
+    /// `lexer → PostLexConnector(postlex) → parser` wiring). Only Earley/CYK refuse
+    /// with a [`GrammarError::Other`]. A genuinely un-lexable character (issue #93) is
+    /// likewise recovered from: it is skipped one character at a time, each skip
+    /// recorded in [`RecoveredTree::errors`] just like a deleted token (Python
+    /// Lark's `UnexpectedCharacters` branch of `on_error`).
+    ///
+    /// [`RecoveredTree::errors`]: crate::error::RecoveredTree::errors
     ///
     /// [`GrammarError::Other`]: crate::error::GrammarError::Other
     pub fn parse_recovering(
@@ -426,24 +543,22 @@ fn build_lalr(
         };
     }
 
-    // Keep a basic lexer for error recovery (issue #43). Building it can't
-    // fail here — the same construction already succeeded above for the
-    // basic-lexer path, and zero-width/collision checks ran earlier.
-    let recovery_lexer = BasicLexer::new(&lexer_conf).ok();
     match options.lexer {
         LexerType::Contextual | LexerType::Auto => {
+            // The contextual driver recovers over its own contextual lexer (issue
+            // #166, via its root-lexer fallback), so it needs no stored basic lexer.
             let state_terminals = parser.state_terminals();
             let always_accept = cg.ignore.clone();
             let lexer = ContextualLexer::new(&lexer_conf, &state_terminals, always_accept)?;
-            Ok(Box::new(LalrContextual {
-                parser,
-                lexer,
-                recovery_lexer,
-            }))
+            Ok(Box::new(LalrContextual { parser, lexer }))
         }
         // `Basic`, and any other explicit choice, takes the basic lexer.
         _ => {
             let lexer = BasicLexer::new(&lexer_conf)?;
+            // Keep a basic lexer for error recovery (issue #43); for the basic-lexer
+            // driver the recovery lexer is the global terminal set too. Building it
+            // can't fail here — the construction just above already succeeded.
+            let recovery_lexer = BasicLexer::new(&lexer_conf).ok();
             Ok(Box::new(LalrBasic {
                 parser,
                 lexer,

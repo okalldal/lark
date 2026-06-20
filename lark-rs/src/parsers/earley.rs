@@ -162,12 +162,6 @@ struct Packed {
 /// (packed nodes); more than one means the node is ambiguous.
 struct SymbolNode {
     is_intermediate: bool,
-    /// The input span `[start, end)` this node covers (column steps for the
-    /// dynamic lexer, token indices for the basic lexer). Used only to break
-    /// `sort_key` ties among a node's derivations by split point — see
-    /// [`Transformer::sorted_families`].
-    start: usize,
-    end: usize,
     families: Vec<Packed>,
     family_set: HashSet<(ForestRef, ForestRef)>,
     /// Joop-Leo deferred reconstructions: `(transitive, bottom_node, end_col)`. A
@@ -234,8 +228,6 @@ impl Forest {
         let id = self.nodes.len();
         self.nodes.push(SymbolNode {
             is_intermediate: key.is_intermediate(),
-            start,
-            end,
             families: Vec::new(),
             family_set: HashSet::new(),
             paths: Vec::new(),
@@ -314,6 +306,16 @@ pub struct EarleyParser {
     grammar: CompiledGrammar,
     /// Non-terminal id → indices of the rules producing it (the predictor index).
     rules_by_origin: HashMap<SymbolId, Vec<usize>>,
+    /// `nullable[id.index()]` = the symbol can derive ε. Indexed by `SymbolId`.
+    /// Used by [`Self::eps_node`] to rebuild a skipped ε-tail.
+    nullable: Vec<bool>,
+    /// `eps_only[id.index()]` = the symbol can derive **only** ε (nullable *and*
+    /// cannot derive any non-empty string). Used by the Joop-Leo completer
+    /// (`is_quasi_complete`) to admit a nullable tail after the recognized symbol
+    /// (#64) ONLY when the tail is ε-only: an *optional* tail (nullable but able
+    /// to match real tokens, e.g. `opt: Y |`) must NOT be linearized, or the
+    /// non-empty derivation becomes unreachable and valid input is rejected.
+    eps_only: Vec<bool>,
 }
 
 impl EarleyParser {
@@ -322,9 +324,13 @@ impl EarleyParser {
         for (i, rule) in grammar.rules.iter().enumerate() {
             rules_by_origin.entry(rule.origin).or_default().push(i);
         }
+        let nullable = crate::grammar::analysis::nullable_set(&grammar);
+        let eps_only = crate::grammar::analysis::eps_only_set(&grammar);
         EarleyParser {
             grammar,
             rules_by_origin,
+            nullable,
+            eps_only,
         }
     }
 
@@ -722,26 +728,49 @@ impl EarleyParser {
         }
     }
 
-    /// A reduction path through `item` is taken by Leo only when consuming the
-    /// symbol at the dot *completes* the rule — i.e. the recognized symbol is the
-    /// rule's final symbol (strict right recursion). Scott/Leo also permit a
-    /// nullable tail after the recognized symbol, but the topmost item is then
-    /// non-complete and the SPPF spine reconstruction must thread the nullable
-    /// completions through it — a subtle case upstream Lark never finished. We
-    /// deliberately decline it: such a tail is bounded extra work the regular
-    /// completer handles correctly, so the linearization target (`a: X a | X`,
-    /// including a nullable base like `a: X a | ε`) is covered while the
-    /// nullable-tail interaction that breaks the forest is avoided. The `start_id`
-    /// guard refuses to special-case a directly self-recursive start.
+    /// A reduction path through `item` is taken by Leo only when advancing past
+    /// the symbol at the dot leaves the rule *deterministically completable* — i.e.
+    /// consuming the recognized symbol either completes the rule (strict right
+    /// recursion, `a: X a | X`) or leaves only a **nullable tail** that ε-derives
+    /// to completion (`a: X a opt | X` with `opt:` ε-only, the minimal
+    /// nullable-tail shape — #64). The topmost item is then non-complete, and the
+    /// SPPF spine reconstruction threads the tail's ε-completions through it
+    /// (`materialize_leo_paths`), the case upstream Lark never finished
+    /// (lark-parser/lark#397).
+    ///
+    /// **The tail must be ε-ONLY, not merely nullable.** Linearizing collapses the
+    /// tail to ε on the Leo shortcut and skips the regular completer's cascade; if
+    /// a tail symbol could also match real tokens (an *optional* tail like
+    /// `opt: Y |`), that non-empty derivation would become unreachable and valid
+    /// input (`a: X a opt | X`, `opt: Y |` on `"xxy"`) would be wrongly rejected.
+    /// So `eps_only` (strictly stronger than nullable) is the admission test.
+    /// (Python Lark's reference uses `NULLABLE` here, but its Leo completer is dead
+    /// code — lark-parser/lark#397 — so it never exercised this distinction; ours
+    /// is a live reimplementation and must get it right.)
+    ///
+    /// The `start_id` guard refuses to special-case a directly self-recursive
+    /// start — at the recognized position OR anywhere in the tail (matches the
+    /// original reference guard), falling back to the regular completer there.
     fn is_quasi_complete(&self, item: &Item, start_id: SymbolId) -> bool {
         let expansion = &self.grammar.rules[item.rule].expansion;
         let origin = self.grammar.rules[item.rule].origin;
-        // The recognized symbol (at `item.dot`) must be the last in the rule.
-        if item.dot + 1 != expansion.len() {
+        // Refuse a directly self-recursive start at the recognized position.
+        if origin == start_id && expansion[item.dot] == start_id {
             return false;
         }
-        // Refuse a directly self-recursive start (matches the reference guard).
-        origin != start_id || expansion[item.dot] != start_id
+        // Walk the tail after the recognized symbol (positions `item.dot + 1 ..`).
+        // Each must be ε-only (so the rule completes with no further input AND the
+        // Leo collapse cannot drop a real derivation), and none may re-enter the
+        // recursive start.
+        for &sym in &expansion[item.dot + 1..] {
+            if !self.eps_only[sym.index()] {
+                return false;
+            }
+            if origin == start_id && sym == start_id {
+                return false;
+            }
+        }
+        true
     }
 
     /// Memoize (or extend) the Joop-Leo transitive chain for completing
@@ -794,11 +823,17 @@ impl EarleyParser {
                 break;
             }
             to_create.push((rec, col, o));
-            // The topmost item the chain reaches is the advance of the highest
-            // unique originator seen so far (its `node` is unused downstream).
+            // The topmost item the chain reaches is the *completed* form of the
+            // highest unique originator seen so far — its dot at the end of the
+            // rule (its `node` is unused downstream). For strict right recursion
+            // `o.dot + 1` already equals the length; with a nullable tail (#64) the
+            // tail's ε-completions are consumed here so `top` lands on the
+            // completed `Sym(origin)` node, exactly as the regular completer would
+            // after held-ε-advancing through the tail. `materialize_leo_paths`
+            // rebuilds the skipped intermediate + ε-tail spine lazily.
             top = Some(Item {
                 rule: o.rule,
-                dot: o.dot + 1,
+                dot: self.grammar.rules[o.rule].expansion.len(),
                 origin: o.origin,
                 node: ForestRef::None,
             });
@@ -880,21 +915,120 @@ impl EarleyParser {
             }
             for &t in chain.iter().rev() {
                 let tr = trans_arena[t];
-                let cur_node = forest.get_or_create(
+                // Build the node for the originator advanced past the recognized
+                // symbol: `[red.rule → … recognized • γ]`. With strict right
+                // recursion γ is empty, so this is already the completed
+                // `Sym(origin)`; with a nullable tail it is the intermediate
+                // `Inter(red.rule, red.dot + 1)`.
+                let mut prev_node = forest.get_or_create(
                     self.node_key(tr.red.rule, tr.red.dot + 1),
                     tr.red.origin,
                     end,
                 );
                 let right = forest.get_or_create(NodeKey::Sym(tr.recognized), tr.key_start, end);
                 forest.add_family(
-                    cur_node,
+                    prev_node,
                     tr.red.rule,
                     tr.red.node,
                     ForestRef::Node(right),
                     tr.red.dot,
                 );
+                // Thread the nullable tail (#64): each remaining symbol after the
+                // recognized one is nullable (guaranteed by `is_quasi_complete`),
+                // so it ε-completes at `end`. Advance one binarized level per tail
+                // position, each carrying the tail symbol's ε-node as the right
+                // child — exactly the spine the regular completer's held-ε
+                // advancing would have built, but materialized once here. The empty
+                // span `(end, end)` reuses any ε-node the chart already built.
+                let expansion = &self.grammar.rules[tr.red.rule].expansion;
+                for pos in (tr.red.dot + 1)..expansion.len() {
+                    let tail_sym = expansion[pos];
+                    let mut building = HashSet::new();
+                    let eps = self.eps_node(forest, tail_sym, end, &mut building);
+                    let next_node = forest.get_or_create(
+                        self.node_key(tr.red.rule, pos + 1),
+                        tr.red.origin,
+                        end,
+                    );
+                    forest.add_family(
+                        next_node,
+                        tr.red.rule,
+                        ForestRef::Node(prev_node),
+                        ForestRef::Node(eps),
+                        pos,
+                    );
+                    prev_node = next_node;
+                }
             }
         }
+    }
+
+    /// Build (or reuse) the SPPF node for a *nullable* symbol's ε-derivation at the
+    /// empty span `(col, col)`, returning its node id. Mirrors the ε-nodes the
+    /// regular completer materializes for a held ε-completion: a node keyed by its
+    /// global `(Sym(sym), col, col)` identity, carrying one family per fully
+    /// nullable rule of `sym`, each binarized over that rule's own (nullable)
+    /// children. Used by the Joop-Leo nullable-tail spine reconstruction (#64) to
+    /// thread the skipped ε-tail. Idempotent: a node whose families are already
+    /// present is returned untouched (it merges with the chart's own ε-node when
+    /// the chart built one), and recursion terminates because every ε-child spans
+    /// the same empty column and is dedup-guarded by the global index.
+    ///
+    /// `building` is a per-reconstruction "already descended into" set guarding a
+    /// nullable ε-cycle (e.g. `a: b |`, `b: a`): a symbol already entered returns
+    /// its node without re-descending, so the reconstruction terminates. It is
+    /// monotonic (never un-set) — safe because every symbol this builds ends with
+    /// non-empty `families`, so any later visit short-circuits at the
+    /// `families.is_empty()` check above rather than relying on the guard. Such
+    /// mutually-ε-recursive nullable symbols are outside the linearization target;
+    /// the regular completer still builds their canonical ε-node, which this node
+    /// merges into by global identity (`add_family` dedups by `(left, right)`).
+    fn eps_node(
+        &self,
+        forest: &mut Forest,
+        sym: SymbolId,
+        col: usize,
+        building: &mut HashSet<SymbolId>,
+    ) -> usize {
+        let id = forest.get_or_create(NodeKey::Sym(sym), col, col);
+        // Already populated (by the chart or an earlier call): reuse as-is.
+        if !forest.nodes[id].families.is_empty() {
+            return id;
+        }
+        // ε-cycle guard: this symbol is already being built further up the stack.
+        if !building.insert(sym) {
+            return id;
+        }
+        // Build a family for each fully nullable production of `sym`.
+        let Some(prods) = self.rules_by_origin.get(&sym) else {
+            return id;
+        };
+        let prods = prods.clone();
+        for ri in prods {
+            let expansion = &self.grammar.rules[ri].expansion;
+            // Only productions that derive ε wholesale (every symbol nullable)
+            // contribute an ε-derivation.
+            if !expansion.iter().all(|s| self.nullable[s.index()]) {
+                continue;
+            }
+            if expansion.is_empty() {
+                // The empty production: Scott's (None, None) ε family.
+                forest.add_family(id, ri, ForestRef::None, ForestRef::None, 0);
+            } else {
+                // A non-empty all-nullable production: binarize its ε-children
+                // left to right, mirroring the regular completer's spine.
+                let mut left = ForestRef::None;
+                let len = expansion.len();
+                for pos in 0..len {
+                    let child = self.eps_node(forest, expansion[pos], col, building);
+                    let key = self.node_key(ri, pos + 1);
+                    let node = forest.get_or_create(key, col, col);
+                    forest.add_family(node, ri, left, ForestRef::Node(child), pos);
+                    left = ForestRef::Node(node);
+                }
+            }
+        }
+        id
     }
 
     /// Scott's scanner: advance every terminal-expecting item that matches
@@ -1268,11 +1402,6 @@ struct Transformer<'a> {
     /// dynamic lexer is used (the basic lexer consumes terminal priorities in its
     /// terminal ordering). Empty otherwise.
     term_priority: HashMap<SymbolId, i32>,
-    /// Whether the dynamic lexer produced this forest. Gates the split-point
-    /// tie-break in [`Transformer::sorted_families`], which compensates for the
-    /// way lark-rs's EBNF helper nodes reverse the insertion order of equal-rank
-    /// `dynamic_complete` segmentation derivations relative to Python Lark.
-    dynamic: bool,
     /// Memoized symbol-node values (final assembled trees).
     memo: HashMap<usize, NodeValue>,
     /// Memoized per-symbol-node derivation lists (the deduped alternative values
@@ -1280,6 +1409,16 @@ struct Transformer<'a> {
     /// [`Transformer::eval_symbol`] and the transparent-child ambiguity lifting in
     /// [`Transformer::expand_packed`].
     deriv_memo: HashMap<usize, Vec<NodeValue>>,
+    /// Explicit mode (#59): memoized "is this node's whole subtree unambiguous?"
+    /// (every reachable node has ≤ 1 family, no forest cycle). A `true` node has
+    /// exactly one derivation, so the explicit walk would produce the *same* single
+    /// value resolve mode does — letting a distributed *transparent* such node be
+    /// **spliced** into the parent in one streaming pass (the `Stream*` frames)
+    /// instead of re-materializing a growing `Inline` per spine level (the O(n²)
+    /// the issue tracked). Genuine ambiguity (any node with > 1 family) stays
+    /// `false` and keeps the cartesian `Derivs` distribution that the `_ambig`
+    /// oracles pin. Computed once per node by [`Transformer::single_deriv`].
+    single_deriv: HashMap<usize, bool>,
     /// Memoized node priorities + the in-progress set for cycle-safe summing.
     prio: HashMap<usize, i32>,
     prio_visiting: HashSet<usize>,
@@ -1301,7 +1440,6 @@ impl<'a> Transformer<'a> {
         term_priority: bool,
     ) -> Self {
         // `term_priority` is set exactly when the dynamic lexer built the forest.
-        let dynamic = term_priority;
         // Map each terminal id to its declared priority (only consulted under the
         // dynamic lexer; built empty otherwise so the lookup is a no-op).
         let term_priority = if term_priority {
@@ -1319,10 +1457,10 @@ impl<'a> Transformer<'a> {
             forest,
             builder: TreeBuilder::new(&grammar.rules),
             resolve,
-            dynamic,
             term_priority,
             memo: HashMap::new(),
             deriv_memo: HashMap::new(),
+            single_deriv: HashMap::new(),
             prio: HashMap::new(),
             prio_visiting: HashSet::new(),
             seen: HashSet::new(),
@@ -1439,21 +1577,20 @@ impl<'a> Transformer<'a> {
     /// equal derivations — its `StableSymbolNode` stores packed children in an
     /// `OrderedSet`, so insertion order is the final tie-break there too).
     ///
-    /// Under the **dynamic lexer** a further tie-break is applied: among otherwise
-    /// equal-rank derivations of the same span, the one whose last symbol (the
-    /// packed node's right child) covers the most input — i.e. the earliest split —
-    /// wins. The dynamic lexer's `dynamic_complete` re-tokenization makes a single
-    /// span reachable by many segmentations; Python Lark inserts these last-symbol
-    /// families in earliest-split-first order during its scan, but lark-rs builds
-    /// them through an EBNF helper node whose LIFO completion reverses that order,
-    /// so the split key restores Python's choice (e.g. `WORD+` over `"bc"` resolves
-    /// to one `WORD "bc"`, not `WORD "b"`, `WORD "c"`). The basic lexer keeps pure
-    /// insertion order, where it already matches Python on genuine grammar ambiguity.
+    /// This is pure `(is_empty, -priority, rule.order)` + insertion order for *both*
+    /// lexers. The dynamic-lexer split-point tie-break that #32/#90 added here is
+    /// gone: it compensated for lark-rs building a grouped repetition through a
+    /// nested `(A|B)` group node whose LIFO completion reversed Python's
+    /// earliest-split-first segmentation order. With the EBNF expansion now inlining
+    /// the group arms straight into the recurse rule (#91 — matching Python's
+    /// `EBNF_to_BNF`), the last symbol of the recursion is a *terminal* built during
+    /// the scan, so the segmentations already arrive in Python's order and the
+    /// `rule.order` key alone disambiguates `dynamic_complete` ties (e.g. `WORD+`
+    /// over `"bc"` resolves to one `WORD "bc"`, the `parse:49/72` cases).
     fn sorted_families(&mut self, node_id: usize) -> Vec<usize> {
         let forest = self.forest;
         let node = &forest.nodes[node_id];
         let parent_inter = node.is_intermediate;
-        let node_start = node.start;
         let prios: Vec<i32> = (0..node.families.len())
             .map(|k| {
                 let p = node.families[k];
@@ -1463,15 +1600,6 @@ impl<'a> Transformer<'a> {
         let mut idx: Vec<usize> = (0..node.families.len()).collect();
         let fams = &forest.nodes[node_id].families;
         let grammar = self.grammar;
-        let dynamic = self.dynamic;
-        // The split position of a derivation: where its right (last) symbol starts,
-        // i.e. the end of its left prefix. A smaller split means a longer right child.
-        let split = |p: &Packed| -> usize {
-            match p.left {
-                ForestRef::Node(lid) => forest.nodes[lid].end,
-                _ => node_start,
-            }
-        };
         idx.sort_by(|&a, &b| {
             let empty = |p: &Packed| {
                 matches!(p.left, ForestRef::None) && matches!(p.right, ForestRef::None)
@@ -1484,11 +1612,6 @@ impl<'a> Transformer<'a> {
                         .order
                         .cmp(&grammar.rules[fams[b].rule].order),
                 )
-                .then(if dynamic {
-                    split(&fams[a]).cmp(&split(&fams[b]))
-                } else {
-                    std::cmp::Ordering::Equal
-                })
         });
         idx
     }
@@ -1504,6 +1627,76 @@ impl<'a> Transformer<'a> {
             .first()
             .map(|p| self.grammar.rules[p.rule].transparent)
             .unwrap_or(false)
+    }
+
+    /// Explicit mode (#59): does `id`'s whole subtree have exactly one derivation
+    /// — every reachable node ≤ 1 family, and no forest cycle through it? Such a
+    /// node's explicit value is identical to the value resolve mode would build (no
+    /// ambiguity to fan out), so a distributed *transparent* one can be spliced in a
+    /// single streaming pass instead of re-materializing a growing `Inline` per
+    /// spine level. Iterative two-phase DFS (`Enter`/`Exit`), memoized in
+    /// `single_deriv` and bounded to O(1) native stack per #33: a node reached while
+    /// still in-progress is a cycle → not single-derivation (conservatively `false`,
+    /// so the cartesian `Derivs` path — which already handles cycles by discarding —
+    /// keeps owning it). A node is single-derivation iff it has exactly one family
+    /// and every `Node` child of that family is single-derivation.
+    fn single_deriv(&mut self, id: usize) -> bool {
+        if let Some(&b) = self.single_deriv.get(&id) {
+            return b;
+        }
+        enum Step {
+            Enter(usize),
+            Exit(usize),
+        }
+        // In-progress set: a re-entry is a cycle (→ false). Local to this query
+        // chain; every node we settle lands in `single_deriv`, so a later query
+        // short-circuits at the memo.
+        let mut on_stack: HashSet<usize> = HashSet::new();
+        let mut stack = vec![Step::Enter(id)];
+        while let Some(step) = stack.pop() {
+            match step {
+                Step::Enter(n) => {
+                    if self.single_deriv.contains_key(&n) {
+                        continue;
+                    }
+                    if !on_stack.insert(n) {
+                        // Cycle edge: this node participates in a forest cycle.
+                        self.single_deriv.insert(n, false);
+                        continue;
+                    }
+                    let node = &self.forest.nodes[n];
+                    if node.families.len() != 1 {
+                        // 0 families (a discarded/empty node) or > 1 (ambiguous):
+                        // not a single clean derivation.
+                        on_stack.remove(&n);
+                        self.single_deriv.insert(n, node.families.len() == 1);
+                        continue;
+                    }
+                    stack.push(Step::Exit(n));
+                    let p = node.families[0];
+                    for r in [p.left, p.right] {
+                        if let ForestRef::Node(c) = r {
+                            stack.push(Step::Enter(c));
+                        }
+                    }
+                }
+                Step::Exit(n) => {
+                    on_stack.remove(&n);
+                    // Already decided as a cycle while on the stack? Keep it.
+                    if self.single_deriv.contains_key(&n) {
+                        continue;
+                    }
+                    let p = self.forest.nodes[n].families[0];
+                    let child_ok = |r: ForestRef, this: &Self| match r {
+                        ForestRef::Node(c) => this.single_deriv.get(&c).copied() == Some(true),
+                        _ => true,
+                    };
+                    let ok = child_ok(p.left, self) && child_ok(p.right, self);
+                    self.single_deriv.insert(n, ok);
+                }
+            }
+        }
+        self.single_deriv.get(&id).copied().unwrap_or(false)
     }
 
     // ─── The de-recursed walk (issue #33) ──────────────────────────────────────
@@ -1734,6 +1927,39 @@ impl<'a> Transformer<'a> {
                     self.memo.insert(node, v.clone());
                 }
                 w.ret = Some(Ret::Value(result));
+            }
+
+            // ── stream a single-derivation transparent child (explicit, #59):
+            //    splice `node` into a fresh buffer with the *resolve* transparent
+            //    splice (`Frame::Splice` → `SpliceTail`) — one linear pass down the
+            //    spine, no growing per-level `Inline` — then hand the buffer back
+            //    wrapped as the lone `Inline` derivation alternative `ExpandCombine`
+            //    expects. Reusing `Splice` (not bare `AppendRule`) is what makes the
+            //    streamed value byte-identical to the `Derivs` + `assemble` value it
+            //    replaces: `SpliceTail` appends the transparent rule's rule-level
+            //    `placeholder_count` and trailing `nones_before` `None` slots that
+            //    `AppendRule` alone omits. Sound because `single_deriv(node)`
+            //    guaranteed exactly one derivation (no ambiguity to fan out).
+            Frame::StreamDistribute { node } => {
+                w.bufs.push(Vec::new());
+                w.frames.push(Frame::StreamDistributeDone);
+                w.frames.push(Frame::Splice { node });
+            }
+            Frame::StreamDistributeDone => {
+                let children = w.bufs.pop().expect("StreamDistribute pushed a buffer");
+                let derivs = match w.take_ret() {
+                    // A discarded family would mean a cycle, which `single_deriv`
+                    // already excludes — but stay defensive: no derivation, no
+                    // alternative.
+                    Ret::Rule(None) => Vec::new(),
+                    Ret::Rule(Some(_)) => vec![NodeValue::Inline(children)],
+                    _ => unreachable!("Splice returns Ret::Rule"),
+                };
+                #[cfg(feature = "perf-counters")]
+                crate::perf::add_explicit_node_children(
+                    derivs.iter().map(node_value_size).sum::<u64>(),
+                );
+                w.ret = Some(Ret::Derivs(derivs));
             }
 
             // ── symbol_derivations (explicit): the deduped list of derivation
@@ -1996,7 +2222,21 @@ impl<'a> Transformer<'a> {
                     distribute_right,
                 });
                 if distribute_right {
-                    w.frames.push(Frame::Derivs { node: rid });
+                    // #59: a *transparent* distributed child whose whole subtree is
+                    // unambiguous has exactly one derivation, so its explicit value
+                    // equals the value resolve mode would build — splice it into a
+                    // fresh buffer in one streaming pass (yielding the single
+                    // `Inline` alternative) instead of materializing a growing
+                    // per-spine-level `Inline` through `Derivs` (the O(n²) on a
+                    // transparent left-recursive helper that #59 fixes). Ambiguous
+                    // children (> 1 derivation anywhere in the subtree) and the
+                    // `keep_all_tokens` distribution of a non-transparent child keep
+                    // the cartesian `Derivs` path, which the `_ambig` oracles pin.
+                    if self.is_transparent_node(rid) && self.single_deriv(rid) {
+                        w.frames.push(Frame::StreamDistribute { node: rid });
+                    } else {
+                        w.frames.push(Frame::Derivs { node: rid });
+                    }
                 } else {
                     w.frames.push(Frame::Eval { node: rid });
                 }
@@ -2093,6 +2333,7 @@ impl<'a> Transformer<'a> {
 /// | `symbol_derivations`   | `Derivs`       | `DerivsNext`                  |
 /// | `expand_packed`        | `ExpandPacked` | `ExpandRight`, `ExpandCombine`|
 /// | `expand_intermediate`  | `ExpandInter`  | `InterNext`                   |
+/// | stream single-deriv child (#59) | `StreamDistribute` | `StreamDistributeDone` (reuses the resolve `Splice`/`SpliceTail` frames) |
 enum Frame {
     Eval {
         node: usize,
@@ -2133,6 +2374,13 @@ enum Frame {
     EvalAmbig {
         node: usize,
     },
+    /// #59: stream a single-derivation transparent distributed child into a fresh
+    /// buffer (via the resolve `Splice`/`SpliceTail` frames), then wrap it as the
+    /// lone `Inline` derivation alternative — the explicit reuse of resolve's splice.
+    StreamDistribute {
+        node: usize,
+    },
+    StreamDistributeDone,
     Derivs {
         node: usize,
     },
@@ -2364,5 +2612,124 @@ mod tests {
             assert!(p.recognize(&input, Some("start")), "k={k} should parse");
         }
         assert!(!p.recognize(&[], Some("start")));
+    }
+
+    // ── #159 guard: the explicit-mode `_ambig` dedup (`node_value_key` keyed in
+    //    `DerivsNext`) must ONLY ever collapse BYTE-IDENTICAL derivations, never
+    //    structurally-distinct ones. lark-rs intentionally diverges from Python
+    //    Lark here: Python's `ForestToParseTree` does not dedup, so its `_ambig`
+    //    may repeat byte-identical children; we drop those (they carry zero
+    //    information — see ADR-0017 "diverge & document" and `docs/STATUS.md`).
+    //    Collapsing a *distinct* derivation would be a real bug; these tests are
+    //    the tripwire. DO NOT relax them to make the dedup do more.
+
+    /// The keying function is the dedup's decision procedure: equal keys collapse,
+    /// distinct keys survive. Pin both directions directly on `node_value_key`.
+    #[test]
+    fn node_value_key_separates_distinct_collapses_identical() {
+        let leaf = |data: &str| Child::Tree(Tree::new(data, vec![]));
+        // Two byte-identical trees → identical keys (these are the ONLY thing the
+        // dedup is allowed to collapse).
+        let a1 = NodeValue::Tree(Tree::new("start", vec![leaf("x"), leaf("x")]));
+        let a2 = NodeValue::Tree(Tree::new("start", vec![leaf("x"), leaf("x")]));
+        assert_eq!(
+            node_value_key(&a1),
+            node_value_key(&a2),
+            "byte-identical derivations must key equal (so they collapse)"
+        );
+
+        // Same node name, DIFFERENT child structure → distinct keys (must survive).
+        let b = NodeValue::Tree(Tree::new("start", vec![leaf("y")]));
+        assert_ne!(
+            node_value_key(&a1),
+            node_value_key(&b),
+            "structurally-distinct derivations must key apart (never collapse)"
+        );
+
+        // Same shape, DIFFERENT kept token value → distinct keys (must survive).
+        // `node_value_key` keys tokens by `type_` + `value` (not the interned id).
+        let c = NodeValue::Tree(Tree::new("n", vec![Child::Token(Token::new("A", "a"))]));
+        let d = NodeValue::Tree(Tree::new("n", vec![Child::Token(Token::new("A", "b"))]));
+        assert_ne!(
+            node_value_key(&c),
+            node_value_key(&d),
+            "derivations differing only in a kept token value must key apart"
+        );
+    }
+
+    /// End-to-end tripwire: a grammar whose ambiguity yields two
+    /// STRUCTURALLY-DISTINCT derivations (`start(x x)` vs `start(y(A A))`) must
+    /// keep BOTH `_ambig` alternatives — the dedup must not over-merge them.
+    #[test]
+    fn explicit_keeps_structurally_distinct_ambig_alternatives() {
+        let cg = compile("start: x x | y\nx: A\ny: A A\nA: \"a\"\n");
+        let p = EarleyParser::new(cg.clone());
+        let parsed = p
+            .parse(
+                &[tok(&cg, "A", "a"), tok(&cg, "A", "a")],
+                Some("start"),
+                false,
+            )
+            .expect("parses");
+        let tree = parsed.as_tree().expect("root is a tree");
+        assert_eq!(
+            tree.data, "_ambig",
+            "the two readings are genuinely ambiguous"
+        );
+        // Collect each alternative's shape (its sole child's `data`).
+        let mut shapes: Vec<&str> = tree
+            .children
+            .iter()
+            .filter_map(Child::as_tree)
+            .flat_map(|alt: &Tree| alt.children.iter().filter_map(Child::as_tree))
+            .map(|t| t.data.as_str())
+            .collect();
+        shapes.sort_unstable();
+        shapes.dedup();
+        assert_eq!(
+            shapes,
+            vec!["x", "y"],
+            "both distinct derivations (x x and y(A A)) must survive the dedup, got {:?}",
+            tree.pretty(0)
+        );
+    }
+
+    /// End-to-end pin of the #159 *current* (intentional) behavior: when every
+    /// derivation is BYTE-IDENTICAL (the distinguishing tokens are filtered out),
+    /// the dedup collapses them to a single tree — no `_ambig`. Python Lark keeps
+    /// the duplicates; we diverge by design (ADR-0017). This is the behavior the
+    /// architect verdict says to KEEP; if it ever changes, that is a real decision,
+    /// not an accident.
+    #[test]
+    fn explicit_collapses_byte_identical_ambig_alternatives() {
+        // The issue's repro: `start: "x" start | start "x" | "x"` on "xxx". The
+        // `"x"` tokens are filtered, so all derivations assemble byte-identically.
+        let cg = compile("start: \"x\" start | start \"x\" | \"x\"\n");
+        let p = EarleyParser::new(cg.clone());
+        // The `"x"` literal lowers to an anonymous string terminal; resolve its
+        // interned name by its pattern value rather than guessing the spelling.
+        let term = cg
+            .terminals
+            .iter()
+            .find(|t| matches!(&t.pattern, crate::grammar::terminal::Pattern::Str(s) if s.value == "x"))
+            .expect("the \"x\" literal interned as a terminal")
+            .name
+            .clone();
+        let input: Vec<Token> = (0..3).map(|_| tok(&cg, &term, "x")).collect();
+        let parsed = p.parse(&input, Some("start"), false).expect("parses");
+        let tree = parsed.as_tree().expect("root is a tree");
+        assert_ne!(
+            tree.data,
+            "_ambig",
+            "byte-identical derivations collapse to a single tree (no _ambig); got {}",
+            tree.pretty(0)
+        );
+        assert_eq!(tree.data, "start");
+        // No `_ambig` anywhere in the collapsed result.
+        assert!(
+            tree.iter_subtrees().all(|t| t.data != "_ambig"),
+            "no nested _ambig should survive the collapse; got {}",
+            tree.pretty(0)
+        );
     }
 }

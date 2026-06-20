@@ -14,7 +14,7 @@
 
 mod common;
 
-use common::{earley_unimplemented, load_oracle, make_earley, tree_matches_oracle};
+use common::{earley_unimplemented, load_oracle, make_earley_mp, tree_matches_oracle};
 use lark_rs::Ambiguity;
 
 fn ambiguity_from_str(s: &str) -> Ambiguity {
@@ -47,8 +47,9 @@ fn test_earley_oracle() {
         let name = group["name"].as_str().unwrap_or("?");
         let grammar = group["grammar"].as_str().unwrap_or("");
         let ambiguity = ambiguity_from_str(group["ambiguity"].as_str().unwrap_or("resolve"));
+        let maybe_placeholders = group["maybe_placeholders"].as_bool().unwrap_or(false);
 
-        let lark = match make_earley(grammar, ambiguity.clone()) {
+        let lark = match make_earley_mp(grammar, ambiguity.clone(), maybe_placeholders) {
             Ok(l) => l,
             Err(e) => {
                 failures.push(format!(

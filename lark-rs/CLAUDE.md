@@ -46,7 +46,7 @@ Phases 1–3 are ✅ complete: LALR + contextual lexer, Earley + SPPF + dynamic 
 and full feature parity (common.lark + the bundled stdlib grammars, `%import` file
 paths, `%declare`, Indenter/postlex on all parsers, error recovery, CYK, standalone
 parser generation). Phase 4 distribution: PyO3 ✅, WASM ✅, C API ✅, benchmarks ✅,
-`include_lark!` 🟡 (const-table bake pending). Bank scores: LALR compliance 512/512,
+`include_lark!` ✅ (bakes via the unified `generate_standalone` emitter, #85). Bank scores: LALR compliance 512/512,
 Earley 211/211, dynamic 454/454, CYK 124/124, JSONTestSuite 293/293.
 
 **Per-component tables, open follow-ups, the full lookaround-routing record, and
@@ -234,6 +234,9 @@ tests/
   test_cyk_scaling.rs Deterministic cubic-envelope gate (#87, perf-counters feature)
   test_recovery.rs    Error-recovery oracle (#43) — single-token-deletion recovery
                       vs Python Lark's `on_error` driver
+  test_indenter_recovery.rs  Error recovery over the LALR + Indenter (postlex) path
+                      (#94, ADR-0020) — streaming indenter resets per resume, both
+                      lexers + the contextual-load-bearing grammar, vs oracle
   test_common.rs      common.lark terminal library vs oracle
   test_indenter.rs    %declare + Indenter/postlex vs oracle (both lexers, all parsers)
   test_lookaround.rs  Lookaround behavioral oracles — engine-agnostic semantics pins
@@ -360,6 +363,25 @@ The `\<`/`\>` dialect normalization (below) and the lookaround-scope refusals ar
 existing instances; #159 (keep our `_ambig` dedup) and #101 (reject a nullable CYK
 rule Python rejects) were decided by this rule.
 
+**Explicit-mode `_ambig` is deduped — distinct alternatives only (#159, ADR-0017).**
+With `ambiguity='explicit'`, lark-rs's forest walk dedups derivation values by a
+structural key (`node_value_key`, applied in `DerivsNext` in `earley.rs`), so it
+returns only the **distinct** `_ambig` alternatives. Python Lark's `ForestToParseTree`
+does *not* dedup, so it can repeat **byte-identical** `_ambig` children: distinct SPPF
+derivations that assemble to the same tree because the distinguishing tokens are
+filtered out (repro: `start: "x" start | start "x" | "x"` on `"xxx"` — Python yields a
+nested `_ambig` of byte-identical `start(start(start))` shapes; lark-rs yields a single
+tree, no `_ambig`). This divergence is **intentional and kept** (architect verdict
+2026-06-18): the dedup compensates for lark-rs's SPPF over-sharing, and matching
+Python's duplicates is expensive forest-structure work for output that carries zero
+information — the "diverge & document" quadrant. **Invariant:** the dedup may only ever
+collapse byte-identical trees, *never* structurally-distinct derivations (that would be
+a real bug). Pinned by the guard tests in `parsers/earley.rs`
+(`node_value_key_separates_distinct_collapses_identical`,
+`explicit_keeps_structurally_distinct_ambig_alternatives`,
+`explicit_collapses_byte_identical_ambig_alternatives`), which trip if the keying ever
+over-merges.
+
 **Terminal ordering matters.** Terminals are sorted `(-priority, -pattern_len, name)` before
 the combined regex is built. Higher priority and longer patterns come first so that, e.g.,
 `OCT` (`0[oO][0-7]…`) beats `INT` (`[0-9]…`) at `"0o777"`. Get this wrong and the lexer
@@ -440,12 +462,21 @@ implementation. The lazy spine reconstruction (`load_leo_paths`) is mandatory:
 expanding all paths eagerly reintroduces O(n²) (#61) — the forest-size perf
 counter is what catches a regression here.
 
-**`dynamic_complete`'s resolve tie-break is a heuristic, not a structural fix.**
-The split-point tie-break in `sorted_families` (#90) is keyed on the observation
-that the dynamic lexer reverses segmentation order via LIFO completion; it
-restores Python's earliest-split-first order empirically. The principled fix
-(match Python's group/optional expansion structurally) is a filed follow-up — so
-treat this as a known soft spot if dynamic-lexer ambiguity ordering ever drifts.
+**EBNF `+`/`*` inline their inner arms into the recurse rule — Python's
+`EBNF_to_BNF` (#91).** A grouped repetition `(A | B)+` lowers to the inlined
+recurse rule `_p: A | B | _p A | _p B` (base arms first, then `_p arm`), *not* a
+nested `(A|B)` group helper under a single-symbol `_p: g | _p g`; and `x*`
+distributes its empty case into the parent (`start: _p | ε`) reusing the same
+recurse rule — there is no `__star: __plus | ε` wrapper (one survives only for a
+`*` nested where a single symbol is mandatory, e.g. inside `~n`). This makes the
+last symbol of the recursion a *terminal* built during the scan (matching Python),
+so `dynamic_complete` resolve ties fall out of `rule.order` + insertion order.
+Consequently `sorted_families` is pure `(is_empty, -priority, rule.order)` +
+insertion order for **both** lexers: the dynamic-lexer split-point tie-break #32/#90
+added (and this note used to flag as a soft spot) is **removed**. Pinned by
+`grouped_plus_inlines_arms_into_recurse_rule` (loader/compiler.rs) and
+`dynamic_complete_resolves_longest_segmentation_without_tiebreak`
+(tests/test_earley_dynamic.rs).
 
 ---
 

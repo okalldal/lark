@@ -19,11 +19,13 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use crate::error::{GrammarError, ParseError};
 use crate::grammar::analysis::GrammarAnalysis;
 use crate::grammar::intern::{CompiledGrammar, CompiledRule, SymbolId, SymbolTable};
-use crate::lexer::ContextualLexer;
-use crate::tree::{Child, ParseTree, Token, Tree};
+use crate::lexer::{BasicLexer, ContextualLexer};
+use crate::tree::{ParseTree, Token};
 
 use super::token_source::{
-    postlex_contextual_source, Contextual, LexFailure, PreLexed, SourceError, TokenSource,
+    postlex_basic_recovering_source, postlex_contextual_recovering_source,
+    postlex_contextual_source, Contextual, ContextualRecovering, LexFailure, PreLexed, SourceError,
+    TokenSource,
 };
 use super::tree_builder::{NodeValue, TreeBuilder};
 
@@ -719,19 +721,22 @@ impl LalrParser {
     // Termination: every iteration either shifts, reduces (toward ACCEPT), deletes a
     // token, or stops — and a deletion strictly advances the source toward `$END`,
     // so the loop cannot spin. A `$END` error can't be deleted (there's nothing
-    // after it); Python re-raises there, we return a best-effort partial instead.
+    // after it); Python re-raises there. lark-rs returns `Ok(None)` (no derivation)
+    // rather than fabricating a partial — see [`RecoveredTree`](crate::error::RecoveredTree)
+    // and ADR-0019. The recorded `errors` remain the authoritative diagnostics.
 
     /// Drive the state machine with recovery. Mirrors [`run`](Self::run) but, on a
     /// token with no action, deletes it and continues (subject to `on_error`).
-    /// Every recovered error is pushed to `errors`. Returns the finished tree on
-    /// ACCEPT, or a best-effort partial tree when recovery cannot reach ACCEPT.
+    /// Every recovered error is pushed to `errors`. Returns `Some(tree)` on a
+    /// normal ACCEPT, or `None` when recovery cannot reach ACCEPT (premature `$END`,
+    /// or `on_error` returning `false`) — no synthetic tree is fabricated.
     fn run_recovering<S: TokenSource>(
         &self,
         source: &mut S,
         start: Option<&str>,
         on_error: &mut dyn FnMut(&ParseError) -> bool,
         errors: &mut Vec<ParseError>,
-    ) -> Result<ParseTree, ParseError> {
+    ) -> Result<Option<ParseTree>, ParseError> {
         let mut state_stack: Vec<usize> = vec![self.initial_state(start)?];
         let mut value_stack: Vec<NodeValue> = Vec::new();
 
@@ -739,9 +744,32 @@ impl LalrParser {
             let state = *state_stack.last().unwrap();
             let token = match source.peek(state) {
                 Ok(tok) => tok,
-                // Lexer-level (character) recovery is a follow-up; a genuinely
-                // un-lexable position is still a hard error.
-                Err(SourceError::Lex(failure)) => return Err(self.lex_failure(state, failure)),
+                // Character-level recovery (issue #93). For the basic-lexer recovery
+                // path the un-lexable characters are skipped up front by
+                // `BasicLexer::lex_recovering`, so its `PreLexed` source never lands
+                // here. The contextual recovery source ([`ContextualRecovering`]),
+                // which lexes lazily, *does* surface a lex failure here when neither
+                // the per-state nor the root scanner matches a position (issue #166):
+                // record it as an `UnexpectedCharacter`, consult `on_error`, and skip
+                // one character before resuming — Python's re-raised
+                // `UnexpectedCharacters` branch. `on_error` returning `false` stops
+                // with no derivation, exactly like a token-level stop.
+                Err(SourceError::Lex(failure)) => {
+                    let err = ParseError::UnexpectedCharacter {
+                        ch: failure.ch,
+                        line: failure.line,
+                        col: failure.col,
+                        pos: failure.pos,
+                        expected: "any token".to_string(),
+                    };
+                    let cont = on_error(&err);
+                    errors.push(err);
+                    if !cont {
+                        return Ok(None);
+                    }
+                    source.skip_char();
+                    continue;
+                }
                 Err(SourceError::Postlex(e)) => return Err(e),
             };
 
@@ -754,77 +782,57 @@ impl LalrParser {
                 Some(Action::Reduce(rule_idx)) => {
                     self.reduce(rule_idx, &mut state_stack, &mut value_stack, &token)?;
                 }
-                Some(Action::Accept) => return Self::accept(&mut value_stack),
+                Some(Action::Accept) => return Self::accept(&mut value_stack).map(Some),
                 None => {
                     let err = self.unexpected(state, &token);
                     // Consult the handler for every error (as Python Lark does),
                     // then record it. `$END` can't be deleted — there's nothing
                     // after it — so stop regardless of the handler's answer, where
-                    // a normal token is deleted only if the handler agrees.
+                    // a normal token is deleted only if the handler agrees. When we
+                    // stop without an ACCEPT there is no real derivation, so return
+                    // `None` rather than a fabricated partial (issue #167, ADR-0019).
                     let cont = on_error(&err);
                     errors.push(err);
                     if token.type_id == SymbolId::END || !cont {
-                        return Ok(self.synthesize_partial(start, value_stack));
+                        return Ok(None);
                     }
                     source.advance(); // delete the offending token, retry in same state
+                                      // Generic resume hook (issue #94), invoked for every recovering
+                                      // source: a no-op for the plain sources (PreLexed /
+                                      // ContextualRecovering), and the indenter reset for a
+                                      // PostlexContextual source — mirroring Python's fresh
+                                      // `Indenter.process` per `resume_parse`.
+                    source.on_delete();
                 }
             }
         }
     }
 
-    /// Wrap whatever fragments remain on the value stack into a best-effort partial
-    /// tree, used when recovery cannot reach a normal ACCEPT. Not a real derivation
-    /// — a scaffold for editor tooling; the [`RecoveredTree::errors`] list is the
-    /// authoritative record of what went wrong.
-    ///
-    /// [`RecoveredTree::errors`]: crate::error::RecoveredTree::errors
-    fn synthesize_partial(&self, start: Option<&str>, value_stack: Vec<NodeValue>) -> ParseTree {
-        let mut children: Vec<Child> = Vec::new();
-        for value in value_stack {
-            match value {
-                NodeValue::Token(t) => children.push(Child::Token(t)),
-                NodeValue::Tree(t) => children.push(Child::Tree(t)),
-                NodeValue::Inline(cs) => children.extend(cs),
-            }
-        }
-        // A lone fragment needs no synthetic wrapper.
-        if children.len() == 1 {
-            return match children.pop().unwrap() {
-                Child::Tree(t) => ParseTree::Tree(t),
-                Child::Token(t) => ParseTree::Token(t),
-                Child::None => ParseTree::Tree(Tree::new(self.start_name(start), Vec::new())),
-            };
-        }
-        ParseTree::Tree(Tree::new(self.start_name(start), children))
-    }
-
-    /// The name to label a synthesized partial root with: the requested start
-    /// symbol, or the first registered start symbol when none was named.
-    fn start_name(&self, start: Option<&str>) -> String {
-        if let Some(name) = start {
-            return name.to_string();
-        }
-        self.table
-            .start_states
-            .keys()
-            .next()
-            .map(|id| self.table.symbols.name(*id).to_string())
-            .unwrap_or_else(|| "start".to_string())
-    }
-
     /// Recovering parse over a pre-tokenized sequence (basic lexer). See
-    /// [`run_recovering`](Self::run_recovering).
+    /// [`run_recovering`](Self::run_recovering). `Ok(None)` means recovery could
+    /// not reach ACCEPT (no fabricated partial — issue #167).
     pub fn parse_recovering(
         &self,
         tokens: Vec<Token>,
         start: Option<&str>,
         on_error: &mut dyn FnMut(&ParseError) -> bool,
         errors: &mut Vec<ParseError>,
-    ) -> Result<ParseTree, ParseError> {
+    ) -> Result<Option<ParseTree>, ParseError> {
         self.run_recovering(&mut PreLexed::new(tokens), start, on_error, errors)
     }
 
-    /// Recovering parse over the contextual lexer.
+    /// Recovering parse over the **contextual** lexer (issue #166). Unlike the
+    /// basic-lexer recovery path (which pre-lexes the whole stream with the global
+    /// terminal set), this recovers over the contextual token stream: the
+    /// [`ContextualRecovering`] source narrows terminals by parser state at each
+    /// position and falls back to the root (full-terminal) scanner only where the
+    /// per-state scanner refuses — Python Lark's `ContextualLexer.lex` except-branch.
+    /// A root match there is an out-of-context-but-valid token the recovery loop
+    /// deletes; a root miss is an un-lexable character it skips. So a grammar whose
+    /// contextual lexer is load-bearing recovers to the same tree a clean contextual
+    /// parse would build.
+    ///
+    /// [`ContextualRecovering`]: crate::parsers::ContextualRecovering
     pub fn parse_contextual_recovering(
         &self,
         text: &str,
@@ -832,8 +840,13 @@ impl LalrParser {
         start: Option<&str>,
         on_error: &mut dyn FnMut(&ParseError) -> bool,
         errors: &mut Vec<ParseError>,
-    ) -> Result<ParseTree, ParseError> {
-        self.run_recovering(&mut Contextual::new(text, lexer), start, on_error, errors)
+    ) -> Result<Option<ParseTree>, ParseError> {
+        self.run_recovering(
+            &mut ContextualRecovering::new(text, lexer),
+            start,
+            on_error,
+            errors,
+        )
     }
 
     /// Parse a pre-tokenized sequence (basic lexer).
@@ -868,5 +881,56 @@ impl LalrParser {
     ) -> Result<ParseTree, ParseError> {
         let mut source = postlex_contextual_source(text, lexer, postlex, symbols)?;
         self.run(&mut source, start)
+    }
+
+    /// Recovering parse over the contextual lexer **with** a streaming [`Indenter`]
+    /// postlex hook (issue #94, sub-target 1). The streaming indenter runs over the
+    /// recovering contextual stream ([`ContextualRecovering`], issue #166), and the
+    /// shared [`run_recovering`](Self::run_recovering) loop deletes offending tokens
+    /// *downstream* of the INDENT/DEDENT injection — exactly Python Lark's
+    /// `lexer → PostLexConnector(postlex) → parser` wiring, where `on_error`/
+    /// `resume_parse` operate on the post-indenter stream. A deleted token therefore
+    /// never reaches the indenter, so its bracket/indent bookkeeping cannot desync,
+    /// and a contextual-load-bearing grammar recovers to the same tree a clean parse
+    /// would build. An indenter error (e.g. a bad dedent) surfaces as a hard
+    /// [`ParseError`] via [`SourceError::Postlex`], as Python re-raises it.
+    ///
+    /// [`Indenter`]: crate::postlex::Indenter
+    /// [`ContextualRecovering`]: crate::parsers::ContextualRecovering
+    pub fn parse_contextual_postlex_recovering(
+        &self,
+        text: &str,
+        lexer: &ContextualLexer,
+        postlex: &crate::postlex::Indenter,
+        symbols: &SymbolTable,
+        start: Option<&str>,
+        on_error: &mut dyn FnMut(&ParseError) -> bool,
+        errors: &mut Vec<ParseError>,
+    ) -> Result<Option<ParseTree>, ParseError> {
+        let mut source = postlex_contextual_recovering_source(text, lexer, postlex, symbols)?;
+        self.run_recovering(&mut source, start, on_error, errors)
+    }
+
+    /// Recovering parse over the **basic** (global) lexer with a streaming
+    /// [`Indenter`] postlex hook (issue #94, sub-target 1) — the basic-lexer postlex
+    /// driver. A lazy [`BasicRecovering`] source feeds the same streaming indenter +
+    /// per-resume-reset machine the contextual path uses, so both postlex recovery
+    /// paths share the exact Python semantics (`Indenter.process` reset on each
+    /// `resume_parse`), including interleaving char skips with the indenter reset.
+    ///
+    /// [`Indenter`]: crate::postlex::Indenter
+    /// [`BasicRecovering`]: crate::parsers::token_source::BasicRecovering
+    pub fn parse_basic_postlex_recovering(
+        &self,
+        text: &str,
+        lexer: &BasicLexer,
+        postlex: &crate::postlex::Indenter,
+        symbols: &SymbolTable,
+        start: Option<&str>,
+        on_error: &mut dyn FnMut(&ParseError) -> bool,
+        errors: &mut Vec<ParseError>,
+    ) -> Result<Option<ParseTree>, ParseError> {
+        let mut source = postlex_basic_recovering_source(text, lexer, postlex, symbols)?;
+        self.run_recovering(&mut source, start, on_error, errors)
     }
 }

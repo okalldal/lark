@@ -1,5 +1,397 @@
 [
   {
+    "name": "nulltail",
+    "grammar": "\nstart: a\na: X a opt | X\nopt:\nX: /x/\n%ignore \" \"\n",
+    "ambiguity": "resolve",
+    "lexer": "dynamic",
+    "cases": [
+      {
+        "input": "x",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "x x",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "opt",
+                  "children": []
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "x x x",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "tree",
+                      "data": "opt",
+                      "children": []
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "opt",
+                  "children": []
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "x x x x",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        },
+                        {
+                          "type": "tree",
+                          "data": "a",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "X",
+                              "value": "x"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "tree",
+                          "data": "opt",
+                          "children": []
+                        }
+                      ]
+                    },
+                    {
+                      "type": "tree",
+                      "data": "opt",
+                      "children": []
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "opt",
+                  "children": []
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      }
+    ]
+  },
+  {
+    "name": "nulltail",
+    "grammar": "\nstart: a\na: X a opt | X\nopt:\nX: /x/\n%ignore \" \"\n",
+    "ambiguity": "explicit",
+    "lexer": "dynamic",
+    "cases": [
+      {
+        "input": "x",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "x x",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "opt",
+                  "children": []
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "x x x",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        }
+                      ]
+                    },
+                    {
+                      "type": "tree",
+                      "data": "opt",
+                      "children": []
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "opt",
+                  "children": []
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "x x x x",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "a",
+              "children": [
+                {
+                  "type": "token",
+                  "token_type": "X",
+                  "value": "x"
+                },
+                {
+                  "type": "tree",
+                  "data": "a",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "X",
+                      "value": "x"
+                    },
+                    {
+                      "type": "tree",
+                      "data": "a",
+                      "children": [
+                        {
+                          "type": "token",
+                          "token_type": "X",
+                          "value": "x"
+                        },
+                        {
+                          "type": "tree",
+                          "data": "a",
+                          "children": [
+                            {
+                              "type": "token",
+                              "token_type": "X",
+                              "value": "x"
+                            }
+                          ]
+                        },
+                        {
+                          "type": "tree",
+                          "data": "opt",
+                          "children": []
+                        }
+                      ]
+                    },
+                    {
+                      "type": "tree",
+                      "data": "opt",
+                      "children": []
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "opt",
+                  "children": []
+                }
+              ]
+            }
+          ]
+        },
+        "error": null
+      }
+    ]
+  },
+  {
     "name": "overlap",
     "grammar": "\nstart: A B\nA: /a+/\nB: /a+/\n",
     "ambiguity": "resolve",

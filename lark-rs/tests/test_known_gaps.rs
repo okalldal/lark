@@ -96,20 +96,23 @@ fn gap2_explicit_ambig_is_flat_n_way() {
     }
 }
 
-// ─── Gap 3 (#64): Joop-Leo does not linearize nullable-tail right recursion ────
+// ─── Gap 3 (#64, FIXED): Joop-Leo linearizes nullable-tail right recursion ─────
 //
-// Leo (#58) is restricted to STRICT right recursion: the recognized symbol must
-// be the rule's last symbol. A rule whose recursive symbol is followed by a
-// nullable tail — e.g. the dangling-else `if_stmt: "if" c "then" stmt ("else"
-// stmt)?`, or any `a: X a opt | X` with `opt:` nullable — has the recursive `a`
-// NOT last, so `is_quasi_complete` declines and the regular completer runs. The
-// trees are correct, but the forest stays O(n²). This test asserts the forest is
-// linear (≤2.3× per doubling) and FAILS, proving the case is not linearized.
-// Extending Leo to nullable tails is the subtle non-complete-topmost forest case
-// upstream Lark never finished; a deliberate follow-up.
+// Leo (#58) was originally restricted to STRICT right recursion: the recognized
+// symbol had to be the rule's last symbol. A rule whose recursive symbol is
+// followed by a nullable tail — e.g. the dangling-else `if_stmt: "if" c "then"
+// stmt ("else" stmt)?`, or any `a: X a opt | X` with `opt:` nullable — has the
+// recursive `a` NOT last, so `is_quasi_complete` declined and the regular
+// completer ran, leaving the forest O(n²). #64 extended `is_quasi_complete` to
+// admit a nullable tail and taught the Leo SPPF spine reconstruction
+// (`materialize_leo_paths` + `eps_node`) to thread the skipped ε-tail
+// completions through the non-complete topmost item — the subtle case upstream
+// Lark's Leo never finished (lark-parser/lark#397). The forest is now LINEAR
+// (≤2.3× per doubling) AND byte-identical to the non-Leo / Python-Lark ground
+// truth (the `right_rec_nulltail` Earley oracle group). This test is now a
+// positive linearity regression guard.
 #[cfg(feature = "perf-counters")]
 #[test]
-#[ignore = "known gap #64: nullable-tail right recursion is not linearized by Leo (still O(n^2)); by design"]
 fn gap3_nullable_tail_right_recursion_is_linearized() {
     use lark_rs::perf;
 
@@ -135,9 +138,10 @@ fn gap3_nullable_tail_right_recursion_is_linearized() {
         let ratio = w[1] as f64 / w[0] as f64;
         assert!(
             ratio <= 2.3,
-            "nullable-tail right recursion should be linear if Leo covered it, but a \
-             doubling grew the forest {ratio:.2}× ({} → {}) — Leo declines this shape \
-             (recognized symbol is not the rule's last), so it stays O(n²). counts={nodes:?}",
+            "nullable-tail right recursion must stay linear now that Leo covers it (#64), \
+             but a doubling grew the forest {ratio:.2}× ({} → {}) — a regression: the Leo \
+             completer is declining this shape again, or the spine reconstruction is \
+             eagerly expanding every column's path back to O(n²). counts={nodes:?}",
             w[0],
             w[1]
         );

@@ -254,58 +254,207 @@ impl BasicLexer {
     }
 }
 
-impl Lexer for BasicLexer {
-    fn lex(&self, text: &str) -> Result<Vec<Token>, ParseError> {
+/// A running source cursor (byte offset + 1-based line/column), advanced one
+/// matched span or one skipped character at a time. Shared by the eager
+/// [`BasicLexer::lex`] and the recovering [`BasicLexer::lex_recovering`] so the
+/// newline-aware position bookkeeping lives in exactly one place.
+struct LexCursor {
+    pos: usize,
+    line: usize,
+    col: usize,
+}
+
+impl LexCursor {
+    fn new() -> Self {
+        LexCursor {
+            pos: 0,
+            line: 1,
+            col: 1,
+        }
+    }
+
+    /// Advance the cursor over `value` (a matched terminal slice or a skipped
+    /// run of text), tracking newlines.
+    fn feed(&mut self, value: &str) {
+        for ch in value.chars() {
+            if ch == '\n' {
+                self.line += 1;
+                self.col = 1;
+            } else {
+                self.col += 1;
+            }
+        }
+        self.pos += value.len();
+    }
+}
+
+impl BasicLexer {
+    /// Build a [`Token`] for a matched terminal `id`/`value` starting at `start`,
+    /// advancing `cur` past it. Returns `None` when the matched terminal is an
+    /// `%ignore` type (it still advances the cursor, but produces no token).
+    fn make_token(&self, cur: &mut LexCursor, id: SymbolId, value: &str) -> Option<Token> {
+        let start_pos = cur.pos;
+        let start_line = cur.line;
+        let start_col = cur.col;
+        cur.feed(value);
+        if self.ignore.contains(&id) {
+            return None;
+        }
+        Some(Token {
+            type_id: id,
+            type_: self.names[&id].clone(),
+            value: value.to_string(),
+            line: start_line,
+            column: start_col,
+            end_line: cur.line,
+            end_column: cur.col,
+            start_pos,
+            end_pos: cur.pos,
+        })
+    }
+
+    /// Lex the single token the combined scanner matches **exactly** at byte offset
+    /// `pos` (1-based `line`/`col` carry the position into the produced token). The
+    /// returned token may be an `%ignore` terminal — the caller decides whether to
+    /// keep or skip it via [`is_ignored`](Self::is_ignored) — so this does *not*
+    /// advance past ignored runs and never mutates any state. `Err(())` when no
+    /// terminal matches here (an un-lexable character the caller recovers from); the
+    /// caller stops the loop at end of input before calling this.
+    ///
+    /// This is the lazy, one-token-at-a-time seam the recovering basic-lexer postlex
+    /// source ([`crate::parsers::BasicRecovering`]) drives, so a char skip can be
+    /// interleaved with the streaming indenter + parser resume exactly as Python
+    /// Lark's lazy `lexer → PostLexConnector → parser` pipeline does — rather than
+    /// the eager [`lex_recovering`](Self::lex_recovering) which skips every
+    /// un-lexable character up front, before the indenter runs. It mirrors
+    /// [`ContextualLexer::next_token`](ContextualLexer::next_token)'s contract: no
+    /// state, ignored tokens surfaced to the caller.
+    ///
+    /// [`lex_recovering`]: Self::lex_recovering
+    pub fn next_token_at(
+        &self,
+        text: &str,
+        pos: usize,
+        line: usize,
+        col: usize,
+    ) -> Result<Token, ()> {
+        match self.scanner.match_at(text, pos) {
+            Some((id, value)) => {
+                let mut cur = LexCursor { pos, line, col };
+                let start_pos = cur.pos;
+                let start_line = cur.line;
+                let start_col = cur.col;
+                cur.feed(value);
+                Ok(Token {
+                    type_id: id,
+                    type_: self.names[&id].clone(),
+                    value: value.to_string(),
+                    line: start_line,
+                    column: start_col,
+                    end_line: cur.line,
+                    end_column: cur.col,
+                    start_pos,
+                    end_pos: cur.pos,
+                })
+            }
+            None => Err(()),
+        }
+    }
+
+    /// Whether `id` is an `%ignore` terminal (whitespace/comments the parser skips).
+    /// Mirrors [`ContextualLexer::is_ignored`](ContextualLexer::is_ignored) for the
+    /// lazy basic-recovering source.
+    pub fn is_ignored(&self, id: SymbolId) -> bool {
+        self.ignore.contains(&id)
+    }
+
+    /// Lex with character-level error recovery (issue #93). Mirrors [`lex`] but,
+    /// at an un-lexable position (no terminal matches), records an
+    /// [`UnexpectedCharacter`] error, consults `on_error`, and — if it returns
+    /// `true` — skips **exactly one character** and resumes, rather than aborting.
+    /// This is the lexer-side analogue of Python Lark's `on_error` loop, whose
+    /// `UnexpectedCharacters` branch feeds one char forward
+    /// (`s.line_ctr.feed(text[p:p+1])`) and resumes: the handler therefore fires
+    /// once per skipped character (two consecutive bad chars = two invocations),
+    /// and every skip is appended to `errors`.
+    ///
+    /// Returns the surviving token stream (terminated by `$END`); the caller then
+    /// drives the token-level recovery loop over it, so token-level and
+    /// character-level deletions accumulate into the same `errors` list. If
+    /// `on_error` returns `false` on a skip, lexing stops there and the tokens
+    /// collected so far are returned (with `$END` appended at that position) —
+    /// the lexer equivalent of the token loop's "stop with the partial".
+    ///
+    /// [`lex`]: BasicLexer::lex
+    /// [`UnexpectedCharacter`]: crate::error::ParseError::UnexpectedCharacter
+    pub fn lex_recovering(
+        &self,
+        text: &str,
+        on_error: &mut dyn FnMut(&ParseError) -> bool,
+        errors: &mut Vec<ParseError>,
+    ) -> Vec<Token> {
         let mut tokens = Vec::new();
-        let mut pos = 0;
-        let mut line = 1usize;
-        let mut col = 1usize;
+        let mut cur = LexCursor::new();
 
-        while pos < text.len() {
-            match self.scanner.match_at(text, pos) {
+        while cur.pos < text.len() {
+            match self.scanner.match_at(text, cur.pos) {
                 Some((id, value)) => {
-                    let start_pos = pos;
-                    let start_line = line;
-                    let start_col = col;
-
-                    for ch in value.chars() {
-                        if ch == '\n' {
-                            line += 1;
-                            col = 1;
-                        } else {
-                            col += 1;
-                        }
-                    }
-                    pos += value.len();
-
-                    if !self.ignore.contains(&id) {
-                        tokens.push(Token {
-                            type_id: id,
-                            type_: self.names[&id].clone(),
-                            value: value.to_string(),
-                            line: start_line,
-                            column: start_col,
-                            end_line: line,
-                            end_column: col,
-                            start_pos,
-                            end_pos: pos,
-                        });
+                    if let Some(tok) = self.make_token(&mut cur, id, value) {
+                        tokens.push(tok);
                     }
                 }
                 None => {
-                    let ch = text[pos..].chars().next().unwrap();
+                    let ch = text[cur.pos..].chars().next().unwrap();
+                    let err = ParseError::UnexpectedCharacter {
+                        ch,
+                        line: cur.line,
+                        col: cur.col,
+                        pos: cur.pos,
+                        expected: "any token".to_string(),
+                    };
+                    let cont = on_error(&err);
+                    errors.push(err);
+                    if !cont {
+                        break;
+                    }
+                    // Skip exactly one character and resume, as Python advances
+                    // its line counter by `text[p:p+1]`.
+                    cur.feed(&text[cur.pos..cur.pos + ch.len_utf8()]);
+                }
+            }
+        }
+
+        tokens.push(Token::end().with_position(cur.line, cur.col, cur.pos, cur.pos));
+        tokens
+    }
+}
+
+impl Lexer for BasicLexer {
+    fn lex(&self, text: &str) -> Result<Vec<Token>, ParseError> {
+        let mut tokens = Vec::new();
+        let mut cur = LexCursor::new();
+
+        while cur.pos < text.len() {
+            match self.scanner.match_at(text, cur.pos) {
+                Some((id, value)) => {
+                    if let Some(tok) = self.make_token(&mut cur, id, value) {
+                        tokens.push(tok);
+                    }
+                }
+                None => {
+                    let ch = text[cur.pos..].chars().next().unwrap();
                     return Err(ParseError::UnexpectedCharacter {
                         ch,
-                        line,
-                        col,
-                        pos,
+                        line: cur.line,
+                        col: cur.col,
+                        pos: cur.pos,
                         expected: "any token".to_string(),
                     });
                 }
             }
         }
 
-        tokens.push(Token::end().with_position(line, col, pos, pos));
+        tokens.push(Token::end().with_position(cur.line, cur.col, cur.pos, cur.pos));
         Ok(tokens)
     }
 }
@@ -326,6 +475,13 @@ pub struct ContextualLexer {
     state_to_scanner: HashMap<usize, usize>,
     /// One entry per distinct terminal set, built lazily on first use.
     scanners: Vec<LazyScanner>,
+    /// The root (fallback) scanner over the **full** terminal set, built lazily on
+    /// first use — Python Lark's `ContextualLexer.root_lexer`. It is consulted only
+    /// during error recovery (see [`Self::next_root_token`]): when the per-state
+    /// scanner refuses a position, the root scanner says whether the input there is
+    /// an out-of-context-but-valid *token* (deletable) or a genuinely un-lexable
+    /// character. A normal (non-recovering) parse never touches it.
+    root: LazyScanner,
     /// Owned terminal definitions the lazy builds draw from.
     terminals: HashMap<SymbolId, TerminalDef>,
     global_flags: u32,
@@ -405,6 +561,17 @@ impl ContextualLexer {
             ScannerBackend::build(&all, conf.global_flags, conf.backend)?;
         }
 
+        // The root (fallback) scanner over the full terminal set, built lazily —
+        // Python Lark's `root_lexer`. Recovery consults it when a per-state scanner
+        // refuses a position (see `next_root_token`); a normal parse never builds it.
+        let mut root_ids: Vec<SymbolId> = conf.terminals.iter().map(|(id, _)| *id).collect();
+        root_ids.sort_unstable();
+        root_ids.dedup();
+        let root = LazyScanner {
+            term_ids: root_ids,
+            cell: std::cell::OnceCell::new(),
+        };
+
         let mut key_to_idx: HashMap<Vec<SymbolId>, usize> = HashMap::new();
         let mut scanners: Vec<LazyScanner> = Vec::new();
         let mut state_to_scanner = HashMap::new();
@@ -433,6 +600,7 @@ impl ContextualLexer {
         Ok(ContextualLexer {
             state_to_scanner,
             scanners,
+            root,
             terminals,
             global_flags: conf.global_flags,
             backend: conf.backend,
@@ -444,6 +612,33 @@ impl ContextualLexer {
     #[inline]
     pub fn is_ignored(&self, id: SymbolId) -> bool {
         self.ignore.contains(&id)
+    }
+
+    /// Build a [`Token`] for a `(id, value)` the scanner matched starting at `pos`,
+    /// with newline-aware end position. Shared by the per-state [`Self::next_token`]
+    /// and the root-fallback [`Self::next_root_token`] so the two cannot drift on
+    /// position bookkeeping.
+    fn build_token(&self, id: SymbolId, value: &str, pos: usize, line: usize, col: usize) -> Token {
+        let (mut end_line, mut end_column) = (line, col);
+        for ch in value.chars() {
+            if ch == '\n' {
+                end_line += 1;
+                end_column = 1;
+            } else {
+                end_column += 1;
+            }
+        }
+        Token {
+            type_id: id,
+            type_: self.names[&id].clone(),
+            value: value.to_string(),
+            line,
+            column: col,
+            end_line,
+            end_column,
+            start_pos: pos,
+            end_pos: pos + value.len(),
+        }
     }
 
     /// Lex the next token at `pos` given the current parser state.
@@ -467,29 +662,7 @@ impl ContextualLexer {
         };
 
         if let Some((id, value)) = scanner.match_at(text, pos) {
-            let end = pos + value.len();
-            // End position is char-based and newline-aware: a token spanning a
-            // newline advances the line and resets the column.
-            let (mut end_line, mut end_column) = (line, col);
-            for ch in value.chars() {
-                if ch == '\n' {
-                    end_line += 1;
-                    end_column = 1;
-                } else {
-                    end_column += 1;
-                }
-            }
-            return Ok(Some(Token {
-                type_id: id,
-                type_: self.names[&id].clone(),
-                value: value.to_string(),
-                line,
-                column: col,
-                end_line,
-                end_column,
-                start_pos: pos,
-                end_pos: end,
-            }));
+            return Ok(Some(self.build_token(id, value, pos, line, col)));
         }
 
         if pos >= text.len() {
@@ -504,6 +677,30 @@ impl ContextualLexer {
             pos,
             expected: "valid token for this state".to_string(),
         })
+    }
+
+    /// Match the next token at `pos` against the **root** (full) terminal set —
+    /// Python Lark's `ContextualLexer.lex` exception branch, which falls back to
+    /// `root_lexer.next_token` when the per-state lexer refuses a position. Used
+    /// only during error recovery (see the contextual recovery source): a `Some`
+    /// here means the input at `pos` is an out-of-context-but-valid token (the
+    /// parser will surface it as an `UnexpectedToken` the recovery loop can delete),
+    /// while `None` means even the full set can't lex `pos` — a genuinely un-lexable
+    /// character to be skipped. Unlike [`Self::next_token`] this never returns an
+    /// `$END` token or an error; the caller handles both end-of-input and the miss.
+    pub fn next_root_token(
+        &self,
+        text: &str,
+        pos: usize,
+        line: usize,
+        col: usize,
+    ) -> Option<Token> {
+        let scanner = self
+            .root
+            .get_or_build(&self.terminals, self.global_flags, self.backend);
+        scanner
+            .match_at(text, pos)
+            .map(|(id, value)| self.build_token(id, value, pos, line, col))
     }
 }
 

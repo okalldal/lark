@@ -31,13 +31,17 @@
 //! **Arm 2 — `ambiguity='explicit'` forest walk.** The issue *guessed* the culprit
 //! was `expand_packed`'s `l = list.clone()` cartesian-product loop. Measuring it
 //! **disproves that**: that loop is *linear* even on a transparent left-recursive
-//! helper (its prefix is bounded by the rule arity). The genuine quadratic is the
+//! helper (its prefix is bounded by the rule arity). The genuine quadratic was the
 //! per-symbol-node derivation-value rebuild in `symbol_derivations` — a transparent
-//! helper materializes Inlines of size 1,2,…,n = O(n²) (exactly the cost #55
-//! streamed away in resolve mode, here still present). We gate **both**: the named
-//! loop stays linear (the committed disproof) and the real cost stays within its
-//! quadratic ceiling (characterization). The streaming fix is a tracked follow-up;
-//! this PR does not claim it is fixed — being explicit about that is the whole point.
+//! helper materialized Inlines of size 1,2,…,n = O(n²) (exactly the cost #55
+//! streamed away in resolve mode). #59 ports that streaming to the explicit walk: an
+//! *unambiguous* transparent helper is spliced into a single shared buffer in one
+//! pass (the `Stream*` frames, the explicit reuse of resolve's `Splice`/`AppendRule`)
+//! instead of re-materializing each growing prefix, so the node-child count is now
+//! O(total children) = flat per byte. We gate **both**: the named loop stays linear
+//! (the committed disproof) and the real cost is now flat per byte (the #59 fix);
+//! the cartesian product is preserved for genuine ambiguity, which the unchanged
+//! `_ambig` oracles + compliance bank pin byte-for-byte.
 
 use lark_rs::{Ambiguity, Lark, LarkOptions, LexerType, ParserAlgorithm};
 
@@ -266,27 +270,37 @@ fn earley_scaling_is_pinned() {
         }
     }
 
-    // ── Arm 2 (real cost, characterized): node rebuild ≤ O(n²) ────────────────
-    // The genuine explicit super-linearity: a transparent helper materializes
+    // ── Arm 2 (fixed, #59): node-child materialization is FLAT per byte ───────
+    // The genuine explicit super-linearity used to be the per-symbol-node
+    // derivation-value rebuild: a transparent left-recursive helper materialized
     // Inlines of size 1,2,…,n = O(n²) derivation children (what #55 streamed away
-    // in resolve mode, still present in explicit). Gate the quadratic ceiling so a
-    // regression to worse-than-quadratic is caught; the streaming fix that would
-    // make this linear is a tracked follow-up. Measured ~0.5·n².
+    // in resolve mode). #59 ports that streaming to the explicit walk — an
+    // unambiguous transparent helper is now spliced into a single shared buffer in
+    // one pass instead of re-materializing every growing prefix, so the total
+    // node-child materialization is O(total children) = O(n), i.e. flat per byte.
+    // The cartesian product is preserved for *genuine* ambiguity (the part that
+    // legitimately fans out); only the single-derivation helper case streams. We
+    // tighten the former `≤ n²` ceiling to a flat-per-byte envelope: a relapse to
+    // the quadratic prefix rebuild makes the per-byte count climb and trips this.
     {
         let p = earley(LIST_GRAMMAR, Ambiguity::Explicit);
+        let mut per_byte = Vec::new();
         for &n in &[128usize, 256, 512, 1024] {
             perf::reset();
             p.parse(&gen_x(n))
                 .expect("list input must parse (explicit)");
             let children = perf::explicit_node_children();
-            assert!(
-                children <= (n as u64) * (n as u64),
-                "Arm 2 residual regression: explicit node-child materialization \
-                 {children} at n={n} exceeds the n² ceiling {} — the explicit walk \
-                 got worse than quadratic",
-                (n as u64) * (n as u64)
-            );
+            per_byte.push((n, children as f64 / n as f64));
         }
+        let first = per_byte.first().unwrap().1;
+        let last = per_byte.last().unwrap().1;
+        assert!(
+            last <= first * 1.6,
+            "Arm 2 (#59) regression: explicit node-child materialization is NOT \
+             flat per byte — grew from {first:.3} to {last:.3} children/byte across \
+             the sweep (per-byte rows: {per_byte:?}); the transparent-helper \
+             derivation rebuild is super-linear again (the streaming splice broke)"
+        );
     }
 }
 

@@ -30,6 +30,18 @@ pub fn make_lalr(grammar_text: &str) -> Lark {
 /// lexer — the contextual lexer narrows terminals by LALR state, which Earley has
 /// none of.
 pub fn make_earley(grammar_text: &str, ambiguity: Ambiguity) -> Result<Lark, LarkError> {
+    make_earley_mp(grammar_text, ambiguity, false)
+}
+
+/// Like [`make_earley`] but lets the caller pick `maybe_placeholders` — the Earley
+/// oracle groups that exercise `[...]` optional `None` slots are generated with it
+/// on (e.g. the #59 `maybe_transparent` group), and the Rust replay must match the
+/// option the oracle was built under.
+pub fn make_earley_mp(
+    grammar_text: &str,
+    ambiguity: Ambiguity,
+    maybe_placeholders: bool,
+) -> Result<Lark, LarkError> {
     Lark::new(
         grammar_text,
         LarkOptions {
@@ -37,6 +49,7 @@ pub fn make_earley(grammar_text: &str, ambiguity: Ambiguity) -> Result<Lark, Lar
             lexer: LexerType::Basic,
             ambiguity,
             start: vec!["start".to_string()],
+            maybe_placeholders,
             ..Default::default()
         },
     )

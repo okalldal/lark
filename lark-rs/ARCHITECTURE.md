@@ -143,7 +143,7 @@ hierarchy (`GrammarError` at build time, `ParseError` at parse time).
 | Area | Where | Note |
 |---|---|---|
 | Significant whitespace | `postlex.rs` | the `Indenter` (INDENT/DEDENT injection) |
-| Standalone codegen | `standalone/` | bake a grammar into a self-contained `.rs` |
+| Standalone codegen | `standalone/` | the one `ParseTable → Rust` emitter (`generate`/`generate_standalone`); two front-ends bake through it — the `generate-parser` CLI (to a file) and `include_lark!` (inline, #85) |
 | Perf instrumentation | `perf.rs` | deterministic work counters ([ADR-0007](docs/decisions/0007-deterministic-perf-counters.md)) |
 | Distribution bindings | `python/`, `wasm/`, `lark_h/`, `lark_proc/` | PyO3, WASM, C API, proc-macro (separate crates) |
 

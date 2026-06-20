@@ -382,6 +382,15 @@ start: "(" inner ")"
 #                            `a: X a |` is valid Lark but lark-rs's loader does not
 #                            accept it yet — a separate gap — so we use a named
 #                            empty rule, which both engines accept.)
+#   * right_rec_nulltail   — the recursive symbol is followed by a NULLABLE tail
+#                            (`a: X a opt | X`, `opt:`), the dangling-else shape:
+#                            the recursive `a` is NOT the rule's last symbol, so
+#                            advancing it lands NON-complete (`a: X a . opt`) and
+#                            the Leo spine reconstruction must thread the ε-`opt`
+#                            completion through every level (#64 — the case
+#                            upstream Lark's Leo never finished). The tree is the
+#                            non-Leo ground truth; Leo must reproduce it byte-for-
+#                            byte while linearizing the forest.
 #   * right_rec_transparent— recursion through a transparent `_tail` helper, whose
 #                            node is inlined away: the tree is identical to
 #                            right_rec, so the Leo path-reconstruction must rebuild
@@ -404,6 +413,68 @@ EARLEY_RIGHT_REC_NULLABLE_GRAMMAR = r"""
 start: a
 a: X a | empty
 empty:
+X: "x"
+"""
+
+EARLEY_RIGHT_REC_NULLTAIL_GRAMMAR = r"""
+start: a
+a: X a opt | X
+opt:
+X: "x"
+"""
+
+# An OPTIONAL (nullable-but-not-ε-only) tail: `opt: Y |` derives ε OR a real token.
+# This is the genuine dangling-else shape, and the hard case: the Leo path must
+# NOT force the tail to ε — `"xxy"` parses as the inner `a` carrying `opt -> Y`,
+# while `"x"` / `"xxx"` take the ε tail. If the Leo recognizer collapses the tail
+# to ε unconditionally, the non-ε derivation becomes unreachable and `"xxy"` is
+# wrongly rejected (#64 correctness pin).
+EARLEY_RIGHT_REC_OPTTAIL_GRAMMAR = r"""
+start: a
+a: X a opt | X
+opt: Y |
+X: "x"
+Y: "y"
+"""
+
+# The textbook dangling-else via EBNF `(ELSE stmt)?` — the optional tail lowers to
+# a nullable helper that can ALSO derive `ELSE stmt`, so it is nullable but NOT
+# ε-only. Leo must decline (the regular completer handles it), and every nesting
+# must parse + shape correctly. The #64 issue notes this shape is already linear
+# (its base case anchors the recursion), so declining costs nothing.
+EARLEY_DANGLING_ELSE_GRAMMAR = r"""
+start: stmt
+stmt: IF stmt (ELSE stmt)? | OTHER
+IF: "i"
+ELSE: "e"
+OTHER: "o"
+"""
+
+# A multi-symbol nullable tail (`opt opt2`, both ε): the Leo spine reconstruction
+# must thread *two* ε-completions per level, advancing through two intermediate
+# binarized nodes before reaching the completed `a`. Pins that `materialize_leo_
+# paths` walks the whole tail, not just the first nullable symbol (#64).
+EARLEY_RIGHT_REC_NULLTAIL2_GRAMMAR = r"""
+start: a
+a: X a opt opt2 | X
+opt:
+opt2:
+X: "x"
+"""
+
+# Directly self-recursive START (`start: X start | X`), strict and with a
+# nullable tail. The Leo `start_id` guard refuses to special-case a recursion
+# that re-enters the start symbol (matching Python's `is_quasi_complete`), so
+# these must fall back to the regular completer and still produce the right
+# right-nested tree — the #64 guard rewrite must not break this fallback.
+EARLEY_RIGHT_REC_START_GRAMMAR = r"""
+start: X start | X
+X: "x"
+"""
+
+EARLEY_RIGHT_REC_START_NULLTAIL_GRAMMAR = r"""
+start: X start opt | X
+opt:
 X: "x"
 """
 
@@ -459,6 +530,30 @@ EARLEY_AMBIG_FLAT_PRODUCT_GRAMMAR = r"""
 !a: "y" a | a "y" | "y"
 """
 
+# ── maybe_placeholders × a transparent helper, explicit walk (#59) ─────────────
+# A transparent rule (`_t`) carrying a `maybe_placeholders` optional `[B]` — when
+# absent, the empty `[...]` contributes a `None` placeholder slot. This pins the
+# #59 streaming fix: a single-derivation transparent child distributed into its
+# parent is now spliced in one pass, and that splice MUST still emit the rule's
+# rule-level placeholder / trailing-`None` slots (the resolve `SpliceTail` tail)
+# — dropping them silently diverged from this oracle (regression that motivated
+# routing the stream through `Splice`, not bare `AppendRule`). `_t: A [B]` puts
+# the optional at the *end* (the trailing-None case the bug dropped); the `+`
+# variant exercises the same on a left-recursive transparent spine.
+EARLEY_MAYBE_TRANSPARENT_GRAMMAR = r"""
+start: _t
+_t: A [B]
+A: "a"
+B: "b"
+"""
+
+EARLEY_MAYBE_TRANSPARENT_PLUS_GRAMMAR = r"""
+start: _t+
+_t: A [B]
+A: "a"
+B: "b"
+"""
+
 # (name, grammar, [(input, should_parse)])
 EARLEY_GRAMMARS = [
     ("unambiguous", EARLEY_UNAMBIGUOUS_GRAMMAR, [
@@ -492,6 +587,46 @@ EARLEY_GRAMMARS = [
         ("xx",  True),
         ("xxx", True),
     ]),
+    ("right_rec_nulltail", EARLEY_RIGHT_REC_NULLTAIL_GRAMMAR, [
+        ("x",    True),
+        ("xx",   True),
+        ("xxx",  True),
+        ("xxxx", True),
+        ("",     False),
+    ]),
+    ("right_rec_nulltail2", EARLEY_RIGHT_REC_NULLTAIL2_GRAMMAR, [
+        ("x",    True),
+        ("xx",   True),
+        ("xxx",  True),
+        ("xxxx", True),
+        ("",     False),
+    ]),
+    ("right_rec_opttail", EARLEY_RIGHT_REC_OPTTAIL_GRAMMAR, [
+        ("x",    True),
+        ("xxy",  True),
+        ("xxxy", True),
+        ("xxx",  True),
+        ("",     False),
+    ]),
+    ("dangling_else", EARLEY_DANGLING_ELSE_GRAMMAR, [
+        ("o",     True),
+        ("io",    True),
+        ("ioeo",  True),
+        ("iioeo", True),
+        ("",      False),
+    ]),
+    ("right_rec_start", EARLEY_RIGHT_REC_START_GRAMMAR, [
+        ("x",    True),
+        ("xx",   True),
+        ("xxx",  True),
+        ("",     False),
+    ]),
+    ("right_rec_start_nulltail", EARLEY_RIGHT_REC_START_NULLTAIL_GRAMMAR, [
+        ("x",    True),
+        ("xx",   True),
+        ("xxx",  True),
+        ("",     False),
+    ]),
     ("right_rec_transparent", EARLEY_RIGHT_REC_TRANSPARENT_GRAMMAR, [
         ("x",   True),
         ("xx",  True),
@@ -523,18 +658,36 @@ EARLEY_GRAMMARS = [
     ]),
 ]
 
+# Groups that must be built with `maybe_placeholders=True` (the rest use False).
+# (name, grammar, [(input, should_parse)])
+EARLEY_MAYBE_GRAMMARS = [
+    ("maybe_transparent", EARLEY_MAYBE_TRANSPARENT_GRAMMAR, [
+        ("a",  True),   # `[B]` absent → trailing `None` slot
+        ("ab", True),   # `[B]` present
+    ]),
+    ("maybe_transparent_plus", EARLEY_MAYBE_TRANSPARENT_PLUS_GRAMMAR, [
+        ("a",   True),
+        ("ab",  True),
+        ("aa",  True),  # two transparent helpers, each contributing a trailing slot
+        ("aab", True),
+    ]),
+]
+
 
 def generate_earley():
     print("Generating Earley + SPPF oracles (resolve + explicit ambiguity)...")
     groups = []
-    for name, grammar, cases in EARLEY_GRAMMARS:
+    catalog = [(g, False) for g in EARLEY_GRAMMARS] + [
+        (g, True) for g in EARLEY_MAYBE_GRAMMARS
+    ]
+    for (name, grammar, cases), maybe_placeholders in catalog:
         for ambiguity in ("resolve", "explicit"):
             built = []
             for inp, should_parse in cases:
                 try:
                     lark = Lark(grammar, parser="earley", lexer="basic",
                                 ambiguity=ambiguity, start="start",
-                                maybe_placeholders=False)
+                                maybe_placeholders=maybe_placeholders)
                     tree = lark.parse(inp)
                     ok, payload = True, tree_to_dict(tree)
                 except Exception as e:
@@ -553,6 +706,7 @@ def generate_earley():
                 "grammar": grammar,
                 "ambiguity": ambiguity,
                 "lexer": "basic",
+                "maybe_placeholders": maybe_placeholders,
                 "cases": built,
             })
     save_oracle("earley", "cases", groups)
@@ -612,8 +766,27 @@ NAME: /[a-z]+/
 %ignore " "
 """
 
+# Nullable-tail right recursion under the DYNAMIC lexer with `%ignore` (#64). The
+# ignored spaces between the `x`s force the dynamic scanner's `%ignore` carry-over
+# to run through `materialize_leo_paths` — the same Leo spine reconstruction the
+# basic lexer uses, but reached via a carried completed item. Pins that the
+# nullable-tail ε-threading is correct on the dynamic path too.
+DYN_NULLTAIL_GRAMMAR = r"""
+start: a
+a: X a opt | X
+opt:
+X: /x/
+%ignore " "
+"""
+
 # (name, grammar, lexer, [(input, should_parse)])
 EARLEY_DYNAMIC_GRAMMARS = [
+    ("nulltail", DYN_NULLTAIL_GRAMMAR, "dynamic", [
+        ("x", True),
+        ("x x", True),
+        ("x x x", True),
+        ("x x x x", True),
+    ]),
     ("overlap", DYN_OVERLAP_GRAMMAR, "dynamic", [
         ("aa", False),    # greedy A eats everything → B starves
         ("aaa", False),
@@ -703,6 +876,13 @@ def save_oracle(suite, name, data):
 # lark-rs intentionally returns a best-effort partial tree instead of aborting
 # (the issue's "produce a partial tree on failure"), so the Rust test only checks
 # that it recovered (non-empty errors), not the tree shape.
+#
+# Character-level recovery (issue #93): an un-lexable position (no terminal matches,
+# e.g. a stray `@`/`#`) is also recoverable. Python's `on_error` loop has an
+# `UnexpectedCharacters` branch that feeds exactly one char forward
+# (`s.line_ctr.feed(text[p:p+1])`) and resumes — so the handler fires once per
+# *skipped character* (two consecutive bad chars = two invocations). Both the
+# character-level skips and the token-level deletions are counted in `error_count`.
 
 RECOVERY_CASES = [
     "1 + 2",          # clean parse, no recovery
@@ -712,6 +892,13 @@ RECOVERY_CASES = [
     "+ 1 + 2",        # leading '+' -> delete it
     "1 + 2 3 + 4",    # stray NUMBER mid-stream -> delete it
     "1 + 2 +",        # trailing '+' -> premature EOF, Python re-raises
+    # ─── Character-level recovery (issue #93): un-lexable positions ───
+    "1 + @ 2",        # stray '@' mid-stream -> skip 1 char, then 1+2 parses
+    "@ 1 + 2",        # leading un-lexable char -> skip it, then 1+2 parses
+    "1 + 2 @",        # trailing un-lexable char -> skip it, sum stays valid
+    "#1 + 2",         # a different un-lexable char ('#') -> skip it
+    "1 @@ 2",         # two consecutive bad chars -> 2 char skips (+ stray NUMBER)
+    "1 @ + 2",        # un-lexable then a misplaced '+' -> char skip recovers the rest
 ]
 
 
@@ -748,6 +935,60 @@ def generate_recovery():
                 "tree": None,
             })
     save_oracle("recovery", "cases", results)
+
+
+# ─── Contextual-lexer error recovery (issue #166) ────────────────────────────
+#
+# The `recovery_contextual` grammar's AWORD/BWORD terminals share one pattern but
+# are valid only in disjoint parser states, so the contextual lexer is load-bearing:
+# the basic/global lexer would retype every word to a single terminal and fail to
+# parse `[...] {...}` at all. We therefore build with `lexer='contextual'` and
+# capture Python's `on_error` recovery over the contextual stream — exercising its
+# `ContextualLexer.lex` root-lexer fallback (a stray `}` inside `[...]` is an
+# out-of-context-but-valid *token* it deletes; a stray digit is un-lexable even by
+# the root set, so it is skipped one character at a time). lark-rs must match this
+# contextual recovery (issue #166), not the basic-lexer recovery that diverges.
+
+RECOVERY_CONTEXTUAL_CASES = [
+    "[foo bar] {baz qux}",   # clean parse, no recovery
+    "[foo 1 bar] {baz}",     # stray un-lexable digit -> 1 char skip, then parses
+    "[foo } bar] {baz}",     # stray '}' inside [...] -> root-lexer token, deleted
+    "[foo bar] {baz @ qux}", # stray '@' inside {...} -> un-lexable, 1 char skip
+    "[foo {  bar] {baz}",    # stray '{' inside [...] -> root-lexer token, deleted
+]
+
+
+def generate_recovery_contextual():
+    print("Generating contextual-lexer error-recovery oracles (#166)...")
+    grammar = load_grammar("recovery_contextual")
+    results = []
+    for inp in RECOVERY_CONTEXTUAL_CASES:
+        # `lexer='contextual'`: the contextual lexer is load-bearing here (AWORD and
+        # BWORD overlap), and Python recovers over it via its root-lexer fallback.
+        lark = Lark(grammar, parser="lalr", lexer="contextual", start="start",
+                    maybe_placeholders=False)
+        count = {"n": 0}
+
+        def on_error(e):
+            count["n"] += 1
+            return True  # delete the offending token / skip the un-lexable char
+
+        try:
+            tree = lark.parse(inp, on_error=on_error)
+            results.append({
+                "input": inp,
+                "recovered": True,
+                "error_count": count["n"],
+                "tree": tree_to_dict(tree),
+            })
+        except Exception:
+            results.append({
+                "input": inp,
+                "recovered": False,
+                "error_count": count["n"],
+                "tree": None,
+            })
+    save_oracle("recovery_contextual", "cases", results)
 
 
 def generate_arithmetic():
@@ -1422,6 +1663,146 @@ def generate_indenter():
                     run_group(name, "lalr", "contextual", open_types, close_types, cases))
 
 
+# ─── Indenter / postlex error recovery (issue #94, sub-target 1) ─────────────
+#
+# Extends single-token-deletion recovery to the LALR + Indenter (postlex) path.
+# Python Lark wires `lexer → PostLexConnector(postlex) → parser`, so `on_error`/
+# `resume_parse` operate on the *post-indenter* token stream: the Indenter injects
+# INDENT/DEDENT over the clean lex, and token-deletion recovery happens DOWNSTREAM
+# of that injection (a deleted token never reaches the indenter, so its
+# bracket/indent bookkeeping cannot desync). lark-rs mirrors that ordering exactly:
+# lex (with char-skip recovery) → Indenter::process over the survivors → the
+# recovering LALR loop over the indented stream.
+#
+# Each case captures, with `on_error=lambda e: True`, the tree Python recovers to
+# and how many times the handler fired (= deleted tokens + skipped chars). A case
+# Python re-raises on (premature `$END`, or a `DedentError` the Indenter itself
+# raises before any parser error) is recorded `recovered: false`; the Rust test
+# pins `tree: None` there (no fabricated derivation — issue #167), and for an
+# Indenter-raised error that recovery never even begins on, `error_count: 0`.
+#
+# (grammar_file, open_paren_types, close_paren_types, [input, ...])
+INDENTER_RECOVERY_GROUPS = [
+    ("indent", [], [], [
+        "a\n",                       # clean: no recovery
+        "if x:\n    a\n",            # clean block
+        "a a\n",                     # stray NAME on one line -> delete it
+        "if x:\n    a\nb b\nc\n",    # stray NAME after a dedent -> delete it
+        "if x:\n    a\n    b\nc\n",  # clean nested block + dedent
+        "if x:\n    a a\n    b\n",   # stray NAME inside a block -> EOF re-raise
+        "a @ b\n",                   # un-lexable char (skip) + stray NAME (delete)
+        # Un-lexable char *inside an indented block*: the char-skip resume re-runs
+        # the Indenter from indent_level=[0] (Python routes UnexpectedCharacters
+        # through resume_parse → a fresh Indenter.process), so the block can't
+        # complete and recovery re-raises at $END. Pins that skip_char resets the
+        # indenter, not just token deletion.
+        "if x:\n    @a\n    b\nc\n",
+        "if x:\n    a\n    @\n    b\nc\n",
+        "if x:\n    a\n   b\n",      # Indenter DedentError: re-raised before recovery
+    ]),
+    ("indent_paren", ["LPAR"], ["RPAR"], [
+        "f (x)\n",                   # clean paren group
+        "f (x) (y)\n",               # stray second group -> delete LPAR NAME RPAR
+        "f (\n   x\n)\n",            # newline inside parens ignored (clean)
+        "f (x) y\n",                 # stray NAME after the group -> delete it
+    ]),
+]
+
+# Indenter recovery where the *contextual* lexer's state-narrowing is load-bearing
+# (the `indent_context` grammar, #67): NAME and VALUE share a regex but are split
+# by parser state, so the *basic* lexer can't even parse a clean `x = y`. Recovery
+# must run over the contextual stream (issue #166's root-lexer fallback) *with* the
+# streaming indenter, or it would mis-tokenize VALUE as NAME and diverge — this is
+# the case that the basic-lexer recovery path cannot serve. Generated under
+# `lexer='contextual'` only.
+#
+# (grammar_file, open_paren_types, close_paren_types, [input, ...])
+INDENTER_RECOVERY_CONTEXTUAL_GROUPS = [
+    ("indent_context", [], [], [
+        "x = y\n",                       # clean top-level assign (VALUE needs state)
+        "x = y z\n",                     # stray VALUE -> delete it (contextual-only)
+        "x x = y\n",                     # stray leading NAME -> delete it
+        "if a:\n    x = y\n    p q\nz = w\n",  # stray inside a block -> EOF re-raise
+        "if a:\n    x = y\nz = w\n",     # clean block + dedent
+    ]),
+]
+
+
+def generate_indenter_recovery():
+    from lark.indenter import Indenter
+
+    print("Generating Indenter / postlex error-recovery oracles (#94)...")
+
+    def run_group(name, lexer_type, open_types, close_types, inputs):
+        grammar = load_grammar(name)
+
+        class _TI(Indenter):
+            NL_type = "_NL"
+            OPEN_PAREN_types = open_types
+            CLOSE_PAREN_types = close_types
+            INDENT_type = "_INDENT"
+            DEDENT_type = "_DEDENT"
+            tab_len = 8
+
+        built = []
+        for inp in inputs:
+            # The `indent`/`indent_paren` groups generate against 'basic' — basic and
+            # contextual lexers produce byte-identical recovery there (the contextual
+            # lexer's root-lexer fallback yields the same global stream), so 'basic'
+            # makes the parity explicit (as `generate_recovery` does). The
+            # `indent_context` group needs 'contextual': the basic lexer can't parse
+            # it at all (NAME/VALUE overlap, split only by parser state).
+            lark = Lark(grammar, parser="lalr", lexer=lexer_type, postlex=_TI(),
+                        start="start", maybe_placeholders=False)
+            count = {"n": 0}
+
+            def on_error(e):
+                count["n"] += 1
+                return True
+
+            try:
+                tree = lark.parse(inp, on_error=on_error)
+                built.append({
+                    "input": inp,
+                    "recovered": True,
+                    "error_count": count["n"],
+                    # `postlex` when the Indenter itself raised before recovery
+                    # could begin (e.g. a DedentError), `parser` for a re-raised
+                    # premature-$END (or no re-raise at all on success).
+                    "error_kind": "parser",
+                    "tree": tree_to_dict(tree),
+                })
+            except Exception as e:
+                # An Indenter DedentError is raised *through the postlex generator*,
+                # before any parser `UnexpectedToken`, so `on_error` is never
+                # consulted (error_count stays 0). lark-rs surfaces that as a hard
+                # `LarkError` (Err), whereas a re-raised premature-$END is the
+                # `Ok(tree: None)` convention. Distinguish them by exception type so
+                # the Rust replay holds each to the right contract.
+                kind = "postlex" if type(e).__name__ == "DedentError" else "parser"
+                built.append({
+                    "input": inp,
+                    "recovered": False,
+                    "error_count": count["n"],
+                    "error_kind": kind,
+                    "tree": None,
+                })
+        return {
+            "name": name,
+            "open_paren_types": open_types,
+            "close_paren_types": close_types,
+            "cases": built,
+        }
+
+    groups = [run_group(name, "basic", ot, ct, inputs)
+              for name, ot, ct, inputs in INDENTER_RECOVERY_GROUPS]
+    groups += [run_group(name, "contextual", ot, ct, inputs)
+               for name, ot, ct, inputs in INDENTER_RECOVERY_CONTEXTUAL_GROUPS]
+    save_oracle("indenter_recovery", "cases", groups)
+    n_cases = sum(len(g["cases"]) for g in groups)
+    print(f"  {len(groups)} groups, {n_cases} cases")
+
+
 def generate_json():
     print("Generating JSON oracles...")
     grammar = load_grammar("json")
@@ -1492,9 +1873,11 @@ if __name__ == "__main__":
     generate_lookaround()
     generate_imports()
     generate_indenter()
+    generate_indenter_recovery()
     generate_python_numbers()
     generate_lalr_core()
     generate_recovery()
+    generate_recovery_contextual()
     generate_earley()
     generate_earley_dynamic()
     generate_fuzz_corpus()

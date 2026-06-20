@@ -96,12 +96,16 @@ pub(super) struct GrammarCompiler {
     /// `*` / `+` / `~` helpers and transparent `_rules` are deliberately absent
     /// (size 0), exactly as Lark treats `_`-prefixed symbols as removed.
     pub(super) helper_sizes: HashMap<String, usize>,
-    /// Cache of the shared `+`-recurse helper (`P: inner | P inner`) keyed by its
-    /// inner symbol and the keep-all context. Identical `x+`/`x*` occurrences reuse
+    /// Cache of the shared one-or-more recurse helper keyed by its inlined inner
+    /// alternatives and the keep-all context. Identical `x+`/`x*` occurrences reuse
     /// one rule — Python Lark's `rules_cache`. This sharing is what keeps grammars
     /// like `a+ b | a+` and `a* b | a+` LALR-parseable: with separate recurse rules
-    /// the duplicated `… -> "a"` reductions are an unresolvable reduce/reduce.
-    pub(super) recurse_cache: HashMap<(Symbol, bool), String>,
+    /// the duplicated `… -> "a"` reductions are an unresolvable reduce/reduce. The
+    /// key is the inner expression's *compiled alternatives*: Python inlines a
+    /// grouped repetition's arms straight into the recurse rule
+    /// (`(A | B)+` → `_p: A | B | _p A | _p B`), so two `(A|B)+` occurrences share
+    /// iff their cartesian-expanded arms coincide.
+    pub(super) recurse_cache: HashMap<(Vec<super::ebnf::CompiledAlt>, bool), String>,
     /// Cache of every other anonymous EBNF helper — groups, optionals, `?`/`*`
     /// wrappers — keyed by its [`HelperKey`] structural identity. Extends the
     /// single-symbol `recurse_cache` sharing to grouped repetition: Python Lark's
@@ -627,5 +631,105 @@ mod tests {
             .collect();
         assert_eq!(anon5.len(), 1, "terminal names must stay unique");
         assert_eq!(anon5[0].pattern.as_regex_str(), "__anon_5");
+    }
+
+    /// The body of every rule named `name`, as `(order, [symbol names])`, sorted by
+    /// order — a compact shape for the EBNF-expansion structural assertions below.
+    fn rule_bodies(g: &crate::grammar::Grammar, name: &str) -> Vec<(usize, Vec<String>)> {
+        use crate::grammar::symbol::Symbol;
+        let mut out: Vec<(usize, Vec<String>)> = g
+            .rules
+            .iter()
+            .filter(|r| r.origin.name == name)
+            .map(|r| {
+                let syms = r
+                    .expansion
+                    .iter()
+                    .map(|s| match s {
+                        Symbol::Terminal(t) => t.name.clone(),
+                        Symbol::NonTerminal(n) => n.name.clone(),
+                    })
+                    .collect();
+                (r.order, syms)
+            })
+            .collect();
+        out.sort_by_key(|(o, _)| *o);
+        out
+    }
+
+    /// #91/#32 structural fix: a grouped repetition inlines the group's arms
+    /// **directly** into the recurse rule — Python Lark's `EBNF_to_BNF`
+    /// (`(A | WORD)+` → `_p: A | WORD | _p A | _p WORD`) — instead of nesting an
+    /// `(A | WORD)` group helper under a single-symbol `_p: g | _p g`. This is the
+    /// shape that removes the dynamic-lexer `dynamic_complete` segmentation reversal
+    /// the old `sorted_families` split-point heuristic compensated for. (Grammar is
+    /// the `parse:49` dynamic compliance case.)
+    #[test]
+    fn grouped_plus_inlines_arms_into_recurse_rule() {
+        let g = load_grammar(
+            "A.2: \"a\"\nWORD: (\"a\"..\"z\")+\nstart: (A | WORD)+\n",
+            &["start".to_string()],
+            true,
+            false,
+        )
+        .unwrap();
+        // No nested `(A | WORD)` group helper is materialized — the only generated
+        // helper is the inlined recurse rule.
+        assert!(
+            !g.rules
+                .iter()
+                .any(|r| r.origin.name.starts_with("__anon_group")),
+            "the group must be inlined into the recurse rule, not given a helper"
+        );
+        let plus_name = g
+            .rules
+            .iter()
+            .map(|r| r.origin.name.clone())
+            .find(|n| n.starts_with("__anon_plus"))
+            .expect("a recurse helper exists");
+        // `_p: A | WORD | _p A | _p WORD` — base arms first (orders 0,1), then the
+        // recurse arms (orders 2,3), matching Python's `EBNF_to_BNF` order.
+        assert_eq!(
+            rule_bodies(&g, &plus_name),
+            vec![
+                (0, vec!["A".into()]),
+                (1, vec!["WORD".into()]),
+                (2, vec![plus_name.clone(), "A".into()]),
+                (3, vec![plus_name.clone(), "WORD".into()]),
+            ]
+        );
+    }
+
+    /// `(A | B)*` distributes its empty case into the *parent* (Python's
+    /// `SimplifyRule`: `start: _p | ε`) and reuses the same inlined recurse rule as
+    /// `+` — there is no longer a `__star: __plus | ε` nullable wrapper.
+    #[test]
+    fn grouped_star_distributes_empty_into_parent_no_wrapper() {
+        let g = load_grammar(
+            "start: (A | B)*\nA: \"a\"\nB: \"b\"\n",
+            &["start".to_string()],
+            true,
+            false,
+        )
+        .unwrap();
+        assert!(
+            !g.rules
+                .iter()
+                .any(|r| r.origin.name.starts_with("__anon_star")),
+            "`*` must distribute into the parent, not keep a star wrapper"
+        );
+        let plus_name = g
+            .rules
+            .iter()
+            .map(|r| r.origin.name.clone())
+            .find(|n| n.starts_with("__anon_plus"))
+            .expect("a recurse helper exists");
+        // The parent carries both the present (`_p`) and the empty alternative.
+        let starts = rule_bodies(&g, "start");
+        assert!(starts.contains(&(0, vec![plus_name.clone()])));
+        assert!(
+            starts.iter().any(|(_, syms)| syms.is_empty()),
+            "the empty case is distributed into the parent"
+        );
     }
 }

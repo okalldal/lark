@@ -10,15 +10,16 @@
 //! let tree = parser.parse(r#"{"a": [1, 2, true]}"#)?;
 //! ```
 //!
-//! The macro reads the `.lark` file *while the calling crate compiles* and runs it
-//! through the real [`lark_rs::Lark`] loader. A malformed grammar (unknown
-//! terminal, LALR conflict, syntax error, …) is reported as a `cargo build`
-//! compiler error, not a runtime panic — the headline of issue #49. It expands to
-//! a zero-field parser struct whose `parse(&str)` method builds the underlying
-//! [`lark_rs::Lark`] lazily from the embedded grammar source and then reuses it
-//! for every call via a `thread_local!` cache — `lark_rs::Lark` holds a `RefCell`
-//! scratch buffer in its scanner and so is not `Sync`, so the built parser is
-//! cached once per thread rather than process-wide.
+//! The macro reads the `.lark` file *while the calling crate compiles* and bakes it
+//! through the real lark-rs pipeline (the same [`lark_rs::generate_standalone`]
+//! emitter the `generate-parser` CLI uses). A malformed grammar (unknown terminal,
+//! LALR conflict, syntax error, …) is reported as a `cargo build` compiler error,
+//! not a runtime panic — the headline of issue #49. It expands to a zero-field
+//! parser struct whose `parse(&str)` method drives a *baked* LALR `ParseTable` +
+//! lexer `ScannerPlan` embedded inline as `const GrammarData` — no table is built
+//! at runtime (issue #85), closing #49's own "bake the ParseTable into const data"
+//! follow-up. The parser is built once per thread via a `thread_local!` cache (its
+//! scanner compiles the combined regex on first use and holds it).
 //!
 //! ## Path resolution
 //!
@@ -29,16 +30,34 @@
 //!
 //! ## Requirements on the caller
 //!
-//! The generated code names `::lark_rs`, so any crate using `include_lark!` must
-//! also depend on `lark-rs` (just as `serde_derive` users depend on `serde`).
+//! The baked parser is **self-contained**: it depends only on the `regex` crate and
+//! the Rust standard library, not on `lark-rs`. A crate using `include_lark!` need
+//! only have `regex` as a dependency (the standalone backend's contract).
 //!
-//! ## Status
+//! ## Scope (inherited from the standalone backend)
 //!
-//! v1 validates the grammar at compile time and embeds the grammar *source*,
-//! building the parse table once at first use. Baking the LALR `ParseTable` itself
-//! into `const` data (so zero table construction happens at runtime) is a tracked
-//! follow-up; the regex-based lexer always compiles its patterns at runtime
-//! regardless, so this affects only first-use latency, not correctness.
+//! The baked artifact is the standalone parser (see [`lark_rs::standalone`]), so the
+//! macro is **LALR + basic-lexer only**: no Earley/CYK, no postlex (`Indenter`), and
+//! no grammars whose terminals use lookaround. A non-LALR parser, a postlex hook, a
+//! lookaround terminal, or a zero-width terminal is rejected at compile time with
+//! the same `cargo build` error #49 introduced.
+//!
+//! One narrowing from the previous version is worth calling out: the old macro built
+//! a default `lark_rs::Lark`, which uses the **contextual** lexer (Lark's USP for
+//! resolving LALR terminal conflicts). The baked standalone parser uses the **basic**
+//! lexer. A grammar that *relies on* the contextual lexer to disambiguate terminals
+//! is **not** rejected at compile time (the LALR tables still build) — exactly as
+//! Python Lark's own `standalone` tool, it will instead fail to lex (or mis-lex) at
+//! the user's runtime. Disambiguate with explicit terminal priority if you need it
+//! (the project's standing discipline; see `lark-rs/CLAUDE.md`).
+//!
+//! ## Generated surface
+//!
+//! The generated struct's `parse`/`parse_with_start` return
+//! `Result<ParseTree, String>` over the embedded standalone runtime's
+//! `Tree`/`Token`/`Child` types (re-exported on the struct's own module as
+//! `Tree`, `Token`, `Child`, `ParseTree`), *not* `lark_rs::ParseTree`. This is the
+//! self-contained-export model the standalone backend already ships.
 
 use proc_macro::{TokenStream, TokenTree};
 use std::path::PathBuf;
@@ -78,21 +97,24 @@ fn expand(input: TokenStream) -> Result<TokenStream, String> {
         )
     })?;
 
-    // The whole point of the macro: surface grammar errors at compile time. We
-    // build the real parser the generated code would build, so anything that would
-    // fail at runtime (unknown terminal, LALR conflict, bad regex, …) fails the
-    // build instead, attributed to this file.
+    // The whole point of the macro: surface grammar errors at compile time. We bake
+    // the parser through the *same* standalone emitter the `generate-parser` CLI
+    // uses (issue #85) — so anything that would fail at runtime (unknown terminal,
+    // LALR conflict, bad regex, unsupported backend, …) fails the build instead,
+    // attributed to this file. The baked `GrammarData` literal + runtime is emitted
+    // inline; nothing constructs a `lark_rs::Lark` at runtime (closes #49's
+    // const-table-bake follow-up).
     let base_path = abs_path.parent().map(|p| p.to_path_buf());
     let options = lark_rs::LarkOptions {
         base_path,
         ..Default::default()
     };
-    if let Err(e) = lark_rs::Lark::new(&source, options) {
-        return Err(format!(
+    let baked = lark_rs::generate_standalone(&source, &options).map_err(|e| {
+        format!(
             "include_lark!: grammar {} is invalid:\n{e}",
             abs_path.display()
-        ));
-    }
+        )
+    })?;
 
     // Determine the struct name: explicit, or `<FileStem>Parser`.
     let struct_name = match name {
@@ -100,7 +122,7 @@ fn expand(input: TokenStream) -> Result<TokenStream, String> {
         None => default_struct_name(&rel_path)?,
     };
 
-    Ok(generate(&struct_name, &source, &abs_path))
+    Ok(generate(&struct_name, &source, &baked, &abs_path))
 }
 
 struct Args {
@@ -238,50 +260,77 @@ fn default_struct_name(rel_path: &str) -> Result<String, String> {
     Ok(name)
 }
 
-/// Emit the generated parser struct. The grammar source is embedded as a string
-/// literal; `Lark` is built once per thread via `thread_local!` (it is not `Sync`).
-/// `include_bytes!` ties the build to the grammar file so edits force a rebuild.
-fn generate(struct_name: &str, source: &str, abs_path: &std::path::Path) -> TokenStream {
+/// Emit the generated parser struct. `baked` is the self-contained standalone
+/// source produced by [`lark_rs::generate_standalone`] (the *same* emitter the
+/// `generate-parser` CLI uses, issue #85): a `pub mod parser {{ … }}` carrying the
+/// embedded runtime, the baked `static DATA: GrammarData`, and a `Parser::new()`
+/// that calls `Parser::from_data(&DATA)`. We wrap it in a uniquely-named private
+/// module and delegate the public struct's methods to that module's `Parser`, so
+/// no `ParseTable` is built at runtime. The grammar source is embedded as a string
+/// literal for `GRAMMAR`; `include_bytes!` ties the build to the grammar file so
+/// edits force a rebuild.
+fn generate(
+    struct_name: &str,
+    source: &str,
+    baked: &str,
+    abs_path: &std::path::Path,
+) -> TokenStream {
     // `{:?}` renders a correctly escaped Rust string literal for both the grammar
     // body and the absolute path.
     let grammar_lit = format!("{source:?}");
     let path_lit = format!("{:?}", abs_path.to_string_lossy());
+    // A module name unique per struct, so multiple `include_lark!` calls in one
+    // scope don't collide on the baked `parser` module. We derive it from the struct
+    // name *verbatim* (not lowercased): two calls with the same struct name already
+    // collide on the struct definition, so a 1:1 mapping keeps the module unique
+    // too — lowercasing would alias distinct names (`Json`/`JSON`) onto one module.
+    // It is `pub` so the caller can name the runtime's tree types (e.g.
+    // `__lark_baked_<Name>::ParseTree`) to `match` on a parse result — the standalone
+    // runtime defines its own types, distinct per grammar, so they live behind this
+    // module rather than being re-exported (which would collide across grammars).
+    let module = format!("__lark_baked_{struct_name}");
 
     let code = format!(
         r#"
+/// The self-contained standalone parser baked from this grammar (the `GrammarData`
+/// literal + embedded runtime), emitted by the same `lark_rs::generate_standalone`
+/// the `generate-parser` CLI uses (issue #85). Depends only on `regex` + std, not on
+/// lark-rs. Its ParseTree/Tree/Token/Child are the types a parse returns.
+#[allow(non_snake_case)]
+pub mod {module} {{
+{baked}
+}}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct {name};
 
 impl {name} {{
-    /// The embedded grammar source, validated at compile time by `include_lark!`.
+    /// The embedded grammar source, baked at compile time by `include_lark!`.
     pub const GRAMMAR: &'static str = {grammar};
 
-    /// Create a handle to the parser. Building the underlying `lark_rs::Lark` is
-    /// deferred to the first `parse` call on this thread (and then cached).
+    /// Create a handle to the parser. The baked `Parser` (its lexer regex) is built
+    /// once per thread on the first `parse` call and then reused.
     pub fn new() -> Self {{
         {name}
     }}
 
-    /// Run `f` with the thread-local, lazily-built `lark_rs::Lark` instance.
-    fn with_lark<R>(f: impl FnOnce(&::lark_rs::Lark) -> R) -> R {{
-        // `lark_rs::Lark` is not `Sync` (its scanner holds a `RefCell` scratch
-        // buffer), so the parser is cached per thread, built once on first use.
+    /// Run `f` with the thread-local, lazily-built standalone `Parser`.
+    fn with_parser<R>(f: impl FnOnce(&{module}::Parser) -> R) -> R {{
+        // The baked `Parser` holds a compiled `regex::Regex`; build it once per
+        // thread (matches the prior caching contract; `Parser::from_data` is cheap
+        // table-wiring plus that one regex compile).
         ::std::thread_local! {{
-            static __LARK: ::lark_rs::Lark =
-                ::lark_rs::Lark::new(
-                    {name}::GRAMMAR,
-                    ::lark_rs::LarkOptions::default(),
-                ).expect("include_lark!: grammar was validated at compile time");
+            static __PARSER: {module}::Parser = {module}::Parser::new();
         }}
-        __LARK.with(|lark| f(lark))
+        __PARSER.with(|p| f(p))
     }}
 
     /// Parse `input` from the grammar's start symbol.
     pub fn parse(
         &self,
         input: &str,
-    ) -> ::core::result::Result<::lark_rs::ParseTree, ::lark_rs::ParseError> {{
-        Self::with_lark(|lark| lark.parse(input))
+    ) -> ::core::result::Result<{module}::ParseTree, ::std::string::String> {{
+        Self::with_parser(|p| p.parse(input))
     }}
 
     /// Parse `input` from an explicit start symbol.
@@ -289,8 +338,8 @@ impl {name} {{
         &self,
         input: &str,
         start: &str,
-    ) -> ::core::result::Result<::lark_rs::ParseTree, ::lark_rs::ParseError> {{
-        Self::with_lark(|lark| lark.parse_with_start(input, start))
+    ) -> ::core::result::Result<{module}::ParseTree, ::std::string::String> {{
+        Self::with_parser(|p| p.parse_from(input, ::core::option::Option::Some(start)))
     }}
 }}
 
@@ -298,6 +347,8 @@ impl {name} {{
 const _: &[u8] = include_bytes!({path});
 "#,
         name = struct_name,
+        module = module,
+        baked = baked,
         grammar = grammar_lit,
         path = path_lit,
     );
