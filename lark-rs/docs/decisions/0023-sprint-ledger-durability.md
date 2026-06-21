@@ -1,6 +1,6 @@
 # ADR-0023: Sprint/kaizen ledger durability — reconstruct-at-finalize + a committed append-only residue, not a churned PR body
 
-- **Status:** Proposed (pending architect ratification)
+- **Status:** Accepted (2026-06-21)
 - **Date:** 2026-06-21
 
 ## Context
