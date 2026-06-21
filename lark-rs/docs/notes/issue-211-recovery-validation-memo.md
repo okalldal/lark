@@ -1,5 +1,12 @@
 # Decision memo — framing the validation story for editor/LSP-grade recovery
 
+> **⚠️ Superseded / non-normative (2026-06-21).** Decision-*support* memo, not policy.
+> The binding decision is **[ADR-0026](../decisions/0026-behaviour-scope-is-the-oracles.md)**
+> (behaviour is scoped to the oracle's): **#168 accepted, #164/#165 deferred.** Where
+> this memo's *recommendations* differ from ADR-0026 — notably it explores **promoting
+> #165 to `good-autonomous`**, which the architect did **not** adopt — **ADR-0026
+> governs.** Kept only as the research audit trail.
+
 **Status:** decision-support for the architect. Drafts a recommendation for the
 `needs-decision` issue **#211** (epic **#209**). Does **not** resolve it — per
 `PRINCIPLES.md` §1/§5 an agent surfaces and proposes; the architect picks. No

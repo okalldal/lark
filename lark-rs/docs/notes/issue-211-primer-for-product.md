@@ -1,5 +1,9 @@
 # Primer — what "error recovery" is, and why #211 needs *you*
 
+> **⚠️ Superseded / non-normative (2026-06-21).** Plain-language *background*, not
+> policy. The binding decision is **[ADR-0026](../decisions/0026-behaviour-scope-is-the-oracles.md)**:
+> #168 accepted, #164/#165 deferred. Kept only as the research audit trail.
+
 **Audience:** the product owner, not a parser engineer. No jargon without a plain
 explanation. This is the "why are we even talking about this" memo that sits
 *under* the two technical memos in this folder.
