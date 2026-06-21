@@ -1,6 +1,6 @@
 # ADR-0021: Differential-audit checkpoint in the review discipline
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-21
 
 ## Context
