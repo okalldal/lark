@@ -1861,6 +1861,187 @@ def generate_json_corpus_manifest():
     print(f"  {passed}/{len(manifest)} files correctly handled by Python Lark")
 
 
+# ─── Interactive parser oracles (issues #168, #222) ──────────────────────────
+#
+# Each case records accept-sets at each step, tokens fed, and the final tree,
+# so the Rust tests can replay the sequence and compare at every point.
+
+def interactive_trace(lark_instance, text, manual_tokens=None):
+    """Run an interactive parse, returning a trace dict.
+
+    If `manual_tokens` is provided, feed them one by one (no lexer drive).
+    Otherwise, exhaust the lexer + feed_eof.
+    """
+    from lark import Token as LToken
+
+    p = lark_instance.parse_interactive(text)
+    trace = {
+        "text": text,
+        "initial_accepts": sorted(p.accepts()),
+        "steps": [],
+    }
+
+    if manual_tokens:
+        for (term, value) in manual_tokens:
+            accepts_before = sorted(p.accepts())
+            p.feed_token(LToken(term, value))
+            accepts_after = sorted(p.accepts())
+            trace["steps"].append({
+                "action": "feed",
+                "terminal": term,
+                "value": value,
+                "accepts_before": accepts_before,
+                "accepts_after": accepts_after,
+            })
+        result = p.feed_eof()
+        trace["result"] = tree_to_dict(result) if result else None
+        trace["final_accepts"] = sorted(p.accepts()) if not result else []
+    else:
+        tokens = p.exhaust_lexer()
+        for t in tokens:
+            trace["steps"].append({
+                "action": "exhaust",
+                "terminal": str(t.type),
+                "value": str(t),
+            })
+        accepts_after_exhaust = sorted(p.accepts())
+        trace["accepts_after_exhaust"] = accepts_after_exhaust
+        result = p.feed_eof()
+        trace["result"] = tree_to_dict(result) if result else None
+
+    return trace
+
+
+def generate_interactive():
+    print("Generating interactive parser oracles...")
+
+    cases = []
+
+    # ── Basic lexer (arithmetic.lark) ──
+    grammar_arith = load_grammar("arithmetic")
+    l_basic = Lark(grammar_arith, parser="lalr", lexer="basic")
+
+    # Case: exhaust_lexer + feed_eof, basic, "1 + 2 * 3"
+    cases.append({
+        "name": "basic_exhaust_1_plus_2_times_3",
+        "lexer": "basic",
+        "grammar": "arithmetic",
+        **interactive_trace(l_basic, "1 + 2 * 3"),
+    })
+
+    # Case: exhaust_lexer + feed_eof, basic, "(1 + 2) * 3"
+    cases.append({
+        "name": "basic_exhaust_parens",
+        "lexer": "basic",
+        "grammar": "arithmetic",
+        **interactive_trace(l_basic, "(1 + 2) * 3"),
+    })
+
+    # Case: manual feed, basic, "1 + 2"
+    cases.append({
+        "name": "basic_manual_1_plus_2",
+        "lexer": "basic",
+        "grammar": "arithmetic",
+        **interactive_trace(l_basic, "", manual_tokens=[
+            ("NUMBER", "1"),
+            ("PLUS", "+"),
+            ("NUMBER", "2"),
+        ]),
+    })
+
+    # Case: manual feed, basic, single number
+    cases.append({
+        "name": "basic_manual_single_number",
+        "lexer": "basic",
+        "grammar": "arithmetic",
+        **interactive_trace(l_basic, "", manual_tokens=[
+            ("NUMBER", "42"),
+        ]),
+    })
+
+    # Case: exhaust, basic, "-1"
+    cases.append({
+        "name": "basic_exhaust_neg",
+        "lexer": "basic",
+        "grammar": "arithmetic",
+        **interactive_trace(l_basic, "-1"),
+    })
+
+    # ── Contextual lexer (recovery_contextual.lark) ──
+    grammar_ctx = load_grammar("recovery_contextual")
+    l_ctx = Lark(grammar_ctx, parser="lalr", lexer="contextual")
+
+    # Case: exhaust_lexer + feed_eof, contextual, "[hello world] {foo bar}"
+    cases.append({
+        "name": "contextual_exhaust_hello_foo",
+        "lexer": "contextual",
+        "grammar": "recovery_contextual",
+        **interactive_trace(l_ctx, "[hello world] {foo bar}"),
+    })
+
+    # Case: manual feed, contextual
+    cases.append({
+        "name": "contextual_manual_hello_foo",
+        "lexer": "contextual",
+        "grammar": "recovery_contextual",
+        **interactive_trace(l_ctx, "", manual_tokens=[
+            ("LSQB", "["),
+            ("AWORD", "hello"),
+            ("RSQB", "]"),
+            ("LBRACE", "{"),
+            ("BWORD", "foo"),
+            ("RBRACE", "}"),
+        ]),
+    })
+
+    # Case: exhaust, contextual, single a_part and b_part with one word each
+    cases.append({
+        "name": "contextual_exhaust_single_words",
+        "lexer": "contextual",
+        "grammar": "recovery_contextual",
+        **interactive_trace(l_ctx, "[x] {y}"),
+    })
+
+    # ── Fork test: basic ──
+    from lark import Token as LToken
+    p = l_basic.parse_interactive("1 + 2")
+    p.exhaust_lexer()
+    fork = p.copy()
+    fork_trace = {
+        "name": "basic_fork",
+        "lexer": "basic",
+        "grammar": "arithmetic",
+        "text": "1 + 2",
+        "main_accepts_before_eof": sorted(p.accepts()),
+        "fork_accepts_before_eof": sorted(fork.accepts()),
+    }
+    r_main = p.feed_eof()
+    r_fork = fork.feed_eof()
+    fork_trace["main_result"] = tree_to_dict(r_main) if r_main else None
+    fork_trace["fork_result"] = tree_to_dict(r_fork) if r_fork else None
+    cases.append(fork_trace)
+
+    # ── Fork test: contextual ──
+    p2 = l_ctx.parse_interactive("[hello] {foo}")
+    p2.exhaust_lexer()
+    fork2 = p2.copy()
+    fork_trace2 = {
+        "name": "contextual_fork",
+        "lexer": "contextual",
+        "grammar": "recovery_contextual",
+        "text": "[hello] {foo}",
+        "main_accepts_before_eof": sorted(p2.accepts()),
+        "fork_accepts_before_eof": sorted(fork2.accepts()),
+    }
+    r_main2 = p2.feed_eof()
+    r_fork2 = fork2.feed_eof()
+    fork_trace2["main_result"] = tree_to_dict(r_main2) if r_main2 else None
+    fork_trace2["fork_result"] = tree_to_dict(r_fork2) if r_fork2 else None
+    cases.append(fork_trace2)
+
+    save_oracle("interactive", "cases", cases)
+
+
 if __name__ == "__main__":
     ORACLES_DIR.mkdir(parents=True, exist_ok=True)
     generate_arithmetic()
@@ -1880,6 +2061,7 @@ if __name__ == "__main__":
     generate_recovery_contextual()
     generate_earley()
     generate_earley_dynamic()
+    generate_interactive()
     generate_fuzz_corpus()
     generate_json_corpus_manifest()
     print("\nDone. Commit tests/fixtures/oracles/ to track expected outputs.")

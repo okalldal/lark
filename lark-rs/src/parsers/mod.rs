@@ -1,11 +1,13 @@
 pub mod cyk;
 pub mod earley;
+pub mod interactive;
 pub mod lalr;
 pub mod token_source;
 pub mod tree_builder;
 
 pub use cyk::CykParser;
 pub use earley::EarleyParser;
+pub use interactive::InteractiveParser;
 pub use lalr::{build_lalr_table, LalrParser, ParseTable};
 pub use token_source::{
     BasicRecovering, Contextual, ContextualRecovering, LexFailure, PreLexed, TokenSource,
@@ -82,6 +84,18 @@ trait ParserDriver: Send {
     ) -> Result<RecoveredTree, LarkError> {
         Err(recovery_unsupported())
     }
+
+    /// Begin an interactive parse (issue #168). The default is the typed refusal;
+    /// the LALR drivers override it (basic lexer: #168, contextual: #222). The
+    /// postlex drivers are a follow-up (mirroring how recovery was extended to
+    /// them in #94).
+    fn parse_interactive(
+        &self,
+        _text: &str,
+        _start: Option<&str>,
+    ) -> Result<InteractiveParser<'_>, LarkError> {
+        Err(interactive_unsupported())
+    }
 }
 
 /// The typed refusal for a configuration without recovery support — shared by
@@ -91,6 +105,15 @@ trait ParserDriver: Send {
 fn recovery_unsupported() -> LarkError {
     LarkError::Grammar(GrammarError::Other {
         msg: "error recovery requires parser='lalr'".to_string(),
+    })
+}
+
+/// The typed refusal for a configuration without interactive-parsing support
+/// (issue #168). Supported on LALR with the basic or contextual lexer; the
+/// postlex drivers are a follow-up.
+fn interactive_unsupported() -> LarkError {
+    LarkError::Grammar(GrammarError::Other {
+        msg: "interactive parsing requires parser='lalr' (without postlex)".to_string(),
     })
 }
 
@@ -200,6 +223,24 @@ impl ParserDriver for LalrBasic {
             on_error,
         )
     }
+
+    /// Interactive parse over the basic lexer (issue #168). Construction does **not**
+    /// lex — the [`InteractiveParser`] lexes lazily as the caller drives it, so it can
+    /// be created over broken editor text and an un-lexable character surfaces only
+    /// when `exhaust_lexer`/`resume` reaches it (matching Python).
+    fn parse_interactive(
+        &self,
+        text: &str,
+        start: Option<&str>,
+    ) -> Result<InteractiveParser<'_>, LarkError> {
+        let stack = self.parser.initial_stack(start)?;
+        Ok(InteractiveParser::new_basic(
+            &self.parser,
+            &self.lexer,
+            stack,
+            text.to_string(),
+        ))
+    }
 }
 
 /// LALR over the contextual lexer (the default): the parser state narrows which
@@ -236,6 +277,25 @@ impl ParserDriver for LalrContextual {
             &mut errors,
         )?;
         Ok(RecoveredTree { tree, errors })
+    }
+
+    /// Interactive parse over the contextual lexer (issue #222). The lazy cursor
+    /// lexes via `ContextualLexer::next_token` at the live parser state, with
+    /// root-lexer fallback — exactly the machinery the contextual recovery source
+    /// uses (#166). A grammar whose contextual lexer is load-bearing (AWORD vs
+    /// BWORD) gets correctly typed tokens under `exhaust_lexer`/`resume`.
+    fn parse_interactive(
+        &self,
+        text: &str,
+        start: Option<&str>,
+    ) -> Result<InteractiveParser<'_>, LarkError> {
+        let stack = self.parser.initial_stack(start)?;
+        Ok(InteractiveParser::new_contextual(
+            &self.parser,
+            &self.lexer,
+            stack,
+            text.to_string(),
+        ))
     }
 }
 
@@ -438,6 +498,16 @@ impl ParsingFrontend {
         on_error: &mut dyn FnMut(&ParseError) -> bool,
     ) -> Result<RecoveredTree, LarkError> {
         self.driver.parse_recovering(text, start, on_error)
+    }
+
+    /// Begin an interactive parse (issues #168, #222). Supported on LALR with the
+    /// basic or contextual lexer; other configurations return a typed error.
+    pub fn parse_interactive(
+        &self,
+        text: &str,
+        start: Option<&str>,
+    ) -> Result<InteractiveParser<'_>, LarkError> {
+        self.driver.parse_interactive(text, start)
     }
 }
 
