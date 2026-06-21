@@ -97,6 +97,16 @@ architect call or more grounding); do not dispatch it. An otherwise-schedulable 
 **missing Done-when or Files** → stop before dispatch and report that triage repair is
 needed — never hand a worker an issue without a falsifiable done-when.
 
+**Classify from the label state + resolving comments, not stale body text.** The labels
+are the state machine — trust them. An issue body still reading "Decision needed" /
+"Decision-needed:" is **not** a fork if the issue carries a binding architect verdict in
+its **comments** and its labels have moved on (`needs-decision` removed, `good-autonomous`
+added). Before excluding an issue as a decision fork, **read its latest resolving comment**
+and judge by the *current* label state, not the original body prose. (In sprint 20260619
+the orchestrator wrongly excluded #159/#101/#94 on stale "Decision needed" bodies and had
+to recover them as a late wave — each already carried an architect verdict and the flipped
+labels.)
+
 Group the schedulable issues into **waves by blast-radius overlap** so parallel workers
 don't collide: use each issue's *Files* section + topic labels as the key — same-module
 issues serialize (e.g. an `earley.rs` cluster, or the loader/EBNF path), disjoint-file
