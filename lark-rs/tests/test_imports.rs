@@ -218,69 +218,55 @@ fn test_in_memory_sources_never_fall_back_to_the_filesystem() {
     );
 }
 
-/// Provenance survives `%import` rename for CYK's empty-rule guard (#101,
-/// ADR-0024). A `(B*)~2` rule emits a nullable anonymous EBNF helper the loader
-/// *generates*; Python Lark's CYK accepts it directly. `import_rule_closure`
-/// copies and renames imported rules — it must also carry their `anon_kinds`
-/// provenance under the renamed origin, or the imported helper is reclassified
-/// as a user rule (`anon_kind == None`) and the CYK guard wrongly rejects the
-/// whole grammar. This fails before the provenance-carry fix and passes after,
-/// matching the direct case (`cyk_accepts_nullable_helper_under_rep_count`).
+/// An imported `~n`-over-nullable rule lowers and parses under CYK exactly like
+/// its in-file equivalent — `%import` rename preserves the lowering (#101/#176).
+///
+/// Since #176 a bounded `~n` *inlines* into its parent like Python's
+/// `EBNF_to_BNF._generate_repeats` (no `__anon_rep`/`__anon_group` helper), so an
+/// imported `sub: A (B*)~2` lowers to a non-nullable `_star` exactly as the direct
+/// grammar does. `import_rule_closure` copies and renames imported rules together
+/// with their `anon_kinds` provenance, so the import path produces the *same*
+/// lowering as the direct path (the original #101/ADR-0024 motivation: provenance
+/// must survive rename, or a generated helper is misclassified as a user rule).
+/// We pin that the imported grammar parses identically through both CYK and the
+/// Earley oracle baseline — LALR cannot build `(B*)~2` (its inlined `_star _star`
+/// is a reduce/reduce Python's LALR also rejects), so Earley is the baseline.
 #[test]
-fn test_cyk_imported_nullable_helper_under_rep_count_is_accepted() {
+fn test_cyk_imported_repeat_over_nullable_matches_oracle() {
     for sub_body in ["A (B*)~2", "A (B?)~2"] {
-        let sources: HashMap<String, String> = [(
-            "sub.lark".to_string(),
-            format!("sub: {sub_body}\nA: \"a\"\nB: \"b\"\n"),
-        )]
-        .into();
-        let res = Lark::new(
-            "start: sub\n%import .sub.sub\n",
-            LarkOptions {
-                parser: ParserAlgorithm::Cyk,
-                lexer: LexerType::Basic,
-                start: vec!["start".to_string()],
-                import_sources: Some(Arc::new(sources)),
-                ..Default::default()
-            },
-        );
-        assert!(
-            res.is_ok(),
-            "CYK must accept an imported nullable helper under `~n` \
-             (`sub: {sub_body}`), matching the direct case: {:?}",
-            res.err()
-        );
-        // Tree parity vs LALR on the *same imported* grammar (≡ Python-Lark
-        // oracle): LALR ignores the empty-rule guard entirely, so it is the
+        let make = |parser: ParserAlgorithm| {
+            let sources: HashMap<String, String> = [(
+                "sub.lark".to_string(),
+                format!("sub: {sub_body}\nA: \"a\"\nB: \"b\"\n"),
+            )]
+            .into();
+            Lark::new(
+                "start: sub\n%import .sub.sub\n",
+                LarkOptions {
+                    parser,
+                    lexer: LexerType::Basic,
+                    start: vec!["start".to_string()],
+                    import_sources: Some(Arc::new(sources)),
+                    ..Default::default()
+                },
+            )
+        };
+        let cyk = make(ParserAlgorithm::Cyk)
+            .unwrap_or_else(|e| panic!("CYK must accept the imported `sub: {sub_body}`: {e:?}"));
+        // Earley (≡ Python-Lark oracle) on the *same imported* grammar is the
         // per-input baseline. Imported-dependency terminals are mangled under the
-        // module prefix (`sub__A`), so we compare CYK and LALR built from the same
+        // module prefix (`sub__A`), so we compare CYK and Earley built from the same
         // import — not against the differently-mangled direct grammar.
-        let cyk = res.unwrap();
-        let lalr_sources: HashMap<String, String> = [(
-            "sub.lark".to_string(),
-            format!("sub: {sub_body}\nA: \"a\"\nB: \"b\"\n"),
-        )]
-        .into();
-        let lalr = Lark::new(
-            "start: sub\n%import .sub.sub\n",
-            LarkOptions {
-                parser: ParserAlgorithm::Lalr,
-                lexer: LexerType::Basic,
-                start: vec!["start".to_string()],
-                import_sources: Some(Arc::new(lalr_sources)),
-                ..Default::default()
-            },
-        )
-        .expect("imported grammar builds under LALR");
+        let earley = make(ParserAlgorithm::Earley).expect("imported grammar builds under Earley");
         for input in ["a", "ab", "abb"] {
             let cyk_tree = cyk
                 .parse(input)
                 .unwrap_or_else(|e| panic!("imported CYK rejects {input:?}: {e}"))
                 .to_string();
-            let lalr_tree = lalr.parse(input).unwrap().to_string();
+            let earley_tree = earley.parse(input).unwrap().to_string();
             assert_eq!(
-                cyk_tree, lalr_tree,
-                "imported CYK vs LALR (≡ oracle) tree mismatch on {input:?} for `sub: {sub_body}`"
+                cyk_tree, earley_tree,
+                "imported CYK vs Earley (≡ oracle) tree mismatch on {input:?} for `sub: {sub_body}`"
             );
         }
     }

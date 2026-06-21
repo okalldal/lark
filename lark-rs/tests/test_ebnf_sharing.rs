@@ -90,3 +90,98 @@ fn test_repetition_trees_unaffected() {
     let group = build("!start: (\"a\" \"b\")+");
     assert_eq!(parsed(&group, "abab"), "start[A:a,B:b,A:a,B:b]");
 }
+
+// ─── #176: bounded `~n` must inline, not mint a colliding helper rule ──────────
+//
+// Python Lark's `EBNF_to_BNF._generate_repeats` inlines a small `x~n..m`
+// (`mx < 50`) directly into the parent expansion as one alternative per count —
+// it never materializes a helper rule. lark-rs used to give every exact/range
+// repeat its own `__anon_rep_*` helper, so `"d"~1` became `__anon_rep: D`
+// *alongside* a sibling literal `D` alternative; both reduce on `D` in one state,
+// an unresolvable reduce/reduce that Python never reports. Found by the
+// `--fuzz-grammars` differential mode (#38, seed 13); expected trees are the
+// Python-Lark oracle.
+
+#[test]
+fn test_exact_repeat_one_inlines_no_helper() {
+    // The minimal collision core: `foo: "d"~1 | "d"`. After inlining, `~1` is just
+    // `D`, the duplicate `foo -> D` alternatives dedup, and the grammar is LALR.
+    let lark = build("start: foo\nfoo: \"d\"~1 | \"d\"\n");
+    assert_eq!(parsed(&lark, "d"), "start[foo[]]");
+}
+
+#[test]
+fn test_exact_repeat_one_keeps_token() {
+    // `!start: "d"~1` keeps the single inlined token (oracle: `start[D:d]`).
+    let lark = build("!start: \"d\"~1\n");
+    assert_eq!(parsed(&lark, "d"), "start[D:d]");
+}
+
+#[test]
+fn test_template_plus_optional_repeat_one() {
+    // The full #176 repro: a template instance next to an optional rule whose body
+    // contains a `"d"~1`. Python builds it cleanly; lark-rs used to reject it with a
+    // spurious reduce/reduce between `__anon_rep_2` and `r0`.
+    let lark = build("start: rep{r0} r0?\nr0: \"b\"+ | \"d\"~1 | \"d\"\nrep{x}: x x?\n");
+    assert_eq!(parsed(&lark, "b"), "start[rep[r0[]]]");
+    assert_eq!(parsed(&lark, "bb"), "start[rep[r0[]]]");
+    assert_eq!(parsed(&lark, "bbb"), "start[rep[r0[]]]");
+}
+
+// ─── #210: a `*`/`+` over a group with a duplicate alternative must dedup ───────
+//
+// Python Lark's `EBNF_to_BNF` builds the one-or-more recurse rule from the *set*
+// of inner expansions, so `("b" | "b")*` collapses to a single recurse arm.
+// lark-rs's `recurse_helper` used to inline every arm verbatim, so two identical
+// arms produced two byte-identical `__anon_plus_0 -> B` reductions in one state —
+// an unresolvable reduce/reduce Python never reports. Found by the
+// `--fuzz-grammars` differential mode (#38, seed 99); expected trees are the
+// Python-Lark oracle.
+
+#[test]
+fn test_star_over_duplicate_alt_dedups() {
+    // The minimal #210 core: `("b" | "b")*`. Python builds it; lark-rs used to
+    // reject it with a self-collision (`__anon_plus_0 -> B` vs `__anon_plus_0 -> B`).
+    let lark = build("start: (\"b\" | \"b\")*\n");
+    assert_eq!(parsed(&lark, ""), "start[]");
+    assert_eq!(parsed(&lark, "b"), "start[]");
+    assert_eq!(parsed(&lark, "bb"), "start[]");
+    assert_eq!(parsed(&lark, "bbb"), "start[]");
+}
+
+#[test]
+fn test_plus_over_duplicate_alt_dedups() {
+    // The `+` form of the same core: `("b" | "b")+`.
+    let lark = build("start: (\"b\" | \"b\")+\n");
+    assert_eq!(parsed(&lark, "b"), "start[]");
+    assert_eq!(parsed(&lark, "bb"), "start[]");
+}
+
+#[test]
+fn test_star_over_duplicate_alt_keeps_tokens() {
+    // With `!`, the deduped recurse rule still yields one token per repeat (the
+    // dedup collapses identical *rules*, not the tokens matched). Oracle:
+    // `start[B:b, B:b]`.
+    let lark = build("!start: (\"b\" | \"b\")*\n");
+    assert_eq!(parsed(&lark, ""), "start[]");
+    assert_eq!(parsed(&lark, "b"), "start[B:b]");
+    assert_eq!(parsed(&lark, "bb"), "start[B:b,B:b]");
+}
+
+#[test]
+fn test_seed99_template_star_duplicate_alt_builds() {
+    // The full seed-99 minimized fuzzer repro: a `*` group with a duplicate `r0`
+    // alternative, a template instance, and a `~1`. Python builds it cleanly;
+    // lark-rs used to reject it with a self-collision in the inlined `*` recurse
+    // rule. Oracle tree for "bdddcc cbb" is six `r0` children + a `rep`.
+    let lark = build(
+        "start: (\"b\" | r0 | r0)* r0 rep{\"b\"} | rep{r0}\n\
+         r0: \"d\"~1 | \"c\"\n\
+         rep{x}: x x?\n\
+         %ignore \" \"\n",
+    );
+    assert_eq!(
+        parsed(&lark, "bdddcc cbb"),
+        "start[r0[],r0[],r0[],r0[],r0[],r0[],rep[]]"
+    );
+}

@@ -456,16 +456,20 @@ only** (#144). Anonymous symbols are now disambiguated via a closed `AnonKind`
 enum rather than name spelling; keep new interned names namespace-unambiguous.
 
 **CYK empty-rule rejection is by *provenance*, not transparency or name spelling
-(#101, ADR-0024).** Python Lark's CYK rejects an ε-deriving rule, but *accepts* the
-nullable anonymous helper a `*`/`?` nested under `~n` emits (`start: A (B*)~2`). The
-discriminator is whether the nullable origin was **generated** by the loader, carried
-as `SymbolInfo.anon_kind: Option<AnonKind>` (set at `fresh_anon_rule` mint time,
-plumbed through `Grammar.anon_kinds` → `lower()`). CYK rejects a nullable `Nt::Orig`
-iff `anon_kind.is_none()` — a user rule, including a transparent `_a: B?` and even a
-user rule *named* `__anon_star_0` (a user can author that exact name, #144). Do **not**
-gate this on `name.starts_with("__anon_")`; the blunt "reject every nullable origin"
-fix over-rejects `(B*)~2` (an oracle regression the four banks miss — their only `~n`
-cases are on terminals). Pinned in `parsers/cyk.rs` + `grammar/intern.rs`.
+(#101, ADR-0024).** Python Lark's CYK rejects an ε-deriving rule, but *accepts* a
+nullable anonymous helper the loader **generates** (e.g. the `__anon_plus_*` recurse
+helper a `*`/`?` folds into under `(B*)+`, whose `… | ε | … P ε` arm is nullable). The
+discriminator is whether the nullable origin was generated, carried as
+`SymbolInfo.anon_kind: Option<AnonKind>` (set at `fresh_anon_rule` mint time, plumbed
+through `Grammar.anon_kinds` → `lower()`). CYK rejects a nullable `Nt::Orig` iff
+`anon_kind.is_none()` — a user rule, including a transparent `_a: B?` and even a user
+rule *named* `__anon_star_0` (a user can author that exact name, #144). Do **not** gate
+this on `name.starts_with("__anon_")`; the blunt "reject every nullable origin" fix
+over-rejects those generated helpers (an oracle regression). Pinned in `parsers/cyk.rs`
++ `grammar/intern.rs`. NB since #176 a bounded `~n`/`~n..m` *inlines* into its parent
+exactly like Python (no `__anon_rep`/`__anon_group` helper), so `(B*)~2`/`(B?)~2` lower
+to non-nullable arms and no longer reach this carve-out — and `(B*)~2` under LALR is now
+a reduce/reduce both engines reject, where lark-rs used to wrongly accept it.
 
 **Joop-Leo is reimplemented, not ported — and its laziness is load-bearing.**
 Python Lark's Leo optimization is dead code (it reads a nonexistent field;
@@ -479,16 +483,29 @@ counter is what catches a regression here.
 recurse rule `_p: A | B | _p A | _p B` (base arms first, then `_p arm`), *not* a
 nested `(A|B)` group helper under a single-symbol `_p: g | _p g`; and `x*`
 distributes its empty case into the parent (`start: _p | ε`) reusing the same
-recurse rule — there is no `__star: __plus | ε` wrapper (one survives only for a
-`*` nested where a single symbol is mandatory, e.g. inside `~n`). This makes the
-last symbol of the recursion a *terminal* built during the scan (matching Python),
+recurse rule — there is no `__star: __plus | ε` wrapper. The recurse rule is built
+from the **deduped set** of inner arms (`recurse_helper`, #210): `("b" | "b")*`
+collapses to a single arm, matching Python's `EBNF_to_BNF` — without the dedup, two
+byte-identical arms emit two identical `_p -> B` reductions in one state, a spurious
+reduce/reduce Python never reports. **Bounded `~n`/`~n..m`
+likewise inlines** (#176): a small `x~mn..mx` (`mx < 50`, Python's
+`REPEAT_BREAK_THRESHOLD`) fans out one alternative per count `k` in `mn..=mx`
+(`x~1 ≡ x`, `x~2 ≡ x x`, `x~0..2 ≡ ε | x | x x`) straight into the parent via
+`inline_repeat` — *not* a `__anon_rep` helper, which (e.g. for `"d"~1` beside a
+sibling `"d"`) would duplicate an alternative as a spurious reduce/reduce Python
+never reports. Only a *large* `~n` (`mx ≥ 50`) keeps the single `compile_repeat`
+exact/range helper (Python factors these into sub-rules; the helper is byte-identical
+in the tree). This makes the last symbol of the recursion a *terminal* built during
+the scan (matching Python),
 so `dynamic_complete` resolve ties fall out of `rule.order` + insertion order.
 Consequently `sorted_families` is pure `(is_empty, -priority, rule.order)` +
 insertion order for **both** lexers: the dynamic-lexer split-point tie-break #32/#90
 added (and this note used to flag as a soft spot) is **removed**. Pinned by
-`grouped_plus_inlines_arms_into_recurse_rule` (loader/compiler.rs) and
+`grouped_plus_inlines_arms_into_recurse_rule` (loader/compiler.rs),
 `dynamic_complete_resolves_longest_segmentation_without_tiebreak`
-(tests/test_earley_dynamic.rs).
+(tests/test_earley_dynamic.rs), and the `~n`-inlining tests
+`test_exact_repeat_one_inlines_no_helper` / `test_template_plus_optional_repeat_one`
+(tests/test_ebnf_sharing.rs, #176).
 
 ---
 
