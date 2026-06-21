@@ -24,7 +24,8 @@ pub use lookaround::classify::{
 };
 pub use lookaround::lower::{GuardSpec, LookbehindGuard, LowerDecline, LoweredBranch};
 pub use parsers::{
-    basic_lexer_conf, lalr, EarleyParser, LexFailure, ParseTable, ParserConf, TokenSource,
+    basic_lexer_conf, lalr, EarleyParser, InteractiveParser, LexFailure, ParseTable, ParserConf,
+    TokenSource,
 };
 pub use postlex::Indenter;
 pub use standalone::generate as generate_standalone;
@@ -114,6 +115,26 @@ impl Lark {
     ) -> Result<RecoveredTree, LarkError> {
         self.frontend
             .parse_recovering(text, Some(start), &mut on_error)
+    }
+
+    /// Begin an interactive parse (issue #168), mirroring Python Lark's
+    /// `parse_interactive`. Returns an [`InteractiveParser`] the caller drives:
+    /// feed tokens (`feed`/`feed_token`), inspect what is accepted (`accepts`),
+    /// fork (`fork`), or resume automated parsing (`resume`).
+    ///
+    /// v1 is supported on the **basic-lexer LALR** configuration; other
+    /// configurations return a typed error (contextual lexer is a follow-up).
+    pub fn parse_interactive(&self, text: &str) -> Result<InteractiveParser<'_>, LarkError> {
+        self.frontend.parse_interactive(text, None)
+    }
+
+    /// As [`parse_interactive`](Self::parse_interactive), from an explicit start.
+    pub fn parse_interactive_with_start(
+        &self,
+        text: &str,
+        start: &str,
+    ) -> Result<InteractiveParser<'_>, LarkError> {
+        self.frontend.parse_interactive(text, Some(start))
     }
 }
 

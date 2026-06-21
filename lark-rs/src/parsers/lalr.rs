@@ -22,6 +22,7 @@ use crate::grammar::intern::{CompiledGrammar, CompiledRule, SymbolId, SymbolTabl
 use crate::lexer::{BasicLexer, ContextualLexer};
 use crate::tree::{ParseTree, Token};
 
+use super::interactive::InteractiveParser;
 use super::token_source::{
     postlex_basic_recovering_source, postlex_contextual_recovering_source,
     postlex_contextual_source, Contextual, ContextualRecovering, LexFailure, PreLexed, SourceError,
@@ -528,6 +529,168 @@ pub fn build_lalr_table(
 
 // ─── LALR parser execution ────────────────────────────────────────────────────
 
+/// The two stacks plus the "feed one token" reduce-loop that drive every LALR
+/// parse. Lifting them out of [`LalrParser::run`]/`run_recovering` into a single
+/// [`feed_token`](ParserStack::feed_token) mirrors Python Lark's
+/// `ParserState.feed_token` and gives exactly one definition of "advance the
+/// machine by one token" — shared by the batch drivers and the interactive parser
+/// (issue #168, ADR-0015). The fed token is fixed for the whole reduce loop,
+/// exactly as the contextual lexer caches its token across REDUCEs
+/// ([`token_source`](super::token_source)), so this is behaviour-preserving for
+/// every existing driver.
+#[derive(Clone)]
+pub(crate) struct ParserStack {
+    state_stack: Vec<usize>,
+    value_stack: Vec<NodeValue>,
+}
+
+/// What feeding one token did to a [`ParserStack`].
+pub(crate) enum Feed {
+    /// The token was shifted (consumed) — pull the next one.
+    Shifted,
+    /// Reached ACCEPT; here is the finished tree.
+    Accepted(ParseTree),
+    /// No action for this token in the current (post-reduce) state. The stack is
+    /// left where the parser would raise `UnexpectedToken`; the caller decides to
+    /// error (batch parse) or delete-and-resume (recovery).
+    NoAction,
+    /// A missing GOTO after a reduce — effectively unreachable for a valid table,
+    /// surfaced rather than panicked.
+    Error(ParseError),
+}
+
+impl ParserStack {
+    fn new(initial_state: usize) -> Self {
+        ParserStack {
+            state_stack: vec![initial_state],
+            value_stack: Vec::new(),
+        }
+    }
+
+    /// The current (top) parser state.
+    #[inline]
+    pub(crate) fn position(&self) -> usize {
+        *self.state_stack.last().unwrap()
+    }
+
+    /// Feed one token: REDUCE as many times as it dictates, then SHIFT it
+    /// ([`Feed::Shifted`]), ACCEPT ([`Feed::Accepted`]), or report no action
+    /// ([`Feed::NoAction`]). Mirrors Python Lark's `ParserState.feed_token`.
+    pub(crate) fn feed_token(&mut self, table: &ParseTable, token: &Token) -> Feed {
+        loop {
+            let state = self.position();
+            match table.action_at(state, token.type_id).copied() {
+                Some(Action::Shift(next_state)) => {
+                    self.state_stack.push(next_state);
+                    self.value_stack.push(NodeValue::Token(token.clone()));
+                    return Feed::Shifted;
+                }
+                Some(Action::Reduce(rule_idx)) => {
+                    if let Err(e) = self.reduce(table, rule_idx, token) {
+                        return Feed::Error(e);
+                    }
+                }
+                Some(Action::Accept) => {
+                    return match self.accept() {
+                        Ok(tree) => Feed::Accepted(tree),
+                        Err(e) => Feed::Error(e),
+                    };
+                }
+                None => return Feed::NoAction,
+            }
+        }
+    }
+
+    /// Apply a REDUCE: pop the rule's child values, shape the parent via the shared
+    /// [`TreeBuilder`], and follow GOTO. `at` supplies the position for the
+    /// (effectively unreachable) missing-GOTO error.
+    fn reduce(
+        &mut self,
+        table: &ParseTable,
+        rule_idx: usize,
+        at: &Token,
+    ) -> Result<(), ParseError> {
+        let rule = &table.rules[rule_idx];
+        let len = rule.expansion.len();
+
+        let child_values: Vec<NodeValue> = self
+            .value_stack
+            .drain(self.value_stack.len() - len..)
+            .collect();
+        for _ in 0..len {
+            self.state_stack.pop();
+        }
+        let value = TreeBuilder::new(&table.rules).assemble(rule_idx, child_values);
+
+        let top_state = self.position();
+        let nt_index = rule.origin.index() - table.n_terminals;
+        let next_state = table.goto[top_state]
+            .get(nt_index)
+            .copied()
+            .flatten()
+            .ok_or_else(|| ParseError::UnexpectedToken {
+                token: at.value.clone(),
+                token_type: table.symbols.name(rule.origin).to_string(),
+                line: at.line,
+                col: at.column,
+                expected: vec![table.symbols.name(rule.origin).to_string()],
+            })?;
+        self.state_stack.push(next_state as usize);
+        self.value_stack.push(value);
+        Ok(())
+    }
+
+    /// ACCEPT: the final value on the stack is the parse result (a `?start` rule can
+    /// collapse to a bare token, hence [`ParseTree`]).
+    fn accept(&mut self) -> Result<ParseTree, ParseError> {
+        match self.value_stack.pop() {
+            Some(NodeValue::Tree(t)) => Ok(ParseTree::Tree(t)),
+            Some(NodeValue::Token(tok)) => Ok(ParseTree::Token(tok)),
+            // A start rule is never transparent, so its value is never Inline.
+            Some(NodeValue::Inline(_)) | None => Err(ParseError::unexpected_eof(0, 0, vec![])),
+        }
+    }
+
+    /// State-only simulation: would feeding `terminal` advance the parser (SHIFT or
+    /// ACCEPT, possibly after REDUCEs) without a no-action error? Clones only the
+    /// cheap state stack — no tree values are built — so [`accepts`](Self::accepts)
+    /// is far cheaper than Python's copy-and-trial-feed.
+    fn would_accept(&self, table: &ParseTable, terminal: SymbolId) -> bool {
+        let mut states = self.state_stack.clone();
+        loop {
+            let state = *states.last().unwrap();
+            match table.action_at(state, terminal).copied() {
+                Some(Action::Shift(_)) | Some(Action::Accept) => return true,
+                Some(Action::Reduce(rule_idx)) => {
+                    let rule = &table.rules[rule_idx];
+                    for _ in 0..rule.expansion.len() {
+                        states.pop();
+                    }
+                    let top = *states.last().unwrap();
+                    let nt_index = rule.origin.index() - table.n_terminals;
+                    match table.goto[top].get(nt_index).copied().flatten() {
+                        Some(next) => states.push(next as usize),
+                        None => return false,
+                    }
+                }
+                None => return false,
+            }
+        }
+    }
+
+    /// The terminal names that would advance the parser from here, sorted — the
+    /// oracle-comparable form of Python's `InteractiveParser.accepts()`.
+    pub(crate) fn accepts(&self, table: &ParseTable) -> Vec<String> {
+        let mut names: Vec<String> = (0..table.n_terminals)
+            .map(|t| SymbolId(t as u32))
+            .filter(|&t| self.would_accept(table, t))
+            .map(|t| table.symbols.name(t).to_string())
+            .collect();
+        names.sort();
+        names
+    }
+}
+
 pub struct LalrParser {
     pub table: ParseTable,
 }
@@ -594,102 +757,40 @@ impl LalrParser {
             .unwrap_or_default()
     }
 
-    /// The shared tree-builder over this parse table's rules (filtering is per
-    /// rule position, carried by each [`CompiledRule`]).
-    fn tree_builder(&self) -> TreeBuilder<'_> {
-        TreeBuilder::new(&self.table.rules)
-    }
-
-    /// Apply a REDUCE: pop the rule's child values, hand them to the shared
-    /// [`TreeBuilder`] to shape the parent value, and follow GOTO. `at` supplies
-    /// the position for the (effectively unreachable) missing-GOTO error.
-    fn reduce(
-        &self,
-        rule_idx: usize,
-        state_stack: &mut Vec<usize>,
-        value_stack: &mut Vec<NodeValue>,
-        at: &Token,
-    ) -> Result<(), ParseError> {
-        let rule = &self.table.rules[rule_idx];
-        let len = rule.expansion.len();
-
-        let child_values: Vec<NodeValue> = value_stack.drain(value_stack.len() - len..).collect();
-        for _ in 0..len {
-            state_stack.pop();
-        }
-        let value = self.tree_builder().assemble(rule_idx, child_values);
-
-        let top_state = *state_stack.last().unwrap();
-        let nt_index = rule.origin.index() - self.table.n_terminals;
-        let next_state = self.table.goto[top_state]
-            .get(nt_index)
-            .copied()
-            .flatten()
-            .ok_or_else(|| ParseError::UnexpectedToken {
-                token: at.value.clone(),
-                token_type: self.table.symbols.name(rule.origin).to_string(),
-                line: at.line,
-                col: at.column,
-                expected: vec![self.table.symbols.name(rule.origin).to_string()],
-            })?;
-        state_stack.push(next_state as usize);
-        value_stack.push(value);
-        Ok(())
-    }
-
-    /// ACCEPT: the final value on the stack is the parse result.
-    ///
-    /// A `?start` rule (expand1) can collapse to a single token — then the result
-    /// is that bare [`Token`], matching Python Lark, instead of a tree named after
-    /// the terminal. Hence the [`ParseTree`] return type.
-    fn accept(value_stack: &mut Vec<NodeValue>) -> Result<ParseTree, ParseError> {
-        match value_stack.pop() {
-            Some(NodeValue::Tree(t)) => Ok(ParseTree::Tree(t)),
-            Some(NodeValue::Token(tok)) => Ok(ParseTree::Token(tok)),
-            // A start rule is never transparent, so its value is never Inline.
-            Some(NodeValue::Inline(_)) | None => Err(ParseError::unexpected_eof(0, 0, vec![])),
-        }
-    }
-
     /// Build the error for a token with no action in the current state, filling
-    /// `expected` from the state's action row (only the parser knows it).
-    fn unexpected(&self, state: usize, token: &Token) -> ParseError {
+    /// `expected` from the state's action row (only the parser knows it). Shared by
+    /// the batch driver and the interactive parser (issue #168).
+    pub(crate) fn unexpected(&self, state: usize, token: &Token) -> ParseError {
         ParseError::unexpected_token(token, self.expected_at(state))
     }
 
-    /// Drive the LALR state machine against any [`TokenSource`]. SHIFT consumes a
-    /// token; REDUCE re-reads it; ACCEPT returns the finished tree. The only thing
-    /// that differs between the pre-lexed and contextual frontends is the source,
-    /// so this single loop replaces what used to be two near-identical drivers.
+    /// Drive the LALR state machine against any [`TokenSource`]. The per-token
+    /// reduce/shift/accept work lives in [`ParserStack::feed_token`]; this loop only
+    /// sources the next token and reacts to what the feed did, so the batch driver,
+    /// the recovering driver, and the interactive parser (#168) share one definition
+    /// of the state machine.
     fn run<S: TokenSource>(
         &self,
         source: &mut S,
         start: Option<&str>,
     ) -> Result<ParseTree, ParseError> {
-        let mut state_stack: Vec<usize> = vec![self.initial_state(start)?];
-        let mut value_stack: Vec<NodeValue> = Vec::new();
+        let mut stack = ParserStack::new(self.initial_state(start)?);
 
         loop {
-            let state = *state_stack.last().unwrap();
-            let token = match source.peek(state) {
+            let token = match source.peek(stack.position()) {
                 Ok(tok) => tok,
-                Err(SourceError::Lex(failure)) => return Err(self.lex_failure(state, failure)),
+                Err(SourceError::Lex(failure)) => {
+                    return Err(self.lex_failure(stack.position(), failure))
+                }
                 // A postlex transform (the indenter) already produced a full error.
                 Err(SourceError::Postlex(e)) => return Err(e),
             };
 
-            match self.table.action_at(state, token.type_id).copied() {
-                Some(Action::Shift(next_state)) => {
-                    source.advance();
-                    state_stack.push(next_state);
-                    value_stack.push(NodeValue::Token(token));
-                }
-                Some(Action::Reduce(rule_idx)) => {
-                    // Don't advance the source — the same token may be consumed next.
-                    self.reduce(rule_idx, &mut state_stack, &mut value_stack, &token)?;
-                }
-                Some(Action::Accept) => return Self::accept(&mut value_stack),
-                None => return Err(self.unexpected(state, &token)),
+            match stack.feed_token(&self.table, &token) {
+                Feed::Shifted => source.advance(),
+                Feed::Accepted(tree) => return Ok(tree),
+                Feed::Error(e) => return Err(e),
+                Feed::NoAction => return Err(self.unexpected(stack.position(), &token)),
             }
         }
     }
@@ -737,12 +838,10 @@ impl LalrParser {
         on_error: &mut dyn FnMut(&ParseError) -> bool,
         errors: &mut Vec<ParseError>,
     ) -> Result<Option<ParseTree>, ParseError> {
-        let mut state_stack: Vec<usize> = vec![self.initial_state(start)?];
-        let mut value_stack: Vec<NodeValue> = Vec::new();
+        let mut stack = ParserStack::new(self.initial_state(start)?);
 
         loop {
-            let state = *state_stack.last().unwrap();
-            let token = match source.peek(state) {
+            let token = match source.peek(stack.position()) {
                 Ok(tok) => tok,
                 // Character-level recovery (issue #93). For the basic-lexer recovery
                 // path the un-lexable characters are skipped up front by
@@ -773,18 +872,12 @@ impl LalrParser {
                 Err(SourceError::Postlex(e)) => return Err(e),
             };
 
-            match self.table.action_at(state, token.type_id).copied() {
-                Some(Action::Shift(next_state)) => {
-                    source.advance();
-                    state_stack.push(next_state);
-                    value_stack.push(NodeValue::Token(token));
-                }
-                Some(Action::Reduce(rule_idx)) => {
-                    self.reduce(rule_idx, &mut state_stack, &mut value_stack, &token)?;
-                }
-                Some(Action::Accept) => return Self::accept(&mut value_stack).map(Some),
-                None => {
-                    let err = self.unexpected(state, &token);
+            match stack.feed_token(&self.table, &token) {
+                Feed::Shifted => source.advance(),
+                Feed::Accepted(tree) => return Ok(Some(tree)),
+                Feed::Error(e) => return Err(e),
+                Feed::NoAction => {
+                    let err = self.unexpected(stack.position(), &token);
                     // Consult the handler for every error (as Python Lark does),
                     // then record it. `$END` can't be deleted — there's nothing
                     // after it — so stop regardless of the handler's answer, where
@@ -806,6 +899,25 @@ impl LalrParser {
                 }
             }
         }
+    }
+
+    /// Begin an interactive parse (issue #168): a fresh [`ParserStack`] at the start
+    /// state, plus the remaining lexer `tokens` a caller can `exhaust`/`resume` over.
+    /// Manual `feed`/`feed_token` ignore the token queue. See [`InteractiveParser`].
+    pub fn interactive(
+        &self,
+        start: Option<&str>,
+        tokens: Vec<Token>,
+    ) -> Result<InteractiveParser<'_>, ParseError> {
+        let stack = ParserStack::new(self.initial_state(start)?);
+        // The basic lexer appends a synthetic `$END`; the interactive parser feeds
+        // `$END` only via `feed_eof`/`resume` (Python's `exhaust_lexer` never feeds
+        // it), so keep it out of the exhaustible queue.
+        let tokens: Vec<Token> = tokens
+            .into_iter()
+            .filter(|t| t.type_id != SymbolId::END)
+            .collect();
+        Ok(InteractiveParser::new(self, stack, tokens))
     }
 
     /// Recovering parse over a pre-tokenized sequence (basic lexer). See
