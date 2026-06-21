@@ -18,7 +18,8 @@ integration branch**, and the whole batch lands as **one omnibus PR** that only 
 > **Reuse, don't fork.** This command is the kaizen *specialization* of the sprint
 > orchestration. For the shared machinery — the worker dispatch packet, the
 > verdict-only review sub-agent contract, the staging queue, the parking protocol,
-> resumability (omnibus body as the live ledger), rollback-first, and the live
+> resumability (GitHub is the ledger — reconstruct-at-finalize + a committed append-only
+> residue file, **not** a churned PR body; ADR-0023), rollback-first, and the live
 > Retrospective — **follow `.claude/commands/start-sprint.md` verbatim**, substituting
 > "kaizen" for "sprint" throughout. The sections below state only the kaizen-specific
 > **deltas**; everything not contradicted here is inherited from `/start-sprint`.
@@ -66,11 +67,11 @@ git push -u origin kaizen/YYYYMMDD-HHMM
 ```
 
 Open the **omnibus PR immediately, as a draft** — base `master`, head the kaizen
-branch, title `kaizen: omnibus <date/short-sha>`, body seeded as the **live ledger**
-(*Staged* / *In-flight child PRs* / *Parked needs-decision* / *Triage-repair needed* /
-*Follow-ups* / *Retrospective*), per sprint §6 + the Retrospective section. The omnibus
-is the **only** PR that targets `master` and the **only** one carrying `Closes #N`
-lines.
+branch, title `kaizen: omnibus <date/short-sha>`, body seeded as a **stable pointer +
+short summary** (sprint base SHA + a pointer to `lark-rs/docs/sprints/<kaizen-id>.md`,
+plus rough *Parked* / *Triage-repair* / *Follow-ups* lines) — **not** a per-stage live
+ledger (ADR-0023; sprint §2/§6/§7). The omnibus is the **only** PR that targets `master`
+and the **only** one carrying `Closes #N` lines.
 
 ## 3. Survey + plan the whole kaizen backlog
 
@@ -137,14 +138,18 @@ is **kit-only (no product behavior change)**. **Tier is always `escalate`.** Rou
 
 ## 6. Staging queue (sprint §6)
 
-Stage eligible child PRs into the kaizen branch one at a time; **append the omnibus
-ledger row in the same step** (child PR #, tier `escalate`, review evidence); rebase the
-remaining child PRs; keep `master` *merged into* (never rebase) the kaizen branch. CI
-waits and CI-fix dispatch as sprint §6.
+Stage eligible child PRs into the kaizen branch one at a time; **do not rewrite the PR
+body per stage** — the staged fact is reconstructable from the merge commit + child PR
+body, so the *Staged* table is rebuilt at finalize (sprint §6/§7, ADR-0023). In the same
+step, only persist the **irreducible residue** (orchestrator/review `RETRO:`, synced SHAs)
+by appending + committing `lark-rs/docs/sprints/<kaizen-id>.md`. Rebase the remaining child
+PRs; keep `master` *merged into* (never rebase) the kaizen branch. CI waits and CI-fix
+dispatch as sprint §6.
 
 **`Closes #N` for multi-concern issues:** the omnibus carries `Closes #N` only once
-**every** concern of issue #N is staged. Until then the ledger lists #N's concerns as
-partially staged (stage rows reference the concern, not yet the close).
+**every** concern of issue #N is staged (reconstructed at finalize). Until then #N's
+concerns are partially staged — the reconstructed table references the concern, not yet
+the close.
 
 ## 7–9. Finalize, terminal states, close-out (sprint §7–§9)
 
@@ -162,8 +167,8 @@ aggregated **Retrospective**.
 - **Never bake kit fixes into a product PR or a sprint omnibus** (§9) — they ride the
   **kaizen** omnibus so they can be reverted independently and reviewed as governance.
 - **Resumability, rollback-first, no mid-run `AskUserQuestion`** — inherited from the
-  sprint guardrails (the omnibus body is the live ledger; a bad stage is reverted out of
-  the integration branch before it can escape, since nothing reaches `master` until the
-  omnibus merge).
+  sprint guardrails (GitHub is the ledger — reconstruct-at-finalize + the committed residue
+  file, ADR-0023; a bad stage is reverted out of the integration branch before it can
+  escape, since nothing reaches `master` until the omnibus merge).
 - A `kaizen` change that would alter `PRINCIPLES.md` is the architect's to write; the
   sweep may *draft* a proposal child PR but flags it explicitly for the architect.
