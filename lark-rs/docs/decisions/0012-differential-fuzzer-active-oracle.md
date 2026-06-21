@@ -15,15 +15,13 @@ imagined — slips through.
 
 Add a **differential fuzzer** that generates inputs and compares lark-rs against
 Python Lark live, as an *active* oracle complementing the static ones — but keep
-it off the PR critical path. Two tiers (#12):
+it off the PR critical path. Two tiers:
 
 - **Discovery** (manual / nightly): generates fresh inputs, hunts for new
-  divergences. *"Never on the PR critical path."*
-- **Regression** (every PR): replays a committed corpus — *"`fuzz/inputs.json`
-  is the source of truth."* A divergence found in discovery is minimized and
-  frozen into that corpus, after which it behaves like any other oracle case.
-
-The framing: *"Turn the static oracle into an active one."*
+  divergences. Never on the PR critical path.
+- **Regression** (every PR): replays a committed corpus (`fuzz/inputs.json`).
+  A divergence found in discovery is minimized and frozen into that corpus,
+  after which it behaves like any other oracle case.
 
 ## Consequences
 

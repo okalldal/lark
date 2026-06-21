@@ -5,20 +5,15 @@
 
 ## Context
 
-Error recovery (#43/#93/#167) shipped **LALR-without-postlex only**:
+Error recovery (#43/#93) shipped **LALR-without-postlex only**:
 `ParsingFrontend::parse_recovering` returned `GrammarError::Other` whenever a
-postlex hook was present, with the message *"error recovery requires
-parser='lalr' without a postlex hook"*. The stated reason (mod.rs doc-comments)
-was that single-token-deletion recovery deletes tokens from the stream, which
-"could desync the indenter's synthetic INDENT/DEDENT injection."
+postlex hook was present, because single-token-deletion recovery deletes tokens
+from the stream, which might desync the indenter's synthetic INDENT/DEDENT
+injection. Earley/CYK recovery are out of scope — Python exposes no `on_error`
+there, so they have no oracle and are unfalsifiable.
 
-Issue #94 scoped (architect verdict, 2026-06-18) to **sub-target 1 only**:
-lift that restriction for the LALR + Indenter postlex path. Earley/CYK recovery
-were dropped as won't-do — Python exposes no `on_error` there, so they have no
-oracle and are unfalsifiable.
-
-The desync worry turned out to be the wrong mental model. Tracing Python Lark
-(the oracle) settled three load-bearing facts:
+The desync concern turned out to be the wrong mental model. Python Lark's actual
+wiring settles three load-bearing facts:
 
 1. **The indenter is upstream of deletion.** Python wires
    `lexer → PostLexConnector(postlex) → parser`, and `on_error`/`resume_parse`
@@ -88,7 +83,7 @@ requires parser='lalr'"*.
   branch threaded through the parser loop.
 - **Public API.** `Lark::parse_with_recovery` / `parse_on_error` now succeed on
   LALR + Indenter grammars instead of erroring. No signature change; a previously
-  failing configuration starts working. `escalate`-tier (the architect approves via
-  the omnibus) since it widens recovery's supported surface.
-- **Earley/CYK stay refused** — unfalsifiable without an `on_error` oracle, per the
-  #94 verdict. The refusal message no longer mentions postlex.
+  failing configuration starts working (`escalate`-tier: widens recovery's supported
+  surface).
+- **Earley/CYK stay refused** — unfalsifiable without an `on_error` oracle. The
+  refusal message no longer mentions postlex.

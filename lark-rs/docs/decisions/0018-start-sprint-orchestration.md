@@ -6,27 +6,22 @@
 ## Context
 
 The autonomy kit drives the backlog **one issue at a time** (`/next-task` →
-`/finish-task`). The architect asked for a single session that drives the *entire* open
-backlog forward in one pass, under four constraints: don't dilute the session's context,
-don't interrupt before the target is met, exploit parallelism, and keep merge gruntwork
-off the architect's desk.
+`/finish-task`). A whole-backlog sprint needs to drive the *entire* open backlog in
+one pass under four constraints: don't dilute the session's context, don't interrupt
+before the target is met, exploit parallelism, and keep merge gruntwork off the
+architect's desk.
 
-A naive "loop `/next-task` in one session" fails all four: each issue's diffs accumulate
-in one context (dilution); a mid-issue fork triggers a synchronous `AskUserQuestion`
-(interruption); issues run serially (no parallelism); and every PR still queues for the
-architect (merge hell).
-
-An *earlier* draft of this ADR fixed three of those but mis-handled the fourth: it had
-worker/review sub-agents run `/review-pr` and let the orchestrator **auto-merge
-`auto`-tier child PRs straight to `master`**. With ADR-0016 Accepted, `/review-pr` *can*
-merge — so that path would let automation mutate `master` in a whole-backlog batch with
-no single human approval point, which is exactly the blast radius that should not be
-automated. The model below removes that.
+A naive "loop `/next-task` in one session" fails all four: each issue's diffs
+accumulate in one context (dilution); a mid-issue fork triggers a synchronous
+`AskUserQuestion` (interruption); issues run serially (no parallelism); and every PR
+still queues for the architect (merge hell). Letting automation auto-merge child PRs
+directly to `master` during the sprint also fails — it removes the single human
+approval point from a high-blast-radius batch.
 
 ## Decision
 
 `/start-sprint` is a **thin orchestrator** over worker sub-agents that **never touches
-`master` directly**. Concretely:
+`master` directly**:
 
 - **Workers never merge.** A worker executes one issue in an isolated worktree and opens
   a **child PR whose base is a temporary sprint integration branch** (created from the
@@ -60,20 +55,16 @@ off the architect's desk **without** letting automation write to `master`.
   architect's to land.
 - **Keeps CI and review per child PR, plus one final CI on the integrated result** (the
   omnibus PR), so nothing lands without both per-change and whole-batch gates passing.
-- **No reliance on conversation memory.** Durable state is the integration branch, the
-  child PRs, the labels, and the omnibus PR body (PRINCIPLES.md §0); a rolled-over
-  session rebuilds the plan from GitHub and resumes. The omnibus body is a **live
-  ledger**, not an end-of-sprint summary: a *Staged* row (PR, issue, tier, evidence) is
-  appended the instant a child PR is merged into the sprint branch — necessarily, since
-  a staged child is no longer an *open* PR and the body is then its only record — so a
-  roll-over mid-staging loses nothing.
+- **No reliance on conversation memory.** Durable state is the integration branch
+  (merge history), the child PRs, the labels, the omnibus PR pointer/summary, and
+  the committed residue ledger ([ADR-0023](0023-sprint-ledger-durability.md) owns the
+  ledger mechanism). A rolled-over session reconstructs the plan from these sources
+  and resumes.
 - **Process improves itself.** Every worker, every review sub-agent, and the orchestrator
   emit a `RETRO:` block of process quirks (wrong/stale instructions, misfiring steps,
-  missing know-how, context-draining tooling). These are harvested into the omnibus body's
-  *Retrospective* section as they arrive (same durability rule as the ledger) and
-  presented to the architect at close-out, with persistent fixes filed as their own
-  governance follow-ups (§9) — so the kit sharpens sprint over sprint instead of
-  re-hitting the same friction.
+  missing know-how, context-draining tooling). These are captured durably
+  ([ADR-0023](0023-sprint-ledger-durability.md)) and presented to the architect at
+  close-out, with persistent fixes filed as governance follow-ups (§9).
 - It *adds scheduling*, not new authority: it inherits per-issue DoD (§6), ADR-0016
   tiers (nothing `auto`-merges to `master`; governance/`needs-decision` never auto), §9
   rollback-first, and escalate-don't-guess (§4–5).
@@ -83,11 +74,6 @@ off the architect's desk **without** letting automation write to `master`.
 - **Tripwire — omnibus too big to review.** If an `escalate` child PR (or the omnibus as
   a whole) is too large for a meaningful final review, split the sprint or require
   per-`escalate` architect approval *before* staging that child, rather than batching it.
-- **Self-gated activation.** `/start-sprint`'s §1 preflight requires **ADR-0016**,
-  **ADR-0017**, *and* **this ADR (0018)** to be Accepted before it will run. Accepting
-  0018 in the same PR that adds the command is deliberate (Option A of the activation
-  question): merging the command *is* adopting the policy, so the two move together rather
-  than landing a live command whose own ADR still says Proposed. If 0016 is ever reverted,
-  the preflight refuses to start rather than staging work that can never land.
-- This is a command/policy artifact, so per §9 it ships on its own PR and is
-  escalate-tier (the architect merges it).
+- **Self-gated activation.** `/start-sprint`'s preflight requires ADR-0016, ADR-0017,
+  and this ADR to be Accepted before it will run. If ADR-0016 is ever reverted, the
+  preflight refuses to start rather than staging work that can never land.

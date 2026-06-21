@@ -62,6 +62,29 @@ append-only, and why a `Proposed` *policy* ADR (e.g. ADR-0016) is legitimate her
 an ADR is both the record of *why we did it* and the audit trail for *decisions an
 agent made without the architect in the loop*.
 
+## ADRs are decision records, not session transcripts
+
+Keep ADRs self-contained and stable: context, decision, consequences, and the
+validation gate. The following belong in **PR bodies, issues, or explicitly
+non-normative notes** — not in the decision record:
+
+- PR state, branch names, session IDs, or transient merge-tier routing ("Reviewed
+  as `escalate`-tier", "architect approves via the omnibus"). Noting a change's
+  *durable* blast-radius classification (e.g. "this is a breaking API change,
+  `escalate`-tier") is fine in Consequences — it is a standing fact about the
+  decision, not a routing instruction for a specific PR.
+- Implementation queues, command routing, or task plans
+- Model provenance or AI session transcripts
+- Sprint retrospective narratives ("Two problems surfaced the first time it ran…")
+- Meta-commentary about the ADR-writing process itself ("An earlier draft of this
+  ADR…", "This ADR preserves it so the dead ends aren't re-explored")
+
+Issue and PR numbers are fine as **parenthetical citations** for traceability
+(e.g. "the `~n`-inlining fix (#176)"), but the ADR must stand on its own without
+reading those references. "Worked examples" that illustrate the decision's
+application are welcome when they name the principle being applied, not just the
+ticket.
+
 ## How to add one
 
 1. Copy [`TEMPLATE.md`](TEMPLATE.md) to `NNNN-short-title.md` (next number).

@@ -8,27 +8,26 @@
 Python Lark's CYK backend rejects a grammar whose CNF conversion would emit an
 empty rule (`CYK doesn't support empty rules`). lark-rs must match that rejection
 (invariant §2; [ADR-0017](0017-oracle-fidelity-is-for-intended-behavior.md): being
-*more permissive* than the oracle is unfalsifiable). #101 found lark-rs *accepted* a
-wholly-nullable transparent rule (`_a: B?`) that Python rejects: the original guard
-keyed on `!info.inline`, so any transparent origin (leading `_`, or an `__anon_*`
-helper) slipped through.
+*more permissive* than the oracle is unfalsifiable). lark-rs *accepted* a
+wholly-nullable transparent rule (`_a: B?`) that Python rejects (#101): the original
+guard keyed on `!info.inline`, so any transparent origin (leading `_`, or an
+`__anon_*` helper) slipped through.
 
 The obvious fix — drop the carve-out and reject *every* nullable `Nt::Orig` —
 over-corrects. A `*`/`?` nested where a single symbol is mandatory (inside `~n`,
 e.g. `start: A (B*)~2`) emits a **standalone nullable anonymous EBNF helper**
 (`__anon_rep_*` / `__anon_group_*`). Python Lark's CYK **accepts** that grammar and
-lark-rs matches it tree-for-tree today; the blunt rejection would start rejecting an
-input Python parses — itself a §2 oracle regression. The four compliance banks miss
-it because their only `~n` cases are on terminals (`"A"~2`), never a nullable group.
+lark-rs matches it tree-for-tree; the blunt rejection would start rejecting an
+input Python parses — itself a §2 oracle regression. The compliance banks miss it
+because their only `~n` cases are on terminals (`"A"~2`), never a nullable group.
 
-A differential audit (recorded on #101) pinned the exact discriminator: **Python
-rejects ⟺ the nullable rule is user-written; it accepts iff every nullable origin is
-a generated anonymous EBNF helper.** The remaining question was the *mechanism*: the
-interner ([ADR-0003](0003-intern-symbols-to-ids-with-flags.md)) deliberately folds
-`_name` and `__anon_*` into one `inline` flag and warns against name-prefix sniffing,
-because a user grammar can author the exact name `__anon_star_0` (#144) — so a
-`name.starts_with("__anon_")` gate in `cyk.rs` would reintroduce the bug under a
-different spelling.
+The exact discriminator: **Python rejects ⟺ the nullable rule is user-written; it
+accepts iff every nullable origin is a generated anonymous EBNF helper.** The
+mechanism matters: the interner ([ADR-0003](0003-intern-symbols-to-ids-with-flags.md))
+deliberately folds `_name` and `__anon_*` into one `inline` flag and warns against
+name-prefix sniffing, because a user grammar can author the exact name
+`__anon_star_0` (#144) — so a `name.starts_with("__anon_")` gate in `cyk.rs` would
+reintroduce the bug under a different spelling.
 
 ## Decision
 
