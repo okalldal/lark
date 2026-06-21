@@ -116,21 +116,12 @@ fn recovery_unsupported() -> LarkError {
     })
 }
 
-/// Shared recovery body for the **basic-lexer** LALR driver (issues #43 + #93):
-/// lex the whole stream with the basic (global) lexer, then drive the recovering
-/// LALR loop. (The contextual driver does not use this — it recovers over its own
-/// contextual lexer via [`LalrParser::parse_contextual_recovering`], issue #166.)
-/// Lexing uses the recovering entry point ([`BasicLexer::lex_recovering`]): a
-/// genuinely un-lexable character is no longer a hard error but is *skipped one
-/// char at a time*, recording each skip in `errors` (Python's
-/// `UnexpectedCharacters` branch). The character-level skips and the token-level
-/// deletions both flow through the same `on_error` handler and accumulate into one
-/// `errors` list, so editor tooling sees a complete diagnostic record. `lexer` is
-/// `None` only if the recovery lexer's construction failed at build time (not
-/// expected in practice); recovery is then unavailable rather than the whole build
-/// failing.
-///
-/// [`BasicLexer::lex_recovering`]: crate::lexer::BasicLexer::lex_recovering
+/// Shared recovery body for the **basic-lexer** LALR driver (issues #43, #93,
+/// #223). Uses a lazy [`BasicRecovering`] source so character-level lex failures
+/// surface during parsing (not up front) and the `on_error` handler's
+/// [`RecoveryContext`] reflects the real parser state at the error — not a
+/// fabricated initial-state context. `lexer` is `None` only if the recovery
+/// lexer's construction failed at build time (not expected in practice).
 fn lalr_recover(
     parser: &LalrParser,
     lexer: Option<&BasicLexer>,
@@ -142,16 +133,8 @@ fn lalr_recover(
         return Err(recovery_unsupported());
     };
     let mut errors = Vec::new();
-    let tokens = {
-        let initial_state = parser.initial_state(start)?;
-        let mut lex_handler = |err: &ParseError| -> bool {
-            let mut stack = crate::parsers::lalr::ParserStack::for_state(initial_state);
-            let mut ctx = RecoveryContext::new(&mut stack, &parser.table);
-            !matches!(on_error(err, &mut ctx), RecoveryAction::Stop)
-        };
-        lexer.lex_recovering(text, &mut lex_handler, &mut errors)
-    };
-    let tree = parser.parse_recovering(tokens, start, on_error, &mut errors)?;
+    let mut source = BasicRecovering::new(text, lexer);
+    let tree = parser.run_recovering(&mut source, start, on_error, &mut errors)?;
     Ok(RecoveredTree { tree, errors })
 }
 

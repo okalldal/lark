@@ -566,13 +566,6 @@ impl ParserStack {
         }
     }
 
-    /// Lightweight constructor for a stack at a known state — used by the
-    /// pre-lex recovery adapter to create a temporary `RecoveryContext` before
-    /// the parser has started.
-    pub(crate) fn for_state(state: usize) -> Self {
-        Self::new(state)
-    }
-
     /// The current (top) parser state.
     #[inline]
     pub(crate) fn position(&self) -> usize {
@@ -705,16 +698,29 @@ impl ParserStack {
 /// it is *not* the public [`InteractiveParser`]: its lifetime is scoped to the
 /// handler call and it does not own a lexer or input text.
 ///
+/// Failed feeds are transactional: if `feed_token` returns `Err`, the stack is
+/// rolled back to its state before the call, so candidate-insertion patterns
+/// (try feed, fall back to Delete on failure) are safe.
+///
 /// [`RecoveryAction`]: crate::error::RecoveryAction
 /// [`InteractiveParser`]: super::interactive::InteractiveParser
 pub struct RecoveryContext<'a> {
     stack: &'a mut ParserStack,
     table: &'a ParseTable,
+    fed_count: usize,
 }
 
 impl<'a> RecoveryContext<'a> {
     pub(crate) fn new(stack: &'a mut ParserStack, table: &'a ParseTable) -> Self {
-        RecoveryContext { stack, table }
+        RecoveryContext {
+            stack,
+            table,
+            fed_count: 0,
+        }
+    }
+
+    pub(crate) fn fed_count(&self) -> usize {
+        self.fed_count
     }
 
     /// The terminal names that would advance the parser from its current state,
@@ -726,14 +732,34 @@ impl<'a> RecoveryContext<'a> {
     }
 
     /// Feed one token, advancing through any REDUCEs to the next SHIFT or ACCEPT.
-    /// Returns `Ok(())` on success and `Err` when the parser has no action for it.
-    /// The terminal is resolved by *name* (not `type_id`), exactly as
-    /// [`InteractiveParser::feed_token`] does.
+    /// Returns `Ok(None)` on SHIFT and `Ok(Some(tree))` on ACCEPT, matching
+    /// [`InteractiveParser::feed_token`]'s return shape. Returns `Err` when the
+    /// parser has no action for the token.
+    ///
+    /// **Transactional on failure:** if the feed errors (including after partial
+    /// reductions), the stack is rolled back to its pre-call state so the handler
+    /// can safely try candidate insertions and fall back.
+    ///
+    /// Feeding `$END` is rejected — use [`RecoveryAction::Resume`] to retry the
+    /// current lookahead after feeding corrective tokens; completion is the
+    /// recovery loop's responsibility, not the handler's.
     ///
     /// [`InteractiveParser::feed_token`]: super::interactive::InteractiveParser::feed_token
-    pub fn feed_token(&mut self, mut token: Token) -> Result<(), ParseError> {
+    /// [`RecoveryAction::Resume`]: crate::error::RecoveryAction::Resume
+    pub fn feed_token(&mut self, mut token: Token) -> Result<Option<ParseTree>, ParseError> {
         match self.table.symbols.id(&token.type_) {
-            Some(id) => token.type_id = id,
+            Some(id) => {
+                if id == SymbolId::END {
+                    return Err(ParseError::UnexpectedToken {
+                        token: token.value,
+                        token_type: token.type_,
+                        line: token.line,
+                        col: token.column,
+                        expected: self.accepts(),
+                    });
+                }
+                token.type_id = id;
+            }
             None => {
                 return Err(ParseError::UnexpectedToken {
                     token: token.value.clone(),
@@ -744,10 +770,22 @@ impl<'a> RecoveryContext<'a> {
                 })
             }
         }
+        let snapshot = self.stack.clone();
         match self.stack.feed_token(self.table, &token) {
-            Feed::Shifted | Feed::Accepted(_) => Ok(()),
-            Feed::Error(e) => Err(e),
+            Feed::Shifted => {
+                self.fed_count += 1;
+                Ok(None)
+            }
+            Feed::Accepted(tree) => {
+                self.fed_count += 1;
+                Ok(Some(tree))
+            }
+            Feed::Error(e) => {
+                *self.stack = snapshot;
+                Err(e)
+            }
             Feed::NoAction => {
+                *self.stack = snapshot;
                 let expected = self.accepts();
                 Err(ParseError::UnexpectedToken {
                     token: token.value,
@@ -762,7 +800,7 @@ impl<'a> RecoveryContext<'a> {
 
     /// Feed a token by terminal name and value — convenience wrapper over
     /// [`feed_token`](Self::feed_token).
-    pub fn feed(&mut self, terminal: &str, value: &str) -> Result<(), ParseError> {
+    pub fn feed(&mut self, terminal: &str, value: &str) -> Result<Option<ParseTree>, ParseError> {
         self.feed_token(Token::new(terminal, value))
     }
 }
@@ -915,7 +953,7 @@ impl LalrParser {
     ///
     /// Every recovered error is pushed to `errors`. Returns `Some(tree)` on a
     /// normal ACCEPT, or `None` when recovery cannot reach ACCEPT.
-    fn run_recovering<S: TokenSource>(
+    pub(crate) fn run_recovering<S: TokenSource>(
         &self,
         source: &mut S,
         start: Option<&str>,
@@ -953,25 +991,25 @@ impl LalrParser {
                 Feed::Error(e) => return Err(e),
                 Feed::NoAction => {
                     let err = self.unexpected(stack.position(), &token);
-                    if token.type_id == SymbolId::END {
-                        let mut ctx = RecoveryContext::new(&mut stack, &self.table);
-                        on_error(&err, &mut ctx);
-                        errors.push(err);
-                        return Ok(None);
-                    }
-                    let state_before = stack.position();
+                    let is_end = token.type_id == SymbolId::END;
                     let mut ctx = RecoveryContext::new(&mut stack, &self.table);
                     let action = on_error(&err, &mut ctx);
+                    let fed = ctx.fed_count();
                     errors.push(err);
                     match action {
+                        RecoveryAction::Delete if is_end => {
+                            return Ok(None);
+                        }
                         RecoveryAction::Delete => {
                             source.advance();
                             source.on_delete();
                         }
+                        RecoveryAction::Resume if fed == 0 => {
+                            return Ok(None);
+                        }
                         RecoveryAction::Resume => {
-                            if stack.position() == state_before {
-                                return Ok(None);
-                            }
+                            // The handler fed corrective tokens; retry the
+                            // same lookahead (including $END) in the new state.
                         }
                         RecoveryAction::Stop => {
                             return Ok(None);
