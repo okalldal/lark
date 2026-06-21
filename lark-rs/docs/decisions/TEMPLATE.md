@@ -7,8 +7,16 @@
 A *staged* ADR is ALWAYS `Status: Proposed (pending architect ratification)`.
 An agent never self-ratifies — only the architect flips an ADR to `Accepted`,
 by merging the PR that carries it. Authoring a new ADR as `Accepted` is a DoD
-failure (see `.claude/commands/finish-task.md`). Delete this comment in the
-real ADR.
+failure (see `.claude/commands/finish-task.md`).
+
+QUALITY RULE: ADRs are decision records, not session transcripts or task plans.
+Keep context/decision/consequences self-contained and stable. PR state, command
+routing, implementation queues, model provenance, sprint narratives, and
+meta-commentary about the ADR-writing process belong in PR bodies or issues,
+not here. Issue/PR numbers are fine as parenthetical citations for traceability.
+See README.md for the full rule.
+
+Delete this comment in the real ADR.
 -->
 
 

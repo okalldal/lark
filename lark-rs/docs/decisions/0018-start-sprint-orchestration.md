@@ -6,27 +6,22 @@
 ## Context
 
 The autonomy kit drives the backlog **one issue at a time** (`/next-task` →
-`/finish-task`). The architect asked for a single session that drives the *entire* open
-backlog forward in one pass, under four constraints: don't dilute the session's context,
-don't interrupt before the target is met, exploit parallelism, and keep merge gruntwork
-off the architect's desk.
+`/finish-task`). A whole-backlog sprint needs to drive the *entire* open backlog in
+one pass under four constraints: don't dilute the session's context, don't interrupt
+before the target is met, exploit parallelism, and keep merge gruntwork off the
+architect's desk.
 
-A naive "loop `/next-task` in one session" fails all four: each issue's diffs accumulate
-in one context (dilution); a mid-issue fork triggers a synchronous `AskUserQuestion`
-(interruption); issues run serially (no parallelism); and every PR still queues for the
-architect (merge hell).
-
-An *earlier* draft of this ADR fixed three of those but mis-handled the fourth: it had
-worker/review sub-agents run `/review-pr` and let the orchestrator **auto-merge
-`auto`-tier child PRs straight to `master`**. With ADR-0016 Accepted, `/review-pr` *can*
-merge — so that path would let automation mutate `master` in a whole-backlog batch with
-no single human approval point, which is exactly the blast radius that should not be
-automated. The model below removes that.
+A naive "loop `/next-task` in one session" fails all four: each issue's diffs
+accumulate in one context (dilution); a mid-issue fork triggers a synchronous
+`AskUserQuestion` (interruption); issues run serially (no parallelism); and every PR
+still queues for the architect (merge hell). Letting automation auto-merge child PRs
+directly to `master` during the sprint also fails — it removes the single human
+approval point from a high-blast-radius batch.
 
 ## Decision
 
 `/start-sprint` is a **thin orchestrator** over worker sub-agents that **never touches
-`master` directly**. Concretely:
+`master` directly**:
 
 - **Workers never merge.** A worker executes one issue in an isolated worktree and opens
   a **child PR whose base is a temporary sprint integration branch** (created from the
@@ -83,11 +78,6 @@ off the architect's desk **without** letting automation write to `master`.
 - **Tripwire — omnibus too big to review.** If an `escalate` child PR (or the omnibus as
   a whole) is too large for a meaningful final review, split the sprint or require
   per-`escalate` architect approval *before* staging that child, rather than batching it.
-- **Self-gated activation.** `/start-sprint`'s §1 preflight requires **ADR-0016**,
-  **ADR-0017**, *and* **this ADR (0018)** to be Accepted before it will run. Accepting
-  0018 in the same PR that adds the command is deliberate (Option A of the activation
-  question): merging the command *is* adopting the policy, so the two move together rather
-  than landing a live command whose own ADR still says Proposed. If 0016 is ever reverted,
-  the preflight refuses to start rather than staging work that can never land.
-- This is a command/policy artifact, so per §9 it ships on its own PR and is
-  escalate-tier (the architect merges it).
+- **Self-gated activation.** `/start-sprint`'s preflight requires ADR-0016, ADR-0017,
+  and this ADR to be Accepted before it will run. If ADR-0016 is ever reverted, the
+  preflight refuses to start rather than staging work that can never land.

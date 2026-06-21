@@ -5,15 +5,13 @@
 
 ## Context
 
-The first `/kaizen-sweep` (added in #193) drained a **small batch** of process/kit
-debt — "pick ≈1–3 issues, make one PR per concern, stop at PR opened" — leaving the
-rest of the `kaizen` backlog for a later run. Two problems surfaced the first time it
-ran:
+The original `/kaizen-sweep` model — pick 1–3 issues, one PR per concern, stop at
+PR opened — has two structural problems:
 
 - **It does not actually drain the backlog.** Most `kaizen` issues bundle several
-  fixes, and the small-batch cap plus the single-working-branch constraint meant one
-  sweep cleared one concern and left the queue ~unchanged. Process debt keeps
-  accreting between runs — the exact failure mode #192 created the ritual to prevent.
+  fixes, and the small-batch cap plus the single-working-branch constraint means one
+  sweep clears one concern and leaves the queue ~unchanged. Process debt accretes
+  between runs.
 - **A scatter of tiny governance PRs is high-overhead for the architect.** Each
   kit/governance change is `escalate`-tier and needs an architect merge; draining the
   queue that way is N separate approval points.

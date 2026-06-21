@@ -6,45 +6,33 @@
 ## Context
 
 [ADR-0005](0005-lower-lookaround-into-the-dfa.md) records the *endpoint* — lower
-bounded lookaround into the DFA, no backtracking runtime engine — but reads as if
-that were the plan all along. It wasn't. The strategy reversed **three times**,
-twice *after* code or grammar edits had already landed. The "why we didn't keep
-approach X" reasoning is the expensive knowledge, and it lived only in the PR
-bodies. This ADR preserves it so the dead ends aren't re-explored.
+bounded lookaround into the DFA, no backtracking runtime engine — but the strategy
+reversed **three times**, twice *after* code or grammar edits had already landed.
+The reasons each approach was abandoned are load-bearing: they constrain future
+design so the dead ends aren't re-explored.
 
 ## The four legs
 
-**Leg 1 — fancy-regex runtime overlay (#88, shipped then removed).** First
-solution: send a terminal to `fancy-regex` only when the `regex` crate rejects
-its pattern. Abandoned (#110) as *"a correctness/distribution liability: a real
-ReDoS in `lark.REGEXP`, a possible wrong-answer on backtrack-limit, and patterns
-that can't be baked into the standalone/WASM/C runtimes."*
+**Leg 1 — fancy-regex runtime overlay (#88).** Send a terminal to `fancy-regex`
+only when the `regex` crate rejects its pattern. Abandoned: a correctness and
+distribution liability (ReDoS in `lark.REGEXP`, possible wrong-answer on
+backtrack-limit, and patterns that can't be baked into standalone/WASM/C runtimes).
 
-**Leg 2 — Pike-VM lowering engine (#110, closed not merged).** Replace
-backtracking with *"a linear, backtracking-free Pike-VM lowering engine."* #110
-also disproved its own central premise by re-scanning the grammars: *"The plan
-assumed all bundled assertions sit at token boundaries; in fact only `DEC_NUMBER`
-and `OP` do … the 'boundary peek' path was not complete."* PR closed, engine
-shelved.
+**Leg 2 — Pike-VM lowering engine (#110).** A linear, backtracking-free Pike-VM.
+Its central premise — all bundled assertions sit at token boundaries — was
+disproved by re-scanning the grammars: only `DEC_NUMBER` and `OP` do. The
+"boundary peek" path was incomplete.
 
-**Leg 3 — pure elimination, no engine at all (#111), then disproved (#112).**
-Superseded #110: *"Decision: pure elimination (Option 1b), no runtime engine …
-elimination rejoins the fast combined-DFA scan, carries zero `re`-parity
-maintenance surface, and makes the bundled grammars standalone/WASM-bakeable for
-free."* But E2a (#112) falsified its premise — not every terminal is rewritable
-lookaround-free: *"`python.STRING` ⛔ Irreducible — proven negative result …
-`(?!"")` makes `""""` a lex error while `"" ""` is valid … no lookaround-free
-regex, priority, or grammar-level fix can reproduce it."* (#112's earlier
-revisions that rewrote `LONG_STRING`/`STRING` grammars were reverted.)
+**Leg 3 — pure elimination, no engine at all (#111, disproved by #112).** Rewrite
+every terminal to be lookaround-free. Falsified: `python.STRING` is irreducible —
+`(?!"")` makes `""""` a lex error while `"" ""` is valid; no lookaround-free
+regex, priority, or grammar-level fix can reproduce it.
 
-**Leg 4 — combined DFA over lowered terminals (#113, #115, final).** Re-aimed to
-*"a combined DFA lexer — a DFA, not PR #110's Pike-VM."* The distinction that
-defuses #111's anti-engine memo: *"a DFA over lowered, lookaround-free terminals
-executes no lookaround, has no CPython-`re`-parity surface, and is faster than a
-Pike-VM — so the strategy memo's anti-engine arguments (which targeted a
-match-time lookaround engine) don't apply."* #115 then dissolved the
-reducible/irreducible terminal tiers: at the automaton level the distinction
-*"dissolves … the old 'edit the Tier-E grammars' phase is dropped."*
+**Leg 4 — combined DFA over lowered terminals (#113, #115, adopted).** A DFA
+over lowered, lookaround-free terminals executes no lookaround, has no
+CPython-`re`-parity surface, and is faster than a Pike-VM — so the anti-engine
+arguments from Leg 3 (which targeted match-time lookaround) don't apply. At the
+automaton level the reducible/irreducible terminal distinction dissolves.
 
 ## Consequences / lessons preserved
 

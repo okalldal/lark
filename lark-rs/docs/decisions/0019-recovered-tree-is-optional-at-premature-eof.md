@@ -13,7 +13,7 @@ oracle.
 
 lark-rs originally diverged: it called `synthesize_partial`, wrapping whatever
 fragments remained on the value stack under the start-symbol name and returning
-`Ok(tree)`. Two problems (raised in #95 sub-decision 4, spun out as #167):
+`Ok(tree)`. Two problems:
 
 1. **It diverges from Python**, which re-raises — those cases are only loosely
    asserted in the oracle (error fired, shape ignored).
@@ -22,9 +22,8 @@ fragments remained on the value stack under the start-symbol name and returning
    `ParseTree`, so "did recovery actually complete?" was unanswerable from the
    type. Misleading for the editor/LSP use case the feature exists for.
 
-The two shapes weighed in #167: `RecoveredTree { tree: Option<…>, errors }` with
-`None` at premature EOF, *or* a partial carrying an explicit incomplete marker.
-#95 recommended the `None`/marked form over a fabricated tree.
+Two alternative shapes: `RecoveredTree { tree: Option<…>, errors }` with `None` at
+premature EOF, or a partial carrying an explicit incomplete marker.
 
 ## Decision
 
@@ -32,9 +31,8 @@ The two shapes weighed in #167: `RecoveredTree { tree: Option<…>, errors }` wi
 recovery reached a normal ACCEPT (a real derivation the surviving tokens produce);
 it is `None` when recovery could not reach ACCEPT — premature `$END`, or `on_error`
 returning `false` before a valid parse. `synthesize_partial` (and its `start_name`
-helper) are deleted; no synthetic tree is fabricated. This is the #95-recommended
-`None` form. The minor Option-vs-marker choice within that directive is settled in
-favor of `Option` (idiomatic Rust, zero extra surface).
+helper) are deleted; no synthetic tree is fabricated. `Option` over an explicit
+marker: idiomatic Rust, zero extra surface.
 
 ## Consequences
 
@@ -46,9 +44,9 @@ favor of `Option` (idiomatic Rust, zero extra surface).
   oracle's `tree: null` (was: shape ignored). Tripwire: a regression that
   fabricates a tree fails the tightened test.
 - **Public-API shape change.** `RecoveredTree.tree: ParseTree → Option<ParseTree>`
-  is a breaking change to a public type. Reviewed as `escalate`-tier (architect
-  approves via the omnibus). No other binding consumes the field (no PyO3/WASM/C
-  surface for recovery yet), so the blast radius is the Rust API and its tests.
+  is a breaking change to a public type (`escalate`-tier). No other binding consumes
+  the field (no PyO3/WASM/C surface for recovery yet), so the blast radius is the
+  Rust API and its tests.
 - **Cost.** Callers that only ever want "a tree, any tree" must now handle `None`.
   Acceptable: the feature's audience (editor tooling) needs the distinction, and a
   fabricated non-derivation served no one.

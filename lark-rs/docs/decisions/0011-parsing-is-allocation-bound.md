@@ -6,10 +6,9 @@
 ## Context
 
 The project goal is "10–100× faster than Python Lark." A natural assumption is
-that the headroom is algorithmic. A profiling spike (#23) measured otherwise and
-this finding now silently underpins a caveat repeated across the standalone /
-PyO3 / benchmark docs ("value is X, **not** throughput") — but the measurement
-itself only survived in an archived plan, not in any durable doc.
+that the headroom is algorithmic. A profiling spike (#23) measured otherwise;
+this finding underpins the caveat repeated across the standalone / PyO3 /
+benchmark docs ("value is X, **not** throughput").
 
 ## Decision
 

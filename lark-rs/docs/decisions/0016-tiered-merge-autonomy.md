@@ -32,32 +32,17 @@ Two tiers, decided per PR by `/review-pr` from `kind:` (`LABELS.md`) + blast rad
 The dividing line is exactly whether an existing, author-independent gate fully
 captures correctness.
 
-## Activation — staged, not switched on
+## Activation
 
-This ADR is **Proposed**, and merge authority does **not** turn on when it lands in
-the repo. The rollout is staged:
+Rollout was staged: verdict-only classification first, then live merge authority.
 
-1. **Verdict-only (now).** `/review-pr` classifies every PR and posts the
-   recommended tier, but the **architect merges all PRs** — `auto` included. This
-   exercises the classifier at zero risk.
-2. **Accept after dry runs.** Once a handful of verdict-only runs show the `auto`
-   tiering is trustworthy, the architect flips this ADR to **Accepted** and
-   `/review-pr` begins merging `auto`-tier PRs directly.
-3. **Widen by evidence.** The `auto` set starts conservative and grows only as the
-   banks/gates prove they cover a class (per the tripwire below).
-
-Until step 2, `PRINCIPLES.md` §6, `/review-pr`, and `/finish-task` all treat `auto`
-as a *recommendation*, not an authorization.
-
-**Accepted 2026-06-18 (step 2 reached).** The architect ratified this ADR to enable
-autonomous whole-backlog sprints. This is ahead of the suggested "handful of
-verdict-only dry runs" above — a deliberate architect call, traded against the
-guardrails that remain in force: the `auto` set stays at the conservative list in
-the Decision above and widens only by evidence (the tripwire below); governance /
-policy PRs are **never** `auto` (§6 / §9); and §9 rollback-first + the periodic
-autonomy audit are the net. From here, `/review-pr` merges `auto`-tier PRs directly
-once the Definition of Done is met; `escalate`-tier and `needs-decision` still go to
-the architect.
+- **Verdict-only phase (2026-06-13 to 2026-06-18).** `/review-pr` classified
+  every PR and posted the recommended tier; the architect merged all PRs.
+- **Accepted 2026-06-18.** `/review-pr` merges `auto`-tier PRs directly once the
+  Definition of Done is met; `escalate`-tier and `needs-decision` go to the
+  architect. The `auto` set stays at the conservative list above and widens only
+  by evidence (the tripwire below); governance/policy PRs are never `auto`
+  (§6 / §9); §9 rollback-first + the periodic autonomy audit are the net.
 
 ## Why this is even defensible here
 
