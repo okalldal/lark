@@ -23,6 +23,7 @@ double as the epic grouping.
 | `status:` | `triaged` `in-progress` `needs-review` `blocked` | Where the item is in the lifecycle. Absent = untriaged. |
 | `needs-decision` | (flag) | **The architect's inbox.** A fork only the architect can resolve (e.g. #159, #101, #95). `/next-task` never auto-picks these. |
 | `good-autonomous` | (flag) | Fully groundable, safe for an unattended `/next-task` pick — a done-when with an oracle and no open fork. |
+| `kaizen` | (flag) | **Process/kit debt**, not product work: a fix to the commands, governance docs, harness, or review discipline (usually surfaced by a sprint retrospective). Drained on a separate low cadence by `/kaizen-sweep`, never folded into feature cadence. Product-affecting retro items (e.g. an oracle/bank gap) stay in the normal backlog *without* this flag. |
 
 ## Lifecycle
 
@@ -46,3 +47,8 @@ double as the epic grouping.
 - **Creating the labels:** they don't exist on the repo yet. The first `/triage`
   run creates any missing label (idempotently, via the GitHub MCP) before
   applying it — no manual setup step.
+- **`kaizen` is drained off-cadence.** `/next-task` and `/start-sprint` do **not**
+  schedule `kaizen` issues — process/kit debt competes with feature work under the
+  same rubric otherwise, and most of it is `escalate`-tier (touches commands or
+  governance docs). The dedicated **`/kaizen-sweep`** surveys open `kaizen` issues,
+  drains a small batch as proposal PRs, and leaves ratification to the architect.
