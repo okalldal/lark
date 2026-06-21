@@ -10,7 +10,7 @@ pub use lalr::{build_lalr_table, LalrParser, ParseTable};
 pub use token_source::{
     BasicRecovering, Contextual, ContextualRecovering, LexFailure, PreLexed, TokenSource,
 };
-pub use tree_builder::{NodeValue, TreeBuilder};
+pub use tree_builder::{NodeValue, OutputBuilder, Slot, TreeBuilder, TreeOutputBuilder};
 
 use crate::error::{GrammarError, LarkError, ParseError, RecoveredTree};
 use crate::grammar::intern::SymbolTable;

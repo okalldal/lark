@@ -39,7 +39,7 @@
 //! ## Forest → tree
 //!
 //! [`Transformer`] walks the SPPF bottom-up, reusing the shared
-//! [`TreeBuilder`](super::tree_builder::TreeBuilder) for every rule's tree
+//! [`TreeOutputBuilder`](super::tree_builder::TreeOutputBuilder) for every rule's tree
 //! shaping (filtering, transparent splice, `expand1`, aliases) — so the forest
 //! walk and the LALR reducer cannot grow two subtly different shapers. With
 //! `ambiguity='resolve'` it picks the single highest-priority derivation per
@@ -54,7 +54,10 @@ use crate::grammar::intern::{CompiledGrammar, SymbolId};
 use crate::lexer::DynamicMatcher;
 use crate::tree::{Child, ParseTree, Token, Tree};
 
-use super::tree_builder::{NodeValue, TreeBuilder};
+use super::tree_builder::{Slot, TreeOutputBuilder};
+
+// Backward-compat alias within earley — keeps diff minimal for this refactor.
+type NodeValue = Slot;
 
 // ─── Chart items ──────────────────────────────────────────────────────────────
 
@@ -1390,13 +1393,13 @@ impl EarleyParser {
 // ─── Forest → tree conversion ─────────────────────────────────────────────────
 
 /// Walks the SPPF bottom-up, building parse trees through the shared
-/// [`TreeBuilder`]. Symbol-node results are memoized (a forest node is reached by
+/// [`TreeOutputBuilder`]. Symbol-node results are memoized (a forest node is reached by
 /// many parents); intermediate nodes are expanded inline into their parent rule's
 /// child list. Priorities are computed lazily, à la Lark's `ForestSumVisitor`.
 struct Transformer<'a> {
     grammar: &'a CompiledGrammar,
     forest: &'a Forest,
-    builder: TreeBuilder<'a>,
+    builder: TreeOutputBuilder<'a>,
     resolve: bool,
     /// Per-terminal-id priority, summed into the forest priority only when the
     /// dynamic lexer is used (the basic lexer consumes terminal priorities in its
@@ -1455,7 +1458,7 @@ impl<'a> Transformer<'a> {
         Transformer {
             grammar,
             forest,
-            builder: TreeBuilder::new(&grammar.rules),
+            builder: TreeOutputBuilder::new(&grammar.rules),
             resolve,
             term_priority,
             memo: HashMap::new(),
@@ -1757,7 +1760,7 @@ impl<'a> Transformer<'a> {
                     // then costs O(total children) instead of the O(children²)
                     // the materialize-then-splice path pays re-copying each
                     // growing prefix (issue #54). The streamed frames mirror
-                    // `TreeBuilder::assemble`'s filtering + shaping (via
+                    // `TreeOutputBuilder::assemble`'s filtering + shaping (via
                     // `keep_token` / `shape`) so resolve trees stay
                     // byte-for-byte identical to the explicit path and to LALR.
                     w.bufs.push(Vec::new());
@@ -1899,7 +1902,7 @@ impl<'a> Transformer<'a> {
                             w.buf().push(Child::None);
                         }
                         // Trailing placeholders of a distributed absent `[...]`
-                        // (the streaming mirror of `TreeBuilder::shape`'s
+                        // (the streaming mirror of `TreeOutputBuilder::shape`'s
                         // trailing append).
                         let len = self.grammar.rules[rule].expansion.len();
                         self.push_nones_before(rule, len, w.buf());
@@ -2303,7 +2306,7 @@ impl<'a> Transformer<'a> {
 
     /// Push the `None` placeholders a distributed absent `[...]` left before
     /// expansion position `gap` of `rule` (the streaming mirror of
-    /// `TreeBuilder::assemble`'s per-position insert).
+    /// `TreeOutputBuilder::assemble`'s per-position insert).
     fn push_nones_before(&self, rule: usize, gap: usize, out: &mut Vec<Child>) {
         for _ in 0..self.builder.nones_at(rule, gap) {
             out.push(Child::None);
@@ -2542,7 +2545,7 @@ fn child_to_node_value(c: Child) -> NodeValue {
         // An `_ambig`'s children are full alternative derivations, never a
         // `maybe_placeholders` slot — the same invariant the LALR expand1
         // collapse relies on (the guarded `Child::None` arm in
-        // `tree_builder::TreeBuilder::shape`).
+        // `tree_builder::TreeOutputBuilder::shape`).
         Child::None => unreachable!("an `_ambig` alternative is never a placeholder"),
     }
 }
