@@ -59,6 +59,12 @@ pushing — that runs everything twice (once here, once in GitHub Actions).
      they merge the PR. Author it `Status: Proposed (pending architect
      ratification)` (the canonical `TEMPLATE.md` phrasing) and say so in the PR
      body; a self-authored `Status: Accepted` is a DoD failure.
+     **Renumber-on-rebase (#207):** the ADR number is the next free integer *at
+     authoring time*, but `master` moves — before rebasing onto `master`, re-check
+     the highest ADR number there and renumber your `Proposed` ADR to the next free
+     slot (a `git grep ADR-NNNN` reference sweep covers the file, the
+     `decisions/README.md` index row, and any code/`CLAUDE.md` citation). Doing it
+     pre-rebase keeps the parallel-branch collision routine, not a conflict surprise.
    - **Point the PR at its issue:** the body must say `Closes #N`, and the
      done-when must actually be met.
    - **One PR, one concern** (§9): if your work touched both code and a

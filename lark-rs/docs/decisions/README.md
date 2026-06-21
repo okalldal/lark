@@ -69,6 +69,17 @@ agent made without the architect in the loop*.
    ADR that supersedes it (set the old one's status to `Superseded by NNNN`) —
    never delete or rewrite history.
 
+**Renumber-on-rebase (parallel-branch convention).** The "next number" in step 1
+is the next free integer *at authoring time* — but `master` moves while a PR is
+open, so two parallel branches can independently mint the **same** number and
+collide on rebase (a duplicate `NNNN-*.md` filename + an index conflict; this bit
+#195/#207). Before rebasing your branch onto `master`, **re-check the highest ADR
+number on `master` and renumber your proposed ADR to the next free slot**, with a
+`git grep ADR-NNNN` reference sweep (the file, this index row, and any
+`CLAUDE.md`/code citation). Your ADR is `Status: Proposed` until merge, so the
+integer is not yet load-bearing — moving it is cheap, and doing it *before* the
+rebase keeps it routine instead of a surprise conflict.
+
 ## The maintenance rule (keep docs from rotting)
 
 A PR that **changes a load-bearing decision** must, in the same PR, either add a
