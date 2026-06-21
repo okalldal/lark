@@ -4,8 +4,7 @@ description: Summarize the architect's open decision inbox as decision memos
 
 Produce a read-only architect decision brief. Do not mutate GitHub, do not apply
 labels, do not file issues, do not start implementation, and do not ask the
-architect to decide inside the command unless explicitly invoked with an argument
-that asks for one item to be resolved.
+architect to decide via `AskUserQuestion` — the brief itself is the deliverable.
 
 The goal is to answer: "What is in the architect's court, why, what decision is
 needed, what is recommended, what alternatives were considered, and what happens
@@ -23,7 +22,13 @@ In parallel, gather:
   `must not be guessed`, `no Python oracle`, `blocked on the decision`,
   `AskUserQuestion`, `unresolved fork`.
   Deduplicate against the labeled set — the point is to catch label drift, not
-  to double-count.
+  to double-count. **Filter out false positives:** an issue that says `architect
+  approved` / `architect ratified` is already decided; an `escalate-tier` mention
+  describes a merge tier, not an open fork; a blocked implementation child
+  (`status:blocked`) is not itself the decision. Only flag issues with an
+  explicit unresolved fork (a `## Decision needed` section, named alternatives
+  with no recorded verdict, or a concrete "must not be guessed" statement about
+  an open choice).
 - **Open PRs and their changed paths** (`mcp__github__list_pull_requests` +
   `mcp__github__pull_request_read` for changed files). Treat as architect-owned
   if `/review-pr` would classify them as `escalate`: public API, grammar
