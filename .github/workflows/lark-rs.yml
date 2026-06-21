@@ -118,10 +118,11 @@ jobs:
           python3 tools/generate_oracles.py
           python3 tools/extract_lark_compliance.py
           python3 tools/generate_wild_oracles.py
+          python3 tools/generate_transformer_oracles.py
           if ! git diff --quiet -- tests/fixtures/oracles; then
             echo "::error::Committed oracles are stale. Run tools/generate_oracles.py,"
-            echo "tools/extract_lark_compliance.py, and tools/generate_wild_oracles.py,"
-            echo "then commit the changes."
+            echo "tools/extract_lark_compliance.py, tools/generate_wild_oracles.py,"
+            echo "and tools/generate_transformer_oracles.py, then commit the changes."
             git --no-pager diff --stat -- tests/fixtures/oracles
             exit 1
           fi
