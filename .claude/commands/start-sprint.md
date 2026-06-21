@@ -158,6 +158,15 @@ The worker brief:
 > and rebase onto the **current** `<sprint-branch>` tip. If that rebase conflicts, **stop
 > and report the conflict** — do **not** retarget the PR to `master`.
 >
+> **Worktree step 0 (do this first — every code worker has tripped on it).** An
+> `isolation: worktree` checkout starts on its *own* `worktree-agent-…` branch at a
+> divergent commit, **not** at `<sprint-tip-sha>`, and a `git checkout -b` you run in the
+> *shared* checkout does **not** become this worktree's branch. So **inside your worktree**:
+> `git fetch origin <sprint-branch>` then `git checkout -b <your-work-branch>
+> origin/<sprint-branch>` (or `<sprint-tip-sha>`) to put *this* worktree on a branch off the
+> sprint tip. And because Edit operates on the worktree copy, **Read the worktree copy of a
+> file before you Edit it** — do not rely on a path you read in the shared checkout.
+>
 > Follow the repo's oracle-first discipline (`lark-rs/CLAUDE.md`): a failing test before
 > the fix, banks green after. Run `/code-review` **if available; otherwise launch a fresh
 > review sub-agent over your branch diff** and address its findings before opening the
