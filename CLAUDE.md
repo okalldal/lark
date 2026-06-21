@@ -52,10 +52,11 @@ are the always-in-context core; cite PRINCIPLES.md for the depth.
   and anything `needs-decision`. The `auto` set stays conservative; §9 rollback-first
   is the net.
 
-Operated by **`/roadmap`** (propose epics for approval), **`/triage`** (label &
-order; dry-run by default), **`/next-task`** (claim & execute), **`/finish-task`**
-(review → gate → PR → close-out), **`/review-pr`** (DoD gate + merge tier), and
-**`/start-sprint`** (whole-backlog sprint). Backlog
+Operated by **`/roadmap`** (propose epics for approval), **`/architect-brief`**
+(read-only decision inbox digest), **`/triage`** (label & order; dry-run by
+default), **`/next-task`** (claim & execute), **`/finish-task`** (review → gate →
+PR → close-out), **`/review-pr`** (DoD gate + merge tier), and **`/start-sprint`**
+(whole-backlog sprint). Backlog
 labels: [`lark-rs/docs/LABELS.md`](lark-rs/docs/LABELS.md); decision log:
 [`lark-rs/docs/decisions/`](lark-rs/docs/decisions/).
 

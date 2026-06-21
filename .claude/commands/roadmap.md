@@ -50,3 +50,20 @@ Report back the filed issue numbers.
 
 Anything genuinely undecidable (a real product/taste fork) is filed as
 `needs-decision` rather than guessed — that is the correct outcome, not a failure.
+
+### Decision memo skeleton
+
+Any `needs-decision` issue created by `/roadmap` must include this skeleton so
+that `/architect-brief` can synthesize reliably instead of reverse-engineering
+prose:
+
+```md
+## Decision needed
+## Background
+## Recommended path
+## Alternatives considered
+## Consequences of recommended path
+## Consequences of alternatives / deferral
+## Unblocks
+## Done-when
+```

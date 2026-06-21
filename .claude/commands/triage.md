@@ -38,6 +38,24 @@ them):
 
 Flag (don't act on) likely **duplicates** or **stale** items for the architect.
 
+### 2b. Decision-label drift check
+
+Search open issue titles and bodies for decision-shaped language even when
+`needs-decision` is absent. Phrases to scan for: `Decision needed`,
+`needs-decision`, `architect`, `escalate-tier`, `must not be guessed`,
+`no Python oracle`, `blocked on the decision`, `AskUserQuestion`,
+`unresolved fork`. Report any discrepancies as:
+
+```
+Decision-label drift:
+- #N says "Decision needed" but lacks `needs-decision`
+- #N has `needs-decision` but no actual fork remains (consider removing)
+- #N blocks another issue but the dependent lacks `status:blocked`
+```
+
+In **apply** mode, add the missing `needs-decision` label and set
+`status:blocked` on dependents. In **dry-run**, list the repairs only.
+
 ## 3. Report the ordered backlog
 
 Output a short ranked list: the `prio:now` / `good-autonomous` picks at the top
