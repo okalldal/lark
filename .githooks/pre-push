@@ -15,6 +15,24 @@ set -euo pipefail
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 GATE="$REPO_ROOT/lark-rs/scripts/check-fast.sh"
 
+# Skip the gate when the push pushes no commits — a ref *delete* (local sha all
+# zeros) or an otherwise empty update set. git feeds one line per ref on stdin:
+#   <local ref> <local sha> <remote ref> <remote sha>
+# A delete has an all-zero <local sha>. If every line is a delete (or stdin is
+# empty), there is nothing to gate, so no-op instead of running the full suite.
+z40="0000000000000000000000000000000000000000"
+has_content=""
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+  if [ -n "$local_sha" ] && [ "$local_sha" != "$z40" ]; then
+    has_content=1
+  fi
+done
+
+if [ -z "$has_content" ]; then
+  echo "pre-push: no commits pushed (ref delete / empty update) — skipping gate."
+  exit 0
+fi
+
 if [ ! -x "$GATE" ]; then
   echo "pre-push: gate script not found or not executable: $GATE" >&2
   exit 1
