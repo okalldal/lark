@@ -321,12 +321,28 @@ This is staging onto the sprint branch, **not** landing to `master`:
   ever moves forward. The omnibus diff must always be "what lands on top of today's
   `master`".
 
-Wait on CI without polling-by-sleep: after a wave, wait on in-flight child PRs and the
-omnibus with the **`Monitor`** tool's until-loop over `mcp__github__pull_request_read`
-(`get_status` / `get_check_runs`) — **never** Bash `sleep`. A child PR red on CI →
-dispatch a CI-fix worker (≤2 rounds); still red and out of scope → **park it via the §5
-parking protocol** (`needs-decision`, or `status:blocked` with the blocker named) and
-move on so one stuck PR doesn't stall the sprint.
+**Waiting on CI — the real harness pattern (do not block).** Earlier text said to wait
+with the `Monitor` tool's until-loop over `mcp__github__pull_request_read` — that is
+**dead**: `Monitor` runs a *bash* command and **cannot call MCP tools**, there is no `gh`
+CLI, and **CI success delivers no webhook** (only *failures*, merges, and closes arrive as
+`<github-webhook-activity>` events). So:
+
+- **React to failures as they arrive.** Subscribe to the relevant PRs
+  (`subscribe_pr_activity`) — a red check wakes the session with a webhook; handle it then.
+- **Poll for green explicitly** (no event will tell you). When you need to *confirm* a
+  child PR or the omnibus is green, read `mcp__github__pull_request_read`
+  (`get_check_runs` / `get_status`) directly. If checks are still pending, **do not
+  foreground-`sleep`** (it is blocked in this harness) and **do not** expect `Monitor` to
+  call MCP. Instead bridge the wait with a **background timer that re-invokes the session**
+  — the `send_later` self check-in (re-arm until terminal), or a `Monitor` *bash* poll on a
+  signal a bash command can actually observe — then re-check `get_check_runs` on wake.
+
+A child PR red on CI → dispatch a CI-fix worker (≤2 rounds); still red and out of scope →
+**park it via the §5 parking protocol** (`needs-decision`, or `status:blocked` with the
+blocker named) and move on so one stuck PR doesn't stall the sprint. An **environmental**
+red (a blocked network fetch, a runner flake — e.g. `wasm-opt` failing to download
+binaryen) that the diff cannot have caused is **not** a code failure: confirm the diff is
+unrelated, note it as a follow-up/infra item, and do not revert a clean stage for it.
 
 The conflict-fix and CI-fix dispatches are **not** first-pass workers — they update an
 *existing* child PR and must not broaden scope or open/merge PRs. Brief them explicitly:
