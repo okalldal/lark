@@ -220,6 +220,76 @@ fn test_eof_position_preserved() {
     }
 }
 
+/// The public `feed_token(Token)` path must work with a hand-built `Token::new`
+/// (no interned id) — resolving the terminal *name* like Python's `feed_token`.
+/// This pins the exact API surface the oracle replay drives through `feed`.
+#[test]
+fn test_feed_token_resolves_user_built_token() {
+    use lark_rs::Token;
+    let lark = interactive_lark();
+    let mut ip = lark.parse_interactive("").unwrap();
+
+    // A bare user token (type_id unset) is accepted and resolved by name.
+    assert!(ip.feed_token(Token::new("NUMBER", "1")).unwrap().is_none());
+    assert_eq!(ip.accepts(), vec!["$END".to_string(), "PLUS".to_string()]);
+    let tree = ip.feed_eof().unwrap().expect("ACCEPT");
+    assert_eq!(format!("{tree}"), format!("{}", lark.parse("1").unwrap()));
+
+    // An unknown terminal name errors clearly rather than silently mis-parsing.
+    let mut ip2 = lark.parse_interactive("").unwrap();
+    assert!(ip2.feed_token(Token::new("NOPE", "x")).is_err());
+}
+
+/// `parse_interactive_with_start` drives from an explicit start symbol.
+#[test]
+fn test_interactive_with_start() {
+    let lark = interactive_lark();
+    let tree = lark
+        .parse_interactive_with_start("1 + 2", "start")
+        .unwrap()
+        .resume()
+        .unwrap();
+    assert_eq!(
+        format!("{tree}"),
+        format!("{}", lark.parse("1 + 2").unwrap())
+    );
+}
+
+/// Forking after wiring the lexer (not just after manual feeds): a fork carries an
+/// independent copy of the input cursor, so both the fork and the original resume to
+/// the same tree without consuming each other.
+#[test]
+fn test_fork_preserves_independent_lexer_cursor() {
+    let lark = interactive_lark();
+    let ip = lark.parse_interactive("1 + 2").unwrap();
+    let want = format!("{}", lark.parse("1 + 2").unwrap());
+
+    let forked = ip.fork().resume().unwrap();
+    assert_eq!(format!("{forked}"), want);
+    // The original still has its full cursor and resumes to the same tree.
+    let original = ip.resume().unwrap();
+    assert_eq!(format!("{original}"), want);
+}
+
+/// A trailing `%ignore`d run must advance the lazy cursor before `feed_eof`, so
+/// `resume` over input with trailing whitespace still completes (and matches parse).
+#[test]
+fn test_ignored_tokens_advance_cursor_before_eof() {
+    let lark = interactive_lark();
+    let mut ip = lark.parse_interactive("7   ").unwrap();
+    let fed = ip.exhaust_lexer().unwrap();
+    assert_eq!(
+        fed.len(),
+        1,
+        "only NUMBER is a real token; the spaces are ignored"
+    );
+    let tree = ip
+        .feed_eof()
+        .unwrap()
+        .expect("ACCEPT past the trailing spaces");
+    assert_eq!(format!("{tree}"), format!("{}", lark.parse("7").unwrap()));
+}
+
 #[test]
 fn test_interactive_unsupported_on_contextual() {
     // v1 is basic-lexer only; the default contextual config returns a typed error.

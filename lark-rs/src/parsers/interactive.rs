@@ -72,12 +72,30 @@ impl<'a> InteractiveParser<'a> {
         }
     }
 
-    /// Feed one already-built token, advancing through any REDUCEs to the next SHIFT
-    /// or ACCEPT. Returns `Ok(Some(tree))` when this token drove ACCEPT (a `$END`),
-    /// `Ok(None)` when it was shifted, and `Err` (the same `UnexpectedToken` a batch
-    /// parse would raise) when the parser has no action for it. Mirrors Python's
-    /// `feed_token`.
-    pub fn feed_token(&mut self, token: Token) -> Result<Option<ParseTree>, ParseError> {
+    /// Feed one token, advancing through any REDUCEs to the next SHIFT or ACCEPT.
+    /// Returns `Ok(Some(tree))` when this token drove ACCEPT (a `$END`), `Ok(None)`
+    /// when it was shifted, and `Err` (the same `UnexpectedToken` a batch parse would
+    /// raise) when the parser has no action for it. Mirrors Python's `feed_token`.
+    ///
+    /// A caller-built `Token::new("NUMBER", "1")` carries no interned id; like Python
+    /// (which dispatches on `token.type`, a name), this resolves the terminal *name*
+    /// to its id when the token's `type_id` is unset, so a hand-made token Just Works.
+    /// Lexer-produced tokens and `$END` already carry a real id and are used as-is.
+    pub fn feed_token(&mut self, mut token: Token) -> Result<Option<ParseTree>, ParseError> {
+        if token.type_id == SymbolId::UNSET {
+            match self.parser.table.symbols.id(&token.type_) {
+                Some(id) => token.type_id = id,
+                None => {
+                    return Err(ParseError::UnexpectedToken {
+                        token: token.value.clone(),
+                        token_type: token.type_.clone(),
+                        line: token.line,
+                        col: token.column,
+                        expected: self.accepts(),
+                    })
+                }
+            }
+        }
         match self.stack.feed_token(&self.parser.table, &token) {
             Feed::Shifted => Ok(None),
             Feed::Accepted(tree) => {
@@ -90,25 +108,11 @@ impl<'a> InteractiveParser<'a> {
     }
 
     /// Build and feed a token by terminal *name* — the form [`accepts`](Self::accepts)
-    /// returns and the oracle speaks. An ergonomic wrapper over
-    /// [`feed_token`](Self::feed_token); resolves the name against the grammar and
-    /// errors with the current `accepts()` if the name is unknown.
+    /// returns. A thin ergonomic wrapper over [`feed_token`](Self::feed_token)
+    /// (`feed("NUMBER", "1")` ≡ `feed_token(Token::new("NUMBER", "1"))`); the name is
+    /// resolved by `feed_token`.
     pub fn feed(&mut self, terminal: &str, value: &str) -> Result<Option<ParseTree>, ParseError> {
-        let id =
-            self.parser
-                .table
-                .symbols
-                .id(terminal)
-                .ok_or_else(|| ParseError::UnexpectedToken {
-                    token: value.to_string(),
-                    token_type: terminal.to_string(),
-                    line: 0,
-                    col: 0,
-                    expected: self.accepts(),
-                })?;
-        let mut token = Token::new(terminal, value);
-        token.type_id = id;
-        self.feed_token(token)
+        self.feed_token(Token::new(terminal, value))
     }
 
     /// The terminal names that would advance the parser from the current state,
@@ -143,8 +147,12 @@ impl<'a> InteractiveParser<'a> {
     }
 
     /// Resume fully-automated parsing to completion: feed the rest of the lexer, then
-    /// a `$END`. Consumes the cursor and returns the finished tree. Mirrors Python's
-    /// `resume_parse`.
+    /// a `$END`. Returns the finished tree. Mirrors Python's `resume_parse`.
+    ///
+    /// Rust API shape (not a Python-parity claim): this **consumes** the cursor
+    /// (`self`), since after resuming to `$END` there is nothing more to drive — you
+    /// wanted the tree, not the handle. The step-wise ops (`feed_token`/`feed_eof`)
+    /// keep `&mut self`. Fork first (`p.fork().resume()`) if you need the cursor back.
     pub fn resume(mut self) -> Result<ParseTree, ParseError> {
         self.exhaust_lexer()?;
         match self.feed_eof()? {
