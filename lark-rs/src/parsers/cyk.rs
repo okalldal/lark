@@ -348,7 +348,7 @@ fn to_cnf(grammar: &CompiledGrammar) -> Result<CnfResult, GrammarError> {
     let rules = prune_unreachable(rules, &grammar.start);
 
     // CYK cannot represent a node that derives ε. Match Python Lark's CYK by
-    // *source provenance*, not transparency (#101, ADR-0021): reject a nullable
+    // *source provenance*, not transparency (#101, ADR-0024): reject a nullable
     // `Nt::Orig` iff it is a **user-written** rule — including transparent ones
     // (`a: B?`, `_a: B?`) and even a user rule the author happened to *name*
     // `__anon_star_0`. A nullable rule the loader *generated* as an anonymous EBNF
@@ -1063,7 +1063,7 @@ WORD: /[a-z]+/
         );
     }
 
-    /// Oracle parity (#101, ADR-0021). A wholly-nullable *transparent* user rule
+    /// Oracle parity (#101, ADR-0024). A wholly-nullable *transparent* user rule
     /// (`_a: B?`) is rejected by Python Lark's CYK (`CYK doesn't support empty
     /// rules`); lark-rs must reject it too. lark-rs once accepted it — its ε-removal
     /// splices away a transparent rule's empty derivation — but being *more*
@@ -1087,7 +1087,7 @@ WORD: /[a-z]+/
         );
     }
 
-    /// Provenance, not prefix (#101, ADR-0021). The empty-rule rejection keys on
+    /// Provenance, not prefix (#101, ADR-0024). The empty-rule rejection keys on
     /// whether the loader *generated* the nullable origin as an anonymous EBNF
     /// helper — never on the `__anon_` name spelling, which a user grammar may
     /// itself author (#144). A user rule the author *named* `__anon_star_0` is
@@ -1112,7 +1112,7 @@ WORD: /[a-z]+/
         );
     }
 
-    /// The generated-helper carve-out (#101, ADR-0021). A `*`/`?` nested where a
+    /// The generated-helper carve-out (#101, ADR-0024). A `*`/`?` nested where a
     /// single symbol is mandatory (inside `~n`) emits a *standalone* nullable
     /// anonymous EBNF helper (`__anon_rep_*` / `__anon_group_*`). Python Lark's CYK
     /// **accepts** these — they splice away when empty without an observable empty

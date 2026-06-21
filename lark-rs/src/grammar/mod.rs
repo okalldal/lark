@@ -31,6 +31,6 @@ pub struct Grammar {
     /// `fresh_anon_rule` (a `*`/`?`/`~n`/group/`[…]` helper) — *not* because it is
     /// spelled `__anon_*`, which a user grammar may also author (#144). Lowering
     /// copies this onto [`SymbolInfo::anon_kind`] so the engine can key empty-rule
-    /// rejection on provenance, not name spelling (#101, ADR-0021).
+    /// rejection on provenance, not name spelling (#101, ADR-0024).
     pub anon_kinds: HashMap<String, AnonKind>,
 }

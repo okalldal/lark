@@ -456,7 +456,7 @@ only** (#144). Anonymous symbols are now disambiguated via a closed `AnonKind`
 enum rather than name spelling; keep new interned names namespace-unambiguous.
 
 **CYK empty-rule rejection is by *provenance*, not transparency or name spelling
-(#101, ADR-0021).** Python Lark's CYK rejects an ε-deriving rule, but *accepts* the
+(#101, ADR-0024).** Python Lark's CYK rejects an ε-deriving rule, but *accepts* the
 nullable anonymous helper a `*`/`?` nested under `~n` emits (`start: A (B*)~2`). The
 discriminator is whether the nullable origin was **generated** by the loader, carried
 as `SymbolInfo.anon_kind: Option<AnonKind>` (set at `fresh_anon_rule` mint time,

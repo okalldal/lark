@@ -219,7 +219,7 @@ fn test_in_memory_sources_never_fall_back_to_the_filesystem() {
 }
 
 /// Provenance survives `%import` rename for CYK's empty-rule guard (#101,
-/// ADR-0021). A `(B*)~2` rule emits a nullable anonymous EBNF helper the loader
+/// ADR-0024). A `(B*)~2` rule emits a nullable anonymous EBNF helper the loader
 /// *generates*; Python Lark's CYK accepts it directly. `import_rule_closure`
 /// copies and renames imported rules — it must also carry their `anon_kinds`
 /// provenance under the renamed origin, or the imported helper is reclassified

@@ -74,7 +74,7 @@ pub struct SymbolInfo {
     /// provenance**, distinct from [`inline`](Self::inline): a transparent user
     /// rule (`_a`) and a user rule the author *named* `__anon_star_0` are both
     /// `inline` yet have `anon_kind == None`, while a generated `__anon_rep_*`
-    /// helper is `Some(..)`. CYK keys empty-rule rejection on this (#101, ADR-0021):
+    /// helper is `Some(..)`. CYK keys empty-rule rejection on this (#101, ADR-0024):
     /// a nullable user rule is rejected (matching Python), a nullable generated
     /// helper is accepted — never sniffing the `__anon_` spelling, which a user can
     /// author (#144).
@@ -490,7 +490,7 @@ mod tests {
         assert_eq!(root_rule.expansion, vec![start]);
     }
 
-    /// Provenance plumbing (#101, ADR-0021): a *generated* anonymous EBNF helper
+    /// Provenance plumbing (#101, ADR-0024): a *generated* anonymous EBNF helper
     /// carries `Some(AnonKind)`, while a user-written rule — even one transparent
     /// (`_a`) or spelled like a helper (`__anon_star_0`) — carries `None`. This is
     /// the discriminator CYK keys empty-rule rejection on, and it must be source

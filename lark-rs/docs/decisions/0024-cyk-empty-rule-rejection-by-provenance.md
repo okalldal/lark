@@ -1,4 +1,4 @@
-# ADR-0021: CYK empty-rule rejection is keyed on source provenance, not name spelling
+# ADR-0024: CYK empty-rule rejection is keyed on source provenance, not name spelling
 
 - **Status:** Proposed
 - **Date:** 2026-06-21
