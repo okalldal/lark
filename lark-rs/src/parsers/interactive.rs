@@ -2,24 +2,29 @@
 //!
 //! A driveable parser: feed tokens one at a time, inspect which terminals the
 //! parser would accept next, fork an independent cursor, and resume automated
-//! parsing. This is a port of Python Lark's `InteractiveParser`
-//! (`lark/parsers/lalr_interactive_parser.py`), so its behaviour is
-//! oracle-checkable — a sequence of operations driven against both engines must
-//! agree on the `accepts()` set after each step and on the resulting tree.
+//! parsing. It ports the **oracle-backed subset** of Python Lark's
+//! `InteractiveParser` (`lark/parsers/lalr_interactive_parser.py`) — `feed_token`,
+//! `accepts`, `feed_eof`, `exhaust_lexer`, `resume`, `copy` (here `fork`),
+//! `pretty`, `result` — plus one ergonomic wrapper, [`feed`](InteractiveParser::feed)
+//! `(name, value)` over `feed_token`. Python's `choices()` / `__eq__` /
+//! `ImmutableInteractiveParser` are not part of v1 (ADR-0026: only what the oracle
+//! grounds, plus the named convenience). The shared operations are differentially
+//! tested against Python (`tests/test_interactive.rs`).
 //!
 //! It is a *view* onto the shared state machine: every mutation goes through
 //! [`ParserStack::feed_token`](super::lalr::ParserStack::feed_token), the same
 //! reduce/shift loop the batch and recovering drivers use (ADR-0015) — there is no
 //! second parser here.
 //!
-//! v1 surface (deliberately exactly Python's operations, no extras — ADR-0026):
-//! `feed_token` / `feed` / `accepts` / `feed_eof` / `exhaust_lexer` / `resume` /
-//! `fork` / `result` / `pretty`. v1 is wired over the **basic lexer**; the
-//! contextual lexer and `on_error`-callback integration are follow-ups.
-
-use std::collections::VecDeque;
+//! **Lazy lexing.** Like Python, the lexer is driven *as the caller drives the
+//! parser*, not up front: `parse_interactive` over broken editor text succeeds, and
+//! an un-lexable character surfaces only when `exhaust_lexer`/`resume` reaches it.
+//! Manual `feed`/`feed_token` inject caller-supplied tokens and ignore the lexer.
+//! v1 lexes with the **basic** lexer; the contextual lexer is a follow-up.
 
 use crate::error::ParseError;
+use crate::grammar::intern::SymbolId;
+use crate::lexer::BasicLexer;
 use crate::tree::{ParseTree, Token};
 
 use super::lalr::{Feed, LalrParser, ParserStack};
@@ -27,26 +32,42 @@ use super::lalr::{Feed, LalrParser, ParserStack};
 /// A driveable LALR parse in progress. Obtained from
 /// [`Lark::parse_interactive`](crate::Lark::parse_interactive).
 ///
-/// Borrows the parser it was created from, so it lives no longer than the
-/// [`Lark`](crate::Lark). The raw state/value stacks are deliberately *not* public
-/// — callers drive the machine through [`feed`](Self::feed)/[`accepts`](Self::accepts),
-/// never by poking the stack.
+/// Borrows the parser (and lexer) it was created from, so it lives no longer than
+/// the [`Lark`](crate::Lark). The raw state/value stacks are deliberately *not*
+/// public — callers drive the machine through [`feed`](Self::feed) /
+/// [`accepts`](Self::accepts), never by poking the stack.
 pub struct InteractiveParser<'a> {
     parser: &'a LalrParser,
+    /// The basic lexer driven lazily by `exhaust_lexer`/`resume`. `None` leaves
+    /// those ops a no-op (manual-feed-only); v1 always wires `Some`.
+    lexer: Option<&'a BasicLexer>,
     stack: ParserStack,
-    /// Remaining lexer tokens (basic-lexer v1), drained by `exhaust_lexer`/`resume`.
-    /// Manual `feed`/`feed_token` ignore this — they inject caller-supplied tokens.
-    queue: VecDeque<Token>,
+    /// Owned input, lexed lazily from a hand-tracked cursor (avoids a
+    /// self-referential borrow of a `LexerState`). `line`/`col` are 1-based to match
+    /// [`LexerState`](crate::lexer::LexerState).
+    text: String,
+    pos: usize,
+    line: usize,
+    col: usize,
     /// The finished tree once a `$END` feed reached ACCEPT (Python's `.result`).
     result: Option<ParseTree>,
 }
 
 impl<'a> InteractiveParser<'a> {
-    pub(crate) fn new(parser: &'a LalrParser, stack: ParserStack, tokens: Vec<Token>) -> Self {
+    pub(crate) fn new(
+        parser: &'a LalrParser,
+        lexer: Option<&'a BasicLexer>,
+        stack: ParserStack,
+        text: String,
+    ) -> Self {
         InteractiveParser {
             parser,
+            lexer,
             stack,
-            queue: tokens.into(),
+            text,
+            pos: 0,
+            line: 1,
+            col: 1,
             result: None,
         }
     }
@@ -69,8 +90,9 @@ impl<'a> InteractiveParser<'a> {
     }
 
     /// Build and feed a token by terminal *name* — the form [`accepts`](Self::accepts)
-    /// returns and the oracle speaks. Resolves the name against the grammar; errors
-    /// with the current `accepts()` as the expected set if the name is unknown.
+    /// returns and the oracle speaks. An ergonomic wrapper over
+    /// [`feed_token`](Self::feed_token); resolves the name against the grammar and
+    /// errors with the current `accepts()` if the name is unknown.
     pub fn feed(&mut self, terminal: &str, value: &str) -> Result<Option<ParseTree>, ParseError> {
         let id =
             self.parser
@@ -96,17 +118,23 @@ impl<'a> InteractiveParser<'a> {
         self.stack.accepts(&self.parser.table)
     }
 
-    /// Feed a synthetic `$END`, finishing the parse. Returns the tree if ACCEPT was
-    /// reached. Mirrors Python's `feed_eof`.
+    /// Feed a synthetic `$END` at the current input position, finishing the parse.
+    /// Returns the tree if ACCEPT was reached. Mirrors Python's `feed_eof` (which
+    /// likewise borrows the position from where lexing left off).
     pub fn feed_eof(&mut self) -> Result<Option<ParseTree>, ParseError> {
-        self.feed_token(Token::end())
+        self.feed_token(self.eof_token())
     }
 
     /// Feed the rest of the (basic-lexer) token stream, **without** a `$END`;
-    /// returns the tokens consumed. Mirrors Python's `exhaust_lexer`.
+    /// returns the tokens consumed. An un-lexable character raises here (Python's
+    /// lazy `UnexpectedCharacters`), not at construction. Mirrors `exhaust_lexer`.
     pub fn exhaust_lexer(&mut self) -> Result<Vec<Token>, ParseError> {
-        let mut fed = Vec::with_capacity(self.queue.len());
-        while let Some(token) = self.queue.pop_front() {
+        let mut fed = Vec::new();
+        loop {
+            let token = self.next_lexed()?;
+            if token.type_id == SymbolId::END {
+                break; // never feed `$END` here; the cursor sits at end for feed_eof
+            }
             let echo = token.clone();
             self.feed_token(token)?;
             fed.push(echo);
@@ -121,18 +149,22 @@ impl<'a> InteractiveParser<'a> {
         self.exhaust_lexer()?;
         match self.feed_eof()? {
             Some(tree) => Ok(tree),
-            None => Err(ParseError::unexpected_eof(0, 0, vec![])),
+            None => Err(ParseError::unexpected_eof(self.line, self.col, vec![])),
         }
     }
 
     /// An independent cursor: feeds on the fork do not affect this one, or vice-versa.
     /// Mirrors Python's `copy()`. Cheap — `accepts()` already avoids cloning tree
-    /// values, and this clones the value stack only on an explicit branch.
+    /// values; this clones the value stack only on an explicit branch.
     pub fn fork(&self) -> InteractiveParser<'a> {
         InteractiveParser {
             parser: self.parser,
+            lexer: self.lexer,
             stack: self.stack.clone(),
-            queue: self.queue.clone(),
+            text: self.text.clone(),
+            pos: self.pos,
+            line: self.line,
+            col: self.col,
             result: self.result.clone(),
         }
     }
@@ -143,12 +175,58 @@ impl<'a> InteractiveParser<'a> {
     }
 
     /// A short debug rendering of the current state and accepted terminals (Python's
-    /// `pretty()`). For humans only — not oracle-pinned.
+    /// `pretty()` renders `choices()`; we render `accepts()` — debug only, not
+    /// oracle-pinned).
     pub fn pretty(&self) -> String {
         format!(
             "InteractiveParser(state {}, accepts {:?})",
             self.stack.position(),
             self.accepts()
         )
+    }
+
+    // ─── Lazy basic-lexer cursor ─────────────────────────────────────────────
+
+    /// The synthetic `$END` token at the current cursor (its position is where lexing
+    /// left off — after `exhaust_lexer`, the end of input; before any drive, the
+    /// start). This is what fixes premature-EOF diagnostics carrying a real location.
+    fn eof_token(&self) -> Token {
+        Token::end().with_position(self.line, self.col, self.pos, self.pos)
+    }
+
+    /// Lex the next non-ignored token, advancing the cursor, or the positioned `$END`
+    /// at end of input. `Err(UnexpectedCharacter)` at an un-lexable character (Python
+    /// raises here rather than recovering — that is the recovery path's job, not the
+    /// interactive parser's). A no-op `$END` when there is no lexer wired.
+    fn next_lexed(&mut self) -> Result<Token, ParseError> {
+        let Some(lexer) = self.lexer else {
+            return Ok(self.eof_token());
+        };
+        loop {
+            if self.pos >= self.text.len() {
+                return Ok(self.eof_token());
+            }
+            match lexer.next_token_at(&self.text, self.pos, self.line, self.col) {
+                Ok(token) => {
+                    self.pos = token.end_pos;
+                    self.line = token.end_line;
+                    self.col = token.end_column;
+                    if lexer.is_ignored(token.type_id) {
+                        continue;
+                    }
+                    return Ok(token);
+                }
+                Err(()) => {
+                    let ch = self.text[self.pos..].chars().next().unwrap();
+                    return Err(ParseError::UnexpectedCharacter {
+                        ch,
+                        line: self.line,
+                        col: self.col,
+                        pos: self.pos,
+                        expected: "any token".to_string(),
+                    });
+                }
+            }
+        }
     }
 }

@@ -214,8 +214,9 @@ src/
                       (the shared state+value stack + feed_token reduce-loop that
                       run/run_recovering/interactive all drive)
     interactive.rs    InteractiveParser (#168) — driveable LALR over ParserStack:
-                      feed/accepts/feed_eof/exhaust_lexer/resume/fork; ports Python's
-                      InteractiveParser 1:1 (basic-lexer v1), oracle-differentiated
+                      feed/accepts/feed_eof/exhaust_lexer/resume/fork; the oracle-
+                      backed subset of Python's InteractiveParser + feed(name,value),
+                      lazy basic-lexer v1, oracle-differentiated
     token_source.rs   TokenSource trait + PreLexed / Contextual (lexer⇄parser API)
     tree_builder.rs   TreeBuilder — shared rule→tree shaping (LALR + Earley)
     earley.rs         Earley recognizer + SPPF + forest→tree +

@@ -22,7 +22,6 @@ use crate::grammar::intern::{CompiledGrammar, CompiledRule, SymbolId, SymbolTabl
 use crate::lexer::{BasicLexer, ContextualLexer};
 use crate::tree::{ParseTree, Token};
 
-use super::interactive::InteractiveParser;
 use super::token_source::{
     postlex_basic_recovering_source, postlex_contextual_recovering_source,
     postlex_contextual_source, Contextual, ContextualRecovering, LexFailure, PreLexed, SourceError,
@@ -901,23 +900,10 @@ impl LalrParser {
         }
     }
 
-    /// Begin an interactive parse (issue #168): a fresh [`ParserStack`] at the start
-    /// state, plus the remaining lexer `tokens` a caller can `exhaust`/`resume` over.
-    /// Manual `feed`/`feed_token` ignore the token queue. See [`InteractiveParser`].
-    pub fn interactive(
-        &self,
-        start: Option<&str>,
-        tokens: Vec<Token>,
-    ) -> Result<InteractiveParser<'_>, ParseError> {
-        let stack = ParserStack::new(self.initial_state(start)?);
-        // The basic lexer appends a synthetic `$END`; the interactive parser feeds
-        // `$END` only via `feed_eof`/`resume` (Python's `exhaust_lexer` never feeds
-        // it), so keep it out of the exhaustible queue.
-        let tokens: Vec<Token> = tokens
-            .into_iter()
-            .filter(|t| t.type_id != SymbolId::END)
-            .collect();
-        Ok(InteractiveParser::new(self, stack, tokens))
+    /// A fresh [`ParserStack`] at the start state for `start` — the seed of an
+    /// interactive parse (issue #168). The driver pairs it with the lexer + input.
+    pub(crate) fn initial_stack(&self, start: Option<&str>) -> Result<ParserStack, ParseError> {
+        Ok(ParserStack::new(self.initial_state(start)?))
     }
 
     /// Recovering parse over a pre-tokenized sequence (basic lexer). See

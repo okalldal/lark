@@ -175,6 +175,51 @@ fn test_accepts_is_honest() {
     assert_eq!(ip.accepts(), accepts, "fork must not mutate the original");
 }
 
+/// Lazy lexing: `parse_interactive` over text with a *later* lexical error must
+/// succeed (the caller gets the steering wheel), and the error surfaces only when
+/// `resume`/`exhaust_lexer` drives into it — matching Python's lazy lexer.
+#[test]
+fn test_lazy_lexing_defers_error() {
+    use lark_rs::ParseError;
+    let lark = interactive_lark();
+
+    // Construction succeeds despite the stray '@' later in the input.
+    let mut ip = lark
+        .parse_interactive("1 + @ 2")
+        .expect("parse_interactive must not eagerly lex / fail on a later bad char");
+    // The caller can inspect before driving into the bad region.
+    assert_eq!(ip.accepts(), vec!["NUMBER".to_string()]);
+
+    // Driving the lexer into the '@' raises an UnexpectedCharacter, not a panic.
+    let err = match ip.exhaust_lexer() {
+        Ok(_) => panic!("exhaust_lexer should raise at '@'"),
+        Err(e) => e,
+    };
+    match err {
+        ParseError::UnexpectedCharacter { ch, .. } => assert_eq!(ch, '@'),
+        other => panic!("expected UnexpectedCharacter at '@', got {other:?}"),
+    }
+}
+
+/// Premature-EOF via `resume` carries the real input position, not the old `0,0`
+/// default (the positioned `$END` is built from the lazy cursor).
+#[test]
+fn test_eof_position_preserved() {
+    use lark_rs::ParseError;
+    let lark = interactive_lark();
+    let err = match lark.parse_interactive("1 +").unwrap().resume() {
+        Ok(_) => panic!("'1 +' is incomplete — resume must error"),
+        Err(e) => e,
+    };
+    match err {
+        ParseError::UnexpectedEof { line, col, .. } => {
+            assert_eq!(line, 1, "EOF line should be the real position, not 0");
+            assert!(col > 1, "EOF col should be past the input, got {col}");
+        }
+        other => panic!("expected UnexpectedEof, got {other:?}"),
+    }
+}
+
 #[test]
 fn test_interactive_unsupported_on_contextual() {
     // v1 is basic-lexer only; the default contextual config returns a typed error.

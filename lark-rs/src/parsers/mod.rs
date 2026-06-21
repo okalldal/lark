@@ -223,18 +223,23 @@ impl ParserDriver for LalrBasic {
         )
     }
 
-    /// Interactive parse over the basic lexer (issue #168): materialize the whole
-    /// token stream up front, then hand the parser + the token queue to the
-    /// [`InteractiveParser`]. Manual `feed`/`accepts` ignore the queue; `exhaust`/
-    /// `resume` drain it. An un-lexable character surfaces here (Python lexes
-    /// lazily and would raise later, but for v1's curated inputs this is moot).
+    /// Interactive parse over the basic lexer (issue #168). Construction does **not**
+    /// lex — the [`InteractiveParser`] lexes lazily as the caller drives it, so it can
+    /// be created over broken editor text and an un-lexable character surfaces only
+    /// when `exhaust_lexer`/`resume` reaches it (matching Python). Manual
+    /// `feed`/`accepts` ignore the lexer entirely.
     fn parse_interactive(
         &self,
         text: &str,
         start: Option<&str>,
     ) -> Result<InteractiveParser<'_>, LarkError> {
-        let tokens = self.lexer.lex(text)?;
-        Ok(self.parser.interactive(start, tokens)?)
+        let stack = self.parser.initial_stack(start)?;
+        Ok(InteractiveParser::new(
+            &self.parser,
+            Some(&self.lexer),
+            stack,
+            text.to_string(),
+        ))
     }
 }
 
