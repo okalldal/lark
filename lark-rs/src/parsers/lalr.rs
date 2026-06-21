@@ -27,7 +27,7 @@ use super::token_source::{
     postlex_contextual_source, Contextual, ContextualRecovering, LexFailure, PreLexed, SourceError,
     TokenSource,
 };
-use super::tree_builder::{NodeValue, TreeBuilder};
+use super::tree_builder::{Slot, TreeOutputBuilder};
 
 // ─── Parse table ─────────────────────────────────────────────────────────────
 
@@ -596,24 +596,24 @@ impl LalrParser {
 
     /// The shared tree-builder over this parse table's rules (filtering is per
     /// rule position, carried by each [`CompiledRule`]).
-    fn tree_builder(&self) -> TreeBuilder<'_> {
-        TreeBuilder::new(&self.table.rules)
+    fn tree_builder(&self) -> TreeOutputBuilder<'_> {
+        TreeOutputBuilder::new(&self.table.rules)
     }
 
     /// Apply a REDUCE: pop the rule's child values, hand them to the shared
-    /// [`TreeBuilder`] to shape the parent value, and follow GOTO. `at` supplies
+    /// [`TreeOutputBuilder`] to shape the parent value, and follow GOTO. `at` supplies
     /// the position for the (effectively unreachable) missing-GOTO error.
     fn reduce(
         &self,
         rule_idx: usize,
         state_stack: &mut Vec<usize>,
-        value_stack: &mut Vec<NodeValue>,
+        value_stack: &mut Vec<Slot>,
         at: &Token,
     ) -> Result<(), ParseError> {
         let rule = &self.table.rules[rule_idx];
         let len = rule.expansion.len();
 
-        let child_values: Vec<NodeValue> = value_stack.drain(value_stack.len() - len..).collect();
+        let child_values: Vec<Slot> = value_stack.drain(value_stack.len() - len..).collect();
         for _ in 0..len {
             state_stack.pop();
         }
@@ -642,12 +642,12 @@ impl LalrParser {
     /// A `?start` rule (expand1) can collapse to a single token — then the result
     /// is that bare [`Token`], matching Python Lark, instead of a tree named after
     /// the terminal. Hence the [`ParseTree`] return type.
-    fn accept(value_stack: &mut Vec<NodeValue>) -> Result<ParseTree, ParseError> {
+    fn accept(value_stack: &mut Vec<Slot>) -> Result<ParseTree, ParseError> {
         match value_stack.pop() {
-            Some(NodeValue::Tree(t)) => Ok(ParseTree::Tree(t)),
-            Some(NodeValue::Token(tok)) => Ok(ParseTree::Token(tok)),
+            Some(Slot::Tree(t)) => Ok(ParseTree::Tree(t)),
+            Some(Slot::Token(tok)) => Ok(ParseTree::Token(tok)),
             // A start rule is never transparent, so its value is never Inline.
-            Some(NodeValue::Inline(_)) | None => Err(ParseError::unexpected_eof(0, 0, vec![])),
+            Some(Slot::Inline(_)) | None => Err(ParseError::unexpected_eof(0, 0, vec![])),
         }
     }
 
@@ -667,7 +667,7 @@ impl LalrParser {
         start: Option<&str>,
     ) -> Result<ParseTree, ParseError> {
         let mut state_stack: Vec<usize> = vec![self.initial_state(start)?];
-        let mut value_stack: Vec<NodeValue> = Vec::new();
+        let mut value_stack: Vec<Slot> = Vec::new();
 
         loop {
             let state = *state_stack.last().unwrap();
@@ -682,7 +682,7 @@ impl LalrParser {
                 Some(Action::Shift(next_state)) => {
                     source.advance();
                     state_stack.push(next_state);
-                    value_stack.push(NodeValue::Token(token));
+                    value_stack.push(Slot::Token(token));
                 }
                 Some(Action::Reduce(rule_idx)) => {
                     // Don't advance the source — the same token may be consumed next.
@@ -738,7 +738,7 @@ impl LalrParser {
         errors: &mut Vec<ParseError>,
     ) -> Result<Option<ParseTree>, ParseError> {
         let mut state_stack: Vec<usize> = vec![self.initial_state(start)?];
-        let mut value_stack: Vec<NodeValue> = Vec::new();
+        let mut value_stack: Vec<Slot> = Vec::new();
 
         loop {
             let state = *state_stack.last().unwrap();
@@ -777,7 +777,7 @@ impl LalrParser {
                 Some(Action::Shift(next_state)) => {
                     source.advance();
                     state_stack.push(next_state);
-                    value_stack.push(NodeValue::Token(token));
+                    value_stack.push(Slot::Token(token));
                 }
                 Some(Action::Reduce(rule_idx)) => {
                     self.reduce(rule_idx, &mut state_stack, &mut value_stack, &token)?;
