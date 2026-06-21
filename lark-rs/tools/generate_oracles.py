@@ -851,6 +851,88 @@ def generate_earley_dynamic():
     print(f"  {len(groups)} dynamic-lexer groups")
 
 
+# ─── CYK curated oracles (issue #186) ───────────────────────────────────────
+#
+# The CYK *compliance bank* (extract_lark_compliance.py) strip-mines Python
+# Lark's CYK test class, but its only `~n` cases use terminals (`"A"~2`),
+# never a nullable group — so the anonymous-helper carve-out (CYK accepts a
+# nullable EBNF helper the loader generates, e.g. `__anon_star_*` from `B*`)
+# is unbanked. These curated oracles close that gap: each grammar exercises
+# `~n` (and `*` / `?`) over a *nullable group* that Python Lark's CYK
+# accepts, pinned byte-for-byte so any future change to CYK's nullable-rule
+# handling that regresses the anon-helper path is caught.
+#
+# CYK always uses the basic lexer and resolve-ambiguity mode.
+#
+# (name, grammar, [(input, should_parse)])
+CYK_NULLABLE_GROUP_GRAMMARS = [
+    # `(B*)~2`: two repetitions of a nullable `B*` group — the grammar from
+    # the issue. `B*` lowers to a nullable anonymous helper; `~2` inlines two
+    # copies. Python Lark CYK builds and parses it; a blunt "reject every
+    # nullable origin" fix would over-reject it (#101 regression).
+    ("star_repeat", r"""
+start: A (B*)~2
+A: "a"
+B: "b"
+%ignore " "
+""", [
+        ("a",       True),   # both B* groups produce ε
+        ("a b",     True),   # one B* matches "b", the other ε
+        ("a b b",   True),   # each B* matches one "b"
+        ("a b b b", True),   # one B* matches two, the other one
+        ("",        False),  # A is required
+    ]),
+
+    # `(B?)~2`: two repetitions of a nullable `B?` optional — the `?`
+    # variant of the nullable-group pattern.
+    ("opt_repeat", r"""
+start: A (B?)~2
+A: "a"
+B: "b"
+%ignore " "
+""", [
+        ("a",     True),   # both B? produce ε
+        ("a b",   True),   # one B? matches "b", the other ε
+        ("a b b", True),   # each B? matches one "b"
+        ("",      False),  # A is required
+    ]),
+]
+
+
+def generate_cyk():
+    print("Generating CYK nullable-group oracles (#186)...")
+    groups = []
+    for name, grammar, cases in CYK_NULLABLE_GROUP_GRAMMARS:
+        built = []
+        for inp, should_parse in cases:
+            try:
+                lark = Lark(grammar, parser="cyk", lexer="basic",
+                            start="start", maybe_placeholders=False)
+                tree = lark.parse(inp)
+                ok, payload = True, tree_to_dict(tree)
+            except Exception as e:
+                ok, payload = False, str(e)
+            if should_parse and not ok:
+                print(f"  WARNING: {name} expected to parse {inp!r}: {payload}")
+            if not should_parse and ok:
+                print(f"  WARNING: {name} expected to reject {inp!r}")
+            built.append({
+                "input": inp,
+                "should_parse": should_parse,
+                "ok": ok,
+                "tree": payload if ok else None,
+                "error": payload if not ok else None,
+            })
+        groups.append({
+            "name": name,
+            "grammar": grammar,
+            "cases": built,
+        })
+    save_oracle("cyk", "cases", groups)
+    n_cases = sum(len(g["cases"]) for g in groups)
+    print(f"  {len(groups)} groups, {n_cases} cases")
+
+
 def save_oracle(suite, name, data):
     out_dir = ORACLES_DIR / suite
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -2062,6 +2144,7 @@ if __name__ == "__main__":
     generate_recovery_contextual()
     generate_earley()
     generate_earley_dynamic()
+    generate_cyk()
     generate_interactive()
     generate_fuzz_corpus()
     generate_json_corpus_manifest()
