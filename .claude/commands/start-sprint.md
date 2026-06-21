@@ -431,7 +431,40 @@ The sprint is finished only once the omnibus PR is merged by the architect. Afte
 - post the single batched close-out: what landed, the parked `needs-decision` inbox
   (each with a recommendation, `/triage`-shaped), any follow-ups filed, and the
   **aggregated Retrospective** (deduped + grouped, per the Retrospective section) so the
-  architect sees every process quirk the sprint surfaced in one place.
+  architect sees every process quirk the sprint surfaced in one place;
+- emit the **Architect Action Memo + Durability Warrant** (template below) as a **comment
+  on the omnibus PR** (it persists after merge). This is a **required** §9 deliverable.
+
+### Architect Action Memo + Durability Warrant (required §9 deliverable)
+
+The architect needs, in **one durable place**, a crisp action list and a guarantee that
+nothing important is stranded in the abandoned session. Post it as a comment on the omnibus
+PR. It has two parts.
+
+**1. Action items.** Every item the architect must act on (parked `needs-decision`, a
+proposal needing ratification, a follow-up needing a call). A "decide X" line is **not
+actionable** on its own — each item must specify **all four**:
+
+1. **The decision** — concrete options + a *recommended default*, copy-pasteable where
+   possible.
+2. **Where to record it** — the exact issue/PR number and the format: the standard
+   `**Decision (architect, <date>):** …` verdict block.
+3. **The label transition that unblocks it** — e.g. remove `needs-decision`, add
+   `good-autonomous` (+ `prio:*`) — *that transition is what `/next-task` / `/start-sprint`
+   read to schedule the follow-on work; without it the decision is recorded but inert.*
+4. **What resumes the work** — the exact continuation: "next `/next-task` picks it up", or
+   "reply here and the session executes", or "this needs a governance PR I'll draft." No
+   item may end at a decision with no named next step.
+
+**Default low-friction path:** since an agent is usually present, the architect should be
+able to just **state the choice in chat** and the agent does (2)+(3)+(4) — records the
+verdict, flips the labels, and dispatches the task or drafts the governance PR. The
+architect should never have to perform GitHub mechanics for the process to continue.
+
+**2. Durability Warrant.** An explicit statement that every artifact the sprint produced
+is saved outside this session — each one mapped to **where**: a `master` commit, an issue
+label/comment, the omnibus PR body, or a filed follow-up issue. Nothing important lives
+only in conversation memory.
 
 ## Retrospective — a live, aggregated process ledger (everyone contributes)
 
