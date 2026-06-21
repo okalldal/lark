@@ -77,23 +77,31 @@ impl<'a> InteractiveParser<'a> {
     /// when it was shifted, and `Err` (the same `UnexpectedToken` a batch parse would
     /// raise) when the parser has no action for it. Mirrors Python's `feed_token`.
     ///
-    /// A caller-built `Token::new("NUMBER", "1")` carries no interned id; like Python
-    /// (which dispatches on `token.type`, a name), this resolves the terminal *name*
-    /// to its id when the token's `type_id` is unset, so a hand-made token Just Works.
-    /// Lexer-produced tokens and `$END` already carry a real id and are used as-is.
+    /// **Dispatch is by terminal *name*** (`token.type_`), exactly as Python's
+    /// `ParserState.feed_token` indexes `states[state][token.type]` — including
+    /// `$END`, which is interned under that name. A caller-built
+    /// `Token::new("NUMBER", "1")` therefore Just Works, and a foreign or mutated
+    /// token's numeric `type_id` is **not trusted**: a token whose `type_` is
+    /// `"NUMBER"` but whose `type_id` is some other parser's id still feeds as
+    /// `NUMBER` here, never under the stale id. An unknown name errors.
+    ///
+    /// Once the parse has reached ACCEPT (`result().is_some()`) it is **finished**:
+    /// further feeds error (with an empty expected set, matching `accepts() == []`).
     pub fn feed_token(&mut self, mut token: Token) -> Result<Option<ParseTree>, ParseError> {
-        if token.type_id == SymbolId::UNSET {
-            match self.parser.table.symbols.id(&token.type_) {
-                Some(id) => token.type_id = id,
-                None => {
-                    return Err(ParseError::UnexpectedToken {
-                        token: token.value.clone(),
-                        token_type: token.type_.clone(),
-                        line: token.line,
-                        col: token.column,
-                        expected: self.accepts(),
-                    })
-                }
+        if self.result.is_some() {
+            // Finished: nothing is acceptable after ACCEPT (see `accepts`).
+            return Err(ParseError::unexpected_token(&token, Vec::new()));
+        }
+        match self.parser.table.symbols.id(&token.type_) {
+            Some(id) => token.type_id = id,
+            None => {
+                return Err(ParseError::UnexpectedToken {
+                    token: token.value.clone(),
+                    token_type: token.type_.clone(),
+                    line: token.line,
+                    col: token.column,
+                    expected: self.accepts(),
+                })
             }
         }
         match self.stack.feed_token(&self.parser.table, &token) {
@@ -118,13 +126,22 @@ impl<'a> InteractiveParser<'a> {
     /// The terminal names that would advance the parser from the current state,
     /// sorted and deterministic — the primary oracle comparand. Mirrors Python's
     /// `accepts()` (computed value-free here: only the state stack is simulated).
+    /// Empty once the parse is **finished** (`result().is_some()`): after ACCEPT
+    /// nothing more can be fed, so reporting `$END` as acceptable would be dishonest.
     pub fn accepts(&self) -> Vec<String> {
+        if self.result.is_some() {
+            return Vec::new();
+        }
         self.stack.accepts(&self.parser.table)
     }
 
-    /// Feed a synthetic `$END` at the current input position, finishing the parse.
-    /// Returns the tree if ACCEPT was reached. Mirrors Python's `feed_eof` (which
-    /// likewise borrows the position from where lexing left off).
+    /// Feed a synthetic `$END`, finishing the parse. Returns the tree if ACCEPT was
+    /// reached. Mirrors Python's `feed_eof`.
+    ///
+    /// The `$END` position comes from the **lazy lexer cursor** (where lexing left
+    /// off), *not* from the last manually-fed token — so after `exhaust_lexer` it is
+    /// the end of input, and before any lexer drive it is the start (`1,1`). v1 does
+    /// not expose Python's optional `last_token` position-borrowing.
     pub fn feed_eof(&mut self) -> Result<Option<ParseTree>, ParseError> {
         self.feed_token(self.eof_token())
     }

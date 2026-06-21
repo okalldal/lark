@@ -1,13 +1,13 @@
 //! Interactive-parser oracle + behaviour tests (issue #168).
 //!
-//! lark-rs's `InteractiveParser` is a 1:1 port of Python Lark's
-//! (`lark/parsers/lalr_interactive_parser.py`), so it is oracle-checkable: the
-//! `interactive/cases.json` bank records, for a script of operations driven against
-//! Python, the sorted `accepts()` set after each step, each feed's success /
-//! expected-set, and the final tree. This test replays the same script and asserts
-//! the same trace — a step-granular differential. Plus three relative-oracle
-//! property tests that need no Python (resume == parse, exhaust+eof == parse,
-//! `accepts()` honesty).
+//! lark-rs's `InteractiveParser` is the **oracle-backed subset** of Python Lark's
+//! (`lark/parsers/lalr_interactive_parser.py`) plus the `feed(name,value)` sugar, so
+//! it is oracle-checkable: the `interactive/cases.json` bank records, for a script of
+//! operations driven against Python, the sorted `accepts()` set after each step, each
+//! feed's success / expected-set, the `exhaust_lexer` token output, and the final
+//! tree. This test replays the same script and asserts the same trace — a
+//! step-granular differential. Plus relative-oracle property tests that need no
+//! Python (resume == parse, exhaust+eof == parse, `accepts()` honesty).
 
 mod common;
 
@@ -40,13 +40,38 @@ fn test_interactive_oracle() {
 
     for case in cases {
         let name = case["name"].as_str().unwrap();
-        // A fresh interactive parse per case; manual feeds ignore the (empty) input.
+        let input = case["input"].as_str().unwrap_or("");
         let mut ip = lark
-            .parse_interactive("")
+            .parse_interactive(input)
             .unwrap_or_else(|e| panic!("case {name}: parse_interactive failed: {e}"));
 
         for step in case["steps"].as_array().unwrap() {
             match step["op"].as_str().unwrap() {
+                "exhaust" => {
+                    let toks = ip
+                        .exhaust_lexer()
+                        .unwrap_or_else(|e| panic!("case {name}: exhaust_lexer failed: {e}"));
+                    let got: Vec<[String; 2]> = toks
+                        .iter()
+                        .map(|t| [t.type_.clone(), t.value.clone()])
+                        .collect();
+                    let want: Vec<[String; 2]> = step["tokens"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|pair| {
+                            let p = pair.as_array().unwrap();
+                            [
+                                p[0].as_str().unwrap().to_string(),
+                                p[1].as_str().unwrap().to_string(),
+                            ]
+                        })
+                        .collect();
+                    assert_eq!(
+                        got, want,
+                        "case {name}: exhaust_lexer tokens mismatch vs oracle"
+                    );
+                }
                 "accepts" => {
                     let want: Vec<String> = step["accepts"]
                         .as_array()
@@ -199,6 +224,47 @@ fn test_lazy_lexing_defers_error() {
         ParseError::UnexpectedCharacter { ch, .. } => assert_eq!(ch, '@'),
         other => panic!("expected UnexpectedCharacter at '@', got {other:?}"),
     }
+}
+
+/// `feed_token` dispatches by terminal *name*, not by a (possibly stale/foreign)
+/// `type_id`: a token whose `type_` says NUMBER but whose `type_id` is PLUS's id must
+/// feed as NUMBER, never under the stale id (the public-field footgun).
+#[test]
+fn test_feed_token_dispatches_by_name_not_stale_id() {
+    let lark = interactive_lark();
+    // Borrow a real PLUS token (carrying PLUS's interned id) from a lexed stream.
+    let mut donor = lark.parse_interactive("1 + 2").unwrap();
+    let toks = donor.exhaust_lexer().unwrap();
+    let mut plus = toks[1].clone();
+    assert_eq!(plus.type_, "PLUS");
+    // Mutate only the NAME to NUMBER, keeping PLUS's stale id.
+    plus.type_ = "NUMBER".to_string();
+
+    // At the start state PLUS has no action but NUMBER does; dispatch-by-name shifts.
+    let mut ip = lark.parse_interactive("").unwrap();
+    assert!(
+        ip.feed_token(plus).unwrap().is_none(),
+        "must dispatch by name (NUMBER), not the stale PLUS id"
+    );
+    assert_eq!(ip.accepts(), vec!["$END".to_string(), "PLUS".to_string()]);
+}
+
+/// A finished parser (reached ACCEPT) accepts nothing and rejects further feeds —
+/// the post-completion contract, so `accepts()` stays honest after `result`.
+#[test]
+fn test_finished_parser_accepts_nothing_and_rejects_feeds() {
+    let lark = interactive_lark();
+    let mut ip = lark.parse_interactive("").unwrap();
+    ip.feed("NUMBER", "1").unwrap();
+    ip.feed_eof().unwrap().expect("ACCEPT");
+
+    assert!(ip.result().is_some(), "parse finished");
+    assert!(ip.accepts().is_empty(), "a finished parser accepts nothing");
+    assert!(ip.feed_eof().is_err(), "a finished parser rejects feed_eof");
+    assert!(
+        ip.feed("NUMBER", "2").is_err(),
+        "a finished parser rejects feeds"
+    );
 }
 
 /// Premature-EOF via `resume` carries the real input position, not the old `0,0`

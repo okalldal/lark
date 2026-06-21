@@ -995,11 +995,13 @@ def generate_recovery_contextual():
 # ─── Interactive parser (issue #168) ─────────────────────────────────────────
 #
 # Python Lark's `parse_interactive` hands back an `InteractiveParser` the caller
-# drives: `feed_token`, inspect `accepts()`, `feed_eof`, resume. lark-rs ports that
-# surface 1:1 (ADR-0026: behaviour is scoped to the oracle's), so we can drive the
-# *same* operation script against both engines and compare, step by step, the
-# sorted `accepts()` set and each feed's success/expected-set — plus the final tree.
-# The script ops are: "accepts", ["feed", TYPE, value], and "feed_eof".
+# drives: `feed_token`, inspect `accepts()`, `feed_eof`, `exhaust_lexer`, resume.
+# lark-rs ports the oracle-backed subset of that surface (plus `feed(name,value)`
+# sugar; ADR-0026), so we drive the *same* operation script against both engines and
+# compare, step by step: the sorted `accepts()` set, each feed's success/expected,
+# the `exhaust_lexer` token output, and the final tree. Script ops:
+# "accepts", ["feed", TYPE, value], "exhaust" (drive the lexer), and "feed_eof".
+# A case may carry an "input" the lexer drives over (default "").
 
 INTERACTIVE_CASES = [
     # A lone number: accepts NUMBER at the start, then can end.
@@ -1018,6 +1020,11 @@ INTERACTIVE_CASES = [
     # A trailing '+' leaves the parser expecting a product, so feed_eof raises.
     {"name": "premature_eof",
      "script": [["feed", "NUMBER", "1"], ["feed", "PLUS", "+"], "accepts", "feed_eof"]},
+    # Lexer-driven: exhaust_lexer must yield Python's exact token stream, then
+    # feed_eof reaches the same final tree (the resume_parse result).
+    {"name": "exhaust_then_eof",
+     "input": "1 + 2",
+     "script": ["exhaust", "accepts", "feed_eof"]},
 ]
 
 
@@ -1026,16 +1033,19 @@ def generate_interactive():
     grammar = load_grammar("interactive")
     results = []
     for case in INTERACTIVE_CASES:
-        # lexer='basic' to match lark-rs's v1 interactive configuration (the manual
-        # feed surface is lexer-independent, but be explicit).
+        # lexer='basic' to match lark-rs's v1 interactive configuration.
         lark = Lark(grammar, parser="lalr", lexer="basic", start="start",
                     maybe_placeholders=False)
-        ip = lark.parse_interactive("")
+        ip = lark.parse_interactive(case.get("input", ""))
         steps = []
         final_tree = None
         for op in case["script"]:
             if op == "accepts":
                 steps.append({"op": "accepts", "accepts": sorted(ip.accepts())})
+            elif op == "exhaust":
+                toks = ip.exhaust_lexer()
+                steps.append({"op": "exhaust",
+                              "tokens": [[str(t.type), str(t)] for t in toks]})
             elif op == "feed_eof":
                 try:
                     final_tree = ip.feed_eof()
@@ -1053,6 +1063,7 @@ def generate_interactive():
                                   "expected": sorted(e.expected)})
         results.append({
             "name": case["name"],
+            "input": case.get("input", ""),
             "tree": tree_to_dict(final_tree) if final_tree is not None else None,
             "steps": steps,
         })

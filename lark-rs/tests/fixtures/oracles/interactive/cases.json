@@ -1,6 +1,7 @@
 [
   {
     "name": "number",
+    "input": "",
     "tree": {
       "type": "tree",
       "data": "start",
@@ -40,6 +41,7 @@
   },
   {
     "name": "sum",
+    "input": "",
     "tree": {
       "type": "tree",
       "data": "start",
@@ -120,6 +122,7 @@
   },
   {
     "name": "bad_first",
+    "input": "",
     "tree": null,
     "steps": [
       {
@@ -141,6 +144,7 @@
   },
   {
     "name": "premature_eof",
+    "input": "",
     "tree": null,
     "steps": [
       {
@@ -167,6 +171,67 @@
         "expected": [
           "NUMBER"
         ]
+      }
+    ]
+  },
+  {
+    "name": "exhaust_then_eof",
+    "input": "1 + 2",
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "add",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "1"
+            },
+            {
+              "type": "token",
+              "token_type": "PLUS",
+              "value": "+"
+            },
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "2"
+            }
+          ]
+        }
+      ]
+    },
+    "steps": [
+      {
+        "op": "exhaust",
+        "tokens": [
+          [
+            "NUMBER",
+            "1"
+          ],
+          [
+            "PLUS",
+            "+"
+          ],
+          [
+            "NUMBER",
+            "2"
+          ]
+        ]
+      },
+      {
+        "op": "accepts",
+        "accepts": [
+          "$END",
+          "PLUS"
+        ]
+      },
+      {
+        "op": "feed_eof",
+        "ok": true
       }
     ]
   }
