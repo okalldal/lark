@@ -65,17 +65,18 @@ rather than proceeding:
    - **base:** `master`
    - **head:** the sprint integration branch
    - **title:** `sprint: omnibus <date/short-sha>`
-   - **body:** seed it as the **live sprint ledger** (see §6) — the sprint base SHA,
-     and sections for *Staged*, *In-flight child PRs*, *Parked needs-decision*,
-     *Follow-ups filed*, and *Retrospective* (see the Retrospective section). This body
-     is the sprint's durable state from now on, not a thing assembled at the end. The
-     *Staged*, *Parked*, *Follow-ups*, and *Retrospective* sections are **authoritative**
-     (resume relies on them); the *In-flight child PRs* section is a **convenience
-     mirror** of the open child PRs — keep it roughly current, but resume reconstructs
-     in-flight state from the live open-PR list, not from this section.
+   - **body:** a **stable pointer + a short living summary** — *not* a per-stage live
+     ledger (ADR-0023). Seed it with the sprint base SHA and a pointer to the committed
+     residue file `lark-rs/docs/sprints/<sprint-id>.md` (see §6), plus brief *Parked
+     needs-decision* / *Follow-ups filed* lines you keep roughly current. The body is
+     written **lightly** (wave boundaries + finalize), never rewritten every stage. The
+     authoritative durable record is **GitHub itself** — the kept integration branch's
+     merge history, the child PRs, the labels, and the append-only residue file — not this
+     body; resume reconstructs from those (§7 / Guardrails), so the body is a convenience
+     summary, not the source of truth.
 3. The omnibus PR is the **only** PR that will ever target `master`, and the **only**
-   PR that carries `Closes #N` lines (filled in as children are staged, §6). Child PRs
-   do not.
+   PR that carries `Closes #N` lines (filled in at finalize as the staging table is
+   reconstructed, §7). Child PRs do not.
 
 ## 3. Build the plan (thin, from GitHub state)
 
@@ -295,16 +296,19 @@ This is staging onto the sprint branch, **not** landing to `master`:
 
 - The orchestrator merges eligible child PRs (`auto` or `escalate`) into the sprint
   integration branch **one at a time**.
-- **Update the omnibus ledger in the same step you stage a child PR** — this is the
-  load-bearing move for resumability (§ guardrails). The instant a child PR is merged
-  into the sprint branch it stops being an *open* PR, so the omnibus body is the **only**
-  durable record that it happened. After each stage, append to the omnibus body a
-  *Staged* row carrying: the child PR number, the issue(s) it covers as a `Closes #N`
-  line, its tier (`auto` | `escalate`), and its review + CI evidence. Do this **before**
-  moving to the next child PR, so a roll-over between stages never loses a staged child.
-  In the same step, **append the child's (and its review's) `RETRO:` bullets to the
-  omnibus *Retrospective* section** (see the Retrospective section) — and likewise when
-  you harvest a parked or failed result — so no retro note depends on conversation memory.
+- **Do not rewrite the PR body per stage (ADR-0023).** The fact that a child PR was
+  staged is **reconstructable** — the instant it merges into the integration branch it
+  leaves a merge commit naming `…(#PR)`, and its body carries `Refs #N` and tier — so the
+  *Staged* table is rebuilt at finalize (§7) from the kept branch's merge history, not
+  maintained live. What you **must** persist in the same step is only the **irreducible
+  residue** (state with no other durable home): append the orchestrator's and the review
+  sub-agent's `RETRO:` bullets — and any synced-`master` SHA — to the committed,
+  append-only **`lark-rs/docs/sprints/<sprint-id>.md`** and **commit + push** it. (A
+  worker's own `RETRO:` already persists in its child PR body; a parked memo on the issue;
+  a follow-up as a filed issue — do not duplicate those into the residue file.) A
+  workspace scratch file is fine as a live convenience cache, but it is **never** the
+  system of record — the container is reclaimed on restart, so anything that must survive a
+  roll-over is reconstructable (above) or committed to the residue file.
 - After each child PR is staged:
   - **rebase/update the remaining open child PRs** onto the new sprint-branch tip
     (`mcp__github__update_pull_request_branch`) so any conflict surfaces **now**;
@@ -316,7 +320,8 @@ This is staging onto the sprint branch, **not** landing to `master`:
   branch** (child PRs target it; rewriting it would break their bases). If `master` moves
   during the sprint, **merge `origin/master` *into* the sprint branch** (a real merge
   commit), resolve any conflicts **inside the sprint** (dispatch a worker), **record the
-  synced `master` SHA in the omnibus ledger**, and rerun the relevant checks. Child PR
+  synced `master` SHA in the residue file** (`lark-rs/docs/sprints/<sprint-id>.md`), and
+  rerun the relevant checks. Child PR
   *branches* are rebased onto the sprint branch (§ above); the sprint branch itself only
   ever moves forward. The omnibus diff must always be "what lands on top of today's
   `master`".
@@ -376,20 +381,23 @@ Re-evaluate the §3 plan against GitHub each cycle; schedule the next wave (newl
 unblocked issues, each rebased on the new sprint tip) until no schedulable issue is
 non-terminal. **Then** prepare the omnibus PR for the architect.
 
-By this point the omnibus body is **already** the complete record — every staged child
-appended its ledger row in §6, and parked `needs-decision` items were recorded as they
-arose. So this step **finalizes and verifies**, it does not assemble. Before marking the
-omnibus **ready for review** (out of draft), confirm:
+This step **reconstructs, finalizes, and verifies** (ADR-0023) — the per-stage record was
+deliberately *not* maintained in the body. **Reconstruct the staging table** from GitHub:
+read the kept integration branch's merge history (each squash names `…(#PR)`) and the
+child PR bodies (`Refs #N` + tier) to build the *Staged* rows, cross-check against labels,
+and fold in the residue file's `RETRO:`/synced-SHA entries. **Then** write the full record
+into the omnibus body **once** (this is the one big body write of the sprint) and post the
+Architect Action Memo (§9). Before marking the omnibus **ready for review** (out of draft),
+confirm:
 
 - current `master` is an **ancestor** of the sprint integration branch;
 - the **omnibus PR CI is green**;
 - **all staged child PRs are merged** into the sprint branch;
 - **no child PR remains in a non-terminal state** (each is staged, or parked as
   `needs-decision`, or `blocked` with a named blocker);
-- the ledger is **complete and consistent** with GitHub: every staged child has a
-  *Staged* row with a `Closes #N` line and tier; reconcile any gaps (e.g. a child staged
-  just before a roll-over) by reading the sprint branch's merge history against the
-  ledger, then add the missing rows.
+- the reconstructed *Staged* table is **complete and consistent** with GitHub — every
+  merge commit on the branch maps to a *Staged* row with a `Closes #N` line and tier, and
+  every residue `RETRO:` note is carried into the Retrospective.
 
 The finalized omnibus body therefore owns the whole sprint's record:
 
@@ -481,13 +489,14 @@ it's felt and surfaced to the architect at the end — the point is to fix the *
   redundant; know-how a future run needs up front to avoid rediscovering it; anything
   that burned context or tokens. Keep each bullet terse and *actionable* ("X said Y, but
   Z — suggest updating §N / ADR-NNNN"). Skip praise and routine status.
-- **Durability = the omnibus body, harvested immediately.** Because sub-agent context is
-  discarded and a staged child stops being an open PR, the **only** safe home for a retro
-  note is the **`Retrospective` section of the omnibus PR body**. When the orchestrator
-  harvests *any* sub-agent result (staged, parked, or failed), it appends that result's
-  `RETRO:` bullets to that section **in the same step** — exactly like the §6 ledger
-  rows, and for the same resumability reason. A roll-over therefore loses no retro notes:
-  resume reads them straight back from the omnibus body.
+- **Durability = the committed residue file, harvested immediately (ADR-0023).** A
+  *worker's* `RETRO:` already persists in its child PR body, so it needs no extra write. A
+  *review sub-agent's* and the *orchestrator's* own `RETRO:` notes have no other durable
+  home — so the moment they are produced, append them to the append-only
+  `lark-rs/docs/sprints/<sprint-id>.md` and **commit + push** (the same step you'd
+  otherwise harvest a result). Not the PR body (which is no longer rewritten per stage),
+  and never the workspace (reclaimed on restart). A roll-over therefore loses no retro
+  note: resume reads them back from the committed residue file and the child PR bodies.
 - **Presented at close-out (§9).** The aggregated retrospective is part of the final
   report: deduped and grouped (instructions / steps / tooling / know-how), each item with
   a concrete suggested fix. Persistent fixes that change the constitution or a command
@@ -499,16 +508,16 @@ it's felt and surfaced to the architect at the end — the point is to fix the *
 - **No `AskUserQuestion` mid-sprint** — a blocking prompt defeats "run until the target
   is met". Forks are parked as `needs-decision` issues (a terminal state) and surfaced
   together in the close-out.
-- **Resumable — the omnibus body is the live ledger.** All durable state lives in GitHub
-  branches, child PRs, labels, and the **continuously-updated omnibus PR body**
-  (PRINCIPLES.md §0). This works *only because* §6 appends a *Staged* row the moment each
-  child PR is merged into the sprint branch: once staged, a child is no longer an open PR,
-  so the ledger is the sole record of which PRs were staged, which issues they covered,
-  their tier, and their review/CI evidence. On a summarize/restart, the next invocation
-  **first reads the omnibus ledger + open child PRs + labels**, reconstructs the
-  issue→state table (staged ↔ ledger rows, in-flight ↔ open child PRs, parked ↔
-  `needs-decision`), reconciles it against the sprint branch's merge history, and only
-  *then* schedules more work — no progress lives in conversation memory.
+- **Resumable — GitHub is the ledger, reconstructed not churned (ADR-0023).** All durable
+  state lives in GitHub: the kept integration branch's **merge history**, the **child
+  PRs**, the **labels**, and the committed append-only **residue file**
+  (`lark-rs/docs/sprints/<sprint-id>.md`) for the irreducible bits (orchestrator/review
+  `RETRO:`, synced SHAs). The PR body is a convenience summary, **not** the source of truth,
+  and is **not** rewritten per stage. On a summarize/restart, the next invocation
+  reconstructs the issue→state table from `(open child PRs ↔ in-flight, branch merge
+  history ↔ staged, labels ↔ parked/blocked, residue file ↔ retro/SHAs)` and only *then*
+  schedules more work — no progress lives in conversation memory or the ephemeral
+  workspace.
 - **Rollback-first (§9).** If a staged change reddens the omnibus CI, revert it out of
   the integration branch immediately (and open an incident issue) — *then* diagnose.
   Because nothing reaches `master` until the omnibus merge, a bad stage never escapes
