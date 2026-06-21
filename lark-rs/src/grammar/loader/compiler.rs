@@ -145,7 +145,10 @@ pub(super) struct GrammarCompiler {
     /// behavior. The discriminator is whether the name was generated here, never
     /// the `__anon_` spelling (a user can author that exact name, #144), so it is
     /// recorded at mint time rather than sniffed downstream.
-    anon_kinds: HashMap<String, AnonKind>,
+    ///
+    /// `pub(super)` so the sibling `imports` module can carry an imported helper's
+    /// provenance across `import_rule_closure`'s rename (#101 import path).
+    pub(super) anon_kinds: HashMap<String, AnonKind>,
     /// User-authored terminal names (terminals, declares, import targets), the
     /// same guard for [`fresh_terminal`](Self::fresh_terminal)'s `__ANON_{n}`.
     /// Unlike rules, generated terminal names must *also* dodge live state: a

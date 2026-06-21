@@ -218,6 +218,74 @@ fn test_in_memory_sources_never_fall_back_to_the_filesystem() {
     );
 }
 
+/// Provenance survives `%import` rename for CYK's empty-rule guard (#101,
+/// ADR-0021). A `(B*)~2` rule emits a nullable anonymous EBNF helper the loader
+/// *generates*; Python Lark's CYK accepts it directly. `import_rule_closure`
+/// copies and renames imported rules — it must also carry their `anon_kinds`
+/// provenance under the renamed origin, or the imported helper is reclassified
+/// as a user rule (`anon_kind == None`) and the CYK guard wrongly rejects the
+/// whole grammar. This fails before the provenance-carry fix and passes after,
+/// matching the direct case (`cyk_accepts_nullable_helper_under_rep_count`).
+#[test]
+fn test_cyk_imported_nullable_helper_under_rep_count_is_accepted() {
+    for sub_body in ["A (B*)~2", "A (B?)~2"] {
+        let sources: HashMap<String, String> = [(
+            "sub.lark".to_string(),
+            format!("sub: {sub_body}\nA: \"a\"\nB: \"b\"\n"),
+        )]
+        .into();
+        let res = Lark::new(
+            "start: sub\n%import .sub.sub\n",
+            LarkOptions {
+                parser: ParserAlgorithm::Cyk,
+                lexer: LexerType::Basic,
+                start: vec!["start".to_string()],
+                import_sources: Some(Arc::new(sources)),
+                ..Default::default()
+            },
+        );
+        assert!(
+            res.is_ok(),
+            "CYK must accept an imported nullable helper under `~n` \
+             (`sub: {sub_body}`), matching the direct case: {:?}",
+            res.err()
+        );
+        // Tree parity vs LALR on the *same imported* grammar (≡ Python-Lark
+        // oracle): LALR ignores the empty-rule guard entirely, so it is the
+        // per-input baseline. Imported-dependency terminals are mangled under the
+        // module prefix (`sub__A`), so we compare CYK and LALR built from the same
+        // import — not against the differently-mangled direct grammar.
+        let cyk = res.unwrap();
+        let lalr_sources: HashMap<String, String> = [(
+            "sub.lark".to_string(),
+            format!("sub: {sub_body}\nA: \"a\"\nB: \"b\"\n"),
+        )]
+        .into();
+        let lalr = Lark::new(
+            "start: sub\n%import .sub.sub\n",
+            LarkOptions {
+                parser: ParserAlgorithm::Lalr,
+                lexer: LexerType::Basic,
+                start: vec!["start".to_string()],
+                import_sources: Some(Arc::new(lalr_sources)),
+                ..Default::default()
+            },
+        )
+        .expect("imported grammar builds under LALR");
+        for input in ["a", "ab", "abb"] {
+            let cyk_tree = cyk
+                .parse(input)
+                .unwrap_or_else(|e| panic!("imported CYK rejects {input:?}: {e}"))
+                .to_string();
+            let lalr_tree = lalr.parse(input).unwrap().to_string();
+            assert_eq!(
+                cyk_tree, lalr_tree,
+                "imported CYK vs LALR (≡ oracle) tree mismatch on {input:?} for `sub: {sub_body}`"
+            );
+        }
+    }
+}
+
 /// A file import with no base path (grammar built from a bare string) is
 /// unresolvable — only the bundled `common` library is available — and must error
 /// rather than silently drop the requested symbols.
