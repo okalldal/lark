@@ -1,80 +1,169 @@
 ---
-description: Drain a small batch of process/kit debt (kaizen issues) as architect-ratified proposal PRs, off the feature cadence
+description: Drain the entire kaizen backlog in one orchestrated sweep — stage every kit/governance fix as a child PR onto a kaizen integration branch and land it as one architect-merged omnibus PR; the sweep proposes, never ratifies
 ---
 
-This is the codified **process-improvement** flow. Where `/next-task` and
+This is the codified **process-improvement sweep**. Where `/next-task` and
 `/start-sprint` move the *product* backlog, `/kaizen-sweep` improves the *kit* —
 the commands, governance docs (`PRINCIPLES.md`, `LABELS.md`, ADRs), harness, and
-review discipline. It runs **on demand**, never on feature cadence, because
-process debt otherwise competes with features under the same rubric and most of it
-is `escalate`-tier (it edits the constitution or the commands).
+review discipline. It runs **on demand**, off the feature cadence.
 
-It **proposes; it does not ratify.** Every change rides its own PR for the
-architect to merge — see PRINCIPLES.md §9 (governance/policy changes ride their own
-PR; only the architect edits `PRINCIPLES.md`).
+**One `/kaizen-sweep` drains the entire open `kaizen` backlog in a single
+orchestrated session.** It mirrors `/start-sprint`'s omnibus mechanics (ADR-0018,
+ADR-0022): each coherent kit change is a **child PR** staged onto a **kaizen
+integration branch**, and the whole batch lands as **one omnibus PR** that only the
+**architect** merges. The sweep **proposes; it does not ratify** — see PRINCIPLES.md
+§9 (governance/policy changes ride their own PR; only the architect edits
+`PRINCIPLES.md`).
 
-## 0. Invariants (binding)
+> **Reuse, don't fork.** This command is the kaizen *specialization* of the sprint
+> orchestration. For the shared machinery — the worker dispatch packet, the
+> verdict-only review sub-agent contract, the staging queue, the parking protocol,
+> resumability (omnibus body as the live ledger), rollback-first, and the live
+> Retrospective — **follow `.claude/commands/start-sprint.md` verbatim**, substituting
+> "kaizen" for "sprint" throughout. The sections below state only the kaizen-specific
+> **deltas**; everything not contradicted here is inherited from `/start-sprint`.
 
-- **`/kaizen-sweep` never auto-merges.** Governance-doc and command changes are
-  `escalate`-tier by definition; the architect merges them.
-- **One concern per PR.** A `kaizen` issue that bundles several fixes is split into
-  one PR per coherent change, so the architect can accept/reject independently.
+## 0. Invariants (binding — read first)
+
+The sprint §0 invariants all hold (workers/review sub-agents never merge; only the
+orchestrator stages into the integration branch; only the architect merges the
+omnibus; nothing reaches `master` except that one merge). Plus the kaizen-specific:
+
+- **One concern per child PR.** A `kaizen` issue that bundles several fixes is split
+  into **one child PR per coherent change**, so the architect can accept/reject each
+  independently *inside* the omnibus and revert it independently afterward (§9).
 - **No product behavior change.** If a `kaizen` item turns out to need a code/oracle
-  change to lark-rs itself, it is *not* kaizen — drop the `kaizen` label, re-triage
-  it into the normal backlog, and leave it for `/next-task`.
+  change to lark-rs itself, it is *not* kaizen — **drop the `kaizen` label, re-triage
+  it into the normal backlog**, exclude it from the sweep, and leave it for
+  `/next-task`.
+- **Everything is `escalate`-tier.** Kit/governance changes are escalate by
+  definition; the verdict-only review classifies but **nothing auto-merges** (matches
+  a sprint's deliberately-withdrawn merge authority).
+- **A `PRINCIPLES.md` change is the architect's to write.** The sweep may *draft* a
+  proposal child PR and flag it explicitly for the architect, but never authors the
+  constitution edit itself.
 
-## 1. Survey (in parallel)
+## 1. Preflight (refuse to start unless all hold)
 
-- **Open `kaizen` issues** — `mcp__github__list_issues` with `labels: ["kaizen"]`,
-  state OPEN. This is the queue.
-- **Open PRs** — skip any `kaizen` issue that already has an open PR (don't collide).
-- Read each issue's body + any architect comment. A `kaizen` issue should name the
-  concrete kit change and where it lives (`.claude/commands/*`, `lark-rs/docs/*`,
-  `.githooks/*`, a workflow). If it doesn't, it needs triage repair first — say so.
+- **ADR-0018 Accepted** and **ADR-0022 Accepted** — the omnibus orchestration and its
+  kaizen application; refuse to run if either is not Accepted (matches ADR-0016's
+  staged-activation style).
+- **Green `master` CI** — never sweep on a broken base.
+- **Capture the current `master` SHA** as the immutable **sweep base**.
 
-## 2. Pick a small batch (rubric, in order)
+(There is no `good-autonomous` triage gate as in a sprint — `kaizen` issues are kit
+work, not product work. The schedulability bar is §3's: each picked concern must name
+a concrete kit change and where it lives.)
 
-1. **A kit bug that is actively misleading or dead** (e.g. an instruction that can't
-   be executed, a hook that misfires) → highest value; fix first.
-2. **A recurring-failure-mode fix** — something a retrospective flagged more than
-   once across workers/sprints (these prevent future waste).
-3. **A clarity/contract tightening** (a brief that had to be re-explained, a missing
-   convention) — cheap, compounding.
-4. Prefer **small, independent** changes; cap the batch (≈1–3 issues) so the architect
-   reviews a focused set, not a grab-bag.
+## 2. Create the integration branch + draft omnibus PR (early)
 
-Skip items that need an architect *decision* first (`needs-decision`) — surface them,
-don't guess.
+Sprint §2 mechanics, kaizen-named:
 
-## 3. Execute each as its own proposal PR
+```bash
+git checkout -b kaizen/YYYYMMDD-HHMM <master-sha>
+git commit --allow-empty -m "kaizen: seed omnibus ledger"
+git push -u origin kaizen/YYYYMMDD-HHMM
+```
 
-For each picked issue, on a branch off the current default branch:
+Open the **omnibus PR immediately, as a draft** — base `master`, head the kaizen
+branch, title `kaizen: omnibus <date/short-sha>`, body seeded as the **live ledger**
+(*Staged* / *In-flight child PRs* / *Parked needs-decision* / *Triage-repair needed* /
+*Follow-ups* / *Retrospective*), per sprint §6 + the Retrospective section. The omnibus
+is the **only** PR that targets `master` and the **only** one carrying `Closes #N`
+lines.
 
-- Make the **minimal** edit the issue describes — command text, `LABELS.md` row,
-  a `decisions/TEMPLATE.md` convention, a hook tweak, a workflow guard.
-- If it changes a **load-bearing governance rule or a §3 default**, add or supersede
-  an **ADR** in `lark-rs/docs/decisions/` in the same PR (the doc-maintenance rule),
-  authored as **`Status: Proposed`** — never self-ratify; the architect flips it to
-  `Accepted` on merge.
-- Run the fast gate only if code/hooks/CI are touched (`lark-rs/scripts/check-fast.sh`);
-  pure-doc/command PRs don't need it.
-- Open the PR with `Closes #N`, a one-line rationale, and the before/after of the
-  instruction or rule. Tag it as a kit/governance change.
+## 3. Survey + plan the whole kaizen backlog
 
-Do **not** run `/finish-task` (it classifies merge tiers and can merge `auto` PRs);
-kaizen PRs are always architect-ratified. Stop at "PR opened."
+In parallel: `mcp__github__list_issues` with `labels: ["kaizen"]`, state OPEN (the
+queue) + `mcp__github__list_pull_requests` OPEN (skip any kaizen issue that already has
+an open PR — don't collide).
 
-## 4. Report
+Read each open `kaizen` issue's body + any architect comment. A `kaizen` issue must
+name the **concrete kit change and where it lives** (`.claude/commands/*`,
+`lark-rs/docs/*`, `.githooks/*`, a workflow). Then classify:
 
-Post a short summary: which `kaizen` issues were drained (with PR links), which were
-left and why (needs-decision, too big, already has a PR), and the remaining `kaizen`
-queue depth. The architect merges the PRs to land the improvements.
+- **Schedulable** — names a concrete kit change + location, not `needs-decision`, no
+  open PR. **Decompose it into one *concern* per coherent change** (a 3-item issue →
+  3 concerns → 3 child PRs). The concern, not the issue, is the unit of work.
+- **Needs triage repair** — a `kaizen` issue with no concrete change/location → do
+  **not** dispatch; record it in the omnibus *Triage-repair needed* section for the
+  close-out.
+- **`needs-decision`** — surface in the parked inbox; never pick (a sweep forbids
+  mid-run `AskUserQuestion`).
+- **Not kaizen** — needs a product code/oracle change → drop the `kaizen` label,
+  re-triage, exclude (Invariant §0).
 
-## Guardrails
+Group concerns into **waves by file/blast-radius overlap** so parallel workers don't
+collide (same-file concerns serialize; e.g. two edits to `start-sprint.md`). Cap
+concurrency at **~3**.
 
-- **Never bake kit fixes into a product PR or a sprint omnibus** (§9) — they ride
-  their own PRs so they can be reverted independently and reviewed as governance.
-- **Off-cadence by design:** do not run this inside `/start-sprint` or as part of a
-  feature pick; it is a deliberate, separate ritual.
-- A `kaizen` change that would alter `PRINCIPLES.md` is the architect's to write;
-  `/kaizen-sweep` may *draft* a proposal but flags it explicitly for the architect.
+Because the sweep drains the *whole* queue, **re-evaluate the queue against GitHub each
+cycle** (sprint §7) and schedule successive waves until no schedulable concern remains
+non-terminal — do not stop at a small batch.
+
+## 4. Dispatch a wave (parallel worker sub-agents — child PRs only)
+
+Sprint §4 dispatch, with a kaizen worker brief. The startup context packet adds an
+`issue concern:` field naming the specific change. Each worker takes **one concern** and:
+
+- reads the issue + the repo rules it needs (`CLAUDE.md`, `lark-rs/docs/PRINCIPLES.md`
+  §9 governance-PR rule, `lark-rs/docs/LABELS.md`);
+- makes the **minimal** edit the concern describes — command text, a `LABELS.md` row, a
+  `decisions/TEMPLATE.md` convention, a hook tweak, a workflow guard;
+- if the concern changes a **load-bearing governance rule or a §3 default**, adds or
+  supersedes an **ADR** in the same child PR, authored **`Status: Proposed`** (never
+  self-ratify — the architect flips it to `Accepted` on omnibus merge) + a README index
+  row;
+- runs the fast gate **only if code/hooks/CI are touched**
+  (`lark-rs/scripts/check-fast.sh`); pure-doc/command concerns skip it;
+- opens a **child PR based on `<kaizen-branch>`** (NOT `master`) carrying **`Refs #N` +
+  `Part of #M`**, a one-line rationale, and the **before/after** of the instruction or
+  rule, with **no closing keyword**;
+- if the concern would touch `PRINCIPLES.md`, **drafts the proposal but flags it for the
+  architect** (does not author the constitution edit) — return `NEEDS_DECISION:` if
+  unsure;
+- ends with a `RETRO:` block.
+
+## 5. Review — verdict-only (sprint §5), kaizen DoD
+
+Per child PR, run the verdict-only review sub-agent (never merges, never mutates GitHub
+state). The kaizen Definition of Done differs from the product DoD: there is **no
+failed-first oracle** for a doc/command change — verify instead (PRINCIPLES §6 DoD-1,
+docs/governance arm) that **the policy/command path was walked through and any
+contradictions resolved**, the **before/after is accurate**, the child carries `Refs #N`
++ `Part of #M` with **no closing keyword**, any ADR is `Status: Proposed`, and the change
+is **kit-only (no product behavior change)**. **Tier is always `escalate`.** Route a
+`needs-decision` via the sprint §5 parking protocol.
+
+## 6. Staging queue (sprint §6)
+
+Stage eligible child PRs into the kaizen branch one at a time; **append the omnibus
+ledger row in the same step** (child PR #, tier `escalate`, review evidence); rebase the
+remaining child PRs; keep `master` *merged into* (never rebase) the kaizen branch. CI
+waits and CI-fix dispatch as sprint §6.
+
+**`Closes #N` for multi-concern issues:** the omnibus carries `Closes #N` only once
+**every** concern of issue #N is staged. Until then the ledger lists #N's concerns as
+partially staged (stage rows reference the concern, not yet the close).
+
+## 7–9. Finalize, terminal states, close-out (sprint §7–§9)
+
+Finalize/verify the omnibus (sprint §7), apply the terminal-state predicate (sprint §8,
+kaizen-flavored: *in the green omnibus* / *parked needs-decision* / *triage-repair
+needed* / *already-PR'd-or-closed*), and after the **architect merges the omnibus** run
+the close-out (sprint §9): verify the included issues closed, report the **remaining
+kaizen queue depth**, the parked inbox, triage-repair items, follow-ups, and the
+aggregated **Retrospective**.
+
+## Guardrails (binding)
+
+- **Off-cadence by design** — never run inside `/start-sprint` or as part of a feature
+  pick; it is a deliberate, separate ritual.
+- **Never bake kit fixes into a product PR or a sprint omnibus** (§9) — they ride the
+  **kaizen** omnibus so they can be reverted independently and reviewed as governance.
+- **Resumability, rollback-first, no mid-run `AskUserQuestion`** — inherited from the
+  sprint guardrails (the omnibus body is the live ledger; a bad stage is reverted out of
+  the integration branch before it can escape, since nothing reaches `master` until the
+  omnibus merge).
+- A `kaizen` change that would alter `PRINCIPLES.md` is the architect's to write; the
+  sweep may *draft* a proposal child PR but flags it explicitly for the architect.
