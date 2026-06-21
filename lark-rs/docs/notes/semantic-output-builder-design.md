@@ -61,25 +61,32 @@ pub trait OutputBuilder<'i> {
     /// The value carried on the parse stack (Yacc's semantic value).
     type Value;
 
-    /// A shifted terminal. `span` indexes `input`; `input` is the whole source,
-    /// so a builder can borrow (`&input[span]`) or own (`input[span].to_owned()`).
-    /// Called at shift time — matching Python wiring terminal callbacks into the
-    /// lexer (see §5, token-filtering parity).
+    /// A shifted terminal — runs for **every** shifted terminal, because the parse
+    /// stack needs a value (this is *engine token materialization*, lower-level than
+    /// Python's visible terminal callbacks; see §5). `span` indexes `input`; `input`
+    /// is the whole source, so a builder can borrow (`&input[span]`) or own
+    /// (`input[span].to_owned()`). `ctx` resolves the interned `terminal` to its
+    /// Python-side name when the builder needs it.
     fn token(
         &mut self,
         terminal: SymbolId,
         span: core::ops::Range<usize>,
         input: &'i str,
+        ctx: &OutputContext<'_>,
     ) -> Self::Value;
 
     /// A completed reduction of `rule` over its shaped `children`.
     /// `span` covers the whole production (subsumes propagate_positions).
+    /// `ctx` resolves `rule` to the *callback name* Python would dispatch on
+    /// (alias → template source → origin), the name parity Python's
+    /// `create_callback` uses.
     fn reduce(
         &mut self,
         rule: RuleId,
         children: &mut Vec<Self::Value>,
         span: core::ops::Range<usize>,
         input: &'i str,
+        ctx: &OutputContext<'_>,
     ) -> Self::Value;
 
     /// Discard hook (Python's `Discard` sentinel). Default: nothing discards —
@@ -105,6 +112,16 @@ Why these choices:
   `reduce`/`token` pushes a branch and a discard concept onto the 99% path that
   never discards. The default-`false` hook is monomorphized away for those builders
   and gives the tree backend full `Discard` parity. *(Alternative weighed in §7.)*
+- **`ctx: &OutputContext` carries the ID→name path.** The hot path stays interned
+  (CLAUDE.md: "an array index per token, never a string hash"), but a builder can't
+  be written — or oracle-tested — without resolving an `RuleId`/`SymbolId` back to a
+  name. `OutputContext` is a cheap borrow of precomputed metadata exposing
+  `callback_name(RuleId)` (the alias→template→origin resolution Python dispatches
+  on), `rule_name`/`rule_alias`, and `terminal_name(SymbolId)`. It is passed
+  per-call rather than injected at builder construction because the builder is
+  user-constructed *before* it ever sees the parser (the `parse_into(&mut builder)`
+  shape, §6); a reference costs nothing and keeps name resolution lazy. *(The
+  injection alternative — an `init(&mut self, meta)` lifecycle hook — is a §7 fork.)*
 
 ## 4. Default & test backends
 
@@ -112,27 +129,46 @@ Why these choices:
   no-op refactor (ADR-0027 slice b) must make this byte-for-byte reproduce today's
   `ParseTree`, proven by the existing tree-oracle + compliance/wild banks staying
   green. This is the safe refactor: behaviour is fully gated.
-- **`TraceOutputBuilder` (test-only)** — appends `(kind, name, children_repr)` per
-  callback; matched against the Python trace oracle. The gate that makes "did we
-  *really* implement Python's transformer order?" a hard test, not a vibe.
-- **`JsonFixtureOutputBuilder` (test-only)** — builds the action-spec fixture value
-  (ADR-0027 slice c), matched against the Python transformer *value* oracle.
+- **`PythonTransformerOracleBuilder` (test-only) — the Python-compat adapter.**
+  Deliberately Python-*shaped*, not Rust-ergonomic: it holds the action spec keyed
+  by `callback_name`/`terminal_name` (`rule_methods`, `token_methods`,
+  `default_rule`, `default_token`), resolves every incoming `RuleId`/`SymbolId`
+  through `ctx` to that name world, and emits **both** the final value (vs the Python
+  transformer value oracle, ADR-0027 slice c) and an ordered callback `trace` (vs the
+  Python trace oracle). It is the single place the engine-vs-visible distinction
+  (§5) lives: it logs a *visible terminal callback* only when the spec defines a
+  method for that terminal, and otherwise materializes a Token-compatible value
+  silently. Result equality alone misses order, missed callbacks, and callbacks
+  firing for filtered punctuation — the trace is why this adapter exists.
 - **Later, speed:** `SpanTreeBuilder` (`Value` borrows `&'i str`), event sink, JSON
   tape. Each ships behind the §projection invariant + perf-counters of ADR-0027.
 
-## 5. The three parity sharp edges (settled by the trace oracle, not this RFC)
+## 5. The parity sharp edges (settled by the trace oracle, not this RFC)
 
 These are behaviour, so they are *not* RFC decisions — the Python trace oracle pins
 them. Flagged here so the implementer expects them:
 
-- **Token filtering vs. token callbacks.** Python wires terminal callbacks into the
-  lexer (`_get_lexer_callbacks`), so `token()` fires at shift time; later
-  punctuation *filtering* drops the value. Whether `token()` should fire for a
-  filtered punctuation terminal is a parity question the trace oracle answers.
+- **Engine token materialization ≠ Python-visible terminal callback (the load-bearing
+  one).** The trait's `token()` runs for *every* shifted terminal because the stack
+  needs a value. Python is narrower: `_get_lexer_callbacks` wires a terminal callback
+  **only** for terminals the transformer actually defines a method for — every other
+  terminal is kept as a plain `Token`, with no visible callback. So the oracle adapter
+  must **not** log every `token()` call as a Python callback: it logs a visible
+  terminal callback iff the action spec defines a method for that terminal, else it
+  materializes a Token-compatible value silently (this is exactly what
+  `PythonTransformerOracleBuilder` does, §4). Naïvely tracing every `token()` would
+  manufacture false mismatches — for kept terminals, not just filtered ones.
+- **Does the embedded path observe `__default_token__`?** Uncertain — Python's
+  embedded transformer may not invoke a default token handler the post-parse path
+  does. `default_token` in the adapter is wired *only if the oracle shows the
+  embedded path observes it*; the fixture settles it, the RFC does not guess.
+- **Filtered punctuation.** A filtered token's value is dropped at shaping; whether
+  its `token()`/visible-callback fired first is pinned by the fixtures.
 - **`Discard` shifts sibling positions** for placeholders — the `maybe_placeholders`
   fixtures pin the interaction.
 - **Aliases / templates / `?`/`_`** decide the *callback name* (`-> alias` vs origin
-  vs template source). The shaping engine resolves the name; fixtures pin it.
+  vs template source) — the `ctx.callback_name` resolution above. The shaping engine
+  resolves it; fixtures pin it.
 
 ## 6. Public entry point & binding implications (the escalate part)
 
@@ -180,6 +216,12 @@ the architect's call.
    ADR-0011); does the *first public* builder hand back owned `String`s or borrowed
    `&'i str`? (Borrowing ties the value's lifetime to the input — an ergonomics
    call.)
+6. **Metadata path form.** *That* the builder gets an ID→name path is settled (§3 —
+   without it the API is unusable and untestable). The form is the fork: recommended
+   per-call `ctx: &OutputContext` (fits `parse_into(&mut builder)`, keeps resolution
+   lazy); alternative is an `init(&mut self, meta: &OutputMetadata)` lifecycle hook
+   the parser calls before the first reduction (smaller per-call signature, but the
+   builder must store the borrow).
 
 ## 8. Where it plugs in (orientation, not a mandate)
 
