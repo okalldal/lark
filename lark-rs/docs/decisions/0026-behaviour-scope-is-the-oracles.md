@@ -53,13 +53,19 @@ has; this routes **new** behaviour by whether Python grounds it at all.
 
 ### Applied to the recovery epic (#209), resolving #211
 
-- **#168 — accept.** Python has it ⇒ oracle-backed. Port the `InteractiveParser`
-  surface 1:1 (no operation Python lacks), validated by a step-granular
-  differential (`accepts()` traces + result trees) plus relative-oracle property
-  tests (resume == parse, exhaust+eof == parse, `accepts()` honesty). Becomes
-  `good-autonomous`; merges escalate-tier (new public API, §6).
-  - *Caller-directed* token insertion via `feed(name, value)` is **in scope** —
-    it is Python's `feed_token`. *Automatic* insertion (#164) is not.
+- **#168 — accept.** Python has it ⇒ oracle-backed. Port the **oracle-backed
+  subset** of the `InteractiveParser` surface (no new *parser behaviour* beyond
+  Python), validated by a step-granular differential (`accepts()` traces + result
+  trees) plus relative-oracle property tests (resume == parse, exhaust+eof == parse,
+  `accepts()` honesty). Becomes `good-autonomous`; merges escalate-tier (new public
+  API, §6).
+  - **The surface rule.** No new parser *behaviour* beyond Python. Rust *may* expose
+    convenience *spellings* that lower directly to a Python-backed operation, each
+    with its own thin test — e.g. `feed(name, value)` is sugar over Python's
+    `feed_token` (caller-directed insertion, in scope). It need not clone Python's
+    spelling byte-for-byte, and may omit Python ops it doesn't need (`choices()`),
+    but it must add no operation that does something Python's parser cannot.
+    *Automatic* insertion (#164) is new behaviour, so it is **not** in scope.
 - **#164 — defer** (beyond-oracle, no demand). Keep `prio:later`; revisit only on
   a concrete consumer + a validation story. Once #168 ships, callers can do their
   own insertion/resync through an oracle-backed surface, which is the Python model
