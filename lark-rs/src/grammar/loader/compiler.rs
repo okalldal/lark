@@ -25,7 +25,7 @@ use std::sync::Arc;
 /// [`GrammarCompiler::fresh_terminal`]). Typed so a new helper cannot pick a
 /// colliding tag by typo, and so the rendering lives in exactly one place.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum AnonKind {
+pub enum AnonKind {
     /// `(...)` group helper (also the optional-group form).
     Group,
     /// `[...]` under `maybe_placeholders`.
@@ -136,6 +136,16 @@ pub(super) struct GrammarCompiler {
     /// import-mangled dependencies (`mod__name` / `_mod__name`) cannot take the
     /// `__anon_{tag}_{n}` shape, so user-authored names are the only hazard.
     reserved_rule_names: HashSet<String>,
+    /// Provenance of every generated anonymous EBNF helper rule, keyed by the name
+    /// [`fresh_anon_rule`](Self::fresh_anon_rule) minted for it. This is the
+    /// *source-provenance* discriminator the engine needs (#101): a nullable
+    /// `Nt::Orig` that is a generated helper (`(B*)~2`'s `__anon_rep_*`) is
+    /// accepted by CYK, but a user-written nullable rule (`_a: B?`, or a user rule
+    /// the author *named* `__anon_star_0`) is rejected — exactly Python Lark's CYK
+    /// behavior. The discriminator is whether the name was generated here, never
+    /// the `__anon_` spelling (a user can author that exact name, #144), so it is
+    /// recorded at mint time rather than sniffed downstream.
+    anon_kinds: HashMap<String, AnonKind>,
     /// User-authored terminal names (terminals, declares, import targets), the
     /// same guard for [`fresh_terminal`](Self::fresh_terminal)'s `__ANON_{n}`.
     /// Unlike rules, generated terminal names must *also* dodge live state: a
@@ -173,6 +183,7 @@ impl GrammarCompiler {
             base_path,
             import_sources,
             reserved_rule_names: HashSet::new(),
+            anon_kinds: HashMap::new(),
             reserved_term_names: HashSet::new(),
         }
     }
@@ -184,6 +195,10 @@ impl GrammarCompiler {
             let name = format!("__anon_{}_{}", kind.tag(), self.anon_counter);
             self.anon_counter += 1;
             if !self.reserved_rule_names.contains(&name) {
+                // Record the generated-helper provenance so the engine can tell a
+                // generated nullable helper from a user rule by *source*, never by
+                // the `__anon_` spelling (#101 / #144).
+                self.anon_kinds.insert(name.clone(), kind);
                 return name;
             }
         }
@@ -473,6 +488,7 @@ impl GrammarCompiler {
             terminals: self.terminals,
             ignore: ignore_names,
             start: self.start,
+            anon_kinds: self.anon_kinds,
         })
     }
 }

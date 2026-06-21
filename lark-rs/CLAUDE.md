@@ -455,6 +455,18 @@ only by a `debug_assert` in `intern.rs`, so it manifested **in release builds
 only** (#144). Anonymous symbols are now disambiguated via a closed `AnonKind`
 enum rather than name spelling; keep new interned names namespace-unambiguous.
 
+**CYK empty-rule rejection is by *provenance*, not transparency or name spelling
+(#101, ADR-0021).** Python Lark's CYK rejects an ε-deriving rule, but *accepts* the
+nullable anonymous helper a `*`/`?` nested under `~n` emits (`start: A (B*)~2`). The
+discriminator is whether the nullable origin was **generated** by the loader, carried
+as `SymbolInfo.anon_kind: Option<AnonKind>` (set at `fresh_anon_rule` mint time,
+plumbed through `Grammar.anon_kinds` → `lower()`). CYK rejects a nullable `Nt::Orig`
+iff `anon_kind.is_none()` — a user rule, including a transparent `_a: B?` and even a
+user rule *named* `__anon_star_0` (a user can author that exact name, #144). Do **not**
+gate this on `name.starts_with("__anon_")`; the blunt "reject every nullable origin"
+fix over-rejects `(B*)~2` (an oracle regression the four banks miss — their only `~n`
+cases are on terminals). Pinned in `parsers/cyk.rs` + `grammar/intern.rs`.
+
 **Joop-Leo is reimplemented, not ported — and its laziness is load-bearing.**
 Python Lark's Leo optimization is dead code (it reads a nonexistent field;
 lark-parser/lark#397), so lark-rs's version (`earley.rs`) is an independent
