@@ -815,7 +815,18 @@ impl GrammarCompiler {
     /// expression only, no `keep_all` context). Without this normalization, two
     /// separate helpers with identical bodies cause an unresolvable LALR
     /// reduce/reduce conflict.
-    fn recurse_helper(&mut self, arms: Vec<CompiledAlt>) -> Symbol {
+    fn recurse_helper(&mut self, mut arms: Vec<CompiledAlt>) -> Symbol {
+        // Dedup identical arms (first occurrence wins, order preserved). Python
+        // Lark's `EBNF_to_BNF` builds the one-or-more rule from the *set* of inner
+        // expansions, so `("b" | "b")*` collapses to a single recurse arm. Without
+        // this, two byte-identical arms emit two identical base reductions (and two
+        // identical `P arm` recurse reductions) into the same state — an
+        // unresolvable reduce/reduce Python never reports (#210, seed 99). Order is
+        // preserved because `rule.order` drives the resolve disambiguation (#49/#72).
+        {
+            let mut seen: std::collections::HashSet<CompiledAlt> = std::collections::HashSet::new();
+            arms.retain(|arm| seen.insert(arm.clone()));
+        }
         // Named (non-filtered) single-terminal arms are always kept regardless of
         // keep_all, so the rule options difference is semantically invisible →
         // normalize the cache key (the common `WORD+` / `DECIMAL+` case).

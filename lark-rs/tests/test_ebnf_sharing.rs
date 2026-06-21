@@ -127,3 +127,61 @@ fn test_template_plus_optional_repeat_one() {
     assert_eq!(parsed(&lark, "bb"), "start[rep[r0[]]]");
     assert_eq!(parsed(&lark, "bbb"), "start[rep[r0[]]]");
 }
+
+// ─── #210: a `*`/`+` over a group with a duplicate alternative must dedup ───────
+//
+// Python Lark's `EBNF_to_BNF` builds the one-or-more recurse rule from the *set*
+// of inner expansions, so `("b" | "b")*` collapses to a single recurse arm.
+// lark-rs's `recurse_helper` used to inline every arm verbatim, so two identical
+// arms produced two byte-identical `__anon_plus_0 -> B` reductions in one state —
+// an unresolvable reduce/reduce Python never reports. Found by the
+// `--fuzz-grammars` differential mode (#38, seed 99); expected trees are the
+// Python-Lark oracle.
+
+#[test]
+fn test_star_over_duplicate_alt_dedups() {
+    // The minimal #210 core: `("b" | "b")*`. Python builds it; lark-rs used to
+    // reject it with a self-collision (`__anon_plus_0 -> B` vs `__anon_plus_0 -> B`).
+    let lark = build("start: (\"b\" | \"b\")*\n");
+    assert_eq!(parsed(&lark, ""), "start[]");
+    assert_eq!(parsed(&lark, "b"), "start[]");
+    assert_eq!(parsed(&lark, "bb"), "start[]");
+    assert_eq!(parsed(&lark, "bbb"), "start[]");
+}
+
+#[test]
+fn test_plus_over_duplicate_alt_dedups() {
+    // The `+` form of the same core: `("b" | "b")+`.
+    let lark = build("start: (\"b\" | \"b\")+\n");
+    assert_eq!(parsed(&lark, "b"), "start[]");
+    assert_eq!(parsed(&lark, "bb"), "start[]");
+}
+
+#[test]
+fn test_star_over_duplicate_alt_keeps_tokens() {
+    // With `!`, the deduped recurse rule still yields one token per repeat (the
+    // dedup collapses identical *rules*, not the tokens matched). Oracle:
+    // `start[B:b, B:b]`.
+    let lark = build("!start: (\"b\" | \"b\")*\n");
+    assert_eq!(parsed(&lark, ""), "start[]");
+    assert_eq!(parsed(&lark, "b"), "start[B:b]");
+    assert_eq!(parsed(&lark, "bb"), "start[B:b,B:b]");
+}
+
+#[test]
+fn test_seed99_template_star_duplicate_alt_builds() {
+    // The full seed-99 minimized fuzzer repro: a `*` group with a duplicate `r0`
+    // alternative, a template instance, and a `~1`. Python builds it cleanly;
+    // lark-rs used to reject it with a self-collision in the inlined `*` recurse
+    // rule. Oracle tree for "bdddcc cbb" is six `r0` children + a `rep`.
+    let lark = build(
+        "start: (\"b\" | r0 | r0)* r0 rep{\"b\"} | rep{r0}\n\
+         r0: \"d\"~1 | \"c\"\n\
+         rep{x}: x x?\n\
+         %ignore \" \"\n",
+    );
+    assert_eq!(
+        parsed(&lark, "bdddcc cbb"),
+        "start[r0[],r0[],r0[],r0[],r0[],r0[],rep[]]"
+    );
+}
