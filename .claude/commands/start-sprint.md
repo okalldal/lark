@@ -423,7 +423,11 @@ The sprint is finished only once the omnibus PR is merged by the architect. Afte
   manually** referencing the omnibus PR;
 - verify each child PR is either **merged into the sprint branch** or **explicitly
   superseded** by the omnibus (comment + close);
-- **clean up the sprint integration branch** if appropriate;
+- **keep the sprint integration branch** — do **not** delete it. It is the durable record
+  of the sprint (the omnibus diff + the full staging history), and the orchestrator cannot
+  delete it here anyway (the git proxy returns `403` on ref-delete and there is no
+  delete-ref tool). Leave any branch removal to GitHub's auto-delete-on-merge or the
+  architect (architect decision, 2026-06-19);
 - post the single batched close-out: what landed, the parked `needs-decision` inbox
   (each with a recommendation, `/triage`-shaped), any follow-ups filed, and the
   **aggregated Retrospective** (deduped + grouped, per the Retrospective section) so the
