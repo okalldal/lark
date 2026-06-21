@@ -12,6 +12,12 @@ and ADRs 0010–0015 from a sweep of the PR history (#1–161) for decisions —
 especially *reversals and abandoned approaches* — that lived only in PR
 descriptions. New decisions get a new file from then on.
 
+**Who sets `Status`.** A newly authored ADR is **always `Proposed` (pending
+architect ratification)** — an agent never accepts its own decision. Only the
+**architect** flips an ADR to `Accepted`, by merging the PR that carries it.
+Authoring a new ADR as `Accepted` is a Definition-of-Done failure (see
+`.claude/commands/finish-task.md` and `TEMPLATE.md`).
+
 ## Index
 
 | # | Decision | Status |
