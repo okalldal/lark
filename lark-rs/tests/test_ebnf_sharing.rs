@@ -90,3 +90,40 @@ fn test_repetition_trees_unaffected() {
     let group = build("!start: (\"a\" \"b\")+");
     assert_eq!(parsed(&group, "abab"), "start[A:a,B:b,A:a,B:b]");
 }
+
+// ─── #176: bounded `~n` must inline, not mint a colliding helper rule ──────────
+//
+// Python Lark's `EBNF_to_BNF._generate_repeats` inlines a small `x~n..m`
+// (`mx < 50`) directly into the parent expansion as one alternative per count —
+// it never materializes a helper rule. lark-rs used to give every exact/range
+// repeat its own `__anon_rep_*` helper, so `"d"~1` became `__anon_rep: D`
+// *alongside* a sibling literal `D` alternative; both reduce on `D` in one state,
+// an unresolvable reduce/reduce that Python never reports. Found by the
+// `--fuzz-grammars` differential mode (#38, seed 13); expected trees are the
+// Python-Lark oracle.
+
+#[test]
+fn test_exact_repeat_one_inlines_no_helper() {
+    // The minimal collision core: `foo: "d"~1 | "d"`. After inlining, `~1` is just
+    // `D`, the duplicate `foo -> D` alternatives dedup, and the grammar is LALR.
+    let lark = build("start: foo\nfoo: \"d\"~1 | \"d\"\n");
+    assert_eq!(parsed(&lark, "d"), "start[foo[]]");
+}
+
+#[test]
+fn test_exact_repeat_one_keeps_token() {
+    // `!start: "d"~1` keeps the single inlined token (oracle: `start[D:d]`).
+    let lark = build("!start: \"d\"~1\n");
+    assert_eq!(parsed(&lark, "d"), "start[D:d]");
+}
+
+#[test]
+fn test_template_plus_optional_repeat_one() {
+    // The full #176 repro: a template instance next to an optional rule whose body
+    // contains a `"d"~1`. Python builds it cleanly; lark-rs used to reject it with a
+    // spurious reduce/reduce between `__anon_rep_2` and `r0`.
+    let lark = build("start: rep{r0} r0?\nr0: \"b\"+ | \"d\"~1 | \"d\"\nrep{x}: x x?\n");
+    assert_eq!(parsed(&lark, "b"), "start[rep[r0[]]]");
+    assert_eq!(parsed(&lark, "bb"), "start[rep[r0[]]]");
+    assert_eq!(parsed(&lark, "bbb"), "start[rep[r0[]]]");
+}
