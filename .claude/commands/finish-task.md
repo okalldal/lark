@@ -53,7 +53,12 @@ pushing — that runs everything twice (once here, once in GitHub Actions).
      architecture / public-API call a future reader would have to reverse-engineer
      (`lark-rs/docs/decisions/`, copy `TEMPLATE.md`). Commit it in *this* PR
      and link it from the body. Skip it for routine, fully-gated work — the test
-     is the record there.
+     is the record there. **A staged ADR is always `Status: Proposed` — never
+     self-ratify.** An agent does not have the authority to accept its own
+     decision; only the **architect** ratifies, by flipping it to `Accepted` when
+     they merge the PR. Author it `Status: Proposed (pending architect
+     ratification)` (the canonical `TEMPLATE.md` phrasing) and say so in the PR
+     body; a self-authored `Status: Accepted` is a DoD failure.
    - **Point the PR at its issue:** the body must say `Closes #N`, and the
      done-when must actually be met.
    - **One PR, one concern** (§9): if your work touched both code and a
