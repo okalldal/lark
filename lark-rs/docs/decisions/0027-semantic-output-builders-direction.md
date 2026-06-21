@@ -1,6 +1,6 @@
 # ADR-0027: Semantic output backends
 
-- **Status:** Proposed (pending architect ratification)
+- **Status:** Accepted (2026-06-21; architect ratified)
 - **Date:** 2026-06-21
 - **Depends on:** ADR-0026 (behaviour is scoped to the oracle's)
 
