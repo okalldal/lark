@@ -483,7 +483,11 @@ counter is what catches a regression here.
 recurse rule `_p: A | B | _p A | _p B` (base arms first, then `_p arm`), *not* a
 nested `(A|B)` group helper under a single-symbol `_p: g | _p g`; and `x*`
 distributes its empty case into the parent (`start: _p | ε`) reusing the same
-recurse rule — there is no `__star: __plus | ε` wrapper. **Bounded `~n`/`~n..m`
+recurse rule — there is no `__star: __plus | ε` wrapper. The recurse rule is built
+from the **deduped set** of inner arms (`recurse_helper`, #210): `("b" | "b")*`
+collapses to a single arm, matching Python's `EBNF_to_BNF` — without the dedup, two
+byte-identical arms emit two identical `_p -> B` reductions in one state, a spurious
+reduce/reduce Python never reports. **Bounded `~n`/`~n..m`
 likewise inlines** (#176): a small `x~mn..mx` (`mx < 50`, Python's
 `REPEAT_BREAK_THRESHOLD`) fans out one alternative per count `k` in `mn..=mx`
 (`x~1 ≡ x`, `x~2 ≡ x x`, `x~0..2 ≡ ε | x | x x`) straight into the parent via
