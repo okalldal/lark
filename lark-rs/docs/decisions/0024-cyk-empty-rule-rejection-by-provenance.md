@@ -1,6 +1,6 @@
 # ADR-0024: CYK empty-rule rejection is keyed on source provenance, not name spelling
 
-- **Status:** Proposed
+- **Status:** Accepted (2026-06-21; architect-ratified on merge of #195)
 - **Date:** 2026-06-21
 
 ## Context
