@@ -237,6 +237,17 @@ normal "PR body says `Closes #N`" item with the sprint-child closure contract:
 - the body contains **no closing keyword** (`Closes #N` / `Fixes #N` / `Resolves #N`);
 - the eventual `Closes #N` is owned by the **omnibus ledger**, not the child PR.
 
+**Differential-audit checkpoint (part of the verdict-only DoD).** The standing banks
+are a *regression* net, not a *completeness* net — a child PR can pass every bank green
+and still diverge from the oracle (cf. #101: a CYK fix passed all four banks yet
+over-rejected `start: A (B*)~2`, which Python Lark accepts). For any child that touches a
+behavior whose *full* input space the banks under-sample (nullable / EBNF-expansion edges,
+ambiguity dedup, recovery resync, lexer tie-breaks, …), the reviewer must check the PR
+evidences a **targeted differential audit against Python Lark** over adversarial inputs in
+that space (not just the committed bank), with any new case pinned — or an explicit "no
+oracle, banks-green is necessary-but-not-sufficient" note. A silent banks-green on such a
+change is a **DoD failure**.
+
 A faithful reviewer must **not** fail a child PR for "missing `Closes #N`" — that is
 *required* here. The review returns exactly: **DoD status** (against the override above),
 **tier** (`auto` | `escalate` | `needs-decision`), a **short rationale**, **missing

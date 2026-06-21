@@ -31,6 +31,17 @@ Verify each, and say which are satisfied vs missing:
 5. Out-of-scope discoveries filed as issues, not buried in the diff.
 6. An ADR exists if a §3 default was deviated from.
 7. The issue's done-when is met and the PR says `Closes #N`.
+8. **Differential-audit checkpoint (recorded, not optional).** Does this change
+   touch a behavior whose *full* input space the standing banks do **not**
+   exhaustively cover (e.g. nullable / EBNF-expansion edges, ambiguity dedup,
+   recovery resync, lexer tie-breaks)? The banks are a *regression* net, not a
+   *completeness* net — a change can pass every bank green and still diverge from
+   the oracle (cf. #101: `start: A (B*)~2`). If yes, require evidence the PR ran a
+   **targeted differential audit against Python Lark** over a handful of
+   adversarial inputs in that space (not just the committed bank) and pinned any
+   new case found. If no oracle makes the audit impractical, the PR must *say so
+   explicitly* and treat banks-green as **necessary but not sufficient**. A silent
+   "banks are green" is a DoD gap here, not a pass.
 
 Also confirm no §2 **invariant** is violated even if CI is green — if one is and
 CI didn't catch it, the gate is buggy: say so and file an issue.

@@ -11,6 +11,18 @@ pushing — that runs everything twice (once here, once in GitHub Actions).
    findings pre-PR means CI runs once on the final diff instead of twice.
    Note what the review flagged and how it was addressed for the PR description.
 
+   **Differential-audit checkpoint (make it a conscious, recorded decision).**
+   Ask: does this change touch a behavior whose *full* input space the standing
+   banks do **not** exhaustively cover (nullable / EBNF-expansion edges, ambiguity
+   dedup, recovery resync, lexer tie-breaks, …)? The banks are a *regression* net,
+   not a *completeness* net (cf. #101: a CYK fix passed all four banks yet
+   over-rejected `start: A (B*)~2`, which Python Lark accepts). If yes, **run a
+   targeted differential audit against Python Lark** over a handful of adversarial
+   inputs in that space — not just the committed bank — and pin any new case found.
+   If no oracle makes the audit impractical, say so explicitly and treat
+   banks-green as *necessary but not sufficient*. Record the outcome (audited / not
+   applicable / impractical) in the PR body so the reviewer can check it.
+
 2. **Fast gate** (the Pareto cut — fmt + `cargo test --all` catches nearly
    every red):
    ```bash
