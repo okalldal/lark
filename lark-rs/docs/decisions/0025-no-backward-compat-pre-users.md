@@ -1,6 +1,6 @@
 # ADR-0025: Pre-users — breaking the public API is free
 
-- **Status:** Proposed (pending architect ratification)
+- **Status:** Accepted (2026-06-21; architect ratified)
 - **Date:** 2026-06-21
 
 > Forward-looking *policy* ADR (architect product-direction, not a backfilled
