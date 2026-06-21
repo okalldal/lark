@@ -17,9 +17,11 @@ cargo test test_json_corpus   # run the 293-file JSONTestSuite corpus
 
 ## Picking Work
 
-When asked to find or take on the most valuable / highest-value work (or given
-no specific task), run **`/next-task`** — it codifies the backlog survey
-(open PRs/issues, STATUS.md follow-ups, xfail burndown) and the selection rubric.
+When asked to find or take on the most valuable / highest-value work, run
+**`/next-task`** — it codifies the backlog survey (open PRs/issues, STATUS.md
+follow-ups, xfail burndown) and the selection rubric. Run it only on an explicit
+ask, never as a default for an empty instruction — an agent dropped in with no
+task (e.g. an underspecified subagent) must not go find work to do on its own.
 
 ## Autonomous Development — Operating Rules (binding)
 
