@@ -49,6 +49,9 @@ pushing — that runs everything twice (once here, once in GitHub Actions).
      mid-task is filed as an issue in the §7 contract shape (Done-when / Priority
      / Files / Notes), never silently fixed or dropped — this is how #159, #101,
      #64, #59 came to exist. Label them per `lark-rs/docs/LABELS.md`.
+     When a follow-up is an unresolved fork or public API/product decision, file
+     it with the decision memo skeleton (see `/roadmap`) and label it
+     `needs-decision`, not just a generic issue.
    - **Write an ADR if you deviated from a §3 default**, or made an
      architecture / public-API call a future reader would have to reverse-engineer
      (`lark-rs/docs/decisions/`, copy `TEMPLATE.md`). Commit it in *this* PR

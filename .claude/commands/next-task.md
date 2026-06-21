@@ -38,7 +38,9 @@ carry it through implementation and `/finish-task` in this session.
    decision-checkpoint issues ("decision needed", "assess & challenge") — those
    need the architect (`PRINCIPLES.md` §4–5); surface them via `AskUserQuestion`
    only if nothing implementable remains. Don't invent groundable work to avoid
-   asking.
+   asking. If the best next work is blocked only by architect decisions, run
+   `/architect-brief` and report the blocking decision queue instead of asking
+   ad hoc questions.
 
 ## 3. Announce, then execute
 
