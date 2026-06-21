@@ -22,6 +22,7 @@
 
 use std::collections::HashMap;
 
+use super::loader::AnonKind;
 use super::rule::RuleOptions;
 use super::symbol::Symbol;
 use super::terminal::TerminalDef;
@@ -67,6 +68,17 @@ pub struct SymbolInfo {
     pub inline: bool,
     /// Non-terminal only: a synthetic augmented start symbol (`$root_X`).
     pub is_start: bool,
+    /// Non-terminal only: `Some(kind)` iff this origin is a *generated* anonymous
+    /// EBNF helper the loader minted via `fresh_anon_rule` (a `*`/`?`/`~n`/group/
+    /// `[…]` helper); `None` for every user-written rule. This is **source
+    /// provenance**, distinct from [`inline`](Self::inline): a transparent user
+    /// rule (`_a`) and a user rule the author *named* `__anon_star_0` are both
+    /// `inline` yet have `anon_kind == None`, while a generated `__anon_rep_*`
+    /// helper is `Some(..)`. CYK keys empty-rule rejection on this (#101, ADR-0024):
+    /// a nullable user rule is rejected (matching Python), a nullable generated
+    /// helper is accepted — never sniffing the `__anon_` spelling, which a user can
+    /// author (#144).
+    pub anon_kind: Option<AnonKind>,
 }
 
 /// Interner mapping names ↔ [`SymbolId`]s, with per-symbol metadata.
@@ -122,6 +134,7 @@ impl SymbolTable {
             kind: SymbolKind::Terminal,
             inline: false,
             is_start: false,
+            anon_kind: None,
         });
         self.by_name.insert(name.to_string(), id);
         id
@@ -129,7 +142,13 @@ impl SymbolTable {
 
     /// Intern a non-terminal. Idempotent by name. Requires the terminal range to
     /// have been sealed first (see [`seal_terminals`](Self::seal_terminals)).
-    fn intern_nonterminal(&mut self, name: &str, inline: bool, is_start: bool) -> SymbolId {
+    fn intern_nonterminal(
+        &mut self,
+        name: &str,
+        inline: bool,
+        is_start: bool,
+        anon_kind: Option<AnonKind>,
+    ) -> SymbolId {
         if let Some(&id) = self.by_name.get(name) {
             debug_assert_eq!(
                 self.infos[id.index()].kind,
@@ -137,10 +156,15 @@ impl SymbolTable {
                 "symbol {name:?} interned as both terminal and non-terminal"
             );
             // A name first seen via a rule body and later as a start symbol can
-            // upgrade its flags.
+            // upgrade its flags. Provenance is a property of the name's source, so
+            // it is monotone too: once a generated helper, always a generated
+            // helper (the loader never reuses a minted name for a user rule).
             let info = &mut self.infos[id.index()];
             info.inline |= inline;
             info.is_start |= is_start;
+            if info.anon_kind.is_none() {
+                info.anon_kind = anon_kind;
+            }
             return id;
         }
         debug_assert!(
@@ -153,6 +177,7 @@ impl SymbolTable {
             kind: SymbolKind::NonTerminal,
             inline,
             is_start,
+            anon_kind,
         });
         self.by_name.insert(name.to_string(), id);
         id
@@ -317,17 +342,27 @@ pub fn lower(grammar: &Grammar) -> CompiledGrammar {
     symbols.seal_terminals();
 
     // ── Non-terminals: augmented starts, then origins, then referenced. ──────
+    // Generated-helper provenance is carried by `grammar.anon_kinds` (keyed by
+    // origin name, populated by the loader's `fresh_anon_rule`), *not* inferred
+    // from the `__anon_` spelling — a user grammar may author that exact name
+    // (#144), and the discriminator must stay source-based (#101).
+    let anon_kind = |name: &str| -> Option<AnonKind> { grammar.anon_kinds.get(name).copied() };
     for start in &grammar.start {
-        symbols.intern_nonterminal(&format!("$root_{}", start), false, true);
+        symbols.intern_nonterminal(&format!("$root_{}", start), false, true, None);
     }
     for rule in &grammar.rules {
         let name = &rule.origin.name;
-        symbols.intern_nonterminal(name, name.starts_with('_'), false);
+        symbols.intern_nonterminal(name, name.starts_with('_'), false, anon_kind(name));
     }
     for rule in &grammar.rules {
         for sym in &rule.expansion {
             if let Symbol::NonTerminal(nt) = sym {
-                symbols.intern_nonterminal(&nt.name, nt.name.starts_with('_'), false);
+                symbols.intern_nonterminal(
+                    &nt.name,
+                    nt.name.starts_with('_'),
+                    false,
+                    anon_kind(&nt.name),
+                );
             }
         }
     }
@@ -453,6 +488,45 @@ mod tests {
         let root_rule = cg.rules.iter().find(|r| r.is_start).unwrap();
         assert_eq!(root_rule.origin, root);
         assert_eq!(root_rule.expansion, vec![start]);
+    }
+
+    /// Provenance plumbing (#101, ADR-0024): a *generated* anonymous EBNF helper
+    /// carries `Some(AnonKind)`, while a user-written rule — even one transparent
+    /// (`_a`) or spelled like a helper (`__anon_star_0`) — carries `None`. This is
+    /// the discriminator CYK keys empty-rule rejection on, and it must be source
+    /// provenance, not the `__anon_` name spelling (#144).
+    #[test]
+    fn anon_kind_marks_generated_helpers_not_user_rules() {
+        // `(B*)~2` forces a standalone nullable helper; `_a` is a transparent user
+        // rule; `__anon_star_0` is a user rule the author happened to name like a
+        // helper.
+        let cg = compile("start: _a (B*)~2 __anon_star_0\n_a: B\n__anon_star_0: B\nB: \"b\"\n");
+        // The transparent user rule and the helper-looking user rule are user-written.
+        for user in ["_a", "__anon_star_0", "start"] {
+            let id = cg.symbols.id(user).unwrap();
+            assert!(
+                cg.symbols.info(id).anon_kind.is_none(),
+                "user rule {user:?} must have no anon provenance"
+            );
+        }
+        // At least one generated helper exists and is marked with its kind.
+        let generated: Vec<_> = (0..cg.symbols.len())
+            .map(|i| cg.symbols.info(SymbolId(i as u32)))
+            .filter(|info| info.anon_kind.is_some())
+            .collect();
+        assert!(
+            !generated.is_empty(),
+            "`(B*)~2` must emit at least one generated nullable helper marked with an AnonKind"
+        );
+        // Every marked symbol is a generated `__anon_*` helper (the loader's only
+        // minting path), confirming the marker is set at generation, not by spelling.
+        for info in generated {
+            assert!(
+                info.name.starts_with("__anon_"),
+                "only generated helpers carry anon_kind; saw {:?}",
+                info.name
+            );
+        }
     }
 
     #[test]

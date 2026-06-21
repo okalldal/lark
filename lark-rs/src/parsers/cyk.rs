@@ -347,15 +347,21 @@ fn to_cnf(grammar: &CompiledGrammar) -> Result<CnfResult, GrammarError> {
     // Python prunes these before CYK too.
     let rules = prune_unreachable(rules, &grammar.start);
 
-    // CYK cannot represent a node that derives ε. lark-rs's nullable helpers are
-    // transparent (spliced away when empty), so they ε-reduce without changing the
-    // tree; but a nullable *non-transparent* rule would produce an observable empty
-    // node CYK can't model — reject it, exactly as Python Lark's CYK rejects the
-    // empty rule its own expansion would emit.
+    // CYK cannot represent a node that derives ε. Match Python Lark's CYK by
+    // *source provenance*, not transparency (#101, ADR-0024): reject a nullable
+    // `Nt::Orig` iff it is a **user-written** rule — including transparent ones
+    // (`a: B?`, `_a: B?`) and even a user rule the author happened to *name*
+    // `__anon_star_0`. A nullable rule the loader *generated* as an anonymous EBNF
+    // helper (the `__anon_rep_*` / `__anon_group_*` emitted under `(B*)~2`,
+    // `(B?)~2`, …) is accepted, exactly as Python's CYK keeps it: those splice
+    // away when empty without producing an observable empty node. The
+    // discriminator is `anon_kind`, set at `fresh_anon_rule` time — never the
+    // `__anon_` name spelling, which a user can author (#144). A blunt
+    // "reject every nullable origin" over-rejects `(B*)~2` (an oracle regression).
     let nullable = compute_nullable(&rules);
     for nt in &nullable {
         if let Nt::Orig(id) = nt {
-            if !grammar.symbols.info(*id).inline {
+            if grammar.symbols.info(*id).anon_kind.is_none() {
                 return Err(GrammarError::Other {
                     msg: "CYK doesn't support empty rules".to_string(),
                 });
@@ -1057,18 +1063,15 @@ WORD: /[a-z]+/
         );
     }
 
-    /// Known divergence from the oracle — tracked by #101. A wholly-nullable
-    /// *transparent* rule (`_a: B?`) is rejected by Python Lark's CYK
-    /// (`CYK doesn't support empty rules`) but lark-rs currently **accepts** it: its
-    /// ε-removal can splice away a transparent rule's empty derivation, so the build
-    /// proceeds (only a *non*-transparent nullable is rejected — see
-    /// `cyk_rejects_genuine_epsilon_rule`). This test encodes the oracle-target
-    /// (rejection) and is `#[ignore]`d until #101 is decided: run it with
-    /// `cargo test --ignored cyk_transparent_nullable` to reproduce the gap. If #101
-    /// resolves toward *accepting* the divergence instead, flip this to assert
-    /// `is_ok()` and drop the `#[ignore]`.
+    /// Oracle parity (#101, ADR-0024). A wholly-nullable *transparent* user rule
+    /// (`_a: B?`) is rejected by Python Lark's CYK (`CYK doesn't support empty
+    /// rules`); lark-rs must reject it too. lark-rs once accepted it — its ε-removal
+    /// splices away a transparent rule's empty derivation — but being *more*
+    /// permissive than the oracle is unfalsifiable (the accepted tree has no
+    /// ground truth). The rejection is keyed on **source provenance** (the rule is
+    /// user-written → `anon_kind == None`), not on the leading-`_` transparency
+    /// that hid this gap. Formerly `#[ignore]`d while #101 was open.
     #[test]
-    #[ignore = "#101: lark-rs CYK accepts a transparent wholly-nullable rule the oracle rejects"]
     fn cyk_transparent_nullable_rule_diverges_from_oracle() {
         let built = Lark::new(
             "start: _a \"x\"\n_a: B?\nB: \"b\"\n",
@@ -1080,8 +1083,63 @@ WORD: /[a-z]+/
         );
         assert!(
             built.is_err(),
-            "oracle parity: a transparent wholly-nullable rule should be rejected (#101)"
+            "oracle parity: a transparent wholly-nullable user rule should be rejected (#101)"
         );
+    }
+
+    /// Provenance, not prefix (#101, ADR-0024). The empty-rule rejection keys on
+    /// whether the loader *generated* the nullable origin as an anonymous EBNF
+    /// helper — never on the `__anon_` name spelling, which a user grammar may
+    /// itself author (#144). A user rule the author *named* `__anon_star_0` is
+    /// still a user rule, so a wholly-nullable one (`__anon_star_0: B?`) must be
+    /// rejected exactly like `a: B?` / `_a: B?`. If this regressed to a
+    /// `name.starts_with("__anon_")` check, this rule would slip through and the
+    /// build would (wrongly) succeed.
+    #[test]
+    fn cyk_rejects_user_authored_anon_looking_nullable_rule() {
+        let built = Lark::new(
+            "start: __anon_star_0 \"x\"\n__anon_star_0: B?\nB: \"b\"\n",
+            LarkOptions {
+                parser: ParserAlgorithm::Cyk,
+                lexer: LexerType::Basic,
+                ..Default::default()
+            },
+        );
+        assert!(
+            built.is_err(),
+            "a user-authored `__anon_*`-named nullable rule must still be rejected \
+             (provenance-based, not prefix-based) (#101)"
+        );
+    }
+
+    /// The generated-helper carve-out (#101, ADR-0024). A `*`/`?` nested where a
+    /// single symbol is mandatory (inside `~n`) emits a *standalone* nullable
+    /// anonymous EBNF helper (`__anon_rep_*` / `__anon_group_*`). Python Lark's CYK
+    /// **accepts** these — they splice away when empty without an observable empty
+    /// node — and lark-rs must match: rejecting them (the blunt "reject every
+    /// nullable origin" fix) is itself an oracle regression. Pins acceptance *and*
+    /// tree parity against LALR (the per-input oracle baseline; verified byte-equal
+    /// to Python Lark 1.3.1: `start[A]`, `start[A,B]`, `start[A,B,B]`).
+    #[test]
+    fn cyk_accepts_nullable_helper_under_rep_count() {
+        for grammar in [
+            "start: A (B*)~2\nA: \"a\"\nB: \"b\"\n",
+            "start: A (B?)~2\nA: \"a\"\nB: \"b\"\n",
+        ] {
+            let cyk = cyk(grammar);
+            let lalr = lalr(grammar);
+            for input in ["a", "ab", "abb"] {
+                let cyk_tree = cyk
+                    .parse(input)
+                    .unwrap_or_else(|e| panic!("CYK should accept {input:?} on {grammar:?}: {e}"))
+                    .to_string();
+                let lalr_tree = lalr.parse(input).unwrap().to_string();
+                assert_eq!(
+                    cyk_tree, lalr_tree,
+                    "CYK and LALR (≡ oracle) disagree on {input:?} for {grammar:?}"
+                );
+            }
+        }
     }
 
     /// Under `maybe_placeholders`, an absent `[...]` optional must still emit a

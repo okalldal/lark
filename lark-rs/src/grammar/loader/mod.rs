@@ -36,6 +36,7 @@ mod tokenizer;
 
 use super::Grammar;
 use crate::error::GrammarError;
+pub use compiler::AnonKind;
 use compiler::GrammarCompiler;
 use parser::GrammarParser;
 use std::collections::HashMap;

@@ -303,6 +303,14 @@ impl GrammarCompiler {
             .filter(|r| rule_names.contains(&r.origin.name))
         {
             let origin = NonTerminal::new(rename(&rule.origin.name));
+            // Carry source provenance across the rename: a generated anonymous EBNF
+            // helper from the imported grammar (e.g. the `__anon_rep_*` a `(B*)~2`
+            // emits) must stay classified as loader-generated after import, or the
+            // CYK empty-rule guard (#101, ADR-0024) would reclassify it as a
+            // user-written rule and wrongly reject an oracle-accepted import.
+            if let Some(kind) = imported.anon_kinds.get(&rule.origin.name).copied() {
+                self.anon_kinds.insert(origin.name.clone(), kind);
+            }
             let expansion = rule
                 .expansion
                 .iter()
