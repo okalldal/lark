@@ -1,11 +1,12 @@
 # Spike — API design for #168 (interactive parser)
 
 > **⚠️ Superseded / non-normative (2026-06-21).** Design *exploration*, not the
-> shipped spec. The implementation landed in **PR #219** and differs deliberately:
-> the v1 surface is the **oracle-backed subset** of Python's `InteractiveParser`
-> **plus** a `feed(name, value)` convenience wrapper — *not* "exactly Python's ops,
-> no extras", and `choices()` is **not** in v1 (deferred). Lexing is **lazy**. Where
-> this spike disagrees with the shipped code or **ADR-0026**, those govern.
+> shipped spec. The implementation is proposed in **(open) PR #219** and differs
+> deliberately: the v1 surface is the **oracle-backed subset** of Python's
+> `InteractiveParser` **plus** a `feed(name, value)` convenience wrapper — *not*
+> "exactly Python's ops, no extras", and `choices()` is **not** in v1 (deferred).
+> Lexing is **lazy**. Where this spike disagrees with the shipped code or
+> **ADR-0026**, those govern.
 
 **Status:** design spike / decision-support for the architect. Escalate-tier (new
 public API). Proposes a v1 surface, the refactor it needs, and — front and center

@@ -1,4 +1,4 @@
-# ADR-0026: Behavioural scope is Python Lark's — beyond-oracle behaviour is escalate + needs a validation story
+# ADR-0026: Behaviour is scoped to the Python Lark oracle — beyond-oracle behaviour is escalate + needs a validation story
 
 - **Status:** Proposed (pending architect ratification)
 - **Date:** 2026-06-21

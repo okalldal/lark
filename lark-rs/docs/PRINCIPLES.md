@@ -106,8 +106,8 @@ architect audit the deviation later instead of catching it in review.
   `auto`: new/changed public API stays `escalate`-tier (§6) as product direction,
   and it is not license to churn surface absent a design win. The freedom expires at
   the first real dependent (then supersede ADR-0025 with a stability policy).
-- **Behaviour is scoped to Python Lark's** (ADR-0026). Ship behaviour you can
-  falsify against the oracle. Behaviour with *no Python counterpart* is **not** an
+- **Behaviour is scoped to the Python Lark oracle** (ADR-0026). Ship behaviour you
+  can falsify against the oracle. Behaviour with *no Python counterpart* is **not** an
   autonomous default — it is `escalate`-tier and needs *both* a concrete consumer
   demand *and* an architect-approved validation story substituting for the missing
   oracle (partial oracle → relative oracle → property tests → curated residue, in

@@ -47,7 +47,7 @@ Authoring a new ADR as `Accepted` is a Definition-of-Done failure (see
 | [0023](0023-sprint-ledger-durability.md) | Sprint/kaizen ledger durability — reconstruct-at-finalize + a committed append-only residue, not a churned PR body (refines ADR-0018) | Accepted |
 | [0024](0024-cyk-empty-rule-rejection-by-provenance.md) | CYK empty-rule rejection keyed on source provenance (generated-helper `anon_kind`), not name spelling | Accepted |
 | [0025](0025-no-backward-compat-pre-users.md) | Pre-users: breaking the public API is free — no backward-compatibility constraint until lark-rs has users | Accepted |
-| [0026](0026-behaviour-scope-is-the-oracles.md) | Behaviour is scoped to Python Lark's; beyond-oracle behaviour is escalate + needs a validation story (resolves #211) | Proposed |
+| [0026](0026-behaviour-scoped-to-the-oracle.md) | Behaviour is scoped to the Python Lark oracle; beyond-oracle behaviour is escalate + needs a validation story (resolves #211) | Proposed |
 
 ## ADRs going forward — the governance audit trail
 
