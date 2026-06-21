@@ -141,20 +141,56 @@ fn test_char_level_recovery_records_unexpected_character() {
 
 #[test]
 fn test_char_and_token_deletions_both_counted() {
-    // Issue #93: character-level skips and token-level deletions accumulate into
-    // one error list. `1 @ 2`: skip the `@` (char), then the surviving `1 2` has a
-    // stray NUMBER the parser deletes (token) — two errors total, matching Python.
+    // Issue #93 / #187: character-level skips and token-level deletions accumulate
+    // into one error list. `1 @ 2` is in the oracle bank (RECOVERY_CASES) — its
+    // error count and tree are Python-derived, not hand-asserted.
     let lark = recovery_parser();
+    let cases = load_oracle("recovery", "cases");
+    let cases = cases.as_array().expect("oracle is a JSON array");
+    let oracle = cases
+        .iter()
+        .find(|c| c["input"].as_str() == Some("1 @ 2"))
+        .expect("oracle must contain '1 @ 2' entry");
+    let error_count = oracle["error_count"].as_u64().unwrap() as usize;
+    let recovered = oracle["recovered"].as_bool().unwrap();
+
     let result = lark.parse_with_recovery("1 @ 2").unwrap();
-    assert_eq!(result.errors.len(), 2);
+    assert_eq!(
+        result.errors.len(),
+        error_count,
+        "'1 @ 2': lark-rs recovered {} errors, oracle says {error_count}",
+        result.errors.len(),
+    );
+    assert!(recovered, "oracle says '1 @ 2' should recover");
+    let tree = result
+        .tree
+        .as_ref()
+        .expect("'1 @ 2': oracle says recovered, so tree must be Some");
+    tree_matches_oracle(tree, &oracle["tree"])
+        .unwrap_or_else(|e| panic!("'1 @ 2': tree mismatch vs oracle: {e}"));
 }
 
 #[test]
 fn test_on_error_false_stops_at_unlexable_char() {
-    // Returning `false` from the handler at an un-lexable position stops lexing
-    // there (the lexer-side equivalent of stopping the token loop), returning the
-    // tokens collected so far with the single error recorded.
+    // Issue #187: `"1 @ 2"` is now oracle-backed (RECOVERY_CASES). Returning
+    // `false` from the handler at the first error stops recovery there — the
+    // handler fires exactly once and the single error is recorded. The oracle's
+    // full-recovery error_count (> 1) confirms this input HAS multiple errors,
+    // so stopping at 1 is a genuine behavioral pin, not a tautology.
     let lark = recovery_parser();
+    let cases = load_oracle("recovery", "cases");
+    let cases = cases.as_array().expect("oracle is a JSON array");
+    let oracle = cases
+        .iter()
+        .find(|c| c["input"].as_str() == Some("1 @ 2"))
+        .expect("oracle must contain '1 @ 2' entry");
+    let full_error_count = oracle["error_count"].as_u64().unwrap() as usize;
+    assert!(
+        full_error_count > 1,
+        "oracle should show multiple errors for '1 @ 2' (got {full_error_count}); \
+         otherwise stopping at 1 is not a meaningful behavioral test"
+    );
+
     let mut seen = 0;
     let result = lark
         .parse_on_error("1 @ 2", |_| {

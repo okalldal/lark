@@ -899,6 +899,7 @@ RECOVERY_CASES = [
     "#1 + 2",         # a different un-lexable char ('#') -> skip it
     "1 @@ 2",         # two consecutive bad chars -> 2 char skips (+ stray NUMBER)
     "1 @ + 2",        # un-lexable then a misplaced '+' -> char skip recovers the rest
+    "1 @ 2",          # un-lexable '@' (char skip) then stray NUMBER (token delete)
 ]
 
 
