@@ -1,11 +1,13 @@
 pub mod cyk;
 pub mod earley;
+pub mod interactive;
 pub mod lalr;
 pub mod token_source;
 pub mod tree_builder;
 
 pub use cyk::CykParser;
 pub use earley::EarleyParser;
+pub use interactive::InteractiveParser;
 pub use lalr::{build_lalr_table, LalrParser, ParseTable};
 pub use token_source::{
     BasicRecovering, Contextual, ContextualRecovering, LexFailure, PreLexed, TokenSource,
@@ -82,6 +84,26 @@ trait ParserDriver: Send {
     ) -> Result<RecoveredTree, LarkError> {
         Err(recovery_unsupported())
     }
+
+    /// Begin an interactive parse (issue #168). The default is the typed refusal;
+    /// the basic-lexer LALR driver overrides it. v1 is basic-lexer + LALR only — the
+    /// contextual lexer and the postlex drivers are follow-ups (mirroring how
+    /// recovery was extended to them in #166/#94).
+    fn parse_interactive(
+        &self,
+        _text: &str,
+        _start: Option<&str>,
+    ) -> Result<InteractiveParser<'_>, LarkError> {
+        Err(interactive_unsupported())
+    }
+}
+
+/// The typed refusal for a configuration without interactive-parsing support
+/// (issue #168). v1 supports LALR over the basic lexer only.
+fn interactive_unsupported() -> LarkError {
+    LarkError::Grammar(GrammarError::Other {
+        msg: "interactive parsing requires parser='lalr' with lexer='basic'".to_string(),
+    })
 }
 
 /// The typed refusal for a configuration without recovery support — shared by
@@ -199,6 +221,25 @@ impl ParserDriver for LalrBasic {
             start,
             on_error,
         )
+    }
+
+    /// Interactive parse over the basic lexer (issue #168). Construction does **not**
+    /// lex — the [`InteractiveParser`] lexes lazily as the caller drives it, so it can
+    /// be created over broken editor text and an un-lexable character surfaces only
+    /// when `exhaust_lexer`/`resume` reaches it (matching Python). Manual
+    /// `feed`/`accepts` ignore the lexer entirely.
+    fn parse_interactive(
+        &self,
+        text: &str,
+        start: Option<&str>,
+    ) -> Result<InteractiveParser<'_>, LarkError> {
+        let stack = self.parser.initial_stack(start)?;
+        Ok(InteractiveParser::new(
+            &self.parser,
+            Some(&self.lexer),
+            stack,
+            text.to_string(),
+        ))
     }
 }
 
@@ -438,6 +479,16 @@ impl ParsingFrontend {
         on_error: &mut dyn FnMut(&ParseError) -> bool,
     ) -> Result<RecoveredTree, LarkError> {
         self.driver.parse_recovering(text, start, on_error)
+    }
+
+    /// Begin an interactive parse (issue #168). Supported on the basic-lexer LALR
+    /// configuration; other configurations return the typed refusal.
+    pub fn parse_interactive(
+        &self,
+        text: &str,
+        start: Option<&str>,
+    ) -> Result<InteractiveParser<'_>, LarkError> {
+        self.driver.parse_interactive(text, start)
     }
 }
 

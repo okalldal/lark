@@ -1,0 +1,12 @@
+// Grammar for the interactive-parser oracle (issue #168).
+//
+// A small left-recursive sum grammar with *explicitly named* terminals (NUMBER,
+// PLUS) so that `accepts()` reports identical terminal names in Python Lark and
+// lark-rs — the interactive oracle compares those name sets step by step.
+start: sum
+?sum: product
+    | sum PLUS product   -> add
+?product: NUMBER
+NUMBER: /[0-9]+/
+PLUS: "+"
+%ignore " "

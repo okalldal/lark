@@ -210,7 +210,13 @@ src/
                       new impl, not match arms); per-backend builders share the
                       lower + lexer-conf preamble; ParseError construction is
                       centralized in error.rs (unexpected_token's END split)
-    lalr.rs           Dense ParseTable, LalrParser, build_lalr_table
+    lalr.rs           Dense ParseTable, LalrParser, build_lalr_table; ParserStack
+                      (the shared state+value stack + feed_token reduce-loop that
+                      run/run_recovering/interactive all drive)
+    interactive.rs    InteractiveParser (#168) — driveable LALR over ParserStack:
+                      feed/accepts/feed_eof/exhaust_lexer/resume/fork; the oracle-
+                      backed subset of Python's InteractiveParser + feed(name,value),
+                      lazy basic-lexer v1, oracle-differentiated
     token_source.rs   TokenSource trait + PreLexed / Contextual (lexer⇄parser API)
     tree_builder.rs   TreeBuilder — shared rule→tree shaping (LALR + Earley)
     earley.rs         Earley recognizer + SPPF + forest→tree +
@@ -232,6 +238,9 @@ tests/
                       the forest→tree walk or Tree's Drop/Clone
   test_cyk_compliance.rs  Replays the CYK compliance bank (XFAIL-gated)
   test_cyk_scaling.rs Deterministic cubic-envelope gate (#87, perf-counters feature)
+  test_interactive.rs Interactive-parser oracle (#168) — step-granular differential
+                      (accepts() traces + feed results + final tree) vs Python's
+                      InteractiveParser, plus relative oracles (resume==parse, etc.)
   test_recovery.rs    Error-recovery oracle (#43) — single-token-deletion recovery
                       vs Python Lark's `on_error` driver
   test_indenter_recovery.rs  Error recovery over the LALR + Indenter (postlex) path

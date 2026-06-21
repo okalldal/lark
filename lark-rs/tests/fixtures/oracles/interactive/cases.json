@@ -1,0 +1,238 @@
+[
+  {
+    "name": "number",
+    "input": "",
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "token",
+          "token_type": "NUMBER",
+          "value": "7"
+        }
+      ]
+    },
+    "steps": [
+      {
+        "op": "accepts",
+        "accepts": [
+          "NUMBER"
+        ]
+      },
+      {
+        "op": "feed",
+        "type": "NUMBER",
+        "value": "7",
+        "ok": true
+      },
+      {
+        "op": "accepts",
+        "accepts": [
+          "$END",
+          "PLUS"
+        ]
+      },
+      {
+        "op": "feed_eof",
+        "ok": true
+      }
+    ]
+  },
+  {
+    "name": "sum",
+    "input": "",
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "add",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "1"
+            },
+            {
+              "type": "token",
+              "token_type": "PLUS",
+              "value": "+"
+            },
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "2"
+            }
+          ]
+        }
+      ]
+    },
+    "steps": [
+      {
+        "op": "accepts",
+        "accepts": [
+          "NUMBER"
+        ]
+      },
+      {
+        "op": "feed",
+        "type": "NUMBER",
+        "value": "1",
+        "ok": true
+      },
+      {
+        "op": "accepts",
+        "accepts": [
+          "$END",
+          "PLUS"
+        ]
+      },
+      {
+        "op": "feed",
+        "type": "PLUS",
+        "value": "+",
+        "ok": true
+      },
+      {
+        "op": "accepts",
+        "accepts": [
+          "NUMBER"
+        ]
+      },
+      {
+        "op": "feed",
+        "type": "NUMBER",
+        "value": "2",
+        "ok": true
+      },
+      {
+        "op": "accepts",
+        "accepts": [
+          "$END",
+          "PLUS"
+        ]
+      },
+      {
+        "op": "feed_eof",
+        "ok": true
+      }
+    ]
+  },
+  {
+    "name": "bad_first",
+    "input": "",
+    "tree": null,
+    "steps": [
+      {
+        "op": "accepts",
+        "accepts": [
+          "NUMBER"
+        ]
+      },
+      {
+        "op": "feed",
+        "type": "PLUS",
+        "value": "+",
+        "ok": false,
+        "expected": [
+          "NUMBER"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "premature_eof",
+    "input": "",
+    "tree": null,
+    "steps": [
+      {
+        "op": "feed",
+        "type": "NUMBER",
+        "value": "1",
+        "ok": true
+      },
+      {
+        "op": "feed",
+        "type": "PLUS",
+        "value": "+",
+        "ok": true
+      },
+      {
+        "op": "accepts",
+        "accepts": [
+          "NUMBER"
+        ]
+      },
+      {
+        "op": "feed_eof",
+        "ok": false,
+        "expected": [
+          "NUMBER"
+        ]
+      }
+    ]
+  },
+  {
+    "name": "exhaust_then_eof",
+    "input": "1 + 2",
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "add",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "1"
+            },
+            {
+              "type": "token",
+              "token_type": "PLUS",
+              "value": "+"
+            },
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "2"
+            }
+          ]
+        }
+      ]
+    },
+    "steps": [
+      {
+        "op": "exhaust",
+        "tokens": [
+          [
+            "NUMBER",
+            "1"
+          ],
+          [
+            "PLUS",
+            "+"
+          ],
+          [
+            "NUMBER",
+            "2"
+          ]
+        ]
+      },
+      {
+        "op": "accepts",
+        "accepts": [
+          "$END",
+          "PLUS"
+        ]
+      },
+      {
+        "op": "feed_eof",
+        "ok": true
+      }
+    ]
+  }
+]
