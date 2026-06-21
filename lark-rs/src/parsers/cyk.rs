@@ -352,12 +352,16 @@ fn to_cnf(grammar: &CompiledGrammar) -> Result<CnfResult, GrammarError> {
     // `Nt::Orig` iff it is a **user-written** rule — including transparent ones
     // (`a: B?`, `_a: B?`) and even a user rule the author happened to *name*
     // `__anon_star_0`. A nullable rule the loader *generated* as an anonymous EBNF
-    // helper (the `__anon_rep_*` / `__anon_group_*` emitted under `(B*)~2`,
-    // `(B?)~2`, …) is accepted, exactly as Python's CYK keeps it: those splice
-    // away when empty without producing an observable empty node. The
-    // discriminator is `anon_kind`, set at `fresh_anon_rule` time — never the
-    // `__anon_` name spelling, which a user can author (#144). A blunt
-    // "reject every nullable origin" over-rejects `(B*)~2` (an oracle regression).
+    // helper (e.g. the `__anon_plus_*` recurse helper a `*`/`?` folds into under
+    // `(B*)+`, whose `… | ε | … P ε` arm is nullable) is accepted, exactly as
+    // Python's CYK keeps it: those splice away when empty without producing an
+    // observable empty node. The discriminator is `anon_kind`, set at
+    // `fresh_anon_rule` time — never the `__anon_` name spelling, which a user can
+    // author (#144). A blunt "reject every nullable origin" over-rejects those
+    // generated helpers (an oracle regression). NB since #176 a bounded `~n`/`~n..m`
+    // *inlines* into its parent exactly like Python (no `__anon_rep`/`__anon_group`
+    // helper), so `(B*)~2`/`(B?)~2` lower to non-nullable `_star`/literal arms and
+    // no longer reach this carve-out at all — matching Python on every engine.
     let nullable = compute_nullable(&rules);
     for nt in &nullable {
         if let Nt::Orig(id) = nt {
@@ -939,6 +943,19 @@ mod tests {
         .unwrap_or_else(|e| panic!("LALR build failed: {e}"))
     }
 
+    /// LALR builder that surfaces the build result (for asserting a grammar Python's
+    /// LALR also rejects, e.g. an inlined `~n` reduce/reduce).
+    fn lalr_build(grammar: &str) -> Result<Lark, crate::LarkError> {
+        Lark::new(
+            grammar,
+            LarkOptions {
+                parser: ParserAlgorithm::Lalr,
+                lexer: LexerType::Basic,
+                ..Default::default()
+            },
+        )
+    }
+
     /// On an unambiguous grammar, CYK must produce a byte-identical tree to LALR —
     /// it shares the same lexer and TreeBuilder, so the only thing under test is the
     /// CNF round-trip (TERM/BIN/UNIT then revert). Covers a >2-symbol rule (BIN),
@@ -1112,34 +1129,72 @@ WORD: /[a-z]+/
         );
     }
 
-    /// The generated-helper carve-out (#101, ADR-0024). A `*`/`?` nested where a
-    /// single symbol is mandatory (inside `~n`) emits a *standalone* nullable
-    /// anonymous EBNF helper (`__anon_rep_*` / `__anon_group_*`). Python Lark's CYK
-    /// **accepts** these — they splice away when empty without an observable empty
-    /// node — and lark-rs must match: rejecting them (the blunt "reject every
-    /// nullable origin" fix) is itself an oracle regression. Pins acceptance *and*
-    /// tree parity against LALR (the per-input oracle baseline; verified byte-equal
-    /// to Python Lark 1.3.1: `start[A]`, `start[A,B]`, `start[A,B,B]`).
+    /// `~n` over a nullable inner, across every engine, matches Python (#176).
+    ///
+    /// After #176 a bounded `x~n..m` inlines into the parent expansion exactly like
+    /// Python Lark's `EBNF_to_BNF._generate_repeats` (no helper rule): `(B*)~2`
+    /// lowers to `start: A _star _star | A _star | A` with a **non-nullable** `_star:
+    /// _star B | B` — byte-identical to Python's own lowering. So lark-rs now agrees
+    /// with Python on *all three* engines, which is the whole point:
+    ///
+    /// - **CYK** and **Earley** accept both grammars (Python's CYK/Earley do too),
+    ///   producing the oracle trees `start[A]`, `start[A,B]`, `start[A,B,B]`.
+    /// - **LALR** *rejects* `(B*)~2` — the inlined `_star _star` is a genuine
+    ///   reduce/reduce that **Python's LALR also rejects**. The old lark-rs lowering
+    ///   minted a nullable `__anon_rep` helper that hid this, accepting a grammar
+    ///   Python rejects (an ADR-0017 permissive leakage); inlining removes it.
+    /// - **LALR** *accepts* `(B?)~2` (Python builds `start: A B B | A B | A`).
+    ///
+    /// The generated-helper carve-out this test used to exercise (#101, ADR-0024)
+    /// no longer fires for `(B*)~2`/`(B?)~2`: now that the `~n` inlines like Python,
+    /// neither produces a nullable generated origin. The carve-out is still live and
+    /// necessary for the cases that *do* (a `*`/`?` folded into a `+`/`*` recurse
+    /// helper, e.g. `(B*)+`); Earley is the build-baseline oracle here since LALR
+    /// cannot build `(B*)~2`.
     #[test]
-    fn cyk_accepts_nullable_helper_under_rep_count() {
+    fn cyk_matches_oracle_on_bounded_repeat_over_nullable() {
+        let earley = |g: &str| {
+            Lark::new(
+                g,
+                LarkOptions {
+                    parser: ParserAlgorithm::Earley,
+                    lexer: LexerType::Basic,
+                    ..Default::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("Earley build failed: {e}"))
+        };
+        // Oracle trees (Python Lark 1.3.1, CYK ≡ Earley): `start[A]`, `start[A,B]`,
+        // `start[A,B,B]` — pinned here by CYK ≡ Earley agreement on every input.
         for grammar in [
             "start: A (B*)~2\nA: \"a\"\nB: \"b\"\n",
             "start: A (B?)~2\nA: \"a\"\nB: \"b\"\n",
         ] {
             let cyk = cyk(grammar);
-            let lalr = lalr(grammar);
+            let earley = earley(grammar);
             for input in ["a", "ab", "abb"] {
                 let cyk_tree = cyk
                     .parse(input)
                     .unwrap_or_else(|e| panic!("CYK should accept {input:?} on {grammar:?}: {e}"))
                     .to_string();
-                let lalr_tree = lalr.parse(input).unwrap().to_string();
+                let earley_tree = earley.parse(input).unwrap().to_string();
                 assert_eq!(
-                    cyk_tree, lalr_tree,
-                    "CYK and LALR (≡ oracle) disagree on {input:?} for {grammar:?}"
+                    cyk_tree, earley_tree,
+                    "CYK and Earley (≡ oracle) disagree on {input:?} for {grammar:?}"
                 );
             }
         }
+        // LALR engine parity with Python: `(B*)~2`'s inlined `_star _star` is an
+        // unresolvable reduce/reduce (Python's LALR rejects it too), while `(B?)~2`
+        // builds cleanly (Python: `start: A B B | A B | A`).
+        assert!(
+            lalr_build("start: A (B*)~2\nA: \"a\"\nB: \"b\"\n").is_err(),
+            "LALR must reject `(B*)~2` (the inlined `_star _star` reduce/reduce), matching Python"
+        );
+        assert!(
+            lalr_build("start: A (B?)~2\nA: \"a\"\nB: \"b\"\n").is_ok(),
+            "LALR must accept `(B?)~2` (inlines to `A B B | A B | A`), matching Python"
+        );
     }
 
     /// Under `maybe_placeholders`, an absent `[...]` optional must still emit a

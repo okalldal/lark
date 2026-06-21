@@ -170,20 +170,7 @@ impl GrammarCompiler {
                 // A distributed plain group: its arms fan out as-is, no ε arm.
                 Slot::Choices(arms) => arms,
             };
-            let mut next = Vec::with_capacity(acc.len() * choices.len());
-            for (psyms, pgaps) in &acc {
-                for (csyms, cgaps) in &choices {
-                    let mut syms = psyms.clone();
-                    syms.extend_from_slice(csyms);
-                    // Merge gap vectors: the seam gap is the sum of the prefix's
-                    // trailing gap and the choice's leading gap.
-                    let mut gaps = pgaps[..pgaps.len() - 1].to_vec();
-                    gaps.push(pgaps[pgaps.len() - 1] + cgaps[0]);
-                    gaps.extend_from_slice(&cgaps[1..]);
-                    next.push((syms, gaps));
-                }
-            }
-            acc = next;
+            acc = Self::concat_alts(&acc, &choices);
         }
         // Distributing two optionals can coincide (`X? X?` → `X X | X | X | ε`);
         // identical alternatives would reduce/reduce on the same item, so keep the
@@ -191,6 +178,75 @@ impl GrammarCompiler {
         let mut seen = std::collections::HashSet::new();
         acc.retain(|a| seen.insert(a.clone()));
         Ok(acc)
+    }
+
+    /// Cartesian concatenation of two alternative lists: every `prefix` alternative
+    /// followed by every `suffix` alternative, merging the seam gap (the prefix's
+    /// trailing `None` count plus the suffix's leading one). This is the per-position
+    /// product `compile_expansion` runs; factored out so repeat-inlining
+    /// ([`inline_repeat`](Self::inline_repeat)) reuses the exact same gap arithmetic.
+    fn concat_alts(prefix: &[CompiledAlt], suffix: &[CompiledAlt]) -> Vec<CompiledAlt> {
+        let mut next = Vec::with_capacity(prefix.len() * suffix.len());
+        for (psyms, pgaps) in prefix {
+            for (csyms, cgaps) in suffix {
+                let mut syms = psyms.clone();
+                syms.extend_from_slice(csyms);
+                // Merge gap vectors: the seam gap is the sum of the prefix's
+                // trailing gap and the suffix's leading gap.
+                let mut gaps = pgaps[..pgaps.len() - 1].to_vec();
+                gaps.push(pgaps[pgaps.len() - 1] + cgaps[0]);
+                gaps.extend_from_slice(&cgaps[1..]);
+                next.push((syms, gaps));
+            }
+        }
+        next
+    }
+
+    /// Python Lark's `EBNF_to_BNF._generate_repeats` small case (`mx < 50`,
+    /// `REPEAT_BREAK_THRESHOLD`): a bounded `x~mn..mx` inlines into the parent
+    /// expansion as one alternative per count `k` in `mn..=mx`, each the `k`-fold
+    /// concatenation of the inner's present alternatives — with **no** helper rule
+    /// (Python emits `expansions([expansion([rule]*k) …])`, distributed by
+    /// `SimplifyRule_Visitor`). Returns `None` to fall back to the helper form
+    /// ([`compile_repeat`](Self::compile_repeat)) when the inner carries an alias
+    /// (inlining would lose the named subtree) or the max count reaches Python's
+    /// break threshold (large repeats factor into sub-rules upstream; we keep the
+    /// single-helper form, which is byte-identical in the tree).
+    ///
+    /// Inlining is what stops `"d"~1` from minting a `__anon_rep: D` helper that
+    /// duplicates a sibling literal `D` alternative as an unresolvable reduce/reduce
+    /// Python never reports (#176).
+    fn inline_repeat(
+        &mut self,
+        inner: &Expr,
+        mn: usize,
+        mx: usize,
+        parent: &str,
+    ) -> Result<Option<Vec<CompiledAlt>>, GrammarError> {
+        // Python Lark's load_grammar.REPEAT_BREAK_THRESHOLD.
+        const REPEAT_BREAK_THRESHOLD: usize = 50;
+        if mx >= REPEAT_BREAK_THRESHOLD || Self::expr_contains_alias(inner) {
+            return Ok(None);
+        }
+        // One copy's present alternatives — a non-aliased group fans its arms out,
+        // a plain atom is a single arm. Compiled once and replicated, exactly as
+        // Python reuses the same `rule` subtree for each of the `[rule]*k` copies.
+        let base = self.inner_alternatives(inner, parent)?;
+        // For each count k, the k-fold cartesian concatenation of `base`
+        // (k == 0 → the single empty alternative). Union over the range, then dedup
+        // identical alternatives (Python's grammar dedups identical rules — e.g.
+        // `x~0..1` ≡ `x?` ≡ `x | ε`).
+        let mut out: Vec<CompiledAlt> = Vec::new();
+        for k in mn..=mx {
+            let mut acc: Vec<CompiledAlt> = vec![(Vec::new(), vec![0])];
+            for _ in 0..k {
+                acc = Self::concat_alts(&acc, &base);
+            }
+            out.extend(acc);
+        }
+        let mut seen = std::collections::HashSet::new();
+        out.retain(|a| seen.insert(a.clone()));
+        Ok(Some(out))
     }
 
     /// Compile one position of an expansion into either a single fixed symbol
@@ -237,6 +293,20 @@ impl GrammarCompiler {
         if !Self::expr_contains_alias(&expr) {
             if let Some(slot) = self.try_distribute(&expr, parent)? {
                 return Ok(slot);
+            }
+        }
+        // A bounded `~n` / `~n..m` (the `?`/`*`/`+` shapes were consumed by
+        // `try_distribute` / the group check above; only `max: Some(_)` exact/range
+        // counts reach here) inlines into the parent's alternatives rather than
+        // minting a helper rule, matching Python's `_generate_repeats` (#176).
+        if let Expr::Repeat {
+            inner,
+            min,
+            max: Some(max),
+        } = &expr
+        {
+            if let Some(arms) = self.inline_repeat(inner, *min, *max, parent)? {
+                return Ok(Slot::Choices(arms));
             }
         }
         Ok(Slot::Fixed(vec![self.compile_expr(expr, parent)?]))
@@ -353,6 +423,22 @@ impl GrammarCompiler {
                 let plus = self.recurse_helper(arms);
                 Ok(single(plus))
             }
+            // Bounded `~n` / `~n..m` nested under a distributed `?` inlines its
+            // counts as present forms too (the directly-positioned case is handled
+            // in `compile_slot`); large/aliased repeats fall back to the helper.
+            Expr::Repeat {
+                inner,
+                min,
+                max: Some(max),
+            } => match self.inline_repeat(&inner, min, max, parent)? {
+                Some(arms) => Ok(Some(arms)),
+                None => Ok(single(self.compile_repeat(
+                    *inner,
+                    min,
+                    Some(max),
+                    parent,
+                )?)),
+            },
             // Exact / bounded repetition: a single helper symbol.
             other => Ok(single(self.compile_expr(other, parent)?)),
         }
