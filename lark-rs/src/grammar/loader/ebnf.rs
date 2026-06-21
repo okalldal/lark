@@ -228,6 +228,45 @@ impl GrammarCompiler {
         if mx >= REPEAT_BREAK_THRESHOLD || Self::expr_contains_alias(inner) {
             return Ok(None);
         }
+        // #212: a `[X]~n` under `maybe_placeholders` must distribute each copy's
+        // present + absent forms into the parent's alternatives, exactly as Python
+        // Lark's `_generate_repeats` does (each `[X]` in the expansion distributes
+        // via `SimplifyRule_Visitor`). Without this, `inner_alternatives` compiles
+        // the `[X]` into a helper symbol that absorbs the distribution, so the
+        // parent sees only one alternative (`helper helper …`) and the placeholder-
+        // position collision that Python's "Rules defined twice" catches is hidden.
+        if let Expr::Maybe(alts) = inner {
+            if self.maybe_placeholders {
+                let present = match self.distributable_alternatives(alts.clone(), parent)? {
+                    Some(p) => p,
+                    None => return Ok(None), // aliased — fall back to helper form
+                };
+                let absent_nones = present
+                    .iter()
+                    .map(|(syms, gaps)| {
+                        syms.iter().map(|s| self.symbol_size(s)).sum::<usize>()
+                            + gaps.iter().sum::<usize>()
+                    })
+                    .max()
+                    .unwrap_or(0);
+                // Each copy is the present alternatives plus one absent
+                // alternative (empty, contributing `absent_nones` placeholders) —
+                // the same shape `compile_expansion` builds from a `Nullable` slot.
+                let mut per_copy = present;
+                per_copy.push((Vec::new(), vec![absent_nones]));
+                let mut out: Vec<CompiledAlt> = Vec::new();
+                for k in mn..=mx {
+                    let mut acc: Vec<CompiledAlt> = vec![(Vec::new(), vec![0])];
+                    for _ in 0..k {
+                        acc = Self::concat_alts(&acc, &per_copy);
+                    }
+                    out.extend(acc);
+                }
+                let mut seen = std::collections::HashSet::new();
+                out.retain(|a| seen.insert(a.clone()));
+                return Ok(Some(out));
+            }
+        }
         // One copy's present alternatives — a non-aliased group fans its arms out,
         // a plain atom is a single arm. Compiled once and replicated, exactly as
         // Python reuses the same `rule` subtree for each of the `[rule]*k` copies.
