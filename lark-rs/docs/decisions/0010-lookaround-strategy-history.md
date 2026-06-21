@@ -30,8 +30,9 @@ regex, priority, or grammar-level fix can reproduce it.
 
 **Leg 4 — combined DFA over lowered terminals (#113, #115, adopted).** A DFA
 over lowered, lookaround-free terminals executes no lookaround, has no
-CPython-`re`-parity surface, and is faster than a Pike-VM — so the anti-engine
-arguments from Leg 3 (which targeted match-time lookaround) don't apply. At the
+CPython-`re`-parity surface, and is faster than a Pike-VM — so Leg 3's anti-engine
+arguments (which targeted a *match-time lookaround* engine, not an automaton over
+already-lowered terminals) don't apply. At the
 automaton level the reducible/irreducible terminal distinction dissolves.
 
 ## Consequences / lessons preserved

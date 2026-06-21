@@ -67,8 +67,11 @@ Keep ADRs self-contained and stable: context, decision, consequences, and the
 validation gate. The following belong in **PR bodies, issues, or explicitly
 non-normative notes** — not in the decision record:
 
-- PR state, branch names, session IDs, or merge-tier routing ("Reviewed as
-  `escalate`-tier", "architect approves via the omnibus")
+- PR state, branch names, session IDs, or transient merge-tier routing ("Reviewed
+  as `escalate`-tier", "architect approves via the omnibus"). Noting a change's
+  *durable* blast-radius classification (e.g. "this is a breaking API change,
+  `escalate`-tier") is fine in Consequences — it is a standing fact about the
+  decision, not a routing instruction for a specific PR.
 - Implementation queues, command routing, or task plans
 - Model provenance or AI session transcripts
 - Sprint retrospective narratives ("Two problems surfaced the first time it ran…")
