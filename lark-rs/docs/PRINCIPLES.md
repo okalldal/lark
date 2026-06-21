@@ -99,6 +99,13 @@ architect audit the deviation later instead of catching it in review.
   DFA; out-of-scope shapes take a categorized refusal through the single seam
   (`docs/LOOKAROUND_SCOPE.md`).
 - **A new parser×lexer configuration is a new driver impl, not new match arms.**
+- **No backward-compatibility constraint (pre-users)** (ADR-0025). lark-rs has no
+  users yet, so breaking the public API is *free*: prefer the clean shape, delete
+  the old one — do not preserve deprecated shapes, add compat shims, or keep an old
+  signature for compatibility's sake. This does **not** demote API *design* to
+  `auto`: new/changed public API stays `escalate`-tier (§6) as product direction,
+  and it is not license to churn surface absent a design win. The freedom expires at
+  the first real dependent (then supersede ADR-0025 with a stability policy).
 
 ## 4. The decision taxonomy — how an agent decides whether it may decide
 

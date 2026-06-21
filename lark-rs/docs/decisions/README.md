@@ -46,6 +46,7 @@ Authoring a new ADR as `Accepted` is a Definition-of-Done failure (see
 | [0022](0022-kaizen-sweep-omnibus.md) | `/kaizen-sweep` drains the whole kaizen backlog via the omnibus pattern (mirrors ADR-0018) | Accepted |
 | [0023](0023-sprint-ledger-durability.md) | Sprint/kaizen ledger durability — reconstruct-at-finalize + a committed append-only residue, not a churned PR body (refines ADR-0018) | Accepted |
 | [0024](0024-cyk-empty-rule-rejection-by-provenance.md) | CYK empty-rule rejection keyed on source provenance (generated-helper `anon_kind`), not name spelling | Accepted |
+| [0025](0025-no-backward-compat-pre-users.md) | Pre-users: breaking the public API is free — no backward-compatibility constraint until lark-rs has users | Proposed |
 
 ## ADRs going forward — the governance audit trail
 
