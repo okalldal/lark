@@ -14,3 +14,8 @@ tags
 docs/_build
 docs/examples
 docs/sg_execution_times.rst
+
+# Ephemeral sub-agent worktrees created by `isolation: worktree` sub-agents
+# (sprint/kaizen orchestration). Never repo content — without this the git-check
+# stop hook flags them as untracked on essentially every turn.
+.claude/worktrees/

@@ -97,6 +97,16 @@ architect call or more grounding); do not dispatch it. An otherwise-schedulable 
 **missing Done-when or Files** → stop before dispatch and report that triage repair is
 needed — never hand a worker an issue without a falsifiable done-when.
 
+**Classify from the label state + resolving comments, not stale body text.** The labels
+are the state machine — trust them. An issue body still reading "Decision needed" /
+"Decision-needed:" is **not** a fork if the issue carries a binding architect verdict in
+its **comments** and its labels have moved on (`needs-decision` removed, `good-autonomous`
+added). Before excluding an issue as a decision fork, **read its latest resolving comment**
+and judge by the *current* label state, not the original body prose. (In sprint 20260619
+the orchestrator wrongly excluded #159/#101/#94 on stale "Decision needed" bodies and had
+to recover them as a late wave — each already carried an architect verdict and the flipped
+labels.)
+
 Group the schedulable issues into **waves by blast-radius overlap** so parallel workers
 don't collide: use each issue's *Files* section + topic labels as the key — same-module
 issues serialize (e.g. an `earley.rs` cluster, or the loader/EBNF path), disjoint-file
@@ -147,6 +157,15 @@ The worker brief:
 > `<sprint-branch>` at `<sprint-tip-sha>`. Before opening or updating the child PR, fetch
 > and rebase onto the **current** `<sprint-branch>` tip. If that rebase conflicts, **stop
 > and report the conflict** — do **not** retarget the PR to `master`.
+>
+> **Worktree step 0 (do this first — every code worker has tripped on it).** An
+> `isolation: worktree` checkout starts on its *own* `worktree-agent-…` branch at a
+> divergent commit, **not** at `<sprint-tip-sha>`, and a `git checkout -b` you run in the
+> *shared* checkout does **not** become this worktree's branch. So **inside your worktree**:
+> `git fetch origin <sprint-branch>` then `git checkout -b <your-work-branch>
+> origin/<sprint-branch>` (or `<sprint-tip-sha>`) to put *this* worktree on a branch off the
+> sprint tip. And because Edit operates on the worktree copy, **Read the worktree copy of a
+> file before you Edit it** — do not rely on a path you read in the shared checkout.
 >
 > Follow the repo's oracle-first discipline (`lark-rs/CLAUDE.md`): a failing test before
 > the fix, banks green after. Run `/code-review` **if available; otherwise launch a fresh
@@ -302,12 +321,28 @@ This is staging onto the sprint branch, **not** landing to `master`:
   ever moves forward. The omnibus diff must always be "what lands on top of today's
   `master`".
 
-Wait on CI without polling-by-sleep: after a wave, wait on in-flight child PRs and the
-omnibus with the **`Monitor`** tool's until-loop over `mcp__github__pull_request_read`
-(`get_status` / `get_check_runs`) — **never** Bash `sleep`. A child PR red on CI →
-dispatch a CI-fix worker (≤2 rounds); still red and out of scope → **park it via the §5
-parking protocol** (`needs-decision`, or `status:blocked` with the blocker named) and
-move on so one stuck PR doesn't stall the sprint.
+**Waiting on CI — the real harness pattern (do not block).** Earlier text said to wait
+with the `Monitor` tool's until-loop over `mcp__github__pull_request_read` — that is
+**dead**: `Monitor` runs a *bash* command and **cannot call MCP tools**, there is no `gh`
+CLI, and **CI success delivers no webhook** (only *failures*, merges, and closes arrive as
+`<github-webhook-activity>` events). So:
+
+- **React to failures as they arrive.** Subscribe to the relevant PRs
+  (`subscribe_pr_activity`) — a red check wakes the session with a webhook; handle it then.
+- **Poll for green explicitly** (no event will tell you). When you need to *confirm* a
+  child PR or the omnibus is green, read `mcp__github__pull_request_read`
+  (`get_check_runs` / `get_status`) directly. If checks are still pending, **do not
+  foreground-`sleep`** (it is blocked in this harness) and **do not** expect `Monitor` to
+  call MCP. Instead bridge the wait with a **background timer that re-invokes the session**
+  — the `send_later` self check-in (re-arm until terminal), or a `Monitor` *bash* poll on a
+  signal a bash command can actually observe — then re-check `get_check_runs` on wake.
+
+A child PR red on CI → dispatch a CI-fix worker (≤2 rounds); still red and out of scope →
+**park it via the §5 parking protocol** (`needs-decision`, or `status:blocked` with the
+blocker named) and move on so one stuck PR doesn't stall the sprint. An **environmental**
+red (a blocked network fetch, a runner flake — e.g. `wasm-opt` failing to download
+binaryen) that the diff cannot have caused is **not** a code failure: confirm the diff is
+unrelated, note it as a follow-up/infra item, and do not revert a clean stage for it.
 
 The conflict-fix and CI-fix dispatches are **not** first-pass workers — they update an
 *existing* child PR and must not broaden scope or open/merge PRs. Brief them explicitly:
@@ -388,11 +423,48 @@ The sprint is finished only once the omnibus PR is merged by the architect. Afte
   manually** referencing the omnibus PR;
 - verify each child PR is either **merged into the sprint branch** or **explicitly
   superseded** by the omnibus (comment + close);
-- **clean up the sprint integration branch** if appropriate;
+- **keep the sprint integration branch** — do **not** delete it. It is the durable record
+  of the sprint (the omnibus diff + the full staging history), and the orchestrator cannot
+  delete it here anyway (the git proxy returns `403` on ref-delete and there is no
+  delete-ref tool). Leave any branch removal to GitHub's auto-delete-on-merge or the
+  architect (architect decision, 2026-06-19);
 - post the single batched close-out: what landed, the parked `needs-decision` inbox
   (each with a recommendation, `/triage`-shaped), any follow-ups filed, and the
   **aggregated Retrospective** (deduped + grouped, per the Retrospective section) so the
-  architect sees every process quirk the sprint surfaced in one place.
+  architect sees every process quirk the sprint surfaced in one place;
+- emit the **Architect Action Memo + Durability Warrant** (template below) as a **comment
+  on the omnibus PR** (it persists after merge). This is a **required** §9 deliverable.
+
+### Architect Action Memo + Durability Warrant (required §9 deliverable)
+
+The architect needs, in **one durable place**, a crisp action list and a guarantee that
+nothing important is stranded in the abandoned session. Post it as a comment on the omnibus
+PR. It has two parts.
+
+**1. Action items.** Every item the architect must act on (parked `needs-decision`, a
+proposal needing ratification, a follow-up needing a call). A "decide X" line is **not
+actionable** on its own — each item must specify **all four**:
+
+1. **The decision** — concrete options + a *recommended default*, copy-pasteable where
+   possible.
+2. **Where to record it** — the exact issue/PR number and the format: the standard
+   `**Decision (architect, <date>):** …` verdict block.
+3. **The label transition that unblocks it** — e.g. remove `needs-decision`, add
+   `good-autonomous` (+ `prio:*`) — *that transition is what `/next-task` / `/start-sprint`
+   read to schedule the follow-on work; without it the decision is recorded but inert.*
+4. **What resumes the work** — the exact continuation: "next `/next-task` picks it up", or
+   "reply here and the session executes", or "this needs a governance PR I'll draft." No
+   item may end at a decision with no named next step.
+
+**Default low-friction path:** since an agent is usually present, the architect should be
+able to just **state the choice in chat** and the agent does (2)+(3)+(4) — records the
+verdict, flips the labels, and dispatches the task or drafts the governance PR. The
+architect should never have to perform GitHub mechanics for the process to continue.
+
+**2. Durability Warrant.** An explicit statement that every artifact the sprint produced
+is saved outside this session — each one mapped to **where**: a `master` commit, an issue
+label/comment, the omnibus PR body, or a filed follow-up issue. Nothing important lives
+only in conversation memory.
 
 ## Retrospective — a live, aggregated process ledger (everyone contributes)
 

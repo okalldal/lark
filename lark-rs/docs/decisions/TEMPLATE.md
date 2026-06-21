@@ -1,7 +1,16 @@
 # ADR-NNNN: <short title>
 
-- **Status:** Proposed | Accepted | Superseded by ADR-XXXX
+- **Status:** Proposed (pending architect ratification) | Accepted | Superseded by ADR-XXXX
 - **Date:** YYYY-MM-DD
+
+<!--
+A *staged* ADR is ALWAYS `Status: Proposed (pending architect ratification)`.
+An agent never self-ratifies — only the architect flips an ADR to `Accepted`,
+by merging the PR that carries it. Authoring a new ADR as `Accepted` is a DoD
+failure (see `.claude/commands/finish-task.md`). Delete this comment in the
+real ADR.
+-->
+
 
 ## Context
 
