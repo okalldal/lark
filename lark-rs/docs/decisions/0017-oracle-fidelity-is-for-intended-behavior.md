@@ -24,9 +24,7 @@ the rewrite. We already make this trade implicitly and case-by-case —
 (a contract) while [ADR-0005](0005-lower-lookaround-into-the-dfa.md) /
 `LOOKAROUND_SCOPE.md` deliberately refuse full backtracking lookaround (we decline to
 reproduce an engine accident). What was missing was the *general rule* above those
-instances. Two live `needs-decision` items forced it: #159 (we emit deduped `_ambig`
-alternatives where Python repeats byte-identical ones) and #101 (our CYK accepts a
-wholly-nullable transparent rule Python rejects).
+instances — a reusable routing test for "Python does X, should we?"
 
 ## Decision
 
@@ -48,15 +46,15 @@ tree for an input Python won't parse, so the behavior is unfalsifiable. Absent a
 deliberate, documented reason, **match the oracle's rejection** rather than be the
 more permissive engine.
 
-Worked examples that motivated this ADR:
+**Worked examples** (illustrating the routing test):
 
-- **#159 — keep our dedup.** Python's duplicate byte-identical `_ambig` children are
-  leakage of `ForestToParseTree` (no dedup); matching is expensive and the output
-  carries zero information → diverge & document, with a test that the dedup only
-  collapses byte-identical trees.
-- **#101 — match the rejection.** Python's `CYK doesn't support empty rules` is an
-  intentional guard; our acceptance is an accidental ε-removal carve-out and triggers
-  the corollary → reject, restoring parity.
+- **Deduped `_ambig` alternatives (#159).** Python's duplicate byte-identical
+  `_ambig` children are leakage of `ForestToParseTree` (no dedup); matching is
+  expensive and the output carries zero information → *diverge & document*, with a
+  test that the dedup only collapses byte-identical trees.
+- **CYK empty-rule rejection (#101).** Python's `CYK doesn't support empty rules`
+  is an intentional guard; our acceptance was an accidental ε-removal carve-out and
+  triggers the corollary → *match the rejection*, restoring parity.
 
 ## Consequences
 

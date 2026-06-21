@@ -28,6 +28,7 @@ GRAMMARS_DIR = LARK_RS_DIR / "tests" / "grammars"
 sys.path.insert(0, str(LARK_RS_DIR.parent))
 
 from lark import Lark, Tree, Token
+from lark.exceptions import UnexpectedToken
 
 
 def tree_to_dict(node):
@@ -1072,6 +1073,84 @@ def generate_recovery_contextual():
                 "tree": None,
             })
     save_oracle("recovery_contextual", "cases", results)
+
+
+# ─── Interactive parser (issue #168) ─────────────────────────────────────────
+#
+# Python Lark's `parse_interactive` hands back an `InteractiveParser` the caller
+# drives: `feed_token`, inspect `accepts()`, `feed_eof`, `exhaust_lexer`, resume.
+# lark-rs ports the oracle-backed subset of that surface (plus `feed(name,value)`
+# sugar; ADR-0026), so we drive the *same* operation script against both engines and
+# compare, step by step: the sorted `accepts()` set, each feed's success/expected,
+# the `exhaust_lexer` token output, and the final tree. Script ops:
+# "accepts", ["feed", TYPE, value], "exhaust" (drive the lexer), and "feed_eof".
+# A case may carry an "input" the lexer drives over (default "").
+
+INTERACTIVE_CASES = [
+    # A lone number: accepts NUMBER at the start, then can end.
+    {"name": "number",
+     "script": ["accepts", ["feed", "NUMBER", "7"], "accepts", "feed_eof"]},
+    # A full sum, inspecting accepts() after every feed.
+    {"name": "sum",
+     "script": ["accepts",
+                ["feed", "NUMBER", "1"], "accepts",
+                ["feed", "PLUS", "+"], "accepts",
+                ["feed", "NUMBER", "2"], "accepts",
+                "feed_eof"]},
+    # A misplaced PLUS at the start raises (only NUMBER is accepted there).
+    {"name": "bad_first",
+     "script": ["accepts", ["feed", "PLUS", "+"]]},
+    # A trailing '+' leaves the parser expecting a product, so feed_eof raises.
+    {"name": "premature_eof",
+     "script": [["feed", "NUMBER", "1"], ["feed", "PLUS", "+"], "accepts", "feed_eof"]},
+    # Lexer-driven: exhaust_lexer must yield Python's exact token stream, then
+    # feed_eof reaches the same final tree (the resume_parse result).
+    {"name": "exhaust_then_eof",
+     "input": "1 + 2",
+     "script": ["exhaust", "accepts", "feed_eof"]},
+]
+
+
+def generate_interactive():
+    print("Generating interactive-parser oracles (#168)...")
+    grammar = load_grammar("interactive")
+    results = []
+    for case in INTERACTIVE_CASES:
+        # lexer='basic' to match lark-rs's v1 interactive configuration.
+        lark = Lark(grammar, parser="lalr", lexer="basic", start="start",
+                    maybe_placeholders=False)
+        ip = lark.parse_interactive(case.get("input", ""))
+        steps = []
+        final_tree = None
+        for op in case["script"]:
+            if op == "accepts":
+                steps.append({"op": "accepts", "accepts": sorted(ip.accepts())})
+            elif op == "exhaust":
+                toks = ip.exhaust_lexer()
+                steps.append({"op": "exhaust",
+                              "tokens": [[str(t.type), str(t)] for t in toks]})
+            elif op == "feed_eof":
+                try:
+                    final_tree = ip.feed_eof()
+                    steps.append({"op": "feed_eof", "ok": True})
+                except UnexpectedToken as e:
+                    steps.append({"op": "feed_eof", "ok": False,
+                                  "expected": sorted(e.expected)})
+            else:
+                _, typ, val = op
+                try:
+                    ip.feed_token(Token(typ, val))
+                    steps.append({"op": "feed", "type": typ, "value": val, "ok": True})
+                except UnexpectedToken as e:
+                    steps.append({"op": "feed", "type": typ, "value": val, "ok": False,
+                                  "expected": sorted(e.expected)})
+        results.append({
+            "name": case["name"],
+            "input": case.get("input", ""),
+            "tree": tree_to_dict(final_tree) if final_tree is not None else None,
+            "steps": steps,
+        })
+    save_oracle("interactive", "cases", results)
 
 
 def generate_arithmetic():
@@ -2142,6 +2221,7 @@ if __name__ == "__main__":
     generate_lalr_core()
     generate_recovery()
     generate_recovery_contextual()
+    generate_interactive()
     generate_earley()
     generate_earley_dynamic()
     generate_cyk()

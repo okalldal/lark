@@ -6,27 +6,22 @@
 ## Context
 
 ADR-0018 made the omnibus PR **body** the "live ledger": the orchestrator rewrote
-the whole body on every stage so a summarize/roll-over could always recover what had
-happened. The justification was real — the instant a child PR is merged into the
-integration branch it stops being an *open* PR, so without a durable write nothing
-records that it was staged.
-
-Two costs surfaced once the pattern ran at scale (#191.3, plus the 2026-06-21 kaizen
-sweep that drained #185/#190/#191):
+the whole body on every stage so a roll-over could always recover what had happened.
+The justification was real — a staged child PR is no longer *open*, so without a
+durable write nothing records it was staged. Two costs at scale:
 
 - **Per-stage whole-body rewrite is token-heavy.** Rewriting the entire body every
-  stage was felt even at 8 stages; a real sprint hits 11+.
-- **The retrospective rides the same body with the same churn.** It is appended in the
-  same step as the staging rows, so it doubles the rewrite pressure.
+  stage is felt at 8+ stages; a real sprint hits 11+.
+- **The retrospective rides the same body with the same churn**, doubling the
+  rewrite pressure.
 
-The key observation: **most of what the body recorded is reconstructable.** Which child
-PR staged, the issue(s) it covered, and its tier are all derivable after the fact from
-the **kept** integration branch's merge history (each squash merge names `…(#PR)`), the
-child PR bodies (`Refs #N`), and the issue labels. Only a small residue — the
-orchestrator's and review sub-agents' own `RETRO:` notes, and synced-`master` SHAs — has
-no other durable home. And the *least* durable place of all is the agent workspace: the
-container is reclaimed on inactivity/restart, so an uncommitted scratch file dies on the
-exact roll-over the ledger exists to survive.
+Most of what the body recorded is **reconstructable**: which child PR staged, the
+issue(s) it covered, and its tier are all derivable from the integration branch's
+merge history (each squash merge names `…(#PR)`), the child PR bodies (`Refs #N`),
+and the issue labels. Only a small residue — `RETRO:` notes and synced-`master`
+SHAs — has no other durable home. The agent workspace is the *least* durable place:
+the container is reclaimed on inactivity, so an uncommitted scratch file dies on
+the exact roll-over the ledger exists to survive.
 
 ## Decision
 

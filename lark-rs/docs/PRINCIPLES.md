@@ -115,6 +115,11 @@ architect audit the deviation later instead of catching it in review.
   oracle is as unfalsifiable as being more *permissive* than it (the §2.2 corollary,
   generalised from permissiveness to scope). A gate, not a ban: exceeding Python is
   the architect's call, never a guess.
+- **Representation is not behaviour, but public output modes are API.**
+  A new internal representation with no Python counterpart may be autonomous only
+  when it projects back to an oracle-backed output and has deterministic counters
+  proving the intended representation property. Exposing that representation as a
+  public API, binding mode, or product-level output taxonomy remains `escalate`.
 
 ## 4. The decision taxonomy — how an agent decides whether it may decide
 

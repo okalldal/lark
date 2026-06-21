@@ -48,6 +48,7 @@ Authoring a new ADR as `Accepted` is a Definition-of-Done failure (see
 | [0024](0024-cyk-empty-rule-rejection-by-provenance.md) | CYK empty-rule rejection keyed on source provenance (generated-helper `anon_kind`), not name spelling | Accepted |
 | [0025](0025-no-backward-compat-pre-users.md) | Pre-users: breaking the public API is free — no backward-compatibility constraint until lark-rs has users | Accepted |
 | [0026](0026-behaviour-scoped-to-the-oracle.md) | Behaviour is scoped to the Python Lark oracle; beyond-oracle behaviour is escalate + needs a validation story (resolves #211) | Accepted |
+| [0027](0027-semantic-output-builders-direction.md) | Semantic output backends — `TreeBuilder` becomes the default impl of an internal `OutputBuilder` seam; LALR parity oracle-backed, fast backends relative-oracle-backed | Accepted |
 
 ## ADRs going forward — the governance audit trail
 
@@ -60,6 +61,29 @@ constitution sharpens over time instead of drifting. That is why the log is
 append-only, and why a `Proposed` *policy* ADR (e.g. ADR-0016) is legitimate here:
 an ADR is both the record of *why we did it* and the audit trail for *decisions an
 agent made without the architect in the loop*.
+
+## ADRs are decision records, not session transcripts
+
+Keep ADRs self-contained and stable: context, decision, consequences, and the
+validation gate. The following belong in **PR bodies, issues, or explicitly
+non-normative notes** — not in the decision record:
+
+- PR state, branch names, session IDs, or transient merge-tier routing ("Reviewed
+  as `escalate`-tier", "architect approves via the omnibus"). Noting a change's
+  *durable* blast-radius classification (e.g. "this is a breaking API change,
+  `escalate`-tier") is fine in Consequences — it is a standing fact about the
+  decision, not a routing instruction for a specific PR.
+- Implementation queues, command routing, or task plans
+- Model provenance or AI session transcripts
+- Sprint retrospective narratives ("Two problems surfaced the first time it ran…")
+- Meta-commentary about the ADR-writing process itself ("An earlier draft of this
+  ADR…", "This ADR preserves it so the dead ends aren't re-explored")
+
+Issue and PR numbers are fine as **parenthetical citations** for traceability
+(e.g. "the `~n`-inlining fix (#176)"), but the ADR must stand on its own without
+reading those references. "Worked examples" that illustrate the decision's
+application are welcome when they name the principle being applied, not just the
+ticket.
 
 ## How to add one
 

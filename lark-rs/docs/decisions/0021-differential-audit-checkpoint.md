@@ -10,16 +10,13 @@ are a **regression** net: they replay cases someone already captured. They are
 *not* a **completeness** net — a change to a behavior the banks under-sample can
 pass every bank green and still diverge from Python Lark, our oracle (ADR-0001).
 
-This bit us concretely in sprint `20260619-0714` (#101): a candidate CYK fix
-passed all four compliance banks yet silently over-rejected `start: A (B*)~2`, a
-grammar Python Lark *accepts*. The banks carry no `~n`-over-nullable-group case, so
-"banks green" was satisfied while the oracle was violated. Only an ad-hoc
-differential audit against Python Lark caught it.
+Concrete example (#101): a CYK fix passed all four compliance banks yet silently
+over-rejected `start: A (B*)~2`, a grammar Python Lark *accepts*. The banks carry
+no `~n`-over-nullable-group case, so "banks green" was satisfied while the oracle
+was violated. Only an ad-hoc differential audit against Python Lark caught it.
 
-`/code-review`, `/finish-task`, `/review-pr`, and the `/start-sprint` verdict-only
-review all treated banks-green as sufficient, with no recorded prompt to ask
-whether the change touched a behavior the banks under-sample. The decision to diff
-against the oracle beyond the bank was left implicit — an afterthought, not a gate.
+The review kit had no recorded prompt to ask whether a change touched a behavior
+the banks under-sample — the differential audit was implicit, not a gate.
 
 ## Decision
 
