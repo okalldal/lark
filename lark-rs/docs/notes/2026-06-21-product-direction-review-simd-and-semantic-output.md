@@ -1,5 +1,11 @@
 # SIMD parser optimization query
 
+> **NON-NORMATIVE ARCHIVE.** This is a verbatim, citation-heavy chat transcript kept
+> only as the provenance trail for the semantic-output direction. It is *not* a
+> source of truth and will rot — the durable, self-contained design lives in
+> **ADR-0027** (`docs/decisions/`) and the **OutputBuilder design RFC**
+> (`docs/notes/semantic-output-builder-design.md`). Cite those, not this file.
+
 ## Metadata
 
 - Source archive: `SIMD parser optimization query.webarchive`

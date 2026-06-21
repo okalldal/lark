@@ -2,6 +2,12 @@
 
 - **Status:** Proposed (pending architect ratification)
 - **Date:** 2026-06-21
+- **Depends on:** **ADR-0026** (*behaviour is scoped to the oracle's*), currently
+  **Proposed** in PR #220, not yet on this branch. ADR-0027's relative-oracle
+  grounding for beyond-Python backends *is* an application of ADR-0026's
+  falsifiability ladder, so **ADR-0027 cannot be ratified before ADR-0026 is
+  Accepted** — ratify ADR-0026 (#220) first, or land them together. ADR-0025
+  (*no back-compat, pre-users*) is already Accepted on-branch.
 
 > Forward-looking *direction* ADR (architect-directed, 2026-06-21), seeded by the
 > product-direction review committed under `docs/notes/`. It adopts a new capability
@@ -115,10 +121,15 @@ self-checking.
   reshape*), ADR-0026 (*beyond-oracle behaviour is escalate + needs a validation
   story* — the precedent this ADR applies). This ADR is ADR-0026's first
   application to a *performance* representation rather than an error-recovery shape.
-- **Proposed `PRINCIPLES.md` §3 default** (carried on this ADR's PR, per §9
-  policy-rides-its-own-PR): *"A new output representation with no Python counterpart
-  ships only behind a relative oracle (projection back to the tree/transformer
-  oracle) plus a deterministic perf-counter gate — never curated goldens alone."*
+- **No new `PRINCIPLES.md` §3 default is needed here** — and this PR does **not**
+  edit `PRINCIPLES.md`. ADR-0026's PR (#220) already adds the general §3
+  beyond-oracle/relative-oracle default; ADR-0027 is an *instance* of it (output
+  representations), not a new rule. If the architect wants the instance spelled out
+  in §3, it rides ADR-0026's governance PR or a separate one (§9
+  policy-rides-its-own-PR), never this direction ADR. The instance, for the record:
+  *"A new output representation with no Python counterpart ships only behind a
+  relative oracle (projection back to the tree/transformer oracle) plus a
+  deterministic perf-counter gate — never curated goldens alone."*
 - **Tripwire / revisit.** If a fast backend cannot be projection-checked against an
   oracle (e.g. a lossy tape with no faithful materialization), it does **not** ship
   `auto` — it escalates with a named validation story, exactly as ADR-0026 requires.
