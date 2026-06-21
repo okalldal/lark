@@ -41,10 +41,24 @@ Flag (don't act on) likely **duplicates** or **stale** items for the architect.
 ### 2b. Decision-label drift check
 
 Search open issue titles and bodies for decision-shaped language even when
-`needs-decision` is absent. Phrases to scan for: `Decision needed`,
-`needs-decision`, `architect`, `escalate-tier`, `must not be guessed`,
-`no Python oracle`, `blocked on the decision`, `AskUserQuestion`,
-`unresolved fork`. Report any discrepancies as:
+`needs-decision` is absent. **Candidate phrases** (cast wide for detection):
+`Decision needed`, `needs-decision`, `architect`, `escalate-tier`,
+`must not be guessed`, `no Python oracle`, `blocked on the decision`,
+`AskUserQuestion`, `unresolved fork`.
+
+**Mutation rule** (narrow — only add `needs-decision` when warranted): a
+candidate is a real drift hit only if the issue contains an **explicit
+unresolved fork** — a `## Decision needed` section, a concrete "must not be
+guessed" / "no Python oracle" statement about an open choice, or multiple
+named alternatives with no recorded architect verdict. These alone are
+**not** enough to add the label:
+- `architect approved` / `architect merges` / `architect ratified` — already
+  decided, not an open fork.
+- `escalate-tier` — describes the merge tier of a PR, not an open decision.
+- A blocked implementation issue (`status:blocked`) that names a decision
+  issue as its blocker — the *blocker* is the decision, not the child.
+
+Report discrepancies as:
 
 ```
 Decision-label drift:
@@ -53,8 +67,9 @@ Decision-label drift:
 - #N blocks another issue but the dependent lacks `status:blocked`
 ```
 
-In **apply** mode, add the missing `needs-decision` label and set
-`status:blocked` on dependents. In **dry-run**, list the repairs only.
+In **apply** mode, add the missing `needs-decision` label (only where the
+mutation rule is met) and set `status:blocked` on dependents. In
+**dry-run**, list the repairs only.
 
 ## 3. Report the ordered backlog
 
