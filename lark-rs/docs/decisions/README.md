@@ -37,7 +37,7 @@ descriptions. New decisions get a new file from then on.
 | [0019](0019-recovered-tree-is-optional-at-premature-eof.md) | `RecoveredTree.tree` is `Option`, `None` at premature `$END` (no fabricated partial) | Accepted |
 | [0020](0020-postlex-recovery-mirrors-resume-parse.md) | LALR recovery over a postlex (Indenter) hook — mirror Python's per-resume `Indenter.process` reset | Accepted |
 | [0021](0021-differential-audit-checkpoint.md) | Differential-audit checkpoint in the review discipline — banks are a regression net, not a completeness net | Accepted |
-| [0022](0022-kaizen-sweep-omnibus.md) | `/kaizen-sweep` drains the whole kaizen backlog via the omnibus pattern (mirrors ADR-0018) | Proposed |
+| [0022](0022-kaizen-sweep-omnibus.md) | `/kaizen-sweep` drains the whole kaizen backlog via the omnibus pattern (mirrors ADR-0018) | Accepted |
 
 ## ADRs going forward — the governance audit trail
 

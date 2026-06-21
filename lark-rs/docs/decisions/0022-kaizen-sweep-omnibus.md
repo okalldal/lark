@@ -1,6 +1,6 @@
 # ADR-0022: `/kaizen-sweep` drains the whole kaizen backlog via the omnibus pattern
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-06-21
 
 ## Context
