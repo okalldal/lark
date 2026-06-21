@@ -88,9 +88,9 @@ fn test_on_error_stop_returns_no_tree() {
     let lark = recovery_parser();
     let mut seen = 0;
     let result = lark
-        .parse_on_error("1 + + 2", |_| {
+        .parse_on_error("1 + + 2", |_, _| {
             seen += 1;
-            false // stop on the first error
+            lark_rs::RecoveryAction::Stop
         })
         .unwrap();
     assert_eq!(seen, 1, "handler called exactly once before stopping");
@@ -157,9 +157,9 @@ fn test_on_error_false_stops_at_unlexable_char() {
     let lark = recovery_parser();
     let mut seen = 0;
     let result = lark
-        .parse_on_error("1 @ 2", |_| {
+        .parse_on_error("1 @ 2", |_, _| {
             seen += 1;
-            false
+            lark_rs::RecoveryAction::Stop
         })
         .unwrap();
     assert_eq!(seen, 1, "handler called once before stopping");
@@ -265,4 +265,108 @@ fn test_recovery_unsupported_on_earley() {
         format!("{err}").contains("error recovery requires parser='lalr'"),
         "unexpected error: {err}"
     );
+}
+
+// ─── RecoveryAction + RecoveryContext tests (issue #223) ─────────────────────
+
+#[test]
+fn test_recovery_action_delete_matches_old_true() {
+    // RecoveryAction::Delete is the new spelling of the old `true` return.
+    let lark = recovery_parser();
+    let result = lark
+        .parse_on_error("1 + + 2", |_, _| lark_rs::RecoveryAction::Delete)
+        .unwrap();
+    assert_eq!(result.errors.len(), 1);
+    let tree = result.tree.expect("delete recovery yields a tree");
+    let clean = lark.parse("1 + 2").unwrap();
+    assert_eq!(format!("{tree}"), format!("{clean}"));
+}
+
+#[test]
+fn test_recovery_action_stop_matches_old_false() {
+    // RecoveryAction::Stop is the new spelling of the old `false` return.
+    let lark = recovery_parser();
+    let result = lark
+        .parse_on_error("1 + + 2", |_, _| lark_rs::RecoveryAction::Stop)
+        .unwrap();
+    assert!(result.tree.is_none());
+    assert_eq!(result.errors.len(), 1);
+}
+
+#[test]
+fn test_recovery_context_accepts_exposes_valid_terminals() {
+    // The RecoveryContext's `accepts()` reflects the parser state at the error.
+    let lark = recovery_parser();
+    let mut saw_accepts = Vec::new();
+    lark.parse_on_error("1 + + 2", |_, ctx| {
+        saw_accepts = ctx.accepts();
+        lark_rs::RecoveryAction::Delete
+    })
+    .unwrap();
+    assert!(
+        saw_accepts.contains(&"NUMBER".to_string()),
+        "at `+ +`, the parser expects NUMBER, got {saw_accepts:?}"
+    );
+}
+
+#[test]
+fn test_recovery_context_feed_inserts_token_then_resume() {
+    // Feed a missing NUMBER through the context, then Resume to retry the `+`
+    // that originally errored — it should now be valid in the advanced state.
+    let lark = recovery_parser();
+    let result = lark
+        .parse_on_error("+ 2", |_, ctx| {
+            ctx.feed("NUMBER", "0").expect("NUMBER should be accepted");
+            lark_rs::RecoveryAction::Resume
+        })
+        .unwrap();
+    let tree = result
+        .tree
+        .expect("resume after insertion should produce a tree");
+    let clean = lark.parse("0 + 2").unwrap();
+    assert_eq!(format!("{tree}"), format!("{clean}"));
+}
+
+#[test]
+fn test_resume_no_progress_guard_stops() {
+    // Returning Resume without feeding anything leaves the parser state unchanged.
+    // The no-progress guard must treat that as Stop to prevent infinite loops.
+    let lark = recovery_parser();
+    let result = lark
+        .parse_on_error("1 + + 2", |_, _| lark_rs::RecoveryAction::Resume)
+        .unwrap();
+    assert!(
+        result.tree.is_none(),
+        "Resume without progress must stop (no tree)"
+    );
+    assert_eq!(
+        result.errors.len(),
+        1,
+        "exactly one error before the guard triggers"
+    );
+}
+
+#[test]
+fn test_recovery_context_feed_wrong_token_errors() {
+    // Feeding a token the parser cannot accept errors, leaving the context
+    // unchanged so the handler can fall back to Delete.
+    let lark = recovery_parser();
+    let result = lark
+        .parse_on_error("1 + + 2", |_, ctx| {
+            let res = ctx.feed("PLUS", "+");
+            assert!(res.is_err(), "PLUS should not be accepted after PLUS");
+            lark_rs::RecoveryAction::Delete
+        })
+        .unwrap();
+    assert!(result.tree.is_some(), "fallback Delete should recover");
+}
+
+#[test]
+fn test_parse_with_recovery_uses_delete() {
+    // parse_with_recovery is the convenience wrapper; verify it still works
+    // after the signature change.
+    let lark = recovery_parser();
+    let result = lark.parse_with_recovery("1 + + 2").unwrap();
+    assert_eq!(result.errors.len(), 1);
+    assert!(result.tree.is_some());
 }
