@@ -305,30 +305,30 @@ impl GrammarCompiler {
         // statement runs in Python Lark (`load_grammar.py` resolves all imports,
         // then walks the statements). So an `%override`/`%extend` may target an
         // imported symbol regardless of where the directive sits — collect the
-        // imported (and declared) names up front, classified rule vs terminal by
-        // the leading-case convention the loader uses everywhere, so the
-        // pre-existence gate below sees them.
+        // imported names up front, classified rule vs terminal by the leading-case
+        // convention the loader uses everywhere, so the pre-existence gate below
+        // sees them.
+        //
+        // These same sets are the *single-definition-per-origin* ledger (#270):
+        // every plain definition (rule, terminal, `%declare`) records its origin
+        // here as it is staged, and a second plain definition of an
+        // already-defined name is rejected — matching Python's `_define`, which
+        // raises `"{Type} '{name}' defined more than once"` when a statement names
+        // a key already in `_definitions` (imports included). `%declare`s are
+        // *not* pre-seeded: like every other statement they are processed in
+        // document order, so two `%declare`s of one name collide just as Python's
+        // two `_define(name, …, None)` calls do.
         let mut defined_rule_names: HashSet<String> = HashSet::new();
         let mut defined_term_names: HashSet<String> = HashSet::new();
         for item in &items {
-            match item {
-                Item::ImportItem(spec) => {
-                    for name in spec_final_names(spec) {
-                        if name.starts_with(|c: char| c.is_uppercase()) {
-                            defined_term_names.insert(name);
-                        } else {
-                            defined_rule_names.insert(name);
-                        }
+            if let Item::ImportItem(spec) = item {
+                for name in spec_final_names(spec) {
+                    if Self::name_is_terminal(&name) {
+                        defined_term_names.insert(name);
+                    } else {
+                        defined_rule_names.insert(name);
                     }
                 }
-                Item::DeclareItem(syms) => {
-                    for sym in syms {
-                        if let Symbol::Terminal(t) = sym {
-                            defined_term_names.insert(t.name.clone());
-                        }
-                    }
-                }
-                _ => {}
             }
         }
 
@@ -348,7 +348,7 @@ impl GrammarCompiler {
         for item in items {
             match item {
                 Item::ImportItem(spec) => self.resolve_import(spec)?,
-                Item::DeclareItem(syms) => self.declare_terminals(syms),
+                Item::DeclareItem(syms) => self.declare_terminals(syms, &mut defined_term_names)?,
                 Item::TermItem(t) => {
                     self.stage_term_directive(t, &mut defined_term_names)?;
                 }
@@ -395,7 +395,14 @@ impl GrammarCompiler {
     ) -> Result<(), GrammarError> {
         match r.directive {
             Directive::Plain => {
-                defined.insert(r.name.clone());
+                // Single-definition-per-origin (#270): a plain rule whose name is
+                // already defined (by an import or a prior rule) is a duplicate,
+                // exactly as Python's `_define` rejects it. `%override`/`%extend`
+                // carry a non-`Plain` directive and are handled below — they
+                // *legitimately* redefine, so they must not trip this check.
+                if !defined.insert(r.name.clone()) {
+                    return Err(Self::duplicate_definition_error(false, &r.name));
+                }
                 rule_items.push(r);
             }
             Directive::Override => {
@@ -449,7 +456,14 @@ impl GrammarCompiler {
     ) -> Result<(), GrammarError> {
         match t.directive {
             Directive::Plain => {
-                defined.insert(t.name.clone());
+                // Single-definition-per-origin (#270): a plain terminal whose name
+                // is already defined (by an import, a `%declare`, or a prior
+                // terminal) is a duplicate — Python's `_define` rejects it. This is
+                // the RC2/RC2b fix site: an imported `INT` then re-`%declare`d or
+                // locally redefined now collides instead of silently keeping one.
+                if !defined.insert(t.name.clone()) {
+                    return Err(Self::duplicate_definition_error(true, &t.name));
+                }
                 self.raw_terms.push(t);
             }
             Directive::Override => {
@@ -509,8 +523,13 @@ impl GrammarCompiler {
         match r.directive {
             Directive::Plain => {
                 // The first pass already registered the plain template; just
-                // record it as defined for any later directive's gate.
-                defined.insert(r.name.clone());
+                // record it as defined for any later directive's gate. A template
+                // shares the rule namespace (Python keys it in `_definitions`), so
+                // a duplicate template — or a template colliding with a plain rule
+                // of the same name — is rejected like any other rule (#270).
+                if !defined.insert(r.name.clone()) {
+                    return Err(Self::duplicate_definition_error(false, &r.name));
+                }
             }
             Directive::Override => {
                 if !defined.contains(&r.name) {
@@ -601,15 +620,47 @@ impl GrammarCompiler {
     /// terminal is never lexed — it is interned (so rules can reference it and the
     /// parse table reserves a column) and injected into the token stream by a
     /// postlex hook, e.g. an [`Indenter`](crate::postlex::Indenter)'s `_INDENT` /
-    /// `_DEDENT`. Already-defined names are left untouched (an explicit definition
-    /// or import wins, matching how imports are kept in `resolve_terminals`).
-    fn declare_terminals(&mut self, syms: Vec<Symbol>) {
+    /// `_DEDENT`. A `%declare` is a definition like any other (Python's
+    /// `_define(name, is_term, None)`): declaring a name already defined — by an
+    /// import, a prior `%declare`, or a local terminal — is rejected as a
+    /// duplicate (#270).
+    fn declare_terminals(
+        &mut self,
+        syms: Vec<Symbol>,
+        defined: &mut HashSet<String>,
+    ) -> Result<(), GrammarError> {
         for sym in syms {
             if let Symbol::Terminal(t) = sym {
+                if !defined.insert(t.name.clone()) {
+                    return Err(Self::duplicate_definition_error(true, &t.name));
+                }
                 if !self.terminals.iter().any(|td| td.name == t.name) {
                     self.terminals.push(TerminalDef::declared(&t.name));
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Whether `name` is a terminal name under Lark's lexical convention: a
+    /// terminal is all-uppercase (with `_`/digits), a rule is lowercase — so a
+    /// leading `_` alone does not decide it (`_INDENT` is a terminal, `_expr` a
+    /// rule). Matches the tokenizer's `Terminal` vs `Rule` dispatch
+    /// (`tokenizer.rs`): the presence of any lowercase letter is the discriminator.
+    /// Used to bucket an `%import` target into the right single-definition ledger
+    /// so an imported `_INDENT` then re-`%declare`d collides as the oracle does.
+    fn name_is_terminal(name: &str) -> bool {
+        !name.chars().any(|c| c.is_ascii_lowercase())
+    }
+
+    /// Python Lark's `"{Type} '{name}' defined more than once"` (`_define`,
+    /// `load_grammar.py`), raised when a plain rule / terminal / `%declare`
+    /// definition names an origin already defined. `is_term` picks the `Terminal`
+    /// vs `Rule` wording, matching the oracle's exact message (RC1/RC2, #270).
+    fn duplicate_definition_error(is_term: bool, name: &str) -> GrammarError {
+        let kind = if is_term { "Terminal" } else { "Rule" };
+        GrammarError::Other {
+            msg: format!("{kind} '{name}' defined more than once"),
         }
     }
 
@@ -1076,5 +1127,126 @@ mod tests {
             .find(|t| t.name == "INT")
             .expect("INT survives");
         assert_eq!(int.pattern.as_regex_str(), "z");
+    }
+
+    // ── Single-definition-per-origin (#270, bounty RC1/RC2) ─────────────────────
+
+    /// RC1: a rule defined twice is rejected with Python's exact message, instead
+    /// of silently merging the two bodies into `a: "x" | "y"`.
+    #[test]
+    fn duplicate_rule_definition_rejected() {
+        let err = load("start: a\na: \"x\"\na: \"y\"\n").unwrap_err();
+        assert!(
+            err.to_string().contains("Rule 'a' defined more than once"),
+            "got: {err}"
+        );
+    }
+
+    /// RC2: an imported terminal then re-`%declare`d collides — `Terminal 'INT'
+    /// defined more than once` — instead of keeping one definition silently.
+    #[test]
+    fn duplicate_terminal_import_then_declare_rejected() {
+        let err = load("%import common.INT\n%declare INT\nstart: INT\n").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Terminal 'INT' defined more than once"),
+            "got: {err}"
+        );
+    }
+
+    /// RC2b: an imported terminal then redefined locally collides too, order-
+    /// independent (the import populates the namespace before the local term).
+    #[test]
+    fn duplicate_terminal_import_then_local_rejected() {
+        let err = load("%import common.INT\nINT: \"x\"\nstart: INT\n").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Terminal 'INT' defined more than once"),
+            "got: {err}"
+        );
+    }
+
+    /// Two `%declare`s of one name collide — Python processes each as a
+    /// `_define(name, …, None)`, so the second is a duplicate.
+    #[test]
+    fn duplicate_declare_rejected() {
+        let err = load("%declare FOO\n%declare FOO\nstart: FOO\n").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Terminal 'FOO' defined more than once"),
+            "got: {err}"
+        );
+    }
+
+    /// A template shares the rule namespace: a second plain template of one name
+    /// is a duplicate, like a plain rule (`Rule 'foo' defined more than once`).
+    #[test]
+    fn duplicate_template_rejected() {
+        let err = load("start: foo{A}\nfoo{x}: x\nfoo{x}: x x\nA: \"a\"\n").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Rule 'foo' defined more than once"),
+            "got: {err}"
+        );
+    }
+
+    /// A rule and a same-named template collide (both occupy the rule namespace),
+    /// regardless of which comes first.
+    #[test]
+    fn rule_and_template_same_name_rejected() {
+        let err = load("start: foo\nfoo: \"z\"\nfoo{x}: x\n").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Rule 'foo' defined more than once"),
+            "got: {err}"
+        );
+    }
+
+    /// Not a duplicate: one definition split across `|` arms is a single origin
+    /// (Python accepts `a: "x" | "y"`). The single-definition check must not fire.
+    #[test]
+    fn single_definition_with_alternatives_accepted() {
+        let g = load("start: a\na: \"x\" | \"y\"\n").unwrap();
+        let bodies = rule_bodies(&g, "a");
+        assert_eq!(bodies.len(), 2, "both arms of the one definition survive");
+    }
+
+    /// Not a duplicate: re-importing the *same* symbol is idempotent in Python
+    /// (`imports` dedups by dotted-path + alias), so it must still build.
+    #[test]
+    fn repeated_identical_import_accepted() {
+        let g = load("%import common.INT\n%import common.INT\nstart: INT\n").unwrap();
+        assert!(g.terminals.iter().any(|t| t.name == "INT"));
+    }
+
+    /// A leading-underscore terminal (`_INDENT`) imported then re-`%declare`d
+    /// collides too: the import ledger classifies a name by Lark's lexical
+    /// convention (no lowercase = terminal), not a bare leading-case check, so
+    /// `_INDENT` lands in the terminal namespace where the `%declare` can see it.
+    #[test]
+    fn duplicate_underscore_terminal_import_then_declare_rejected() {
+        let err = load("%import python._INDENT\n%declare _INDENT\nstart: _INDENT\n").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Terminal '_INDENT' defined more than once"),
+            "got: {err}"
+        );
+    }
+
+    /// A transparent (`_`-prefixed) *rule* is correctly NOT bucketed as a terminal
+    /// — `name_is_terminal` keys on lowercase letters, so `_w` stays a rule and a
+    /// single definition of it still builds.
+    #[test]
+    fn underscore_rule_is_not_misclassified_as_terminal() {
+        assert!(load("start: _w\n_w: \"x\"\n").is_ok());
+    }
+
+    /// A legitimate `%override` / `%extend` redefines its target and must *not* be
+    /// caught by the duplicate-definition check (it carries a non-`Plain`
+    /// directive, #269).
+    #[test]
+    fn override_and_extend_not_treated_as_duplicates() {
+        assert!(load("start: A\n%override start: B\nA: \"a\"\nB: \"b\"\n").is_ok());
+        assert!(load("start: A\n%extend start: B\nA: \"a\"\nB: \"b\"\n").is_ok());
     }
 }

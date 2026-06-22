@@ -11,6 +11,9 @@
 //!
 //! to watch them go red (each red == a reproduced, minimized bug). When a bug is
 //! fixed, drop its `#[ignore]` and the test becomes a permanent regression guard.
+//! RC1 / RC2 / RC2b (duplicate rule/terminal definitions, #270) and RC4a–c
+//! (alias/`?` on inlined rules) are now fixed, so their tests run by default as
+//! regression guards rather than `#[ignore]`d XFAILs.
 //!
 //! Target SHA (frozen baseline the finds were minimized against):
 //!   a005423  (branch claude/hackathon-baseline-bounty-08oolp)
@@ -80,7 +83,6 @@ fn assert_build_accepted(grammar: &str, parser: ParserAlgorithm, lexer: LexerTyp
 /// `GrammarError: Rule 'a' defined more than once`. lark-rs silently MERGES the
 /// two bodies into alternatives and accepts both. Default path; all five backends.
 #[test]
-#[ignore = "XFAIL (bounty RC1): duplicate rule definition not rejected"]
 fn rc1_duplicate_rule_definition_rejected() {
     let g = "start: a\na: \"x\"\na: \"y\"\n";
     assert_build_rejected(g, ParserAlgorithm::Lalr, LexerType::Contextual, "RC1");
@@ -91,7 +93,6 @@ fn rc1_duplicate_rule_definition_rejected() {
 /// `GrammarError: Terminal 'INT' defined more than once`. lark-rs keeps one
 /// definition silently and builds.
 #[test]
-#[ignore = "XFAIL (bounty RC2): duplicate terminal definition (import + %declare) not rejected"]
 fn rc2_duplicate_terminal_import_then_declare_rejected() {
     let g = "%import common.INT\n%declare INT\nstart: INT\n";
     assert_build_rejected(g, ParserAlgorithm::Lalr, LexerType::Contextual, "RC2");
@@ -99,7 +100,6 @@ fn rc2_duplicate_terminal_import_then_declare_rejected() {
 
 /// RC2b (HIGH). Same root cause via the import + local-redefinition surface.
 #[test]
-#[ignore = "XFAIL (bounty RC2b): duplicate terminal definition (import + local) not rejected"]
 fn rc2b_duplicate_terminal_import_then_local_rejected() {
     let g = "%import common.INT\nINT: \"x\"\nstart: INT\n";
     assert_build_rejected(g, ParserAlgorithm::Lalr, LexerType::Contextual, "RC2b");
