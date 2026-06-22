@@ -1,6 +1,6 @@
 # ADR-0029: Public `OutputBuilder` API shape
 
-- **Status:** Proposed (pending architect ratification)
+- **Status:** Accepted (2026-06-22; architect ratified)
 - **Date:** 2026-06-21
 - **Depends on:** ADR-0027 (semantic output direction), ADR-0026 (behaviour scoped
   to the oracle), ADR-0011 (allocation is the lever), ADR-0025 (surface free to reshape)
