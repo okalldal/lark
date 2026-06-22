@@ -161,6 +161,13 @@ purely a build/size cost. Deterministic (RHS-symbol count, no wall-clock).
 - **Ruled out (shared with Python, ineligible):** `(a|b)~1..n` → 2ⁿ rules is
   byte-identical between the engines (Python cartesian-products inline groups the
   same way). Not a lark-rs pathology.
+- **FIXED (#279).** `compile_repeat` now ports Python's `_generate_repeats`
+  factoring (`small_factors` / `_add_repeat_rule` / `_add_repeat_opt_rule`) for the
+  `mx ≥ 50` case, so a large `~mn..mx` lowers to a logarithmic stack of shared
+  transparent `__anon_*` sub-rules — sub-quadratic grammar size, byte-identical
+  parse tree. Pinned by `tests/test_repeat_factoring.rs` (deterministic size gate +
+  tree parity across the threshold + grouped repeat + Earley) and the now-passing
+  `n9_bounded_repeat_grammar_size_subquadratic` regression test.
 
 ### N10 — `\Z` rejected & mis-categorized as lookaround (lexer / taxonomy)
 `A: /x\Z/` on `"x"` → Python accepts and tokenizes; lark-rs build-errors,

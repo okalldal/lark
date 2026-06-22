@@ -118,6 +118,25 @@ pub(super) struct GrammarCompiler {
     /// rather than stacked, which is what Python Lark's distribute+dedup achieves
     /// and what keeps `("A"?)?` from building two ambiguous empty rules.
     pub(super) nullable_opts: std::collections::HashSet<String>,
+    /// Cache of the factored bounded-repeat sub-rules a large `x~mn..mx` (`mx ≥
+    /// 50`, Python's `REPEAT_BREAK_THRESHOLD`) breaks into — Python Lark's
+    /// `rules_cache` keyed on the `_add_repeat_rule`/`_add_repeat_opt_rule`
+    /// arguments `(a, b, target, atom, opt)`. Sharing the sub-rules is what keeps
+    /// the factored lowering O(log n) in grammar size: two `x~0..n` over the same
+    /// `x` reuse the `x x x …` chunk rules instead of minting fresh ones.
+    ///
+    /// The key intentionally **omits `keep_all`**, exactly mirroring Python Lark's
+    /// `EBNF_to_BNF.rules_cache` (`load_grammar.py`, keyed `(a, b, target, atom[,
+    /// "opt"])` with no keep-all). Python's `EBNF_to_BNF` instance — and its cache —
+    /// is shared across every rule, so the *first* rule to build a given chunk
+    /// freezes its `rule_options` (keep-all and all) into the shared sub-rule, and a
+    /// later sibling reuses it verbatim. This makes a `!a: "x"~50` next to a plain
+    /// `b: "x"~50` share one chunk whose keep-all is whichever of `a`/`b` compiled
+    /// first — an order-dependent quirk, but it is the oracle's quirk, so lark-rs
+    /// reproduces it byte-for-byte (ADR-0017: a circumstantial leak that is *cheap*
+    /// to match → match it). Pinned by `keep_all_repeat_chunk_sharing_matches_oracle`
+    /// in `tests/test_repeat_factoring.rs`.
+    pub(super) repeat_cache: HashMap<(usize, usize, String, String, bool), String>,
     /// Directory that relative file imports resolve against (the importing
     /// grammar's directory). `None` when the grammar was built from a string with
     /// no source location, in which case only `%import common.*` resolves.
@@ -183,6 +202,7 @@ impl GrammarCompiler {
             recurse_cache: HashMap::new(),
             helper_cache: HashMap::new(),
             nullable_opts: std::collections::HashSet::new(),
+            repeat_cache: HashMap::new(),
             base_path,
             import_sources,
             reserved_rule_names: HashSet::new(),

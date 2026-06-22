@@ -286,8 +286,11 @@ fn n8_positions_are_char_indices() {
 /// wall-clock) via the total RHS-symbol count of the lowered grammar: for a 4×
 /// bound it grows ≈16× (quadratic). A factored lowering would be near-flat.
 /// Both engines build correct parsers — the divergence is purely build/size cost.
+// FIXED (#279): `compile_repeat` now factors a large `~mn..mx` into shared
+// transparent sub-rules (Python's `small_factors`/`_add_repeat_rule`), so the
+// grammar size is sub-quadratic. The dedicated gate + tree-parity pins live in
+// `tests/test_repeat_factoring.rs`; this asserts the headline bound stays closed.
 #[test]
-#[ignore = "XFAIL (bounty N9): x~n..m above threshold is O(n^2) grammar size, not O(log n)"]
 fn n9_bounded_repeat_grammar_size_subquadratic() {
     let total_rhs = |n: usize| -> usize {
         let g = lark_rs::load_grammar(
