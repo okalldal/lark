@@ -708,6 +708,7 @@ pub struct RecoveryContext<'a> {
     stack: &'a mut ParserStack,
     table: &'a ParseTable,
     fed_count: usize,
+    accepted_tree: Option<ParseTree>,
 }
 
 impl<'a> RecoveryContext<'a> {
@@ -716,6 +717,7 @@ impl<'a> RecoveryContext<'a> {
             stack,
             table,
             fed_count: 0,
+            accepted_tree: None,
         }
     }
 
@@ -736,9 +738,15 @@ impl<'a> RecoveryContext<'a> {
     /// [`InteractiveParser::feed_token`]'s return shape. Returns `Err` when the
     /// parser has no action for the token.
     ///
+    /// **On ACCEPT:** the tree is saved internally and the recovery loop will
+    /// short-circuit — the parse completed inside the handler. Further feeds
+    /// after ACCEPT are rejected.
+    ///
     /// **Transactional on failure:** if the feed errors (including after partial
     /// reductions), the stack is rolled back to its pre-call state so the handler
-    /// can safely try candidate insertions and fall back.
+    /// can safely try candidate insertions and fall back. The common case (no
+    /// action for the token) is checked before cloning the stack, so candidate-
+    /// insertion patterns pay O(1) per rejected candidate.
     ///
     /// Feeding `$END` is rejected — use [`RecoveryAction::Resume`] to retry the
     /// current lookahead after feeding corrective tokens; completion is the
@@ -747,6 +755,15 @@ impl<'a> RecoveryContext<'a> {
     /// [`InteractiveParser::feed_token`]: super::interactive::InteractiveParser::feed_token
     /// [`RecoveryAction::Resume`]: crate::error::RecoveryAction::Resume
     pub fn feed_token(&mut self, mut token: Token) -> Result<Option<ParseTree>, ParseError> {
+        if self.accepted_tree.is_some() {
+            return Err(ParseError::UnexpectedToken {
+                token: token.value,
+                token_type: token.type_,
+                line: token.line,
+                col: token.column,
+                expected: vec![],
+            });
+        }
         match self.table.symbols.id(&token.type_) {
             Some(id) => {
                 if id == SymbolId::END {
@@ -770,6 +787,17 @@ impl<'a> RecoveryContext<'a> {
                 })
             }
         }
+        let state = self.stack.position();
+        if self.table.action_at(state, token.type_id).is_none() {
+            let expected = self.accepts();
+            return Err(ParseError::UnexpectedToken {
+                token: token.value,
+                token_type: token.type_,
+                line: token.line,
+                col: token.column,
+                expected,
+            });
+        }
         let snapshot = self.stack.clone();
         match self.stack.feed_token(self.table, &token) {
             Feed::Shifted => {
@@ -778,6 +806,7 @@ impl<'a> RecoveryContext<'a> {
             }
             Feed::Accepted(tree) => {
                 self.fed_count += 1;
+                self.accepted_tree = Some(tree.clone());
                 Ok(Some(tree))
             }
             Feed::Error(e) => {
@@ -1000,7 +1029,11 @@ impl LalrParser {
                     let mut ctx = RecoveryContext::new(&mut stack, &self.table);
                     let action = on_error(&err, &mut ctx);
                     let fed = ctx.fed_count();
+                    let handler_tree = ctx.accepted_tree.take();
                     errors.push(err);
+                    if let Some(tree) = handler_tree {
+                        return Ok(Some(tree));
+                    }
                     match action {
                         RecoveryAction::Delete if is_end => {
                             return Ok(None);

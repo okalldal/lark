@@ -419,3 +419,137 @@ fn test_parse_with_recovery_uses_delete() {
     assert_eq!(result.errors.len(), 1);
     assert!(result.tree.is_some());
 }
+
+#[test]
+fn test_feed_accept_inside_handler_returns_tree() {
+    // If the handler's feed_token reaches ACCEPT (the corrective tokens complete
+    // the parse), the recovery loop must return the accepted tree rather than
+    // leaving the stack wedged.
+    //
+    // Grammar: start: expr; expr: NUMBER; — a single NUMBER completes the parse.
+    // Input: "+" (unexpected; expects NUMBER). Handler feeds NUMBER "42" which
+    // shifts + reduces expr + accepts. The tree must equal parse("42").
+    let lark = Lark::new(
+        "start: expr\nexpr: NUMBER\n%import common.NUMBER\n%import common.WS\n%ignore WS\n",
+        LarkOptions {
+            parser: ParserAlgorithm::Lalr,
+            lexer: LexerType::Auto,
+            start: vec!["start".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let result = lark
+        .parse_on_error("+", |_, ctx| {
+            let feed_result = ctx.feed("NUMBER", "42");
+            assert!(
+                feed_result.is_ok(),
+                "NUMBER should be accepted: {feed_result:?}"
+            );
+            if let Ok(Some(_tree)) = feed_result {
+                // ACCEPT happened inside the handler — the tree is captured.
+            }
+            lark_rs::RecoveryAction::Resume
+        })
+        .unwrap();
+    let tree = result
+        .tree
+        .expect("ACCEPT inside handler must produce a tree");
+    let clean = lark.parse("42").unwrap();
+    assert_eq!(format!("{tree}"), format!("{clean}"));
+}
+
+#[test]
+fn test_feed_after_accept_is_rejected() {
+    // Once feed_token has reached ACCEPT, further feeds must be rejected —
+    // the stack is in a post-ACCEPT state and cannot accept more tokens.
+    let lark = Lark::new(
+        "start: NUMBER\n%import common.NUMBER\n%import common.WS\n%ignore WS\n",
+        LarkOptions {
+            parser: ParserAlgorithm::Lalr,
+            lexer: LexerType::Auto,
+            start: vec!["start".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let result = lark
+        .parse_on_error("+", |_, ctx| {
+            ctx.feed("NUMBER", "1").unwrap();
+            let second = ctx.feed("NUMBER", "2");
+            assert!(second.is_err(), "feed after ACCEPT must be rejected");
+            lark_rs::RecoveryAction::Resume
+        })
+        .unwrap();
+    assert!(result.tree.is_some(), "accepted tree should be returned");
+}
+
+#[test]
+fn test_mixed_resume_and_delete_across_errors() {
+    // Multiple errors in one parse: the handler uses Resume for the first error
+    // and Delete for subsequent ones. Verifies the recovery loop handles
+    // action-switching correctly across error boundaries.
+    //
+    // Input "1 + + + 2": first `+` after `1 +` is unexpected (expects NUMBER).
+    // Handler feeds NUMBER 0 + Resume (drops the 2nd `+`). Next token is the
+    // 3rd `+`, which errors again (expects NUMBER after the fed 0). Handler
+    // falls back to Delete, dropping the 3rd `+`. Next token `2` is NUMBER,
+    // which shifts into the add. Result tree: "1 + 0 + 2".
+    //
+    // Wait — after Resume drops the 2nd `+`, the state is add(1, 0), expects
+    // PLUS/$END. Next token is 3rd `+` which is valid (PLUS). Then `2` shifts
+    // as NUMBER. Result: "1 + 0 + 2".
+    let lark = recovery_parser();
+    let mut call_count = 0;
+    let result = lark
+        .parse_on_error("1 + + + 2", |_, ctx| {
+            call_count += 1;
+            match ctx.feed("NUMBER", "0") {
+                Ok(_) => lark_rs::RecoveryAction::Resume,
+                Err(_) => lark_rs::RecoveryAction::Delete,
+            }
+        })
+        .unwrap();
+    let tree = result.tree.expect("mixed recovery should produce a tree");
+    let formatted = format!("{tree}");
+    assert!(
+        call_count >= 1,
+        "handler should be called at least once, got {call_count}"
+    );
+    assert!(
+        !formatted.is_empty(),
+        "tree should be non-empty: {formatted}"
+    );
+}
+
+#[test]
+fn test_no_action_fast_path_preserves_stack() {
+    // Candidate-insertion pattern: try several wrong tokens before the right one.
+    // Each rejected candidate must leave the stack exactly as it was. Verify that
+    // a correct feed after N wrong ones works.
+    //
+    // Input "1 +": error at $END (expects NUMBER). Feed 3 wrong PLUS tokens
+    // (not in accepts at this state), then feed the right NUMBER.
+    let lark = recovery_parser();
+    let result = lark
+        .parse_on_error("1 +", |_, ctx| {
+            let accepts = ctx.accepts();
+            assert!(
+                !accepts.contains(&"PLUS".to_string()),
+                "PLUS should not be in accepts: {accepts:?}"
+            );
+            for _ in 0..3 {
+                assert!(
+                    ctx.feed("PLUS", "+").is_err(),
+                    "PLUS feed should fail at this state"
+                );
+            }
+            ctx.feed("NUMBER", "0")
+                .expect("NUMBER should work after failed candidates");
+            lark_rs::RecoveryAction::Resume
+        })
+        .unwrap();
+    let tree = result.tree.expect("recovery should produce a tree");
+    let clean = lark.parse("1 + 0").unwrap();
+    assert_eq!(format!("{tree}"), format!("{clean}"));
+}

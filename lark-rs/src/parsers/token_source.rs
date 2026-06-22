@@ -207,8 +207,7 @@ impl<'a> TokenSource for Contextual<'a> {
 ///     recovery loop can *delete* (Python's `raise UnexpectedToken(...)`);
 ///   * the root scanner also misses → a genuinely un-lexable character; record an
 ///     `UnexpectedCharacter`, consult `on_error`, and skip exactly one character
-///     before resuming (Python's re-raised `UnexpectedCharacters` / lark-rs's
-///     [`BasicLexer::lex_recovering`](crate::lexer::BasicLexer::lex_recovering)).
+///     before resuming (Python's re-raised `UnexpectedCharacters`).
 ///
 /// This recovers over the *contextual* token stream, so a grammar whose contextual
 /// lexer is load-bearing (overlapping terminals disambiguated only by parser state)
@@ -333,9 +332,7 @@ impl TokenSource for ContextualRecovering<'_> {
 /// recovery path can interleave char skips with the streaming indenter + parser
 /// resume — Python Lark's lazy `lexer → PostLexConnector → parser` pipeline resets
 /// the indenter on a char skip too, which an eager "skip every char up front, then
-/// indent once" model ([`BasicLexer::lex_recovering`]) cannot reproduce.
-///
-/// [`BasicLexer::lex_recovering`]: crate::lexer::BasicLexer::lex_recovering
+/// indent once" model cannot reproduce.
 pub struct BasicRecovering<'a> {
     lexer: &'a BasicLexer,
     state: LexerState<'a>,
