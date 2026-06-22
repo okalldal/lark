@@ -218,8 +218,10 @@ A: /x\Z/
 /// `cyk`+`contextual`, `earley`+`contextual`); lark-rs silently substitutes a
 /// working lexer and parses. The only pairing gate in the tree is the
 /// postlex+dynamic refusal. Distinct from RC8 (zero-width *content* on dynamic).
+// Fixed in #273: a front-door config-legality gate (`parsers::validate_config`)
+// now mirrors Python's parser→allowed-lexer matrix, so this is a live regression
+// test (un-ignored from XFAIL).
 #[test]
-#[ignore = "XFAIL (bounty N5): illegal parser/lexer pairing not rejected"]
 fn n5_illegal_parser_lexer_pairing_rejected() {
     let g = "start: \"a\"\n";
     assert_build_rejected(
@@ -237,8 +239,9 @@ fn n5_illegal_parser_lexer_pairing_rejected() {
 /// N6 (HIGH). `ambiguity=` is only valid for Earley/CYK; Python raises
 /// `ConfigurationError: 'lalr' doesn't support disambiguation`. lark-rs's
 /// `build_lalr` never reads `options.ambiguity`, so it silently accepts and builds.
+// Fixed in #273: `validate_config` rejects `ambiguity=explicit|forest` on
+// `parser=lalr` (live regression test, un-ignored from XFAIL).
 #[test]
-#[ignore = "XFAIL (bounty N6): ambiguity= on parser=lalr not rejected"]
 fn n6_ambiguity_on_lalr_rejected() {
     let g = "start: \"a\"\n";
     let mut o = opts(ParserAlgorithm::Lalr, LexerType::Contextual);
