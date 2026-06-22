@@ -99,9 +99,9 @@ impl Lark {
     /// [`RecoveryAction`]:
     ///
     /// * [`Delete`](RecoveryAction::Delete) — delete the offending token and resume.
-    /// * [`Resume`](RecoveryAction::Resume) — retry the current token after feeding
-    ///   corrective tokens through the context. A no-progress guard prevents infinite
-    ///   loops.
+    /// * [`Resume`](RecoveryAction::Resume) — drop the errored token and parse the
+    ///   next one in the state the handler's feeds produced (at `$END`, retry the
+    ///   sentinel). Matching Python Lark's `resume_parse()`. No feeds → `Stop`.
     /// * [`Stop`](RecoveryAction::Stop) — stop recovery; `tree: None`.
     pub fn parse_on_error(
         &self,

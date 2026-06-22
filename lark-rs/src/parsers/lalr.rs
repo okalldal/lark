@@ -946,9 +946,9 @@ impl LalrParser {
     ///
     /// * [`Delete`](RecoveryAction::Delete) — delete the offending token, retry next.
     /// * [`Resume`](RecoveryAction::Resume) — the handler fed corrective tokens via
-    ///   the context; retry the *same* lookahead in the (now-advanced) parser state.
-    ///   A no-progress guard prevents infinite loops: if the parser state is unchanged,
-    ///   the loop treats it as `Stop`.
+    ///   the context; the errored token is dropped (matching Python's `resume_parse`)
+    ///   and the next token is parsed in the handler's new state. At `$END` the
+    ///   sentinel is retried. A no-progress guard: no feeds → `Stop`.
     /// * [`Stop`](RecoveryAction::Stop) — stop recovery, no derivation.
     ///
     /// Every recovered error is pushed to `errors`. Returns `Some(tree)` on a
@@ -979,6 +979,11 @@ impl LalrParser {
                     if matches!(action, RecoveryAction::Stop) {
                         return Ok(None);
                     }
+                    // Lex failures always skip one character — the character
+                    // can't be lexed regardless of action. Delete and Resume
+                    // are equivalent here (Python always calls
+                    // `s.line_ctr.feed(...)` to advance past the un-lexable
+                    // character).
                     source.skip_char();
                     continue;
                 }
@@ -1007,9 +1012,17 @@ impl LalrParser {
                         RecoveryAction::Resume if fed == 0 => {
                             return Ok(None);
                         }
+                        RecoveryAction::Resume if is_end => {
+                            // At $END the handler fed corrective tokens;
+                            // retry $END in the (now-advanced) parser state.
+                        }
                         RecoveryAction::Resume => {
-                            // The handler fed corrective tokens; retry the
-                            // same lookahead (including $END) in the new state.
+                            // Python's resume_parse() always drops the errored
+                            // token; the handler's feeds advanced the parser
+                            // state, and the *next* token is parsed in that
+                            // new state — not the errored one.
+                            source.advance();
+                            source.on_delete();
                         }
                         RecoveryAction::Stop => {
                             return Ok(None);
