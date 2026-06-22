@@ -806,8 +806,9 @@ impl<'a> RecoveryContext<'a> {
             }
             Feed::Accepted(tree) => {
                 self.fed_count += 1;
-                self.accepted_tree = Some(tree.clone());
-                Ok(Some(tree))
+                let ret = tree.clone();
+                self.accepted_tree = Some(tree);
+                Ok(Some(ret))
             }
             Feed::Error(e) => {
                 *self.stack = snapshot;
@@ -1008,7 +1009,11 @@ impl LalrParser {
                     };
                     let mut ctx = RecoveryContext::new(&mut stack, &self.table);
                     let action = on_error(&err, &mut ctx);
+                    let handler_tree = ctx.accepted_tree.take();
                     errors.push(err);
+                    if let Some(tree) = handler_tree {
+                        return Ok(Some(tree));
+                    }
                     if matches!(action, RecoveryAction::Stop) {
                         return Ok(None);
                     }
