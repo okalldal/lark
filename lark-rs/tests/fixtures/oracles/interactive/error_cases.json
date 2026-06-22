@@ -111,6 +111,28 @@
     "reuse_error_kind": "UnexpectedCharacter"
   },
   {
+    "name": "contextual_reuse_after_parser_rejected_token",
+    "lexer": "contextual",
+    "grammar": "recovery_contextual",
+    "drive": "exhaust",
+    "text": "[}",
+    "initial_accepts": [
+      "LSQB"
+    ],
+    "manual_prefix": [],
+    "accepts_before_error": [
+      "LSQB"
+    ],
+    "raised": true,
+    "error_kind": "UnexpectedToken",
+    "error_token_type": "RBRACE",
+    "error_token_value": "}",
+    "accepts_after_error": [
+      "AWORD"
+    ],
+    "reuse_raised": false
+  },
+  {
     "name": "basic_feed_eof_before_exhaust",
     "lexer": "basic",
     "grammar": "arithmetic",
