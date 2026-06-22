@@ -1208,19 +1208,27 @@ impl GrammarCompiler {
                 )
             }
             (n, Some(m)) if n == m => {
-                // exact repetition: inline n copies
+                // Exact `x~n` — Python's `_generate_repeats(rule, n, n)`. For a small
+                // `n` (`n < REPEAT_BREAK_THRESHOLD`) this is one flat `__anon_rep`
+                // rule of `n` copies; for a large `n` it factors into shared sub-rules
+                // (`_add_repeat_rule`) so the grammar stays O(log n), not O(n).
                 let inner_sym = self.compile_expr(inner, parent)?;
-                let name = self.fresh_anon_rule(AnonKind::Rep);
-                let nt = NonTerminal::new(&name);
-                let syms: Vec<Symbol> = std::iter::repeat(inner_sym).take(n).collect();
-                self.rules
-                    .push(Rule::new(nt.clone(), syms, None, self.anon_opts(), 0));
-                Ok(Symbol::NonTerminal(nt))
+                Ok(self.generate_repeats(inner_sym, n, n))
             }
-            (n, max_opt) => {
-                // Range: generate rules for n..m repetitions
+            (n, Some(m)) => {
+                // Bounded range `x~n..m` — Python's `_generate_repeats(rule, n, m)`.
+                // Small ranges stay a flat per-count `__anon_rep_range` rule; large
+                // ones factor the `mn` and `diff = mx-mn` parts into shared sub-rules
+                // (`_add_repeat_rule` / `_add_repeat_opt_rule`) for O(log n) size.
                 let inner_sym = self.compile_expr(inner, parent)?;
-                let max_count = max_opt.unwrap_or(n + 10); // cap at n+10 for unbounded
+                Ok(self.generate_repeats(inner_sym, n, m))
+            }
+            (n, None) => {
+                // Unbounded `x~n..` (no max). Lark's surface grammar never produces
+                // this — `~` always carries a finite max — so it is a lark-rs-only
+                // edge; keep the historical `n+10`-capped flat expansion.
+                let inner_sym = self.compile_expr(inner, parent)?;
+                let max_count = n + 10;
                 let name = self.fresh_anon_rule(AnonKind::RepRange);
                 let nt = NonTerminal::new(&name);
                 for count in n..=max_count {
@@ -1232,5 +1240,173 @@ impl GrammarCompiler {
                 Ok(Symbol::NonTerminal(nt))
             }
         }
+    }
+
+    /// Lower a bounded `inner~mn..mx` into a single non-terminal that derives
+    /// between `mn` and `mx` copies of `inner` — Python Lark's
+    /// `EBNF_to_BNF._generate_repeats`. Below `REPEAT_BREAK_THRESHOLD` (50) the
+    /// naive flat expansion (one alternative/rule per count) is fine; at or above
+    /// it that lowering is O(mx²) in grammar size, so Python — and now lark-rs —
+    /// **factors** the repetition into a logarithmic stack of shared sub-rules
+    /// (#279 / bounty N9). Every sub-rule is a transparent `__anon_*` helper, so
+    /// the produced parse tree is byte-identical to the flat expansion either way;
+    /// only the build/size cost changes.
+    fn generate_repeats(&mut self, rule: Symbol, mn: usize, mx: usize) -> Symbol {
+        // Python's `load_grammar.REPEAT_BREAK_THRESHOLD`.
+        const REPEAT_BREAK_THRESHOLD: usize = 50;
+        // Python's `load_grammar.SMALL_FACTOR_THRESHOLD`.
+        const SMALL_FACTOR_THRESHOLD: usize = 5;
+
+        if mx < REPEAT_BREAK_THRESHOLD {
+            // Small case: the naive per-count expansion. One `__anon_rep` /
+            // `__anon_rep_range` rule, one alternative per count `n` in `mn..=mx`,
+            // each `n` copies of `rule` (Python's `expansions([expansion([rule]*n)])`).
+            let kind = if mn == mx {
+                AnonKind::Rep
+            } else {
+                AnonKind::RepRange
+            };
+            let name = self.fresh_anon_rule(kind);
+            let nt = NonTerminal::new(&name);
+            for (order, count) in (mn..=mx).enumerate() {
+                let syms: Vec<Symbol> = std::iter::repeat(rule.clone()).take(count).collect();
+                self.rules
+                    .push(Rule::new(nt.clone(), syms, None, self.anon_opts(), order));
+            }
+            return Symbol::NonTerminal(nt);
+        }
+
+        // Large case: factor `rule~mn..mx` as `rule~mn rule~0..(mx-mn)`. Split `mn`
+        // and `diff = mx-mn+1` with `small_factors`; build the `mn` part from
+        // `_add_repeat_rule` and the `0..diff` part from `_add_repeat_opt_rule`.
+        let mut mn_target = rule.clone();
+        for (a, b) in Self::small_factors(mn, SMALL_FACTOR_THRESHOLD) {
+            mn_target = self.add_repeat_rule(a, b, &mn_target, &rule);
+        }
+        if mx == mn {
+            return mn_target;
+        }
+
+        // `+1` because `_add_repeat_opt_rule` matches one less than its argument.
+        let diff = mx - mn + 1;
+        let diff_factors = Self::small_factors(diff, SMALL_FACTOR_THRESHOLD);
+        let mut diff_target = rule.clone(); // match `rule` 1 time
+        let mut diff_opt_target: Vec<Symbol> = Vec::new(); // match `rule` 0 times (ε)
+        let last = diff_factors.len() - 1;
+        for &(a, b) in &diff_factors[..last] {
+            diff_opt_target =
+                vec![self.add_repeat_opt_rule(a, b, &diff_target, &diff_opt_target, &rule)];
+            diff_target = self.add_repeat_rule(a, b, &diff_target, &rule);
+        }
+        let (a, b) = diff_factors[last];
+        diff_opt_target =
+            vec![self.add_repeat_opt_rule(a, b, &diff_target, &diff_opt_target, &rule)];
+
+        // Final rule: `mn_target` followed by the `0..diff` opt part.
+        let name = self.fresh_anon_rule(AnonKind::RepRange);
+        let nt = NonTerminal::new(&name);
+        let mut syms = vec![mn_target];
+        syms.extend(diff_opt_target);
+        self.rules
+            .push(Rule::new(nt.clone(), syms, None, self.anon_opts(), 0));
+        Symbol::NonTerminal(nt)
+    }
+
+    /// Python Lark's `utils.small_factors`: split `n` into `[(a, b), …]` such that
+    /// folding `acc = acc * a + b` (from `acc = 1`) reconstructs `n`, with each
+    /// `a + b <= max_factor`. Used to factor a large bounded repeat into a
+    /// logarithmic stack of sub-rules.
+    fn small_factors(n: usize, max_factor: usize) -> Vec<(usize, usize)> {
+        debug_assert!(max_factor > 2);
+        if n <= max_factor {
+            return vec![(n, 0)];
+        }
+        for a in (2..=max_factor).rev() {
+            let (r, b) = (n / a, n % a);
+            if a + b <= max_factor {
+                let mut factors = Self::small_factors(r, max_factor);
+                factors.push((a, b));
+                return factors;
+            }
+        }
+        unreachable!("small_factors failed to factorize {n}");
+    }
+
+    /// Python Lark's `EBNF_to_BNF._add_repeat_rule`: a transparent helper rule that
+    /// matches `target` `a` times then `atom` `b` times — `__anon: target*a atom*b`.
+    /// Cached on `(a, b, target, atom, opt)` (Python's `rules_cache`) so repeated
+    /// chunks are shared, which is what makes the factored lowering O(log n) in
+    /// size. The key omits keep-all to match Python's order-dependent shared cache
+    /// verbatim — see [`repeat_cache`](GrammarCompiler::repeat_cache).
+    fn add_repeat_rule(&mut self, a: usize, b: usize, target: &Symbol, atom: &Symbol) -> Symbol {
+        let key = (
+            a,
+            b,
+            target.name().to_string(),
+            atom.name().to_string(),
+            false,
+        );
+        if let Some(name) = self.repeat_cache.get(&key) {
+            return Symbol::NonTerminal(NonTerminal::new(name));
+        }
+        let name = self.fresh_anon_rule(AnonKind::Rep);
+        let nt = NonTerminal::new(&name);
+        let mut syms: Vec<Symbol> = std::iter::repeat(target.clone()).take(a).collect();
+        syms.extend(std::iter::repeat(atom.clone()).take(b));
+        self.rules
+            .push(Rule::new(nt.clone(), syms, None, self.anon_opts(), 0));
+        self.repeat_cache.insert(key, name);
+        Symbol::NonTerminal(nt)
+    }
+
+    /// Python Lark's `EBNF_to_BNF._add_repeat_opt_rule`: a transparent helper that
+    /// matches `atom` 0..(a*n+b)-1 times, built so it carries no shift/reduce
+    /// conflict (LALR-safe). Arms:
+    ///   - `target*i target_opt` for `i` in `0..a` (0 .. n*a-1 atoms), then
+    ///   - `target*a atom*i`     for `i` in `0..b` (n*a .. n*a+b-1 atoms).
+    /// `target_opt` is an *expansion* (a possibly-empty symbol sequence): the empty
+    /// ε on the first call, a prior opt-rule non-terminal thereafter. Cached on
+    /// `(a, b, target, atom, opt=true)` — Python's `rules_cache`. `target` and
+    /// `target_opt` are distinct generated non-terminals whose names already encode
+    /// the chain, so `(a, b, target, atom)` keys the opt-rule uniquely. Keep-all is
+    /// omitted to match Python's shared cache (see
+    /// [`add_repeat_rule`](Self::add_repeat_rule)).
+    fn add_repeat_opt_rule(
+        &mut self,
+        a: usize,
+        b: usize,
+        target: &Symbol,
+        target_opt: &[Symbol],
+        atom: &Symbol,
+    ) -> Symbol {
+        let key = (
+            a,
+            b,
+            target.name().to_string(),
+            atom.name().to_string(),
+            true,
+        );
+        if let Some(name) = self.repeat_cache.get(&key) {
+            return Symbol::NonTerminal(NonTerminal::new(name));
+        }
+        let name = self.fresh_anon_rule(AnonKind::RepRange);
+        let nt = NonTerminal::new(&name);
+        let mut order = 0;
+        for i in 0..a {
+            let mut syms: Vec<Symbol> = std::iter::repeat(target.clone()).take(i).collect();
+            syms.extend_from_slice(target_opt);
+            self.rules
+                .push(Rule::new(nt.clone(), syms, None, self.anon_opts(), order));
+            order += 1;
+        }
+        for i in 0..b {
+            let mut syms: Vec<Symbol> = std::iter::repeat(target.clone()).take(a).collect();
+            syms.extend(std::iter::repeat(atom.clone()).take(i));
+            self.rules
+                .push(Rule::new(nt.clone(), syms, None, self.anon_opts(), order));
+            order += 1;
+        }
+        self.repeat_cache.insert(key, name);
+        Symbol::NonTerminal(nt)
     }
 }
