@@ -755,3 +755,94 @@ fn test_interactive_with_start() {
     let p3 = lark.parse_interactive_with_start("a", "other").unwrap();
     assert!(p3.resume().is_err(), "'a' should fail under 'other' start");
 }
+
+/// Default-start selection must be deterministic and match Python Lark's
+/// `_verify_start` (issue #251). Python pins (verified against the oracle):
+///   * `start=['start','other']`, no explicit start → `ConfigurationError`
+///     "Lark initialized with more than 1 possible start rule. Must specify
+///     which start rule to parse" — NOT a nondeterministic `HashMap` key.
+///   * single configured start, no explicit start → use it.
+///   * explicit start not in the configured list → "Unknown start rule …".
+#[test]
+fn test_interactive_default_start_deterministic() {
+    let grammar = r#"
+        start: A
+        other: B
+        A: /a+/
+        B: /b+/
+    "#;
+
+    // >1 configured start, no explicit start → deterministic rejection.
+    let multi = Lark::new(
+        grammar,
+        LarkOptions {
+            parser: ParserAlgorithm::Lalr,
+            lexer: LexerType::Basic,
+            start: vec!["start".to_string(), "other".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    match multi.parse_interactive("a") {
+        Ok(_) => panic!("multiple starts + default must reject (Python ConfigurationError)"),
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("more than 1 possible start rule"),
+                "expected Python's >1-start message, got: {msg}"
+            );
+        }
+    }
+
+    // Single configured start, no explicit start → use it (parses cleanly).
+    let single = Lark::new(
+        grammar,
+        LarkOptions {
+            parser: ParserAlgorithm::Lalr,
+            lexer: LexerType::Basic,
+            start: vec!["start".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let p = single
+        .parse_interactive("a")
+        .expect("single start + default must succeed");
+    assert!(
+        p.resume().is_ok(),
+        "single default start should parse its input"
+    );
+
+    // Explicit start not in the configured list → Python's "Unknown start rule".
+    match multi.parse_interactive_with_start("a", "nope") {
+        Ok(_) => panic!("unknown explicit start must be rejected"),
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("Unknown start rule"),
+                "expected Python's unknown-start message, got: {msg}"
+            );
+        }
+    }
+
+    // Duplicate configured start (`['start','start']`) counts as >1, exactly as
+    // Python's `len(start_decls) > 1` check (verified against the oracle:
+    // ConfigurationError with `['start', 'start']`).
+    let dup = Lark::new(
+        grammar,
+        LarkOptions {
+            parser: ParserAlgorithm::Lalr,
+            lexer: LexerType::Basic,
+            start: vec!["start".to_string(), "start".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    match dup.parse_interactive("a") {
+        Ok(_) => panic!("duplicate start must be rejected as >1 (Python parity)"),
+        Err(e) => assert!(
+            e.to_string().contains("more than 1 possible start rule"),
+            "duplicate-start should hit the >1 message, got: {e}"
+        ),
+    }
+}
