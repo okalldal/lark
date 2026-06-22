@@ -49,8 +49,8 @@ fn assert_build_rejected(grammar: &str, o: LarkOptions, why: &str) {
 
 /// N1a (CRITICAL). `%override start: B` should *replace* `start`, so only `"b"`
 /// parses. lark-rs merges to `start: A | B` and wrongly accepts `"a"`.
+/// Fixed in #269: directives now reach the compiler, which replaces the body.
 #[test]
-#[ignore = "XFAIL (bounty N1a): %override merges instead of replacing"]
 fn n1a_override_replaces_not_merges() {
     let g = "start: A\n%override start: B\nA: \"a\"\nB: \"b\"\n";
     let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual))
@@ -63,18 +63,16 @@ fn n1a_override_replaces_not_merges() {
 }
 
 /// N1b (HIGH). `%override` of a rule that does not exist. Python:
-/// `GrammarError: Cannot override a nonexisting rule`.
+/// `GrammarError: Cannot override a nonexisting rule`. Fixed in #269.
 #[test]
-#[ignore = "XFAIL (bounty N1b): %override of a non-existent rule not rejected"]
 fn n1b_override_nonexistent_rejected() {
     let g = "%override foo: A\nstart: A\nA: \"a\"\n";
     assert_build_rejected(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual), "N1b");
 }
 
 /// N1c (HIGH). `%extend` of a rule that does not exist. Python:
-/// `GrammarError: Can't extend rule foo as it wasn't defined before`.
+/// `GrammarError: Can't extend rule foo as it wasn't defined before`. Fixed in #269.
 #[test]
-#[ignore = "XFAIL (bounty N1c): %extend of a non-existent rule not rejected"]
 fn n1c_extend_nonexistent_rejected() {
     let g = "%extend foo: A\nstart: A\nA: \"a\"\n";
     assert_build_rejected(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual), "N1c");

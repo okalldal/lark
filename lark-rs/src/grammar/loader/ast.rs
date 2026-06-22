@@ -13,6 +13,18 @@ pub(super) enum Item {
     DeclareItem(Vec<Symbol>),
 }
 
+/// The `%override` / `%extend` modifier a rule or terminal definition may carry.
+/// `Plain` is an ordinary (first) definition; `Override` replaces a pre-existing
+/// definition's body outright; `Extend` prepends new alternatives to a
+/// pre-existing definition. Both directives require the target to pre-exist —
+/// matching Python Lark's `_define(override=True)` / `_extend` (`load_grammar.py`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Directive {
+    Plain,
+    Override,
+    Extend,
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct RawRule {
     pub(super) name: String,
@@ -20,6 +32,7 @@ pub(super) struct RawRule {
     pub(super) params: Vec<String>,
     pub(super) priority: i32,
     pub(super) expansions: Vec<AliasedExpansion>,
+    pub(super) directive: Directive,
 }
 
 #[derive(Debug, Clone)]
@@ -60,6 +73,7 @@ pub(super) struct RawTerm {
     pub(super) name: String,
     pub(super) priority: i32,
     pub(super) expansions: Vec<AliasedExpansion>,
+    pub(super) directive: Directive,
 }
 
 #[derive(Debug, Clone)]
