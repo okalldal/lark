@@ -530,22 +530,38 @@ mod tests {
     }
 
     #[test]
-    fn underscore_rule_is_transparent_alias_overrides() {
-        // `_inner` is transparent; the aliased alternative is not. (The two
-        // alternatives must differ in expansion — same-expansion duplicates are
-        // a "Rules defined twice" load error, like Python Lark.)
-        let cg =
-            compile("start: _inner\n_inner: WORD -> kept | NUM\nWORD: /[a-z]+/\nNUM: /[0-9]+/\n");
+    fn alias_on_inlined_rule_is_rejected() {
+        // An alias on an inlined (`_`-prefixed) rule is rejected at load, exactly
+        // as Python Lark does ("Rule _inner is marked for expansion … isn't
+        // allowed to have aliases"; RC4a, issue #271). Earlier lark-rs accepted it
+        // and (over-permissively) emitted the aliased node — the
+        // unfalsifiable-permissiveness bug the ADR-0017 corollary forbids. This
+        // grammar can no longer reach `lower()`, so the alias-overrides-transparency
+        // interning path it used to exercise is now unreachable by construction.
+        let r = load_grammar(
+            "start: _inner\n_inner: WORD -> kept | NUM\nWORD: /[a-z]+/\nNUM: /[0-9]+/\n",
+            &["start".to_string()],
+            false,
+            false,
+        );
+        assert!(
+            r.is_err(),
+            "alias on an inlined _rule must be rejected at load (RC4a)"
+        );
+    }
+
+    #[test]
+    fn inline_rule_without_alias_stays_transparent() {
+        // A bare inlined rule (no alias, the only form Python permits) interns
+        // transparent — the surviving half of the old
+        // `underscore_rule_is_transparent_alias_overrides` pin.
+        let cg = compile("start: _inner\n_inner: WORD | NUM\nWORD: /[a-z]+/\nNUM: /[0-9]+/\n");
         let inner = cg.symbols.id("_inner").unwrap();
         assert!(cg.symbols.info(inner).inline);
-        let transparent: Vec<bool> = cg
+        assert!(cg
             .rules
             .iter()
             .filter(|r| r.origin == inner)
-            .map(|r| r.transparent)
-            .collect();
-        // One alternative is aliased (not transparent), one is bare (transparent).
-        assert!(transparent.contains(&true));
-        assert!(transparent.contains(&false));
+            .all(|r| r.transparent));
     }
 }

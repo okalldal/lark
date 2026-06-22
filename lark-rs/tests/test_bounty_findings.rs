@@ -125,7 +125,6 @@ fn rc3_colliding_optional_expansion_rejected() {
 /// `GrammarError: Rule _w is marked for expansion ... isn't allowed to have
 /// aliases`. lark-rs accepts and emits the aliased node.
 #[test]
-#[ignore = "XFAIL (bounty RC4a): alias on an inlined _rule not rejected"]
 fn rc4a_alias_on_inlined_rule_rejected() {
     let g = "start: _w\n_w: A -> aliased\nA: \"a\"\n";
     assert_build_rejected(g, ParserAlgorithm::Lalr, LexerType::Contextual, "RC4a");
@@ -135,7 +134,6 @@ fn rc4a_alias_on_inlined_rule_rejected() {
 /// Python: `GrammarError: Inlined rules (_rule) cannot use the ?rule modifier.`
 /// lark-rs accepts.
 #[test]
-#[ignore = "XFAIL (bounty RC4b): ?modifier on an inlined _rule not rejected"]
 fn rc4b_qmark_on_inlined_rule_rejected() {
     let g = "?_w: A\nstart: _w\nA: \"a\"\n";
     assert_build_rejected(g, ParserAlgorithm::Lalr, LexerType::Contextual, "RC4b");
@@ -146,7 +144,6 @@ fn rc4b_qmark_on_inlined_rule_rejected() {
 /// a rule reference: `GrammarError: Rule 'foo' used but not defined`. lark-rs
 /// treats it as a local alias and builds a `foo` node.
 #[test]
-#[ignore = "XFAIL (bounty RC4c): alias inside a parenthesized group not rejected"]
 fn rc4c_alias_inside_group_rejected() {
     let g = "start: (A -> foo) B\nA: \"a\"\nB: \"b\"\n";
     assert_build_rejected(g, ParserAlgorithm::Lalr, LexerType::Contextual, "RC4c");
