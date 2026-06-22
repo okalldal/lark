@@ -315,3 +315,101 @@ fn test_large_repeat_optional_rejects_without_blowup() {
         }
     }
 }
+
+// ─── #258: `([A])?` / `[A]~0..1` under maybe_placeholders=True must *build* ────────
+//
+// A lone `[X]` nested under an outer `?` (`([A])?`) — or its repeat form `[A]~0..1`
+// — is a *non*-colliding nullable Python accepts under both `maybe_placeholders`
+// modes. lark-rs used to reject it under `maybe_placeholders=True` with "unresolvable
+// LALR conflicts": the inner `[A]`'s placeholder-bearing absent arm and the outer
+// wrapper's ε each minted a `start ->` empty production, a reduce/reduce Python never
+// reports. The fix distributes the inner maybe's present + absent forms and lets the
+// empty-arm dedup collapse the two empties to one — keeping the right `None` count.
+//
+// Crucially `?` and `~0..1` *differ* in that count even though they share the
+// `(min: 0, max: Some(1))` AST shape: `?` is Python's `maybe()` (the empty arm
+// inherits the inner `[A]`'s placeholder → `""` is `[None]`), whereas `~0..1` is
+// `_generate_repeats` whose `k == 0` count is a pristine empty → `""` is `[]`. The
+// `RepeatKind` tag carries that distinction (#258).
+
+/// Parse `input` under a chosen `maybe_placeholders`, returning the tree shape so an
+/// absent-case `None` count can be pinned against Python.
+fn parsed_with(grammar: &str, maybe_placeholders: bool, input: &str) -> String {
+    let lark = build_with(grammar, maybe_placeholders)
+        .unwrap_or_else(|e| panic!("{grammar:?} (mp={maybe_placeholders}) should build: {e}"));
+    parsed(&lark, input)
+}
+
+#[test]
+fn test_nested_maybe_optional_builds_and_parses_under_placeholders() {
+    // The headline #258 repro: `([A])?` must build under maybe_placeholders=True and
+    // parse `""`→`[None]` (the inner `[A]`'s placeholder survives the outer `?`) and
+    // `"a"`→`[A]`, byte-identical to Python's oracle.
+    let g = "start: ([A])?\nA: \"a\"\n";
+    assert_eq!(parsed_with(g, true, ""), "start[_]");
+    assert_eq!(parsed_with(g, true, "a"), "start[A:a]");
+    // maybe_placeholders=False: the placeholder is dropped, so `""`→`[]`.
+    assert_eq!(parsed_with(g, false, ""), "start[]");
+    assert_eq!(parsed_with(g, false, "a"), "start[A:a]");
+}
+
+#[test]
+fn test_repeat_optional_zero_one_builds_and_parses_under_placeholders() {
+    // The `~0..1` repeat form. Same acceptance, but its `k == 0` count is a pristine
+    // empty — *no* placeholder — so `""`→`[]` even under maybe_placeholders=True
+    // (where `([A])?` yields `[None]`). This is the load-bearing `?`-vs-`~` split.
+    let g = "start: [A]~0..1\nA: \"a\"\n";
+    assert_eq!(parsed_with(g, true, ""), "start[]");
+    assert_eq!(parsed_with(g, true, "a"), "start[A:a]");
+    assert_eq!(parsed_with(g, false, ""), "start[]");
+    assert_eq!(parsed_with(g, false, "a"), "start[A:a]");
+}
+
+#[test]
+fn test_nested_maybe_placeholder_sibling_shapes_match_oracle() {
+    // Differential audit (#258): sibling nullable shapes vs Python under
+    // maybe_placeholders=True, pinning the absent-case `None` count.
+    //   `[A]?`        ≡ `([A])?` — empty is `[None]` (the `?`/`maybe` placeholder).
+    assert_eq!(parsed_with("start: [A]?\nA: \"a\"\n", true, ""), "start[_]");
+    //   `([A])~0..1`  ≡ `[A]~0..1` — empty is `[]` (the `~0..1` pristine `k==0`).
+    assert_eq!(
+        parsed_with("start: ([A])~0..1\nA: \"a\"\n", true, ""),
+        "start[]"
+    );
+    //   `[[A]]`       — a doubly-nested maybe is one placeholder deep: empty `[None]`.
+    assert_eq!(
+        parsed_with("start: [[A]]\nA: \"a\"\n", true, ""),
+        "start[_]"
+    );
+    //   `[A]~1..1`    — the lone `k==1` count is the maybe present, absent → `[None]`.
+    assert_eq!(
+        parsed_with("start: [A]~1..1\nA: \"a\"\n", true, ""),
+        "start[_]"
+    );
+    //   plain `A?` / `A~0..1` carry no placeholder (no `[]`): empty is `[]`.
+    assert_eq!(parsed_with("start: A?\nA: \"a\"\n", true, ""), "start[]");
+    assert_eq!(
+        parsed_with("start: A~0..1\nA: \"a\"\n", true, ""),
+        "start[]"
+    );
+}
+
+#[test]
+fn test_nested_maybe_with_tail_placeholder_counts_match_oracle() {
+    // `([A] B)?` is non-colliding (`A B | B | ε`), and the absent-`A` present arm
+    // carries one leading `None` before `B`. Pin the placeholder positions vs Python:
+    //   `"ab"`→`[A, B]`, `"b"`→`[None, B]`, `""`→`[]` (the outer `?` pristine ε).
+    let g = "start: ([A] B)?\nA: \"a\"\nB: \"b\"\n";
+    assert_eq!(parsed_with(g, true, "ab"), "start[A:a,B:b]");
+    assert_eq!(parsed_with(g, true, "b"), "start[_,B:b]");
+    assert_eq!(parsed_with(g, true, ""), "start[]");
+}
+
+#[test]
+fn test_nested_maybe_collision_still_rejected_under_placeholders() {
+    // Guardrail: the fix must not start *accepting* a genuine collision. `([A] [A])?`
+    // (two single-`A` present arms) and `([A])? C` (the absent-`[A]` + outer-ε both
+    // reduce to `start -> C`) are rejected by Python under both modes (#252).
+    assert_rejected_both_modes("start: ([A] [A])?\nA: \"a\"\n", "([A] [A])?");
+    assert_rejected_both_modes("start: ([A])? C\nA: \"a\"\nC: \"c\"\n", "([A])? C");
+}

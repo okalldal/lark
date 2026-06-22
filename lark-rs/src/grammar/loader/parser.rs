@@ -318,6 +318,7 @@ impl<'a> GrammarParser<'a> {
                     inner: Box::new(atom),
                     min: 1,
                     max: None,
+                    kind: RepeatKind::Op,
                 })
             }
             Some(Tok::Op('*')) => {
@@ -326,6 +327,7 @@ impl<'a> GrammarParser<'a> {
                     inner: Box::new(atom),
                     min: 0,
                     max: None,
+                    kind: RepeatKind::Op,
                 })
             }
             Some(Tok::Op('?')) => {
@@ -334,6 +336,7 @@ impl<'a> GrammarParser<'a> {
                     inner: Box::new(atom),
                     min: 0,
                     max: Some(1),
+                    kind: RepeatKind::Op,
                 })
             }
             Some(Tok::Tilde) => {
@@ -370,6 +373,7 @@ impl<'a> GrammarParser<'a> {
                     inner: Box::new(atom),
                     min,
                     max,
+                    kind: RepeatKind::Tilde,
                 })
             }
             _ => Ok(atom),
