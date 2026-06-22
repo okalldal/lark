@@ -305,9 +305,16 @@ pub(super) fn global_flag_prefix(global_flags: u32) -> String {
     }
 }
 
-/// Python Lark's terminal ordering: `(-priority, -max_width, -len(pattern), id)`.
-/// Regex terminals have unbounded `max_width` and therefore sort ahead of fixed
-/// strings; the leftmost-first alternation then matches them greedily.
+/// Python Lark's terminal ordering: `(-priority, -max_width, -len(value), name)`
+/// (`lark/lexer.py:583`). An *unbounded* regex (`max_width = ∞`, mapped here from
+/// `None → usize::MAX`) sorts ahead of any finite-width terminal, so the
+/// leftmost-first alternation matches it greedily; a *finite* regex sorts by its
+/// real character width, not as unbounded (#268, RC5). The third key is the raw
+/// pattern length — Python's `len(pattern.value)`, the source with flags stored
+/// separately — so a flagged terminal's baked `(?i:…)` wrapper does not leak a
+/// phantom rank boost into the tiebreak (#268, N2). `as_regex_str().len()` would
+/// reintroduce both bugs (byte length of the *wrapped* source), so use
+/// [`Pattern::raw_value_len`].
 fn sort_terminals(terms: &mut [(SymbolId, &TerminalDef)]) {
     terms.sort_by(|(a_id, a), (b_id, b)| {
         let aw = a.pattern.max_width().unwrap_or(usize::MAX);
@@ -315,12 +322,7 @@ fn sort_terminals(terms: &mut [(SymbolId, &TerminalDef)]) {
         b.priority
             .cmp(&a.priority)
             .then_with(|| bw.cmp(&aw))
-            .then_with(|| {
-                b.pattern
-                    .as_regex_str()
-                    .len()
-                    .cmp(&a.pattern.as_regex_str().len())
-            })
+            .then_with(|| b.pattern.raw_value_len().cmp(&a.pattern.raw_value_len()))
             .then_with(|| a.name.cmp(&b.name))
             .then_with(|| a_id.cmp(b_id))
     });

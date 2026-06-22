@@ -136,8 +136,7 @@ fn n1_extend_imported_terminal_keeps_both() {
 /// wrapped len 7) outranks the equal `A: /aa/` and the name-asc tiebreak is
 /// subverted: Python emits `A`, lark-rs emits `B`. Distinct from RC5 (max_width):
 /// both widths tie; the bug is the flag-wrapper length leaking into the tiebreak.
-#[test]
-#[ignore = "XFAIL (bounty N2): flagged regex terminal mis-ranked by wrapped length"]
+#[test] // FIXED (#268): raw-pattern-length tiebreak strips the baked flag wrapper.
 fn n2_flagged_terminal_ranking() {
     let g = "start: A | B\nA: /aa/\nB: /aa/i\n";
     let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual))

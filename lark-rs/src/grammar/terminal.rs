@@ -16,11 +16,44 @@ impl Pattern {
         }
     }
 
-    /// Maximum number of characters this pattern can match (None = unbounded).
+    /// Maximum number of **characters** this pattern can match (`None` = unbounded),
+    /// mirroring Python Lark's `Pattern.max_width` (`sre_parse.getwidth()[1]`, which
+    /// is `MAXWIDTH`/∞ for an unbounded pattern). This is the load-bearing second key
+    /// of the terminal-ordering sort (`lark/lexer.py:583`,
+    /// `(-priority, -max_width, -len(value), name)`): a finite regex must sort
+    /// *behind* a genuinely-unbounded one, so a maximal greedy match wins (#268, RC5).
+    ///
+    /// For a regex we parse its source to a `regex-syntax` HIR and walk it counting
+    /// characters; a pattern the parser rejects (lookaround/backref idioms — Python
+    /// `re` constructs the linear engine doesn't model) falls back to `None`
+    /// (unbounded), the conservative "sort first" default and the same outcome
+    /// Python's own `MAXWIDTH` fallback produces for a pattern `sre_parse` can't size.
     pub fn max_width(&self) -> Option<usize> {
         match self {
-            Pattern::Str(p) => Some(p.value.len()),
-            Pattern::Re(_) => None,
+            Pattern::Str(p) => Some(p.value.chars().count()),
+            Pattern::Re(p) => regex_syntax::parse(&p.pattern)
+                .ok()
+                .and_then(|hir| hir_max_width_chars(&hir)),
+        }
+    }
+
+    /// The raw pattern length Python's terminal-ordering tiebreak uses
+    /// (`len(pattern.value)` — the source *without* any flag wrapper, since Python
+    /// stores flags separately on the `Pattern`). lark-rs's loader bakes a terminal's
+    /// flags into the stored regex string as a scoped group (`(?i:aa)`), so a naive
+    /// `pattern.len()` would count the wrapper and give a flagged terminal a phantom
+    /// rank boost (#268, N2). Stripping the whole-pattern flag wrapper first restores
+    /// parity: `/aa/` and `/aa/i` both report a raw length of 2 and the tiebreak falls
+    /// through to the name sort, exactly as in Python.
+    pub fn raw_value_len(&self) -> usize {
+        match self {
+            // A `PatternStr`'s value is the literal text; its `i` flag is stored on
+            // the struct, never in `value` — so `chars().count()` is `len(value)`.
+            Pattern::Str(p) => p.value.chars().count(),
+            Pattern::Re(p) => {
+                let (raw, _) = crate::lexer::strip_whole_pattern_flag_wrapper(&p.pattern, p.flags);
+                raw.chars().count()
+            }
         }
     }
 
@@ -42,6 +75,40 @@ impl Pattern {
                 }
             }
         }
+    }
+}
+
+/// Maximum match width of a `regex-syntax` HIR, counted in **characters**
+/// (`None` = unbounded). Mirrors Python's `sre_parse.getwidth()[1]`: a `+`/`*`/open
+/// `{n,}` repetition is unbounded; a literal counts its code points (so a multibyte
+/// literal is *one* char, not its UTF-8 byte length — the HIR's own `maximum_len`
+/// reports bytes, which would diverge from Python on non-ASCII); a class is one char;
+/// concatenation sums, alternation takes the max, and a lookaround assertion is
+/// zero-width.
+fn hir_max_width_chars(hir: &regex_syntax::hir::Hir) -> Option<usize> {
+    use regex_syntax::hir::HirKind;
+    match hir.kind() {
+        HirKind::Empty | HirKind::Look(_) => Some(0),
+        HirKind::Literal(lit) => Some(
+            // HIR literals are UTF-8 bytes; count code points for char-width parity.
+            std::str::from_utf8(&lit.0)
+                .map(|s| s.chars().count())
+                .unwrap_or(lit.0.len()),
+        ),
+        HirKind::Class(_) => Some(1),
+        HirKind::Repetition(r) => match r.max {
+            None => None, // unbounded (`+`, `*`, `{n,}`)
+            Some(max) => hir_max_width_chars(&r.sub).map(|w| w.saturating_mul(max as usize)),
+        },
+        HirKind::Capture(c) => hir_max_width_chars(&c.sub),
+        HirKind::Concat(subs) => subs
+            .iter()
+            .map(hir_max_width_chars)
+            .try_fold(0usize, |acc, w| w.map(|w| acc.saturating_add(w))),
+        HirKind::Alternation(subs) => subs
+            .iter()
+            .map(hir_max_width_chars)
+            .try_fold(0usize, |acc, w| w.map(|w| acc.max(w))),
     }
 }
 

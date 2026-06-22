@@ -528,8 +528,8 @@ static DATA: GrammarData = GrammarData {
     n_terminals: 10,
     symbol_names: &[
         "$END",
-        "NAME",
         "NUMBER",
+        "NAME",
         "__IGNORE_0",
         "LPAR",
         "MINUS",
@@ -562,8 +562,8 @@ static DATA: GrammarData = GrammarData {
     ],
     action: &[
         &[(1, Action::Shift(1)), (2, Action::Shift(2)), (4, Action::Shift(3)), (5, Action::Shift(4)), (6, Action::Shift(5))],
-        &[(0, Action::Reduce(11)), (5, Action::Reduce(11)), (6, Action::Reduce(11)), (7, Action::Reduce(11)), (8, Action::Reduce(11)), (9, Action::Reduce(11))],
         &[(0, Action::Reduce(10)), (5, Action::Reduce(10)), (6, Action::Reduce(10)), (7, Action::Reduce(10)), (8, Action::Reduce(10)), (9, Action::Reduce(10))],
+        &[(0, Action::Reduce(11)), (5, Action::Reduce(11)), (6, Action::Reduce(11)), (7, Action::Reduce(11)), (8, Action::Reduce(11)), (9, Action::Reduce(11))],
         &[(1, Action::Shift(1)), (2, Action::Shift(2)), (4, Action::Shift(3)), (5, Action::Shift(4)), (6, Action::Shift(5))],
         &[(1, Action::Shift(1)), (2, Action::Shift(2)), (4, Action::Shift(3)), (5, Action::Shift(4)), (6, Action::Shift(5))],
         &[(1, Action::Shift(1)), (2, Action::Shift(2)), (4, Action::Shift(3)), (5, Action::Shift(4)), (6, Action::Shift(5))],
@@ -614,15 +614,15 @@ static DATA: GrammarData = GrammarData {
     start_default: "start",
     global_prefix: "",
     scan_groups: &[
-        (2, "(?:(?:(?:(?:(?:(?:(?:(?:[0-9]))+)\\.(?:(?:(?:(?:[0-9]))+))?)|(?:\\.(?:(?:(?:[0-9]))+)))(?:(?:(?:e|E)(?:(?:\\+|\\-)?(?:(?:(?:[0-9]))+))))?)|(?:(?:(?:(?:[0-9]))+)(?:(?:e|E)(?:(?:\\+|\\-)?(?:(?:(?:[0-9]))+))))))|(?:(?:(?:(?:[0-9]))+))"),
-        (1, "(?:_|(?:(?:(?:[A-Z]))|(?:(?:[a-z]))))(?:(?:_|(?:(?:(?:[A-Z]))|(?:(?:[a-z])))|(?:[0-9])))*"),
+        (1, "(?:(?:(?:(?:(?:(?:(?:(?:[0-9]))+)\\.(?:(?:(?:(?:[0-9]))+))?)|(?:\\.(?:(?:(?:[0-9]))+)))(?:(?:(?:e|E)(?:(?:\\+|\\-)?(?:(?:(?:[0-9]))+))))?)|(?:(?:(?:(?:[0-9]))+)(?:(?:e|E)(?:(?:\\+|\\-)?(?:(?:(?:[0-9]))+))))))|(?:(?:(?:(?:[0-9]))+))"),
+        (2, "(?:_|(?:(?:(?:[A-Z]))|(?:(?:[a-z]))))(?:(?:_|(?:(?:(?:[A-Z]))|(?:(?:[a-z])))|(?:[0-9])))*"),
         (3, "(?:(?: |\\t))+"),
         (4, "\\("),
         (5, "\\-"),
         (6, "\\+"),
         (7, "\\)"),
-        (9, "\\*"),
         (8, "/"),
+        (9, "\\*"),
     ],
     unless: &[
     ],
