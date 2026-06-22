@@ -75,7 +75,53 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": 14,
+            "trace": [
+              {
+                "kind": "token",
+                "name": "NUMBER"
+              },
+              {
+                "kind": "rule",
+                "name": "factor"
+              },
+              {
+                "kind": "rule",
+                "name": "term"
+              },
+              {
+                "kind": "token",
+                "name": "NUMBER"
+              },
+              {
+                "kind": "rule",
+                "name": "factor"
+              },
+              {
+                "kind": "token",
+                "name": "NUMBER"
+              },
+              {
+                "kind": "rule",
+                "name": "factor"
+              },
+              {
+                "kind": "rule",
+                "name": "term"
+              },
+              {
+                "kind": "rule",
+                "name": "expr"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         },
         "lalr_contextual": {
           "status": "ok",
@@ -121,7 +167,53 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": 14,
+            "trace": [
+              {
+                "kind": "token",
+                "name": "NUMBER"
+              },
+              {
+                "kind": "rule",
+                "name": "factor"
+              },
+              {
+                "kind": "rule",
+                "name": "term"
+              },
+              {
+                "kind": "token",
+                "name": "NUMBER"
+              },
+              {
+                "kind": "rule",
+                "name": "factor"
+              },
+              {
+                "kind": "token",
+                "name": "NUMBER"
+              },
+              {
+                "kind": "rule",
+                "name": "factor"
+              },
+              {
+                "kind": "rule",
+                "name": "term"
+              },
+              {
+                "kind": "rule",
+                "name": "expr"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         }
       }
     },
@@ -199,7 +291,44 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": {
+              "object": [
+                [
+                  "\"key\"",
+                  42
+                ]
+              ]
+            },
+            "trace": [
+              {
+                "kind": "token",
+                "name": "ESCAPED_STRING"
+              },
+              {
+                "kind": "token",
+                "name": "NUMBER"
+              },
+              {
+                "kind": "rule",
+                "name": "number"
+              },
+              {
+                "kind": "rule",
+                "name": "pair"
+              },
+              {
+                "kind": "rule",
+                "name": "object"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         },
         "lalr_contextual": {
           "status": "ok",
@@ -236,7 +365,44 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": {
+              "object": [
+                [
+                  "\"key\"",
+                  42
+                ]
+              ]
+            },
+            "trace": [
+              {
+                "kind": "token",
+                "name": "ESCAPED_STRING"
+              },
+              {
+                "kind": "token",
+                "name": "NUMBER"
+              },
+              {
+                "kind": "rule",
+                "name": "number"
+              },
+              {
+                "kind": "rule",
+                "name": "pair"
+              },
+              {
+                "kind": "rule",
+                "name": "object"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         }
       }
     },
@@ -297,7 +463,50 @@
               "kind": "token",
               "name": "NAME"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "greeting",
+                  "children": [
+                    "HELLO",
+                    {
+                      "type": "token",
+                      "token_type": "PUNCT",
+                      "value": "!"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "greeting",
+                  "children": [
+                    "WORLD",
+                    {
+                      "type": "token",
+                      "token_type": "PUNCT",
+                      "value": "."
+                    }
+                  ]
+                }
+              ]
+            },
+            "trace": [
+              {
+                "kind": "token",
+                "name": "NAME"
+              },
+              {
+                "kind": "token",
+                "name": "NAME"
+              }
+            ]
+          }
         },
         "lalr_contextual": {
           "status": "ok",
@@ -340,7 +549,50 @@
               "kind": "token",
               "name": "NAME"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "greeting",
+                  "children": [
+                    "HELLO",
+                    {
+                      "type": "token",
+                      "token_type": "PUNCT",
+                      "value": "!"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "greeting",
+                  "children": [
+                    "WORLD",
+                    {
+                      "type": "token",
+                      "token_type": "PUNCT",
+                      "value": "."
+                    }
+                  ]
+                }
+              ]
+            },
+            "trace": [
+              {
+                "kind": "token",
+                "name": "NAME"
+              },
+              {
+                "kind": "token",
+                "name": "NAME"
+              }
+            ]
+          }
         }
       }
     },
@@ -392,7 +644,33 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "got_a",
+              "got_b",
+              "got_a"
+            ],
+            "trace": [
+              {
+                "kind": "rule",
+                "name": "item_a"
+              },
+              {
+                "kind": "rule",
+                "name": "item_b"
+              },
+              {
+                "kind": "rule",
+                "name": "item_a"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         },
         "lalr_contextual": {
           "status": "ok",
@@ -418,7 +696,33 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "got_a",
+              "got_b",
+              "got_a"
+            ],
+            "trace": [
+              {
+                "kind": "rule",
+                "name": "item_a"
+              },
+              {
+                "kind": "rule",
+                "name": "item_b"
+              },
+              {
+                "kind": "rule",
+                "name": "item_a"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         }
       }
     },
@@ -459,7 +763,25 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": "FOO,BAR",
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         },
         "lalr_contextual": {
           "status": "ok",
@@ -477,7 +799,25 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": "FOO,BAR",
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         }
       }
     },
@@ -520,7 +860,25 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": "HELLO",
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "inner"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         },
         "lalr_contextual": {
           "status": "ok",
@@ -538,7 +896,25 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": "HELLO",
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "inner"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         }
       }
     },
@@ -598,7 +974,41 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": "FOO+BAR+BAZ",
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         },
         "lalr_contextual": {
           "status": "ok",
@@ -632,7 +1042,41 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": "FOO+BAR+BAZ",
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         }
       }
     },
@@ -685,7 +1129,33 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": "foo,bar",
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         },
         "lalr_contextual": {
           "status": "ok",
@@ -711,7 +1181,33 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": "foo,bar",
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         }
       }
     },
@@ -755,7 +1251,24 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "hello",
+              null
+            ],
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         },
         "lalr_contextual": {
           "status": "ok",
@@ -772,7 +1285,24 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "hello",
+              null
+            ],
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         }
       }
     },
@@ -815,7 +1345,23 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "hello"
+            ],
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         },
         "lalr_contextual": {
           "status": "ok",
@@ -831,7 +1377,23 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "hello"
+            ],
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         }
       }
     },
@@ -892,7 +1454,40 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "HELLO",
+              "WORLD"
+            ],
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "token",
+                "name": "NOISE"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         },
         "lalr_contextual": {
           "status": "ok",
@@ -925,7 +1520,40 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "HELLO",
+              "WORLD"
+            ],
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "token",
+                "name": "NOISE"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         }
       }
     },
@@ -993,7 +1621,48 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "HELLO",
+              {
+                "type": "unknown",
+                "repr": "lark.visitors.Discard"
+              },
+              "WORLD"
+            ],
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "keep"
+              },
+              {
+                "kind": "token",
+                "name": "NUMBER"
+              },
+              {
+                "kind": "rule",
+                "name": "drop"
+              },
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "keep"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         },
         "lalr_contextual": {
           "status": "ok",
@@ -1030,7 +1699,48 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "HELLO",
+              {
+                "type": "unknown",
+                "repr": "lark.visitors.Discard"
+              },
+              "WORLD"
+            ],
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "keep"
+              },
+              {
+                "kind": "token",
+                "name": "NUMBER"
+              },
+              {
+                "kind": "rule",
+                "name": "drop"
+              },
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "keep"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         }
       }
     },
@@ -1088,7 +1798,38 @@
               "kind": "default_rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "HELLO",
+              [
+                42
+              ]
+            ],
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "alpha"
+              },
+              {
+                "kind": "token",
+                "name": "NUMBER"
+              },
+              {
+                "kind": "default_rule",
+                "name": "beta"
+              },
+              {
+                "kind": "default_rule",
+                "name": "start"
+              }
+            ]
+          }
         },
         "lalr_contextual": {
           "status": "ok",
@@ -1119,7 +1860,38 @@
               "kind": "default_rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "HELLO",
+              [
+                42
+              ]
+            ],
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "alpha"
+              },
+              {
+                "kind": "token",
+                "name": "NUMBER"
+              },
+              {
+                "kind": "default_rule",
+                "name": "beta"
+              },
+              {
+                "kind": "default_rule",
+                "name": "start"
+              }
+            ]
+          }
         }
       }
     },
@@ -1185,7 +1957,45 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "HELLO",
+              {
+                "type": "token",
+                "token_type": "NUMBER",
+                "value": "42"
+              },
+              "WORLD"
+            ],
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         },
         "lalr_contextual": {
           "status": "ok",
@@ -1223,7 +2033,45 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "HELLO",
+              {
+                "type": "token",
+                "token_type": "NUMBER",
+                "value": "42"
+              },
+              "WORLD"
+            ],
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         }
       }
     },
@@ -1319,7 +2167,69 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "first",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "A",
+                      "value": "a"
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "B",
+                      "value": "b"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "second",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "C",
+                      "value": "c"
+                    }
+                  ]
+                }
+              ]
+            },
+            "trace": [
+              {
+                "kind": "token",
+                "name": "A"
+              },
+              {
+                "kind": "token",
+                "name": "B"
+              },
+              {
+                "kind": "rule",
+                "name": "first"
+              },
+              {
+                "kind": "token",
+                "name": "C"
+              },
+              {
+                "kind": "rule",
+                "name": "second"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         },
         "lalr_contextual": {
           "status": "ok",
@@ -1381,7 +2291,910 @@
               "kind": "rule",
               "name": "start"
             }
-          ]
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": {
+              "type": "tree",
+              "data": "start",
+              "children": [
+                {
+                  "type": "tree",
+                  "data": "first",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "A",
+                      "value": "a"
+                    },
+                    {
+                      "type": "token",
+                      "token_type": "B",
+                      "value": "b"
+                    }
+                  ]
+                },
+                {
+                  "type": "tree",
+                  "data": "second",
+                  "children": [
+                    {
+                      "type": "token",
+                      "token_type": "C",
+                      "value": "c"
+                    }
+                  ]
+                }
+              ]
+            },
+            "trace": [
+              {
+                "kind": "token",
+                "name": "A"
+              },
+              {
+                "kind": "token",
+                "name": "B"
+              },
+              {
+                "kind": "rule",
+                "name": "first"
+              },
+              {
+                "kind": "token",
+                "name": "C"
+              },
+              {
+                "kind": "rule",
+                "name": "second"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "unless_keyword_retype",
+      "description": "A string-literal keyword terminal (IF) retypes a NAME match via Lark's `unless` mechanism; the token's retyped type drives callback dispatch \u2014 IF tokens hit the IF method, plain identifiers hit NAME",
+      "grammar": "\n            start: word+\n            word: NAME | IF\n            IF: \"if\"\n            NAME: /[a-z]+/\n            %ignore /\\s+/\n        ",
+      "input": "if foo if bar",
+      "rule_actions": {
+        "start": {
+          "action": "wrap_list"
+        },
+        "word": {
+          "action": "first_child"
+        }
+      },
+      "token_actions": {
+        "IF": {
+          "action": "prefix",
+          "value": "kw:"
+        },
+        "NAME": {
+          "action": "upper"
+        }
+      },
+      "default_rule": null,
+      "default_token": null,
+      "visit_tokens": true,
+      "parser_options": {},
+      "configs": {
+        "lalr_basic": {
+          "status": "ok",
+          "value": [
+            "kw:if",
+            "FOO",
+            "kw:if",
+            "BAR"
+          ],
+          "trace": [
+            {
+              "kind": "token",
+              "name": "IF"
+            },
+            {
+              "kind": "rule",
+              "name": "word"
+            },
+            {
+              "kind": "token",
+              "name": "NAME"
+            },
+            {
+              "kind": "rule",
+              "name": "word"
+            },
+            {
+              "kind": "token",
+              "name": "IF"
+            },
+            {
+              "kind": "rule",
+              "name": "word"
+            },
+            {
+              "kind": "token",
+              "name": "NAME"
+            },
+            {
+              "kind": "rule",
+              "name": "word"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "kw:if",
+              "FOO",
+              "kw:if",
+              "BAR"
+            ],
+            "trace": [
+              {
+                "kind": "token",
+                "name": "IF"
+              },
+              {
+                "kind": "rule",
+                "name": "word"
+              },
+              {
+                "kind": "token",
+                "name": "NAME"
+              },
+              {
+                "kind": "rule",
+                "name": "word"
+              },
+              {
+                "kind": "token",
+                "name": "IF"
+              },
+              {
+                "kind": "rule",
+                "name": "word"
+              },
+              {
+                "kind": "token",
+                "name": "NAME"
+              },
+              {
+                "kind": "rule",
+                "name": "word"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
+        },
+        "lalr_contextual": {
+          "status": "ok",
+          "value": [
+            "kw:if",
+            "FOO",
+            "kw:if",
+            "BAR"
+          ],
+          "trace": [
+            {
+              "kind": "token",
+              "name": "IF"
+            },
+            {
+              "kind": "rule",
+              "name": "word"
+            },
+            {
+              "kind": "token",
+              "name": "NAME"
+            },
+            {
+              "kind": "rule",
+              "name": "word"
+            },
+            {
+              "kind": "token",
+              "name": "IF"
+            },
+            {
+              "kind": "rule",
+              "name": "word"
+            },
+            {
+              "kind": "token",
+              "name": "NAME"
+            },
+            {
+              "kind": "rule",
+              "name": "word"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "kw:if",
+              "FOO",
+              "kw:if",
+              "BAR"
+            ],
+            "trace": [
+              {
+                "kind": "token",
+                "name": "IF"
+              },
+              {
+                "kind": "rule",
+                "name": "word"
+              },
+              {
+                "kind": "token",
+                "name": "NAME"
+              },
+              {
+                "kind": "rule",
+                "name": "word"
+              },
+              {
+                "kind": "token",
+                "name": "IF"
+              },
+              {
+                "kind": "rule",
+                "name": "word"
+              },
+              {
+                "kind": "token",
+                "name": "NAME"
+              },
+              {
+                "kind": "rule",
+                "name": "word"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "ignored_token_no_callback",
+      "description": "A %ignore'd NAMED terminal (WS) never reaches the tree, so its callback never fires even though a WS method is defined \u2014 ignored tokens do not surface to the transformer",
+      "grammar": "\n            start: WORD+\n            WORD: /[a-z]+/\n            WS: /\\s+/\n            %ignore WS\n        ",
+      "input": "foo bar baz",
+      "rule_actions": {
+        "start": {
+          "action": "wrap_list"
+        }
+      },
+      "token_actions": {
+        "WORD": {
+          "action": "upper"
+        },
+        "WS": {
+          "action": "discard"
+        }
+      },
+      "default_rule": null,
+      "default_token": null,
+      "visit_tokens": true,
+      "parser_options": {},
+      "configs": {
+        "lalr_basic": {
+          "status": "ok",
+          "value": [
+            "FOO",
+            "BAR",
+            "BAZ"
+          ],
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "FOO",
+              "BAR",
+              "BAZ"
+            ],
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
+        },
+        "lalr_contextual": {
+          "status": "ok",
+          "value": [
+            "FOO",
+            "BAR",
+            "BAZ"
+          ],
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "FOO",
+              "BAR",
+              "BAZ"
+            ],
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "discard_token_maybe_placeholders",
+      "description": "A token callback returns Discard for a PRESENT optional [B]: the child is removed entirely (no None hole left behind), distinct from the maybe_placeholders None inserted only for an ABSENT optional",
+      "grammar": "\n            start: A [B] C\n            A: \"a\"\n            B: \"b\"\n            C: \"c\"\n            %ignore /\\s+/\n        ",
+      "input": "a b c",
+      "rule_actions": {
+        "start": {
+          "action": "wrap_list"
+        }
+      },
+      "token_actions": {
+        "A": {
+          "action": "stringify"
+        },
+        "B": {
+          "action": "discard"
+        },
+        "C": {
+          "action": "stringify"
+        }
+      },
+      "default_rule": null,
+      "default_token": null,
+      "visit_tokens": true,
+      "parser_options": {
+        "maybe_placeholders": true
+      },
+      "configs": {
+        "lalr_basic": {
+          "status": "ok",
+          "value": [
+            "a",
+            "c"
+          ],
+          "trace": [
+            {
+              "kind": "token",
+              "name": "A"
+            },
+            {
+              "kind": "token",
+              "name": "B"
+            },
+            {
+              "kind": "token",
+              "name": "C"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "a",
+              {
+                "type": "unknown",
+                "repr": "lark.visitors.Discard"
+              },
+              "c"
+            ],
+            "trace": [
+              {
+                "kind": "token",
+                "name": "A"
+              },
+              {
+                "kind": "token",
+                "name": "B"
+              },
+              {
+                "kind": "token",
+                "name": "C"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
+        },
+        "lalr_contextual": {
+          "status": "ok",
+          "value": [
+            "a",
+            "c"
+          ],
+          "trace": [
+            {
+              "kind": "token",
+              "name": "A"
+            },
+            {
+              "kind": "token",
+              "name": "B"
+            },
+            {
+              "kind": "token",
+              "name": "C"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "a",
+              {
+                "type": "unknown",
+                "repr": "lark.visitors.Discard"
+              },
+              "c"
+            ],
+            "trace": [
+              {
+                "kind": "token",
+                "name": "A"
+              },
+              {
+                "kind": "token",
+                "name": "B"
+              },
+              {
+                "kind": "token",
+                "name": "C"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "discard_token_maybe_placeholders_absent",
+      "description": "Same grammar as discard_token_maybe_placeholders but with [B] ABSENT: maybe_placeholders inserts a None at B's position and the B token callback never fires \u2014 pins the sibling-position semantics",
+      "grammar": "\n            start: A [B] C\n            A: \"a\"\n            B: \"b\"\n            C: \"c\"\n            %ignore /\\s+/\n        ",
+      "input": "a c",
+      "rule_actions": {
+        "start": {
+          "action": "wrap_list"
+        }
+      },
+      "token_actions": {
+        "A": {
+          "action": "stringify"
+        },
+        "B": {
+          "action": "discard"
+        },
+        "C": {
+          "action": "stringify"
+        }
+      },
+      "default_rule": null,
+      "default_token": null,
+      "visit_tokens": true,
+      "parser_options": {
+        "maybe_placeholders": true
+      },
+      "configs": {
+        "lalr_basic": {
+          "status": "ok",
+          "value": [
+            "a",
+            null,
+            "c"
+          ],
+          "trace": [
+            {
+              "kind": "token",
+              "name": "A"
+            },
+            {
+              "kind": "token",
+              "name": "C"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "a",
+              null,
+              "c"
+            ],
+            "trace": [
+              {
+                "kind": "token",
+                "name": "A"
+              },
+              {
+                "kind": "token",
+                "name": "C"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
+        },
+        "lalr_contextual": {
+          "status": "ok",
+          "value": [
+            "a",
+            null,
+            "c"
+          ],
+          "trace": [
+            {
+              "kind": "token",
+              "name": "A"
+            },
+            {
+              "kind": "token",
+              "name": "C"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "a",
+              null,
+              "c"
+            ],
+            "trace": [
+              {
+                "kind": "token",
+                "name": "A"
+              },
+              {
+                "kind": "token",
+                "name": "C"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "template_expanded",
+      "description": "A parameterized template `sep{item, COMMA}` expands but dispatches on the template SOURCE name (`sep`); the named COMMA punctuation is kept (a named terminal surfaces) while default-handled rules nest",
+      "grammar": "\n            start: sep{item, COMMA}\n            sep{x, s}: x (s x)*\n            item: WORD\n            WORD: /[a-z]+/\n            COMMA: \",\"\n            %ignore /\\s+/\n        ",
+      "input": "a, b, c",
+      "rule_actions": {
+        "start": {
+          "action": "first_child"
+        },
+        "item": {
+          "action": "first_child"
+        },
+        "sep": {
+          "action": "wrap_list"
+        }
+      },
+      "token_actions": {
+        "WORD": {
+          "action": "upper"
+        },
+        "COMMA": {
+          "action": "stringify"
+        }
+      },
+      "default_rule": null,
+      "default_token": null,
+      "visit_tokens": true,
+      "parser_options": {},
+      "configs": {
+        "lalr_basic": {
+          "status": "ok",
+          "value": [
+            "A",
+            ",",
+            "B",
+            ",",
+            "C"
+          ],
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "token",
+              "name": "COMMA"
+            },
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "token",
+              "name": "COMMA"
+            },
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "rule",
+              "name": "sep"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "A",
+              ",",
+              "B",
+              ",",
+              "C"
+            ],
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "token",
+                "name": "COMMA"
+              },
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "token",
+                "name": "COMMA"
+              },
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "rule",
+                "name": "sep"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
+        },
+        "lalr_contextual": {
+          "status": "ok",
+          "value": [
+            "A",
+            ",",
+            "B",
+            ",",
+            "C"
+          ],
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "token",
+              "name": "COMMA"
+            },
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "token",
+              "name": "COMMA"
+            },
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "rule",
+              "name": "sep"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ],
+          "embedded": {
+            "status": "ok",
+            "value": [
+              "A",
+              ",",
+              "B",
+              ",",
+              "C"
+            ],
+            "trace": [
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "token",
+                "name": "COMMA"
+              },
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "token",
+                "name": "COMMA"
+              },
+              {
+                "kind": "token",
+                "name": "WORD"
+              },
+              {
+                "kind": "rule",
+                "name": "item"
+              },
+              {
+                "kind": "rule",
+                "name": "sep"
+              },
+              {
+                "kind": "rule",
+                "name": "start"
+              }
+            ]
+          }
         }
       }
     }

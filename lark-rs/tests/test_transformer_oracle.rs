@@ -30,6 +30,14 @@
 /// with no method is materialized as a Token-compatible value **silently**.
 /// Naïvely tracing every token is the failure mode this gate exists to catch.
 ///
+/// C4 (#229) hardens the parity edges on top of C3: keyword/identifier `unless`
+/// retyping, ignored tokens not surfacing, `Discard` from token callbacks under
+/// `maybe_placeholders`, template-expanded rules, and the `__default_token__`
+/// embedded-vs-post-parse divergence. Each fixture also records the *embedded*
+/// transformer path (`transformer=…` at parse time) alongside the post-parse one,
+/// which settles RFC §5's open question: the embedded path does **not** wire
+/// `__default_token__` (so the fixture pins the divergence rather than guessing).
+///
 /// Scope: LALR + basic and contextual lexer. No Earley/CYK (Python rejects
 /// embedded transform there). No public API.
 mod common;
@@ -141,8 +149,10 @@ fn validate_trace_entry(entry: &Value, path: &str) {
     assert_is_string(&obj["name"], &format!("{path}.name"));
 }
 
-/// Validate a config result block (one parser x lexer configuration).
-fn validate_config_result(result: &Value, path: &str) {
+/// Validate a config result block (one parser x lexer configuration). When
+/// `expect_embedded` is true the block must also carry an `embedded` sub-block
+/// (C4, #229), itself a config-result shape but with no further nesting.
+fn validate_config_result(result: &Value, path: &str, expect_embedded: bool) {
     assert_is_object(result, path);
     let obj = result.as_object().unwrap();
 
@@ -169,6 +179,19 @@ fn validate_config_result(result: &Value, path: &str) {
             let trace = obj["trace"].as_array().unwrap();
             for (i, entry) in trace.iter().enumerate() {
                 validate_trace_entry(entry, &format!("{path}.trace[{i}]"));
+            }
+
+            if expect_embedded {
+                // The `embedded` block (C4, #229) records the *embedded*
+                // transformer path (transformer=… at parse time) alongside the
+                // post-parse one, so the fixture pins the RFC §5 divergence
+                // rather than guessing it. It is itself a config-result shape,
+                // but never nests a further `embedded` block.
+                assert!(
+                    obj.contains_key("embedded"),
+                    "{path}: status=ok must have an 'embedded' block (C4 / #229)"
+                );
+                validate_config_result(&obj["embedded"], &format!("{path}.embedded"), false);
             }
         }
         "build_error" | "parse_error" | "transform_error" => {
@@ -667,6 +690,15 @@ mod transformer {
 use lark_rs::{Lark, LarkOptions, LexerType, ParserAlgorithm};
 use transformer::PythonTransformerOracleBuilder;
 
+/// The (config_key, lexer) pairs every fixture is generated for. One source of
+/// truth so individual tests don't re-derive the config_key→lexer mapping (a
+/// stray `if key == "lalr_basic" { … } else { … }` silently mis-maps a typo'd
+/// key to Contextual).
+const CONFIGS: [(&str, LexerType); 2] = [
+    ("lalr_basic", LexerType::Basic),
+    ("lalr_contextual", LexerType::Contextual),
+];
+
 /// Build a LALR parser for a fixture case under the given lexer, honoring the
 /// `parser_options` the oracle was generated with (`keep_all_tokens`,
 /// `maybe_placeholders`).
@@ -830,7 +862,7 @@ fn test_transformer_oracle_schema_valid() {
         let configs = obj["configs"].as_object().unwrap();
         assert!(!configs.is_empty(), "{cp}.configs must not be empty");
         for (cfg_key, cfg_val) in configs {
-            validate_config_result(cfg_val, &format!("{cp}.configs.{cfg_key}"));
+            validate_config_result(cfg_val, &format!("{cp}.configs.{cfg_key}"), true);
         }
     }
 }
@@ -915,6 +947,12 @@ fn test_transformer_oracle_has_required_coverage() {
         "default_rule_handler",
         "default_token_handler",
         "callback_order_trace",
+        // C4 (#229): the hardened parity edges.
+        "unless_keyword_retype",
+        "ignored_token_no_callback",
+        "discard_token_maybe_placeholders",
+        "discard_token_maybe_placeholders_absent",
+        "template_expanded",
     ];
 
     for req in &required {
@@ -965,15 +1003,10 @@ fn test_transformer_backend_value_and_trace_parity() {
     let data = load_transformer_cases();
     let cases = data["cases"].as_array().unwrap();
 
-    let configs = [
-        ("lalr_basic", LexerType::Basic),
-        ("lalr_contextual", LexerType::Contextual),
-    ];
-
     let mut checked = 0usize;
     for case in cases {
         let name = case["name"].as_str().unwrap();
-        for (config_key, lexer) in &configs {
+        for (config_key, lexer) in &CONFIGS {
             if let Err(e) = check_case_config(case, config_key, lexer.clone()) {
                 panic!("case {name}:{config_key} failed parity:\n{e}");
             }
@@ -1009,5 +1042,169 @@ fn test_engine_token_vs_visible_callback_distinction() {
     assert!(
         trace.iter().all(|t| t.name != "PUNCT"),
         "PUNCT has no spec method and must not produce a visible callback: {trace:?}"
+    );
+}
+
+// ── C4 (#229): the hardened parity edges, pinned individually ────────────────
+
+/// Find a fixture case by name, panicking if absent.
+fn case_by_name<'a>(data: &'a Value, name: &str) -> &'a Value {
+    data["cases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == name)
+        .unwrap_or_else(|| panic!("fixture case {name:?} is missing"))
+}
+
+/// C4 (d) — the RFC §5 open question, **settled by the fixture**: does the
+/// *embedded* transformer path observe `__default_token__`? It does **not**.
+/// Python's `_get_lexer_callbacks` only wires a terminal callback for terminals
+/// the transformer defines an explicit method for, so the embedded path leaves a
+/// default-handled token as a plain `Token` and never logs a `default_token`
+/// trace entry — whereas the post-parse `.transform(tree)` path *does* invoke it.
+/// The C3 backend reproduces the *post-parse* semantics; this test asserts the
+/// committed fixture pins both sides of the divergence so a future embedded
+/// `parse_into` backend (C7+) has a falsifiable target.
+#[test]
+fn test_default_token_embedded_vs_postparse_divergence() {
+    let data = load_transformer_cases();
+    let case = case_by_name(&data, "default_token_handler");
+
+    for (config_key, lexer) in &CONFIGS {
+        let cfg = &case["configs"][config_key];
+        let postparse_trace = cfg["trace"].as_array().unwrap();
+        let embedded = &cfg["embedded"];
+        let embedded_trace = embedded["trace"].as_array().unwrap();
+
+        let has_default_token = |trace: &[Value]| {
+            trace
+                .iter()
+                .any(|e| e["kind"] == "default_token" && e["name"] == "NUMBER")
+        };
+
+        // Post-parse observes __default_token__ for NUMBER…
+        assert!(
+            has_default_token(postparse_trace),
+            "{config_key}: post-parse trace must include a default_token entry for NUMBER"
+        );
+        // …the embedded path does not.
+        assert!(
+            !has_default_token(embedded_trace),
+            "{config_key}: embedded trace must NOT include a default_token entry \
+             (RFC §5: embedded path does not wire __default_token__)"
+        );
+        // The values diverge too: post-parse converts NUMBER via the default
+        // handler ("tok:42"); embedded keeps the raw Token.
+        assert_eq!(
+            cfg["value"][1],
+            Value::String("tok:42".to_string()),
+            "{config_key}: post-parse default-handles NUMBER"
+        );
+        assert_eq!(
+            embedded["value"][1]["type"], "token",
+            "{config_key}: embedded keeps NUMBER as a raw Token"
+        );
+
+        // The C3 (post-parse) backend must reproduce the post-parse trace.
+        let lark = build_lark(case, lexer.clone()).unwrap();
+        let tree = lark.parse(case["input"].as_str().unwrap()).unwrap();
+        let (_v, trace) = PythonTransformerOracleBuilder::from_case(case).transform(&tree);
+        assert!(
+            trace
+                .iter()
+                .any(|t| t.kind == "default_token" && t.name == "NUMBER"),
+            "{config_key}: C3 backend models the post-parse path and must log default_token"
+        );
+    }
+}
+
+/// C4 (a) — keyword/identifier `unless` retyping drives callback dispatch. The
+/// string-literal keyword `IF` retypes a `NAME` match; the retyped `type_` is
+/// what the transformer keys on, so `if` hits the `IF` method (prefix `kw:`) and
+/// a plain identifier hits the `NAME` method (uppercase).
+#[test]
+fn test_unless_keyword_retype_dispatch() {
+    let data = load_transformer_cases();
+    let case = case_by_name(&data, "unless_keyword_retype");
+    let lark = build_lark(case, LexerType::Contextual).unwrap();
+    let tree = lark.parse(case["input"].as_str().unwrap()).unwrap();
+    let (value, trace) = PythonTransformerOracleBuilder::from_case(case).transform(&tree);
+
+    assert_eq!(value.to_json(), case["configs"]["lalr_contextual"]["value"]);
+    // Both an IF callback (retyped keyword) and a NAME callback (identifier) fire.
+    assert!(
+        trace.iter().any(|t| t.kind == "token" && t.name == "IF"),
+        "retyped keyword must dispatch to the IF method: {trace:?}"
+    );
+    assert!(
+        trace.iter().any(|t| t.kind == "token" && t.name == "NAME"),
+        "plain identifier must dispatch to the NAME method: {trace:?}"
+    );
+}
+
+/// C4 (a) — an `%ignore`'d terminal never surfaces, so its callback never fires
+/// even when a method for it exists.
+#[test]
+fn test_ignored_token_never_calls_back() {
+    let data = load_transformer_cases();
+    let case = case_by_name(&data, "ignored_token_no_callback");
+    let lark = build_lark(case, LexerType::Basic).unwrap();
+    let tree = lark.parse(case["input"].as_str().unwrap()).unwrap();
+    let (value, trace) = PythonTransformerOracleBuilder::from_case(case).transform(&tree);
+
+    // Value parity confirms the transform actually ran end-to-end (three
+    // uppercased WORDs), so the negative trace check below is not vacuous.
+    assert_eq!(value.to_json(), case["configs"]["lalr_basic"]["value"]);
+    // The WORD callbacks DID fire (positive anchor) …
+    assert_eq!(
+        trace.iter().filter(|t| t.name == "WORD").count(),
+        3,
+        "all three WORD callbacks must fire: {trace:?}"
+    );
+    // … while the ignored WS terminal never surfaces, so its method never runs.
+    assert!(
+        trace.iter().all(|t| t.name != "WS"),
+        "an ignored WS terminal must never produce a callback: {trace:?}"
+    );
+}
+
+/// C4 (b) — `Discard` from a token callback under `maybe_placeholders`: a
+/// PRESENT optional that the callback discards is removed entirely (no `None`
+/// hole), distinct from the `None` placeholder inserted for an ABSENT optional.
+#[test]
+fn test_discard_token_under_maybe_placeholders() {
+    let data = load_transformer_cases();
+
+    // Present-and-discarded: result is [a, c] — no hole left at B's slot.
+    let present = case_by_name(&data, "discard_token_maybe_placeholders");
+    let lark = build_lark(present, LexerType::Basic).unwrap();
+    let tree = lark.parse(present["input"].as_str().unwrap()).unwrap();
+    let (value, _t) = PythonTransformerOracleBuilder::from_case(present).transform(&tree);
+    assert_eq!(
+        value.to_json(),
+        serde_json::json!(["a", "c"]),
+        "a discarded PRESENT optional leaves no placeholder hole"
+    );
+
+    // Absent: maybe_placeholders inserts a None at B's slot, B callback silent.
+    let absent = case_by_name(&data, "discard_token_maybe_placeholders_absent");
+    let lark = build_lark(absent, LexerType::Basic).unwrap();
+    let tree = lark.parse(absent["input"].as_str().unwrap()).unwrap();
+    let (value, trace) = PythonTransformerOracleBuilder::from_case(absent).transform(&tree);
+    assert_eq!(
+        value.to_json(),
+        serde_json::json!(["a", null, "c"]),
+        "an ABSENT optional yields a None placeholder under maybe_placeholders"
+    );
+    // Positive anchor: the A and C callbacks DID fire, so the negative B check
+    // below cannot pass vacuously on an empty trace.
+    assert!(
+        trace.iter().any(|t| t.name == "A") && trace.iter().any(|t| t.name == "C"),
+        "the A and C callbacks must fire: {trace:?}"
+    );
+    assert!(
+        trace.iter().all(|t| t.name != "B"),
+        "the B callback must not fire for an absent optional: {trace:?}"
     );
 }
