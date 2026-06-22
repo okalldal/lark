@@ -255,9 +255,8 @@ impl BasicLexer {
 }
 
 /// A running source cursor (byte offset + 1-based line/column), advanced one
-/// matched span or one skipped character at a time. Shared by the eager
-/// [`BasicLexer::lex`] and the recovering [`BasicLexer::lex_recovering`] so the
-/// newline-aware position bookkeeping lives in exactly one place.
+/// matched span or one skipped character at a time. Used by [`BasicLexer::lex`]
+/// so the newline-aware position bookkeeping lives in exactly one place.
 struct LexCursor {
     pos: usize,
     line: usize,
@@ -366,66 +365,6 @@ impl BasicLexer {
     /// lazy basic-recovering source.
     pub fn is_ignored(&self, id: SymbolId) -> bool {
         self.ignore.contains(&id)
-    }
-
-    /// Lex with character-level error recovery (issue #93). Mirrors [`lex`] but,
-    /// at an un-lexable position (no terminal matches), records an
-    /// [`UnexpectedCharacter`] error, consults `on_error`, and — if it returns
-    /// `true` — skips **exactly one character** and resumes, rather than aborting.
-    /// This is the lexer-side analogue of Python Lark's `on_error` loop, whose
-    /// `UnexpectedCharacters` branch feeds one char forward
-    /// (`s.line_ctr.feed(text[p:p+1])`) and resumes: the handler therefore fires
-    /// once per skipped character (two consecutive bad chars = two invocations),
-    /// and every skip is appended to `errors`.
-    ///
-    /// Returns the surviving token stream (terminated by `$END`); the caller then
-    /// drives the token-level recovery loop over it, so token-level and
-    /// character-level deletions accumulate into the same `errors` list. If
-    /// `on_error` returns `false` on a skip, lexing stops there and the tokens
-    /// collected so far are returned (with `$END` appended at that position) —
-    /// the lexer equivalent of the token loop's "stop with the partial".
-    ///
-    /// [`lex`]: BasicLexer::lex
-    /// [`UnexpectedCharacter`]: crate::error::ParseError::UnexpectedCharacter
-    pub fn lex_recovering(
-        &self,
-        text: &str,
-        on_error: &mut dyn FnMut(&ParseError) -> bool,
-        errors: &mut Vec<ParseError>,
-    ) -> Vec<Token> {
-        let mut tokens = Vec::new();
-        let mut cur = LexCursor::new();
-
-        while cur.pos < text.len() {
-            match self.scanner.match_at(text, cur.pos) {
-                Some((id, value)) => {
-                    if let Some(tok) = self.make_token(&mut cur, id, value) {
-                        tokens.push(tok);
-                    }
-                }
-                None => {
-                    let ch = text[cur.pos..].chars().next().unwrap();
-                    let err = ParseError::UnexpectedCharacter {
-                        ch,
-                        line: cur.line,
-                        col: cur.col,
-                        pos: cur.pos,
-                        expected: "any token".to_string(),
-                    };
-                    let cont = on_error(&err);
-                    errors.push(err);
-                    if !cont {
-                        break;
-                    }
-                    // Skip exactly one character and resume, as Python advances
-                    // its line counter by `text[p:p+1]`.
-                    cur.feed(&text[cur.pos..cur.pos + ch.len_utf8()]);
-                }
-            }
-        }
-
-        tokens.push(Token::end().with_position(cur.line, cur.col, cur.pos, cur.pos));
-        tokens
     }
 }
 

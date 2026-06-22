@@ -55,7 +55,15 @@ without feeding any tokens, the loop treats it as `Stop`.
   for the duration of the handler call; no self-referential ownership.
 - **Failed feeds are transactional.** If `feed_token` returns `Err`, the stack
   is rolled back, so candidate-insertion patterns (try feed, fall back to
-  `Delete`) are safe.
+  `Delete`) are safe. The common case (token has no action in the current state)
+  is checked before cloning the stack, so rejected candidates pay O(1).
+- **ACCEPT inside the handler is handled.** If the handler's `feed_token` reaches
+  ACCEPT (the corrective tokens complete the parse), the tree is saved and the
+  recovery loop short-circuits — it does not leave the stack wedged. Further
+  feeds after ACCEPT are rejected.
+- **Dead code removed.** `BasicLexer::lex_recovering` (the old eager two-phase
+  recovery path) is unused since the `BasicRecovering` lazy source replaced it;
+  removed along with stale docstring references.
 - **Ruled out:** handing `&mut InteractiveParser` directly. If a future use case
   demands the full interactive cursor inside `on_error`, this ADR should be
   revisited.
@@ -63,4 +71,9 @@ without feeding any tokens, the loop treats it as `Stop`.
   `test_resume_drops_errored_token_at_non_eof`,
   `test_resume_at_eof_inserts_missing_token`,
   `test_resume_no_progress_guard_stops`,
-  `test_feed_rollback_is_transactional`, and the full oracle bank.
+  `test_feed_rollback_is_transactional`,
+  `test_feed_accept_inside_handler_returns_tree`,
+  `test_feed_after_accept_is_rejected`,
+  `test_mixed_resume_and_delete_across_errors`,
+  `test_no_action_fast_path_preserves_stack`,
+  and the full oracle bank.

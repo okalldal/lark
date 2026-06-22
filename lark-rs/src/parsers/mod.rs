@@ -148,16 +148,16 @@ fn lalr_recover(
 /// token-deletion recovery happens *downstream* of that injection — a deleted token
 /// never reaches the indenter, so its bracket/indent bookkeeping cannot desync.
 ///
-/// Concretely: lex with the basic recovery lexer ([`BasicLexer::lex_recovering`], so
-/// an un-lexable character is skipped one at a time, issue #93), run the indenter
-/// over the surviving stream, then drive the recovering LALR loop over the indented
-/// tokens. An indenter error (e.g. a `DedentError`: a dedent to an unknown column) is
-/// raised by the postlex hook itself, *before* any parser token error — Python
-/// re-raises it through the postlex generator without consulting `on_error`. lark-rs
-/// surfaces it the same way: as a hard [`ParseError`] → `LarkError`, distinct from the
-/// `Ok(tree: None)` premature-`$END` convention.
+/// Concretely: lex lazily with a [`BasicRecovering`] source (so an un-lexable
+/// character is skipped one at a time, issue #93), run the streaming indenter over
+/// each token as it is produced, then drive the recovering LALR loop over the
+/// indented tokens. An indenter error (e.g. a `DedentError`: a dedent to an unknown
+/// column) is raised by the postlex hook itself, *before* any parser token error —
+/// Python re-raises it through the postlex generator without consulting `on_error`.
+/// lark-rs surfaces it the same way: as a hard [`ParseError`] → `LarkError`, distinct
+/// from the `Ok(tree: None)` premature-`$END` convention.
 ///
-/// [`BasicLexer::lex_recovering`]: crate::lexer::BasicLexer::lex_recovering
+/// [`BasicRecovering`]: super::token_source::BasicRecovering
 fn lalr_recover_postlex(
     parser: &LalrParser,
     lexer: &BasicLexer,
