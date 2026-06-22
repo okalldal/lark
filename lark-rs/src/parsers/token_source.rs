@@ -147,13 +147,14 @@ impl<'a> Contextual<'a> {
                 return Ok(Token::end().with_position(
                     self.state.line,
                     self.state.col,
-                    self.state.pos,
-                    self.state.pos,
+                    self.state.char_pos,
+                    self.state.char_pos,
                 ));
             }
             let matched = self.lexer.next_token(
                 self.state.text,
                 self.state.pos,
+                self.state.char_pos,
                 parser_state,
                 self.state.line,
                 self.state.col,
@@ -245,13 +246,14 @@ impl<'a> ContextualRecovering<'a> {
                 return Ok(Token::end().with_position(
                     self.state.line,
                     self.state.col,
-                    self.state.pos,
-                    self.state.pos,
+                    self.state.char_pos,
+                    self.state.char_pos,
                 ));
             }
             match self.lexer.next_token(
                 self.state.text,
                 self.state.pos,
+                self.state.char_pos,
                 parser_state,
                 self.state.line,
                 self.state.col,
@@ -277,6 +279,7 @@ impl<'a> ContextualRecovering<'a> {
                     if let Some(tok) = self.lexer.next_root_token(
                         self.state.text,
                         self.state.pos,
+                        self.state.char_pos,
                         self.state.line,
                         self.state.col,
                     ) {
@@ -359,13 +362,14 @@ impl<'a> BasicRecovering<'a> {
                 return Ok(Token::end().with_position(
                     self.state.line,
                     self.state.col,
-                    self.state.pos,
-                    self.state.pos,
+                    self.state.char_pos,
+                    self.state.char_pos,
                 ));
             }
             match self.lexer.next_token_at(
                 self.state.text,
                 self.state.pos,
+                self.state.char_pos,
                 self.state.line,
                 self.state.col,
             ) {
