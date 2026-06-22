@@ -241,25 +241,90 @@ fn rc8_zero_width_regexp_dynamic_rejected() {
 /// RC9 (HIGH). `expand1` (`?rule`) fails to collapse a single placeholder-`None`
 /// child. With `maybe_placeholders=true`, `?w: [A]` on empty input has exactly one
 /// child — the `None` placeholder. Python collapses the single-child `?` rule,
-/// yielding `start[None]`. lark-rs keeps the `w` wrapper: `start[w[None]]`. With a
+/// yielding `start[None]`. lark-rs kept the `w` wrapper: `start[w[None]]`. With a
 /// real single child both collapse correctly, isolating the bug to the lone-`None`
-/// case. Backend-independent (LALR + Earley).
+/// case. Backend-independent (LALR + Earley); now FIXED — the `?` collapse is purely
+/// arity-1, never value-typed (a lone `None` collapses like any single child).
 #[test]
-#[ignore = "XFAIL (bounty RC9): expand1 keeps wrapper around a lone placeholder-None"]
 fn rc9_expand1_collapses_lone_placeholder() {
     let g = "start: w\n?w: [A]\nA: \"a\"\n";
-    let lark = build(g, ParserAlgorithm::Lalr, LexerType::Contextual, true)
-        .expect("RC9: grammar should build");
-    let tree = lark.parse("").expect("RC9: empty input parses");
-    let ParseTree::Tree(t) = tree else {
-        panic!("RC9: expected a `start` tree");
-    };
-    assert_eq!(t.children.len(), 1, "RC9: start should have one child");
-    assert!(
-        matches!(t.children[0], Child::None),
-        "RC9: expected start[None] (expand1 collapsed the ?w wrapper), got {:?}",
-        t.children[0]
-    );
+    for (parser, lexer) in [
+        (ParserAlgorithm::Lalr, LexerType::Contextual),
+        (ParserAlgorithm::Earley, LexerType::Dynamic),
+    ] {
+        let who = format!("{parser:?}");
+        let lark = build(g, parser, lexer, true).expect("RC9: grammar should build");
+        let tree = lark.parse("").expect("RC9: empty input parses");
+        let ParseTree::Tree(t) = tree else {
+            panic!("RC9 ({who}): expected a `start` tree");
+        };
+        assert_eq!(
+            t.children.len(),
+            1,
+            "RC9 ({who}): start should have one child"
+        );
+        assert!(
+            matches!(t.children[0], Child::None),
+            "RC9 ({who}): expected start[None] (expand1 collapsed the ?w wrapper), got {:?}",
+            t.children[0]
+        );
+    }
+}
+
+/// RC9 / V3 (HIGH, template variant). The same lone-`None` collapse through
+/// parameterized-template instantiation. `?start: sep{i, ","}` / `?i: [A]` expands
+/// each separated element through `?i`; on the empty branch each instantiation has a
+/// lone `None` child that must collapse. Python yields `sep[None]` for `""` (the
+/// `?start` collapses to its single `sep` child, whose lone element is the `None`),
+/// `sep[a]` for `"a"`, and `sep[a, a, …]` for the separated forms — never a
+/// surviving `i[None]`/`i[A]` wrapper. lark-rs previously left multiple un-collapsed
+/// wrappers, one per element. Backend-independent (LALR + Earley).
+#[test]
+fn rc9_v3_expand1_collapses_lone_placeholder_via_template() {
+    let g = "?start: sep{i, \",\"}\n?i: [A]\nA: \"a\"\nsep{x, s}: x (s x)*\n";
+    // Expected children of the (collapsed-to-`sep`) root, per input. `""` is the
+    // lone-`None` case; the rest exercise the real-single-child collapse per element.
+    let cases: [(&str, &[Option<&str>]); 4] = [
+        ("", &[None]),
+        ("a", &[Some("a")]),
+        ("a,a", &[Some("a"), Some("a")]),
+        ("a,a,a", &[Some("a"), Some("a"), Some("a")]),
+    ];
+    for (parser, lexer) in [
+        (ParserAlgorithm::Lalr, LexerType::Contextual),
+        (ParserAlgorithm::Earley, LexerType::Dynamic),
+    ] {
+        let who = format!("{parser:?}");
+        let lark = build(g, parser, lexer, true).expect("V3: grammar should build");
+        for (input, expected) in cases.iter() {
+            let tree = lark.parse(input).expect("V3: input parses");
+            let ParseTree::Tree(t) = tree else {
+                panic!("V3 ({who}, {input:?}): expected a `sep` tree");
+            };
+            assert_eq!(
+                t.data, "sep",
+                "V3 ({who}, {input:?}): ?start should collapse to its single sep child"
+            );
+            assert_eq!(
+                t.children.len(),
+                expected.len(),
+                "V3 ({who}, {input:?}): child count, got {:?}",
+                t.children
+            );
+            for (child, want) in t.children.iter().zip(expected.iter()) {
+                match (child, want) {
+                    (Child::None, None) => {}
+                    (Child::Token(tok), Some(text)) => {
+                        assert_eq!(&tok.value, text, "V3 ({who}, {input:?}): token text mismatch")
+                    }
+                    other => panic!(
+                        "V3 ({who}, {input:?}): expected {want:?}, got {:?} (no i[] wrapper allowed)",
+                        other.0
+                    ),
+                }
+            }
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -175,16 +175,19 @@ impl<'g> TreeOutputBuilder<'g> {
         if rule.transparent {
             // `_rule` / `__anon_*`: splice children into the parent.
             Slot::Inline(children)
-        } else if rule.options.expand1
-            && rule.alias.is_none()
-            && children.len() == 1
-            && !matches!(children[0], Child::None)
-        {
-            // `?rule` with a single child: return that child directly (Token or Tree).
+        } else if rule.options.expand1 && rule.alias.is_none() && children.len() == 1 {
+            // `?rule` with a single child: return that child directly. A lone `None`
+            // placeholder (`?w: [A]` on the absent branch) collapses exactly like a
+            // real single child — Python yields `start[None]`, not `start[w[None]]`
+            // (bounty RC9; the `?` collapse is purely arity-1, never value-typed).
+            // An empty `?` rule (`?w: A?` with zero children) is *not* len==1 and so
+            // correctly keeps its wrapper (`start[w[]]`).
             match children.pop().unwrap() {
                 Child::Tree(t) => Slot::Tree(t),
                 Child::Token(t) => Slot::Token(t),
-                Child::None => unreachable!("guarded above"),
+                // A bare `None` has no Token/Tree slot; carry it as a single-None
+                // inline so the parent splices exactly one `Child::None` in place.
+                Child::None => Slot::Inline(vec![Child::None]),
             }
         } else {
             Slot::Tree(Tree::new(rule.tree_name.clone(), children))
