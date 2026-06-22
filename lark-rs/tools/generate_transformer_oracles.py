@@ -763,8 +763,10 @@ def run_case_embedded(case: dict, parser: str, lexer: str) -> dict:
 
     The transformer is attached at parse time (`Lark(..., transformer=T())`), so
     Python applies callbacks during the parse rather than in a post-parse
-    `.transform(tree)` walk.  For these specs the two paths differ in exactly one
-    observable way: the embedded path does not wire `__default_token__`.
+    `.transform(tree)` walk.  The main divergence this fixture pins is that the
+    embedded path does not wire `__default_token__`; other embedded quirks (e.g.
+    a `Discard`-from-token-callback value leaking under `maybe_placeholders`) are
+    recorded byte-for-byte in the fixture rather than enumerated here.
     """
     parser_options = case.get("parser_options", {})
     visit_tokens = case.get("visit_tokens", True)

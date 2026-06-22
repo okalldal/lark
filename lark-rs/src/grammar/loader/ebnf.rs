@@ -44,8 +44,11 @@ enum Slot {
     /// A leading nullable distributed into the parent: these are the non-empty
     /// ("present") alternatives; the absent alternative is added during the
     /// cartesian product in `compile_expansion`, contributing `absent_nones`
-    /// `None` placeholders (nonzero only for a `maybe_placeholders` `[...]`,
-    /// mirroring Python Lark's `_EMPTY` markers → `empty_indices`).
+    /// positional `_EMPTY` markers (Python Lark's `[_EMPTY] * FindRuleSize`).
+    /// These are computed for *every* `[...]` regardless of `maybe_placeholders`
+    /// to carry the absent arm's collision identity; they become `None` tree
+    /// children only when `maybe_placeholders` is on — with it off they're
+    /// stripped at rule-output storage (`stored_output_gaps`).
     Nullable {
         present: Vec<CompiledAlt>,
         absent_nones: usize,
@@ -501,10 +504,6 @@ impl GrammarCompiler {
         match expr {
             Expr::Value(v) => Ok(single(self.compile_value(v, parent)?)),
             Expr::Group(alts) => self.distributable_alternatives(alts, parent),
-            // `[X]` without placeholders is a plain optional group; with
-            // placeholders this nested position cannot carry the absent case's
-            // `None`s (see the doc comment), so keep the helper.
-            //
             // Under `maybe_placeholders` the absent-with-`None`s middle alternative
             // of a nested `[X]` cannot ride this present/absent split, so keep the
             // helper. Without placeholders, the maybe's own absent arm is included
