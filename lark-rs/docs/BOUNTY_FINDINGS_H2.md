@@ -89,6 +89,10 @@ flag (`global flags not at the start of the expression`, because Lark wraps the
 source and demotes the flag off position 0); lark-rs strips the wrapper into a flag
 bitset and accepts + applies it. Scoped `(?i:…)` is fine on both — only the global
 form diverges. A new more-permissive validation family.
+**Fixed (#274):** `PatternRe::new` now detects a *global* (bodiless) inline flag
+group `(?flags)` / `(?flags-flags)` anywhere in a terminal's regex source and rejects
+it at build (`InvalidRegex`), the unusable-in-Python parity choice; the scoped
+`(?flags:…)` form is untouched.
 
 ### N4 — Named backreference mis-categorized (lexer / taxonomy)
 `A: /(?P<x>a)(?P=x)/`. **Expected behavior is a *categorized refusal*, not
@@ -102,6 +106,11 @@ a raw `Invalid regex pattern … regex parse error` instead. The XFAIL
 `\1`), not support — Python's acceptance is irrelevant here because lark-rs
 deliberately diverges on general backrefs. Distinct from RC6 (`\b`, different
 construct).
+**Fixed (#274):** the lookaround front-end now keeps a `(?P=name)` verbatim in a
+`Node::Atom` (instead of erroring on the named-*group* path), so the pattern parses,
+reaches the lexer-build routing seam, and is refused with the same categorized
+`BacktrackingOnlySyntax` (OutOfScope) message `\1`/`\k`/`\g` produce. `has_backref`
+also recognizes the spelling for the assertion-body case.
 
 ### N5 — Parser/lexer pairing legality not enforced (config validation)
 `start:"a"` with `lalr`+`dynamic` (also `cyk`+`contextual`, `earley`+`contextual`,

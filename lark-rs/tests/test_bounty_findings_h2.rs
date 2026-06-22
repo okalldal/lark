@@ -160,8 +160,8 @@ fn n2_flagged_terminal_ranking() {
 /// `error: global flags not at the start of the expression`. lark-rs strips the
 /// wrapper into a flag bitset and accepts + applies it. (Scoped `(?i:…)` is fine on
 /// both — only the global form diverges.) A new more-permissive validation family.
-#[test]
-#[ignore = "XFAIL (bounty N3): global inline regex flag (?i) accepted, Python rejects"]
+#[test] // FIXED (#274): a global (bodiless) inline flag group is rejected at build,
+        // while scoped `(?i:…)` stays accepted — `PatternRe::new` parity gate.
 fn n3_global_inline_flag_rejected() {
     let g = "start: A\nA: /(?i)abc/\n";
     assert_build_rejected(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual), "N3");
@@ -177,8 +177,8 @@ fn n3_global_inline_flag_rejected() {
 /// XFAIL asserts the *categorized* refusal (matching `\1`), NOT support — this is
 /// not promotion to a supported feature. Distinct from RC6 (`\b`, different
 /// construct).
-#[test]
-#[ignore = "XFAIL (bounty N4): named backref (?P=name) leaks an uncategorized error instead of a categorized refusal"]
+#[test] // FIXED (#274): the front-end keeps `(?P=name)` verbatim, so it routes through
+        // the categorized backref refusal (`BacktrackingOnlySyntax`) like `\1`/`\k`.
 fn n4_named_backref_categorized() {
     let g = "start: A\nA: /(?P<x>a)(?P=x)/\n";
     let err = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual))
