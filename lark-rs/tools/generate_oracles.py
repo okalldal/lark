@@ -1996,6 +1996,140 @@ def interactive_trace(lark_instance, text, manual_tokens=None):
     return trace
 
 
+# ─── Interactive parser INVALID-input / error-semantics oracles (issue #250) ──
+#
+# These pin Python Lark's `InteractiveParser` behavior on the failure paths that
+# the success-heavy traces above never exercise. Python raises subclasses of
+# `UnexpectedInput`; we record the error *kind* normalized into lark-rs's
+# `ParseError` taxonomy so the Rust replay can assert the same variant:
+#
+#   * `UnexpectedCharacters`                       -> "UnexpectedCharacter"
+#   * `UnexpectedToken` with `token.type == "$END"`-> "UnexpectedEof"
+#   * `UnexpectedToken` otherwise                  -> "UnexpectedToken"
+#
+# The `$END` split mirrors lark-rs's `ParseError::unexpected_token`, which routes a
+# `$END` feed to `UnexpectedEof` (src/error.rs) — Python keeps a single
+# `UnexpectedToken` whose `token.type` is the `$END` terminal, so we fold it here.
+
+def _classify_error(exc):
+    """Normalize a Python-Lark UnexpectedInput into lark-rs's ParseError kind."""
+    from lark.exceptions import UnexpectedCharacters, UnexpectedToken as _UT
+    if isinstance(exc, UnexpectedCharacters):
+        return "UnexpectedCharacter"
+    if isinstance(exc, _UT):
+        tok = getattr(exc, "token", None)
+        if tok is not None and str(tok.type) == "$END":
+            return "UnexpectedEof"
+        return "UnexpectedToken"
+    return type(exc).__name__
+
+
+def interactive_error_trace(lark_instance, text, manual_tokens=None,
+                            drive="exhaust", reuse=False):
+    """Drive an interactive parse expected to FAIL, recording the error kind.
+
+    `drive` selects the failure path:
+      * "exhaust"  — call `exhaust_lexer()` (the lazy lexer drive) and expect a raise.
+      * "feed_eof" — call `feed_eof()` directly on non-empty, un-exhausted text.
+    `manual_tokens`, when given, are fed (no lexer) before driving — used for the
+    "unexpected token after a valid manual prefix" case (the parser, not the lexer,
+    is what rejects). `reuse` re-drives the SAME cursor after the first raise, to
+    pin whether Python allows reuse after an error (scenario 4).
+    """
+    from lark import Token as LToken
+    from lark.exceptions import UnexpectedInput
+
+    p = lark_instance.parse_interactive(text)
+    trace = {
+        "text": text,
+        "initial_accepts": sorted(p.accepts()),
+    }
+
+    # Optional valid manual prefix (no lexer involved).
+    fed_prefix = []
+    if manual_tokens:
+        for (term, value) in manual_tokens:
+            p.feed_token(LToken(term, value))
+            fed_prefix.append({"terminal": term, "value": value})
+    trace["manual_prefix"] = fed_prefix
+
+    def _drive(cursor):
+        if drive == "exhaust":
+            cursor.exhaust_lexer()
+        elif drive == "feed_eof":
+            cursor.feed_eof()
+        else:
+            raise ValueError(drive)
+
+    # Capture the accept-set right before the failing drive (the parser state that
+    # rejects).
+    trace["accepts_before_error"] = sorted(p.accepts())
+
+    raised_error = False
+    try:
+        _drive(p)
+        trace["raised"] = False
+    except UnexpectedInput as e:
+        raised_error = True
+        trace["raised"] = True
+        trace["error_kind"] = _classify_error(e)
+        tok = getattr(e, "token", None)
+        if tok is not None:
+            trace["error_token_type"] = str(tok.type)
+            trace["error_token_value"] = str(tok)
+        ch = getattr(e, "char", None)
+        if ch is not None:
+            trace["error_char"] = str(ch)
+
+    # accepts() must survive the error (Python leaves the cursor on the bad input).
+    trace["accepts_after_error"] = sorted(p.accepts())
+
+    if reuse and raised_error:
+        # Re-drive the same cursor: Python does NOT refuse reuse — it re-surfaces
+        # the same error (the cursor still sits on the un-consumed bad input).
+        try:
+            _drive(p)
+            trace["reuse_raised"] = False
+        except UnexpectedInput as e2:
+            trace["reuse_raised"] = True
+            trace["reuse_error_kind"] = _classify_error(e2)
+
+    return trace
+
+
+def _feed_token_error_trace(lark_instance, text, prefix, bad):
+    """Manual prefix then a single rejecting feed_token (scenario 3).
+
+    `prefix` is a list of (term, value) fed cleanly; `bad` is the (term, value) the
+    parser state rejects. Records the error kind + the preserved accept-set.
+    """
+    from lark import Token as LToken
+    from lark.exceptions import UnexpectedInput
+
+    p = lark_instance.parse_interactive(text)
+    trace = {
+        "text": text,
+        "initial_accepts": sorted(p.accepts()),
+        "manual_prefix": [{"terminal": t, "value": v} for (t, v) in prefix],
+    }
+    for (term, value) in prefix:
+        p.feed_token(LToken(term, value))
+    trace["accepts_before_error"] = sorted(p.accepts())
+    try:
+        p.feed_token(LToken(bad[0], bad[1]))
+        trace["raised"] = False
+    except UnexpectedInput as e:
+        trace["raised"] = True
+        trace["error_kind"] = _classify_error(e)
+        tok = getattr(e, "token", None)
+        if tok is not None:
+            trace["error_token_type"] = str(tok.type)
+            trace["error_token_value"] = str(tok)
+    trace["bad_token"] = {"terminal": bad[0], "value": bad[1]}
+    trace["accepts_after_error"] = sorted(p.accepts())
+    return trace
+
+
 def generate_interactive():
     print("Generating interactive parser oracles...")
 
@@ -2124,6 +2258,81 @@ def generate_interactive():
     cases.append(fork_trace2)
 
     save_oracle("interactive", "cases", cases)
+
+    # ── Invalid-input / error-semantics cases (issue #250) ──
+    #
+    # Saved to a separate oracle file so the error-path replay stays distinct from
+    # the success traces. Each case pins the ParseError *kind* Python raises plus
+    # the token/char detail and the accept-set that must survive the error.
+    error_cases = []
+
+    # (1) Contextual lexer: globally-valid-but-state-invalid token. In a_part
+    #     state (after "[") the only valid terminal is AWORD; "}" (RBRACE) is matched
+    #     by the ROOT lexer but rejected by the parser state. exhaust_lexer's
+    #     root-lexer fallback surfaces it, then the parser feed errors —
+    #     UnexpectedToken, SAME as the batch contextual parse (probed: both raise
+    #     UnexpectedToken RBRACE). This is the documented point: the contextual
+    #     interactive root-fallback is NOT more permissive than batch on a
+    #     state-invalid root-valid token; it matches.
+    error_cases.append({
+        "name": "contextual_state_invalid_token_rbrace",
+        "lexer": "contextual",
+        "grammar": "recovery_contextual",
+        "drive": "exhaust",
+        **interactive_error_trace(l_ctx, "[}", drive="exhaust"),
+    })
+
+    # (2) Contextual lexer: genuinely unlexable character. "9" matches no terminal
+    #     (the grammar only has [a-z]+, braces, space) at any state, so even the
+    #     root-lexer fallback misses -> UnexpectedCharacter.
+    error_cases.append({
+        "name": "contextual_unlexable_char_digit",
+        "lexer": "contextual",
+        "grammar": "recovery_contextual",
+        "drive": "exhaust",
+        **interactive_error_trace(l_ctx, "[a9]", drive="exhaust"),
+    })
+
+    # (3) Basic lexer: unexpected token after a valid manual prefix. Feed NUMBER
+    #     cleanly, then feed STAR twice — the second STAR is rejected by the parser
+    #     state (an operator cannot follow an operator). UnexpectedToken; the
+    #     accept-set survives the error (the cursor is unchanged).
+    error_cases.append({
+        "name": "basic_manual_unexpected_token_after_prefix",
+        "lexer": "basic",
+        "grammar": "arithmetic",
+        "drive": "feed_token",
+        **_feed_token_error_trace(
+            l_basic, "",
+            prefix=[("NUMBER", "1"), ("STAR", "*")],
+            bad=("STAR", "*"),
+        ),
+    })
+
+    # (4) resume()/exhaust reuse after an exhaust_lexer() error. Python does NOT
+    #     refuse reuse: re-driving the same cursor re-surfaces the same
+    #     UnexpectedCharacter (the cursor still sits on the un-consumed bad char).
+    error_cases.append({
+        "name": "contextual_reuse_after_exhaust_error",
+        "lexer": "contextual",
+        "grammar": "recovery_contextual",
+        "drive": "exhaust",
+        **interactive_error_trace(l_ctx, "[a9]", drive="exhaust", reuse=True),
+    })
+
+    # (5) feed_eof() before exhausting the lexer on non-empty text. The caller
+    #     short-circuits the lexer; feed_eof injects a $END at the START position
+    #     (no tokens consumed), which the start state rejects -> UnexpectedEof
+    #     (Python: UnexpectedToken with token.type == "$END").
+    error_cases.append({
+        "name": "basic_feed_eof_before_exhaust",
+        "lexer": "basic",
+        "grammar": "arithmetic",
+        "drive": "feed_eof",
+        **interactive_error_trace(l_basic, "1 + 2", drive="feed_eof"),
+    })
+
+    save_oracle("interactive", "error_cases", error_cases)
 
 
 if __name__ == "__main__":

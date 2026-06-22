@@ -44,8 +44,11 @@ enum Slot {
     /// A leading nullable distributed into the parent: these are the non-empty
     /// ("present") alternatives; the absent alternative is added during the
     /// cartesian product in `compile_expansion`, contributing `absent_nones`
-    /// `None` placeholders (nonzero only for a `maybe_placeholders` `[...]`,
-    /// mirroring Python Lark's `_EMPTY` markers → `empty_indices`).
+    /// positional `_EMPTY` markers (Python Lark's `[_EMPTY] * FindRuleSize`).
+    /// These are computed for *every* `[...]` regardless of `maybe_placeholders`
+    /// to carry the absent arm's collision identity; they become `None` tree
+    /// children only when `maybe_placeholders` is on — with it off they're
+    /// stripped at rule-output storage (`stored_output_gaps`).
     Nullable {
         present: Vec<CompiledAlt>,
         absent_nones: usize,
@@ -97,7 +100,7 @@ impl GrammarCompiler {
                 expand1,
                 keep_all_tokens: keep_all,
                 priority: raw.priority,
-                nones_before: Self::stored_gaps(gaps),
+                nones_before: self.stored_output_gaps(gaps),
                 placeholder_count: 0,
             };
             self.rules.push(Rule::new(
@@ -175,8 +178,25 @@ impl GrammarCompiler {
         // Distributing two optionals can coincide (`X? X?` → `X X | X | X | ε`);
         // identical alternatives would reduce/reduce on the same item, so keep the
         // first occurrence of each (Python's grammar dedups identical rules too).
+        //
+        // Under `maybe_placeholders=False` an *empty* alternative carries no output
+        // role — its maybe `_EMPTY` markers are stripped before tree build — so two
+        // empty arms that differ only in those markers are duplicate *empty* rules,
+        // which Python tolerates and dedups (`load_grammar.py`: the "Rules defined
+        // twice" check fires only for non-empty `dups[0].expansion`). Collapsing them
+        // here keeps a non-colliding nullable like `([A])?` from minting two empty
+        // productions at one origin — an LALR conflict Python never reports. A
+        // *non-empty* arm keeps its markers so a genuine `[A]~2 C`-style collision
+        // still reaches `dedup_and_check_alts`.
+        let canon = |a: &CompiledAlt| -> CompiledAlt {
+            if !self.maybe_placeholders && a.0.is_empty() {
+                (Vec::new(), vec![0])
+            } else {
+                a.clone()
+            }
+        };
         let mut seen = std::collections::HashSet::new();
-        acc.retain(|a| seen.insert(a.clone()));
+        acc.retain(|a| seen.insert(canon(a)));
         Ok(acc)
     }
 
@@ -200,6 +220,26 @@ impl GrammarCompiler {
             }
         }
         next
+    }
+
+    /// [`concat_alts`](Self::concat_alts) followed by an immediate first-occurrence
+    /// dedup of the product. Folding the dedup *into each step* is what keeps a
+    /// repeated optional (`[X]~n`) from blowing up: `[X]` contributes a present and
+    /// an absent arm, so the naive `n`-fold product is `2^n` alternatives before the
+    /// trailing dedup collapses it to the `n+1` distinct counts — Python Lark has
+    /// this same exponential in `_generate_repeats` (`[A]~15` already takes seconds
+    /// before it raises "Rules defined twice"). Deduping per step bounds the working
+    /// set to the distinct alternatives at that prefix length, so `[X]~n` stays
+    /// linear-ish in `n` (capped at Python's `REPEAT_BREAK_THRESHOLD = 50`) while
+    /// producing the byte-identical final set — same alternatives, same
+    /// `dedup_and_check_alts` collision verdict, no `2^n` materialization (#252).
+    fn concat_alts_dedup(prefix: &[CompiledAlt], suffix: &[CompiledAlt]) -> Vec<CompiledAlt> {
+        let product = Self::concat_alts(prefix, suffix);
+        let mut seen = std::collections::HashSet::new();
+        product
+            .into_iter()
+            .filter(|a| seen.insert(a.clone()))
+            .collect()
     }
 
     /// Python Lark's `EBNF_to_BNF._generate_repeats` small case (`mx < 50`,
@@ -236,56 +276,101 @@ impl GrammarCompiler {
         // parent sees only one alternative (`helper helper …`) and the placeholder-
         // position collision that Python's "Rules defined twice" catches is hidden.
         if let Expr::Maybe(alts) = inner {
-            if self.maybe_placeholders {
-                let present = match self.distributable_alternatives(alts.clone(), parent)? {
-                    Some(p) => p,
-                    None => return Ok(None), // aliased — fall back to helper form
-                };
-                let absent_nones = present
-                    .iter()
-                    .map(|(syms, gaps)| {
-                        syms.iter().map(|s| self.symbol_size(s)).sum::<usize>()
-                            + gaps.iter().sum::<usize>()
-                    })
-                    .max()
-                    .unwrap_or(0);
-                // Each copy is the present alternatives plus one absent
-                // alternative (empty, contributing `absent_nones` placeholders) —
-                // the same shape `compile_expansion` builds from a `Nullable` slot.
-                let mut per_copy = present;
-                per_copy.push((Vec::new(), vec![absent_nones]));
-                let mut out: Vec<CompiledAlt> = Vec::new();
-                for k in mn..=mx {
-                    let mut acc: Vec<CompiledAlt> = vec![(Vec::new(), vec![0])];
-                    for _ in 0..k {
-                        acc = Self::concat_alts(&acc, &per_copy);
-                    }
-                    out.extend(acc);
-                }
-                let mut seen = std::collections::HashSet::new();
-                out.retain(|a| seen.insert(a.clone()));
-                return Ok(Some(out));
-            }
+            // A `[X]~n` distributes each copy as present + absent forms, exactly as
+            // Python Lark's `_generate_repeats` does (`[X]~2` ≡ `[X] [X]`). The
+            // absent arm carries `[_EMPTY] * FindRuleSize` positional markers
+            // *regardless* of `maybe_placeholders` (Python's `maybe`), so its
+            // present/absent collapse onto a sibling reaches `dedup_and_check_alts`
+            // — the colliding `[A]~2 C` rejection Python raises under both modes
+            // (#252). Without `maybe_placeholders` the markers are stripped before
+            // tree output (no `None` children) at the final rule build below; with
+            // it they become positional `None`s (#212). The non-distributable
+            // (aliased) inner still falls back to the helper form.
+            let present = match self.distributable_alternatives(alts.clone(), parent)? {
+                Some(p) => p,
+                None => return Ok(None), // aliased — fall back to helper form
+            };
+            let absent_nones = self.maybe_absent_size(&present);
+            // Each copy is the present alternatives plus one absent
+            // alternative (empty, contributing `absent_nones` placeholders) —
+            // the same shape `compile_expansion` builds from a `Nullable` slot.
+            let mut per_copy = present;
+            per_copy.push((Vec::new(), vec![absent_nones]));
+            return Ok(Some(Self::repeat_union(&per_copy, mn, mx, parent)?));
         }
         // One copy's present alternatives — a non-aliased group fans its arms out,
         // a plain atom is a single arm. Compiled once and replicated, exactly as
         // Python reuses the same `rule` subtree for each of the `[rule]*k` copies.
         let base = self.inner_alternatives(inner, parent)?;
-        // For each count k, the k-fold cartesian concatenation of `base`
-        // (k == 0 → the single empty alternative). Union over the range, then dedup
-        // identical alternatives (Python's grammar dedups identical rules — e.g.
-        // `x~0..1` ≡ `x?` ≡ `x | ε`).
+        // Union over each count k of the k-fold cartesian concatenation of `base`
+        // (k == 0 → the single empty alternative), with `x~0..1` ≡ `x?` ≡ `x | ε`.
+        Ok(Some(Self::repeat_union(&base, mn, mx, parent)?))
+    }
+
+    /// The deduped union over `k` in `mn..=mx` of the `k`-fold cartesian
+    /// concatenation of `base` — the inlined alternatives of a bounded `x~mn..mx`.
+    /// Built **incrementally**: the `k`-fold product is one deduping concat of the
+    /// `(k-1)`-fold product with `base`, and each count's running product is folded
+    /// into the output as it is reached.
+    ///
+    /// Two short-circuits keep a repeated optional from the `2^k` blow-up (#252):
+    ///
+    ///  1. Per-step dedup ([`concat_alts_dedup`](Self::concat_alts_dedup)) collapses
+    ///     byte-identical alternatives at every prefix length rather than only at the
+    ///     end.
+    ///  2. **Early collision detection.** A `[X]`-style `base` carries an absent arm
+    ///     whose positional `_EMPTY` markers (gaps) differ from a present arm of the
+    ///     same kept symbols, so the running product accumulates alternatives with
+    ///     identical `syms` but distinct gaps — the exact collision
+    ///     [`dedup_and_check_alts`](GrammarCompiler::dedup_and_check_alts) rejects as
+    ///     "Rules defined twice" (a colliding `[X]~n`, e.g. `[A]~2 C`). That verdict
+    ///     is independent of the surrounding context (differing gaps survive
+    ///     concatenation with any tail), so we raise it on the *first* step that
+    ///     produces such a pair instead of materializing the full product. Python
+    ///     Lark reaches the same rejection but only after the exponential
+    ///     `_generate_repeats` expansion (`[A]~15` already takes seconds); matching
+    ///     its verdict without its blow-up is a pure efficiency win, not a divergence.
+    fn repeat_union(
+        base: &[CompiledAlt],
+        mn: usize,
+        mx: usize,
+        origin: &str,
+    ) -> Result<Vec<CompiledAlt>, GrammarError> {
         let mut out: Vec<CompiledAlt> = Vec::new();
-        for k in mn..=mx {
-            let mut acc: Vec<CompiledAlt> = vec![(Vec::new(), vec![0])];
-            for _ in 0..k {
-                acc = Self::concat_alts(&acc, &base);
-            }
-            out.extend(acc);
-        }
         let mut seen = std::collections::HashSet::new();
-        out.retain(|a| seen.insert(a.clone()));
-        Ok(Some(out))
+        // Running `k`-fold product, grown one factor at a time (k == 0 is the lone
+        // empty alternative). `concat_alts_dedup` keeps it at its distinct size.
+        let mut acc: Vec<CompiledAlt> = vec![(Vec::new(), vec![0])];
+        for k in 0..=mx {
+            if k > 0 {
+                acc = Self::concat_alts_dedup(&acc, base);
+                // Two distinct deduped alternatives sharing a `syms` sequence differ
+                // only in gaps → they will collide in `dedup_and_check_alts`. Raise
+                // now (before the next product step) rather than expanding further.
+                let mut syms_seen: std::collections::HashSet<&Vec<Symbol>> =
+                    std::collections::HashSet::new();
+                for (syms, _) in &acc {
+                    if !syms.is_empty() && !syms_seen.insert(syms) {
+                        let rhs: Vec<&str> = syms.iter().map(|s| s.name()).collect();
+                        return Err(GrammarError::Other {
+                            msg: format!(
+                                "Rules defined twice: {origin} -> {} \
+                                 (Might happen due to colliding expansion of optionals: [] or ?)",
+                                rhs.join(" ")
+                            ),
+                        });
+                    }
+                }
+            }
+            if k >= mn {
+                for a in &acc {
+                    if seen.insert(a.clone()) {
+                        out.push(a.clone());
+                    }
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Compile one position of an expansion into either a single fixed symbol
@@ -394,24 +479,9 @@ impl GrammarCompiler {
                     Some(p) => p,
                     None => return Ok(None),
                 };
-                let absent_nones = if self.maybe_placeholders {
-                    // A present alternative's size is its kept symbols plus any
-                    // `None`s its own nested absent maybes left inline, so sizes
-                    // compose through nesting exactly as Lark's `FindRuleSize`.
-                    present
-                        .iter()
-                        .map(|(syms, gaps)| {
-                            syms.iter().map(|s| self.symbol_size(s)).sum::<usize>()
-                                + gaps.iter().sum::<usize>()
-                        })
-                        .max()
-                        .unwrap_or(0)
-                } else {
-                    0
-                };
                 Ok(Some(Slot::Nullable {
-                    present,
-                    absent_nones,
+                    present: present.clone(),
+                    absent_nones: self.maybe_absent_size(&present),
                 }))
             }
             _ => Ok(None),
@@ -434,11 +504,27 @@ impl GrammarCompiler {
         match expr {
             Expr::Value(v) => Ok(single(self.compile_value(v, parent)?)),
             Expr::Group(alts) => self.distributable_alternatives(alts, parent),
-            // `[X]` without placeholders is a plain optional group; with
-            // placeholders this nested position cannot carry the absent case's
-            // `None`s (see the doc comment), so keep the helper.
+            // Under `maybe_placeholders` the absent-with-`None`s middle alternative
+            // of a nested `[X]` cannot ride this present/absent split, so keep the
+            // helper. Without placeholders, the maybe's own absent arm is included
+            // as a present form carrying its positional `_EMPTY` markers (the same
+            // `[_EMPTY] * FindRuleSize` Python's `maybe` always emits), so a colliding
+            // `[A]~0..1 C` / `([A])? C` — where the absent-`[X]` and the outer ε both
+            // reduce to `start -> C` — reaches `dedup_and_check_alts` and is rejected
+            // in both modes (#252). The redundant *empty* arm (when there is no tail
+            // to attach the marker to, e.g. a lone `([A])?`) collapses against the
+            // outer ε in `compile_expansion`'s `maybe_placeholders=False`
+            // empty-arm canonicalization, so a non-colliding nullable still builds.
             Expr::Maybe(_) if self.maybe_placeholders => Ok(None),
-            Expr::Maybe(alts) => self.distributable_alternatives(alts, parent),
+            Expr::Maybe(alts) => {
+                let mut present = match self.distributable_alternatives(alts, parent)? {
+                    Some(p) => p,
+                    None => return Ok(None),
+                };
+                let absent_nones = self.maybe_absent_size(&present);
+                present.push((Vec::new(), vec![absent_nones]));
+                Ok(Some(present))
+            }
             // A nested `?` collapses: `(X?)?` ≡ `X?`, so drop the inner optionality
             // and let the outer distribution re-add the single ε.
             Expr::Repeat {
@@ -687,7 +773,7 @@ impl GrammarCompiler {
                 + gaps.iter().sum::<usize>();
             max_size = max_size.max(size);
             let options = RuleOptions {
-                nones_before: Self::stored_gaps(gaps.clone()),
+                nones_before: self.stored_output_gaps(gaps.clone()),
                 ..self.anon_opts()
             };
             self.rules.push(Rule::new(
@@ -795,6 +881,40 @@ impl GrammarCompiler {
         }
     }
 
+    /// The `_EMPTY`-marker count an absent `[...]` contributes, i.e. the widest
+    /// present alternative's inlined size — Python Lark's `FindRuleSize`. This is
+    /// computed **independently of `maybe_placeholders`** (Python's `maybe` always
+    /// emits `[_EMPTY] * rule_size`): the markers give the absent arm its positional
+    /// identity, so two colliding `[X]` optionals are caught by
+    /// [`dedup_and_check_alts`](GrammarCompiler::dedup_and_check_alts) in *both*
+    /// modes (#252). When `maybe_placeholders` is off the markers are stripped from
+    /// the stored rule's gap vector before tree output (no `None` children), via
+    /// [`stored_output_gaps`](Self::stored_output_gaps).
+    fn maybe_absent_size(&self, present: &[CompiledAlt]) -> usize {
+        present
+            .iter()
+            .map(|(syms, gaps)| {
+                syms.iter().map(|s| self.symbol_size(s)).sum::<usize>() + gaps.iter().sum::<usize>()
+            })
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Gap vector to *store* on a finished rule, given a compile-time gap vector
+    /// that always carries the maybe `_EMPTY` markers. Under `maybe_placeholders`
+    /// the markers become positional `None` children, so the gaps are kept (via
+    /// [`stored_gaps`](GrammarCompiler::stored_gaps)); without it Python emits no
+    /// placeholders, so the gaps are dropped — the markers existed only to drive the
+    /// `dedup_and_check_alts` collision check, which has already run by this point
+    /// (#252).
+    pub(super) fn stored_output_gaps(&self, gaps: Vec<usize>) -> Vec<usize> {
+        if self.maybe_placeholders {
+            Self::stored_gaps(gaps)
+        } else {
+            Vec::new()
+        }
+    }
+
     /// The compiled inner alternatives of a `+`/`*` repetition, used to build the
     /// shared recurse helper. Python Lark's `EBNF_to_BNF` inlines a grouped
     /// repetition's arms directly into the recurse rule (`(A | B)+` →
@@ -895,7 +1015,7 @@ impl GrammarCompiler {
         // `rule.order` disambiguation the resolve cases (#49/#72) rely on.
         for (i, (syms, gaps)) in arms.iter().enumerate() {
             let rule_opts = RuleOptions {
-                nones_before: Self::stored_gaps(gaps.clone()),
+                nones_before: self.stored_output_gaps(gaps.clone()),
                 ..opts.clone()
             };
             self.rules
@@ -909,7 +1029,7 @@ impl GrammarCompiler {
             let mut rec_gaps = vec![0];
             rec_gaps.extend_from_slice(gaps);
             let rule_opts = RuleOptions {
-                nones_before: Self::stored_gaps(rec_gaps),
+                nones_before: self.stored_output_gaps(rec_gaps),
                 ..opts.clone()
             };
             self.rules

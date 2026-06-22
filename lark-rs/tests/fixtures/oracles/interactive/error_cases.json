@@ -1,0 +1,146 @@
+[
+  {
+    "name": "contextual_state_invalid_token_rbrace",
+    "lexer": "contextual",
+    "grammar": "recovery_contextual",
+    "drive": "exhaust",
+    "text": "[}",
+    "initial_accepts": [
+      "LSQB"
+    ],
+    "manual_prefix": [],
+    "accepts_before_error": [
+      "LSQB"
+    ],
+    "raised": true,
+    "error_kind": "UnexpectedToken",
+    "error_token_type": "RBRACE",
+    "error_token_value": "}",
+    "accepts_after_error": [
+      "AWORD"
+    ]
+  },
+  {
+    "name": "contextual_unlexable_char_digit",
+    "lexer": "contextual",
+    "grammar": "recovery_contextual",
+    "drive": "exhaust",
+    "text": "[a9]",
+    "initial_accepts": [
+      "LSQB"
+    ],
+    "manual_prefix": [],
+    "accepts_before_error": [
+      "LSQB"
+    ],
+    "raised": true,
+    "error_kind": "UnexpectedCharacter",
+    "error_char": "9",
+    "accepts_after_error": [
+      "AWORD",
+      "RSQB"
+    ]
+  },
+  {
+    "name": "basic_manual_unexpected_token_after_prefix",
+    "lexer": "basic",
+    "grammar": "arithmetic",
+    "drive": "feed_token",
+    "text": "",
+    "initial_accepts": [
+      "LPAR",
+      "MINUS",
+      "NAME",
+      "NUMBER",
+      "PLUS"
+    ],
+    "manual_prefix": [
+      {
+        "terminal": "NUMBER",
+        "value": "1"
+      },
+      {
+        "terminal": "STAR",
+        "value": "*"
+      }
+    ],
+    "accepts_before_error": [
+      "LPAR",
+      "MINUS",
+      "NAME",
+      "NUMBER",
+      "PLUS"
+    ],
+    "raised": true,
+    "error_kind": "UnexpectedToken",
+    "error_token_type": "STAR",
+    "error_token_value": "*",
+    "bad_token": {
+      "terminal": "STAR",
+      "value": "*"
+    },
+    "accepts_after_error": [
+      "LPAR",
+      "MINUS",
+      "NAME",
+      "NUMBER",
+      "PLUS"
+    ]
+  },
+  {
+    "name": "contextual_reuse_after_exhaust_error",
+    "lexer": "contextual",
+    "grammar": "recovery_contextual",
+    "drive": "exhaust",
+    "text": "[a9]",
+    "initial_accepts": [
+      "LSQB"
+    ],
+    "manual_prefix": [],
+    "accepts_before_error": [
+      "LSQB"
+    ],
+    "raised": true,
+    "error_kind": "UnexpectedCharacter",
+    "error_char": "9",
+    "accepts_after_error": [
+      "AWORD",
+      "RSQB"
+    ],
+    "reuse_raised": true,
+    "reuse_error_kind": "UnexpectedCharacter"
+  },
+  {
+    "name": "basic_feed_eof_before_exhaust",
+    "lexer": "basic",
+    "grammar": "arithmetic",
+    "drive": "feed_eof",
+    "text": "1 + 2",
+    "initial_accepts": [
+      "LPAR",
+      "MINUS",
+      "NAME",
+      "NUMBER",
+      "PLUS"
+    ],
+    "manual_prefix": [],
+    "accepts_before_error": [
+      "LPAR",
+      "MINUS",
+      "NAME",
+      "NUMBER",
+      "PLUS"
+    ],
+    "raised": true,
+    "error_kind": "UnexpectedEof",
+    "error_token_type": "$END",
+    "error_token_value": "",
+    "accepts_after_error": [
+      "LPAR",
+      "MINUS",
+      "NAME",
+      "NUMBER",
+      "PLUS"
+    ]
+  }
+]

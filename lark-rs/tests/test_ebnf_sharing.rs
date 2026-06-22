@@ -13,20 +13,25 @@
 
 mod common;
 
-use lark_rs::{Child, Lark, LarkOptions, LexerType, ParserAlgorithm};
+use lark_rs::{Child, Lark, LarkError, LarkOptions, LexerType, ParserAlgorithm};
 
 fn build(grammar: &str) -> Lark {
+    build_with(grammar, true).unwrap_or_else(|e| panic!("Grammar failed to load: {e}"))
+}
+
+/// Load `grammar` at a chosen `maybe_placeholders`, returning the `Result` so a
+/// rejection test can assert the build *fails* (the parity-gap cases below).
+fn build_with(grammar: &str, maybe_placeholders: bool) -> Result<Lark, LarkError> {
     Lark::new(
         grammar,
         LarkOptions {
             parser: ParserAlgorithm::Lalr,
             lexer: LexerType::Contextual,
             start: vec!["start".to_string()],
-            maybe_placeholders: true,
+            maybe_placeholders,
             ..Default::default()
         },
     )
-    .unwrap_or_else(|e| panic!("Grammar failed to load: {e}"))
 }
 
 fn shape(c: &Child) -> String {
@@ -184,4 +189,129 @@ fn test_seed99_template_star_duplicate_alt_builds() {
         parsed(&lark, "bdddcc cbb"),
         "start[r0[],r0[],r0[],r0[],r0[],r0[],rep[]]"
     );
+}
+
+// ─── #252: colliding `[X]` optionals are rejected under *both* maybe_placeholders ─
+//
+// Python Lark's `EBNF_to_BNF.maybe` always emits positional `_EMPTY` markers
+// (`[_EMPTY] * FindRuleSize(rule)`), independent of `maybe_placeholders` — the
+// option only controls whether those markers become `None` *children* in the
+// tree, not whether the markers exist. So two adjacent `[X]` optionals whose
+// present/absent expansions collapse to the same symbol sequence (`[A] [A]` →
+// `A A | A | A | ε`, two byte-identical `A` arms once `_EMPTY` is stripped) are
+// rejected with "Rules defined twice" in *both* modes (`Rule.__eq__` ignores
+// `empty_indices`). lark-rs used to zero the absent-arm placeholder structure
+// when `maybe_placeholders=False`, so the colliding arms deduped silently and the
+// grammar was wrongly *accepted* — more permissive than the oracle, the
+// unfalsifiable direction (PRINCIPLES §2.2 corollary / ADR-0017). PR #245 fixed
+// the `maybe_placeholders=True` half (#212); this closes the non-placeholder half.
+//
+// Counter-cases: `A? A?` (which lowers via `expr '?'` → `expansion([])`, *no*
+// `_EMPTY` markers) dedups cleanly and Python *accepts* it in both modes — the
+// fix must not over-reject those.
+
+fn assert_rejected_both_modes(grammar: &str, what: &str) {
+    for mp in [false, true] {
+        let err = build_with(grammar, mp)
+            .err()
+            .unwrap_or_else(|| panic!("{what}: expected rejection at maybe_placeholders={mp}"));
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Rules defined twice"),
+            "{what}: maybe_placeholders={mp} rejected with the wrong error: {msg}"
+        );
+    }
+}
+
+fn assert_accepted_both_modes(grammar: &str, what: &str) {
+    for mp in [false, true] {
+        build_with(grammar, mp)
+            .unwrap_or_else(|e| panic!("{what}: maybe_placeholders={mp} should build: {e}"));
+    }
+}
+
+#[test]
+fn test_repeat_optional_collides_under_non_placeholders() {
+    // The headline #252 repro: `[A]~2 C`. `[A]~2` ≡ `[A] [A]`, whose two single-`A`
+    // present arms collide. Python rejects this under both modes; lark-rs used to
+    // accept it under maybe_placeholders=False.
+    assert_rejected_both_modes("start: [A]~2 C\nA: \"a\"\nC: \"c\"\n", "[A]~2 C");
+}
+
+#[test]
+fn test_repeat_optional_collides_no_tail() {
+    // `[A]~2` on its own — same collision, no trailing symbol.
+    assert_rejected_both_modes("start: [A]~2\nA: \"a\"\n", "[A]~2");
+}
+
+#[test]
+fn test_literal_optional_pair_collides() {
+    // The un-repeated form the `~2` expands to: `[A] [A]`. Same rejection.
+    assert_rejected_both_modes("start: [A] [A]\nA: \"a\"\n", "[A] [A]");
+    assert_rejected_both_modes("start: [A] [A] C\nA: \"a\"\nC: \"c\"\n", "[A] [A] C");
+}
+
+#[test]
+fn test_mixed_optional_and_maybe_collides() {
+    // Mixing `?` and `[]`: `[A] A?` / `A? [A]` still collide via the maybe arm's
+    // `_EMPTY` markers. Python rejects both modes.
+    assert_rejected_both_modes("start: [A] A?\nA: \"a\"\n", "[A] A?");
+    assert_rejected_both_modes("start: A? [A]\nA: \"a\"\n", "A? [A]");
+}
+
+#[test]
+fn test_plain_optional_pair_still_accepted() {
+    // Guardrail: `A? A?` lowers without `_EMPTY` markers, so its two `A` arms dedup
+    // cleanly — Python *accepts* it. The #252 fix must not over-reject the `?` form.
+    assert_accepted_both_modes("start: A? A?\nA: \"a\"\n", "A? A?");
+}
+
+#[test]
+fn test_disjoint_optionals_still_accepted() {
+    // Guardrail: distinct optionals don't collide — `[A] [B]` expands to four
+    // distinct arms (`A B | A | B | ε`), accepted in both modes.
+    assert_accepted_both_modes("start: [A] [B]\nA: \"a\"\nB: \"b\"\n", "[A] [B]");
+}
+
+#[test]
+fn test_maybe_nested_under_optional_collides() {
+    // A `[X]` nested under an outer `?` (`[A]~0..1 C` ≡ `([A])? C`) still surfaces
+    // its `_EMPTY` markers onto the trailing `C`, so the absent-`[A]` and empty-`?`
+    // arms both reduce to `start -> C` and collide. Python rejects under both modes.
+    assert_rejected_both_modes("start: [A]~0..1 C\nA: \"a\"\nC: \"c\"\n", "[A]~0..1 C");
+    assert_rejected_both_modes("start: ([A])? C\nA: \"a\"\nC: \"c\"\n", "([A])? C");
+}
+
+#[test]
+fn test_lone_nested_maybe_optional_still_accepted() {
+    // Guardrail: a lone `([A])?` is non-colliding (`A | ε`, the duplicate empty arms
+    // collapse — Python tolerates duplicate *empty* rules), accepted under
+    // maybe_placeholders=False. The collision fix must not turn the redundant empty
+    // arm into a spurious second empty production.
+    build_with("start: ([A])?\nA: \"a\"\n", false)
+        .expect("([A])? should build under maybe_placeholders=False");
+}
+
+#[test]
+fn test_large_repeat_optional_rejects_without_blowup() {
+    // #252 part 2 — combinatorial blow-up. `[A]~n` distributes each copy as a
+    // present + an absent (placeholder-marked) arm, so the naive product is `2^n`
+    // alternatives before dedup. Python Lark has the same exponential in
+    // `_generate_repeats` (`[A]~15` already takes seconds before raising). lark-rs
+    // raises the same "Rules defined twice" on the *first* colliding step, so a
+    // near-threshold `[A]~49` (`< REPEAT_BREAK_THRESHOLD`) is rejected in
+    // sub-millisecond time. The mere fact that this test *terminates* is the gate:
+    // a `2^49` materialization would never finish.
+    for n in [22usize, 49] {
+        let g = format!("start: [A]~{n}\nA: \"a\"\n");
+        for mp in [false, true] {
+            let err = build_with(&g, mp)
+                .err()
+                .unwrap_or_else(|| panic!("[A]~{n} (mp={mp}) must be rejected, not accepted"));
+            assert!(
+                err.to_string().contains("Rules defined twice"),
+                "[A]~{n} (mp={mp}): wrong error: {err}"
+            );
+        }
+    }
 }

@@ -82,7 +82,7 @@ impl GrammarCompiler {
         let compiled = Self::dedup_and_check_alts(&inst_name, compiled)?;
         for (order, ((syms, gaps), alias)) in compiled.into_iter().enumerate() {
             let options = RuleOptions {
-                nones_before: Self::stored_gaps(gaps),
+                nones_before: self.stored_output_gaps(gaps),
                 ..inst_opts.clone()
             };
             self.rules

@@ -7,7 +7,7 @@
 mod common;
 
 use common::{load_oracle, tree_matches_oracle};
-use lark_rs::{Lark, LarkOptions, LexerType, ParserAlgorithm};
+use lark_rs::{Lark, LarkOptions, LexerType, ParseError, ParserAlgorithm};
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -754,4 +754,322 @@ fn test_interactive_with_start() {
     // Cross-check: "a" fails under "other" start
     let p3 = lark.parse_interactive_with_start("a", "other").unwrap();
     assert!(p3.resume().is_err(), "'a' should fail under 'other' start");
+}
+
+/// Default-start selection must be deterministic and match Python Lark's
+/// `_verify_start` (issue #251). Python pins (verified against the oracle):
+///   * `start=['start','other']`, no explicit start → `ConfigurationError`
+///     "Lark initialized with more than 1 possible start rule. Must specify
+///     which start rule to parse" — NOT a nondeterministic `HashMap` key.
+///   * single configured start, no explicit start → use it.
+///   * explicit start not in the configured list → "Unknown start rule …".
+#[test]
+fn test_interactive_default_start_deterministic() {
+    let grammar = r#"
+        start: A
+        other: B
+        A: /a+/
+        B: /b+/
+    "#;
+
+    // >1 configured start, no explicit start → deterministic rejection.
+    let multi = Lark::new(
+        grammar,
+        LarkOptions {
+            parser: ParserAlgorithm::Lalr,
+            lexer: LexerType::Basic,
+            start: vec!["start".to_string(), "other".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    match multi.parse_interactive("a") {
+        Ok(_) => panic!("multiple starts + default must reject (Python ConfigurationError)"),
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("more than 1 possible start rule"),
+                "expected Python's >1-start message, got: {msg}"
+            );
+        }
+    }
+
+    // Single configured start, no explicit start → use it (parses cleanly).
+    let single = Lark::new(
+        grammar,
+        LarkOptions {
+            parser: ParserAlgorithm::Lalr,
+            lexer: LexerType::Basic,
+            start: vec!["start".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let p = single
+        .parse_interactive("a")
+        .expect("single start + default must succeed");
+    assert!(
+        p.resume().is_ok(),
+        "single default start should parse its input"
+    );
+
+    // Explicit start not in the configured list → Python's "Unknown start rule".
+    match multi.parse_interactive_with_start("a", "nope") {
+        Ok(_) => panic!("unknown explicit start must be rejected"),
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("Unknown start rule"),
+                "expected Python's unknown-start message, got: {msg}"
+            );
+        }
+    }
+
+    // Duplicate configured start (`['start','start']`) counts as >1, exactly as
+    // Python's `len(start_decls) > 1` check (verified against the oracle:
+    // ConfigurationError with `['start', 'start']`).
+    let dup = Lark::new(
+        grammar,
+        LarkOptions {
+            parser: ParserAlgorithm::Lalr,
+            lexer: LexerType::Basic,
+            start: vec!["start".to_string(), "start".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    match dup.parse_interactive("a") {
+        Ok(_) => panic!("duplicate start must be rejected as >1 (Python parity)"),
+        Err(e) => assert!(
+            e.to_string().contains("more than 1 possible start rule"),
+            "duplicate-start should hit the >1 message, got: {e}"
+        ),
+    }
+}
+
+// ─── Invalid-input / error-semantics oracle replay (issue #250) ──────────────
+//
+// The success traces above never exercise the interactive parser's failure paths.
+// `tools/generate_oracles.py` pins Python Lark's `InteractiveParser` error
+// behavior into `interactive/error_cases.json`; this replay asserts lark-rs raises
+// the SAME `ParseError` variant (mapped to the same kind string), the same
+// token/char detail, and preserves the same `accepts()` set across the error.
+//
+// **Documented disposition of the contextual root-lexer fallback question (#250).**
+// `InteractiveParser::next_lexed` (contextual path) calls `next_root_token` on a
+// per-state miss (`Ok(None) | Err(_)`), mirroring `ContextualRecovering` rather than
+// `Contextual`. The `contextual_state_invalid_token_rbrace` case pins that this is
+// **not** more permissive than a batch contextual parse: a globally-valid but
+// state-invalid token (`}` in `a_part` state) is matched by the root fallback, fed
+// to the parser, and rejected with `UnexpectedToken` — byte-for-byte the same error
+// the batch contextual parse raises (probed against Python Lark 1.3.1: both
+// `l_ctx.parse("[}")` and the interactive exhaust raise `UnexpectedToken` on
+// `RBRACE`). The fallback only changes *which lexer* surfaces the token, never
+// whether the parser accepts it; the parser's action table is the single authority
+// on validity, so the error semantics are identical to batch. (A genuinely
+// unlexable character — `contextual_unlexable_char_digit` — misses even the root
+// set and surfaces `UnexpectedCharacter`, again as batch does.) This matches
+// Python: its contextual lexer likewise falls back to the full terminal set, so the
+// interactive cursor is not a distinct dialect — the root-fallback is the standard
+// contextual-lexer behavior, not a recovery-only quirk.
+
+/// The oracle's normalized `error_kind` string for a lark-rs `ParseError`.
+fn error_kind(e: &ParseError) -> &'static str {
+    match e {
+        ParseError::UnexpectedCharacter { .. } => "UnexpectedCharacter",
+        ParseError::UnexpectedToken { .. } => "UnexpectedToken",
+        ParseError::UnexpectedEof { .. } => "UnexpectedEof",
+        ParseError::Postlex { .. } => "Postlex",
+    }
+}
+
+#[test]
+fn test_interactive_error_oracle() {
+    let oracle = load_oracle("interactive", "error_cases");
+    let cases = oracle.as_array().expect("error oracle must be an array");
+
+    let mut failures = Vec::new();
+
+    for case in cases {
+        let name = case["name"].as_str().unwrap_or("?");
+        let lexer = case["lexer"].as_str().unwrap_or("basic");
+        let grammar = case["grammar"].as_str().unwrap_or("arithmetic");
+        let text = case["text"].as_str().unwrap_or("");
+        let drive = case["drive"].as_str().unwrap_or("exhaust");
+
+        let lark = make_interactive_parser(grammar, lexer);
+        let mut p = match lark.parse_interactive(text) {
+            Ok(p) => p,
+            Err(e) => {
+                failures.push(format!("{name}: parse_interactive failed: {e}"));
+                continue;
+            }
+        };
+
+        // Initial accepts.
+        let expected_initial = json_str_vec(&case["initial_accepts"]);
+        let actual_initial = p.accepts();
+        if actual_initial != expected_initial {
+            failures.push(format!(
+                "{name}: initial accepts mismatch:\n  expected: {expected_initial:?}\n  actual:   {actual_initial:?}"
+            ));
+        }
+
+        // Feed any valid manual prefix (no lexer drive).
+        if let Some(prefix) = case["manual_prefix"].as_array() {
+            let mut prefix_ok = true;
+            for step in prefix {
+                let term = step["terminal"].as_str().unwrap_or("?");
+                let value = step["value"].as_str().unwrap_or("");
+                if let Err(e) = p.feed(term, value) {
+                    failures.push(format!(
+                        "{name}: manual prefix feed({term:?}, {value:?}) errored: {e}"
+                    ));
+                    prefix_ok = false;
+                    break;
+                }
+            }
+            if !prefix_ok {
+                continue;
+            }
+        }
+
+        // accepts() right before the failing drive.
+        let expected_before = json_str_vec(&case["accepts_before_error"]);
+        let actual_before = p.accepts();
+        if actual_before != expected_before {
+            failures.push(format!(
+                "{name}: accepts_before_error mismatch:\n  expected: {expected_before:?}\n  actual:   {actual_before:?}"
+            ));
+        }
+
+        // Drive the failing path and capture the error.
+        let result = drive_failing(&mut p, drive, case);
+        let expected_raised = case["raised"].as_bool().unwrap_or(true);
+        match (&result, expected_raised) {
+            (Err(e), true) => {
+                let expected_kind = case["error_kind"].as_str().unwrap_or("?");
+                let actual_kind = error_kind(e);
+                if actual_kind != expected_kind {
+                    failures.push(format!(
+                        "{name}: error kind mismatch: expected {expected_kind:?}, got {actual_kind:?} ({e})"
+                    ));
+                }
+                check_error_detail(name, case, e, &mut failures);
+            }
+            (Ok(_), true) => {
+                failures.push(format!(
+                    "{name}: expected an error, but the drive succeeded"
+                ));
+            }
+            (Err(e), false) => {
+                failures.push(format!("{name}: expected success, but errored: {e}"));
+            }
+            (Ok(_), false) => {}
+        }
+
+        // accepts() must survive the error (the cursor is unchanged).
+        if let Some(expected_after) = case.get("accepts_after_error") {
+            let expected = json_str_vec(expected_after);
+            let actual = p.accepts();
+            if actual != expected {
+                failures.push(format!(
+                    "{name}: accepts_after_error mismatch:\n  expected: {expected:?}\n  actual:   {actual:?}"
+                ));
+            }
+        }
+
+        // Reuse-after-error (scenario 4): re-driving the same cursor must re-surface
+        // the same error kind — Python does NOT refuse reuse.
+        if let Some(reuse_raised) = case.get("reuse_raised").and_then(|v| v.as_bool()) {
+            let reuse_result = drive_failing(&mut p, drive, case);
+            match reuse_result {
+                Err(e) if reuse_raised => {
+                    let expected_kind = case["reuse_error_kind"].as_str().unwrap_or("?");
+                    let actual_kind = error_kind(&e);
+                    if actual_kind != expected_kind {
+                        failures.push(format!(
+                            "{name}: reuse error kind mismatch: expected {expected_kind:?}, got {actual_kind:?}"
+                        ));
+                    }
+                }
+                Ok(_) if reuse_raised => {
+                    failures.push(format!("{name}: reuse expected an error, but succeeded"));
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        panic!(
+            "Interactive error oracle failures ({}):\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+}
+
+/// Drive the failing path named by `drive` and return its result. The `bad_token`
+/// (scenario 3) is fed here, after the manual prefix already advanced the cursor.
+fn drive_failing(
+    p: &mut lark_rs::InteractiveParser,
+    drive: &str,
+    case: &serde_json::Value,
+) -> Result<(), ParseError> {
+    match drive {
+        "exhaust" => p.exhaust_lexer().map(|_| ()),
+        "feed_eof" => p.feed_eof().map(|_| ()),
+        "feed_token" => {
+            let bad = &case["bad_token"];
+            let term = bad["terminal"].as_str().unwrap_or("?");
+            let value = bad["value"].as_str().unwrap_or("");
+            p.feed(term, value).map(|_| ())
+        }
+        other => panic!("unsupported drive in error oracle: {other}"),
+    }
+}
+
+/// Assert the error's token/char detail matches the oracle.
+fn check_error_detail(
+    name: &str,
+    case: &serde_json::Value,
+    e: &ParseError,
+    failures: &mut Vec<String>,
+) {
+    match e {
+        ParseError::UnexpectedToken {
+            token, token_type, ..
+        } => {
+            if let Some(t) = case.get("error_token_type").and_then(|v| v.as_str()) {
+                if token_type != t {
+                    failures.push(format!(
+                        "{name}: error token type: expected {t:?}, got {token_type:?}"
+                    ));
+                }
+            }
+            if let Some(v) = case.get("error_token_value").and_then(|v| v.as_str()) {
+                if token != v {
+                    failures.push(format!(
+                        "{name}: error token value: expected {v:?}, got {token:?}"
+                    ));
+                }
+            }
+        }
+        ParseError::UnexpectedCharacter { ch, .. } => {
+            if let Some(c) = case.get("error_char").and_then(|v| v.as_str()) {
+                if ch.to_string() != c {
+                    failures.push(format!(
+                        "{name}: error char: expected {c:?}, got {:?}",
+                        ch.to_string()
+                    ));
+                }
+            }
+        }
+        ParseError::UnexpectedEof { .. } => {
+            // Python carries a `$END` token type here; lark-rs folds it into
+            // UnexpectedEof with no token value. The kind check already covers it.
+        }
+        ParseError::Postlex { .. } => {}
+    }
 }
