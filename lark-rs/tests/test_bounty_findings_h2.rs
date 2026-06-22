@@ -123,24 +123,29 @@ fn n3_global_inline_flag_rejected() {
     assert_build_rejected(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual), "N3");
 }
 
-/// N4 (MEDIUM). A named backreference `(?P=name)` — valid Python `re`, which
-/// tokenizes it. lark-rs leaks a raw/uncategorized regex error
-/// (`Invalid regex pattern … regex parse error`) instead of either supporting it
-/// or surfacing the documented `LookaroundScope::Backref` category — the
-/// classifier's `has_backref` covers `\1`/`\k`/`\g` but misses `(?P=name)`.
-/// Distinct from RC6 (`\b`, a different construct/leak).
+/// N4 (MEDIUM). A named backreference `(?P=name)` is mis-categorized. General
+/// backreferences are a documented OUT-OF-SCOPE non-goal (LOOKAROUND_SCOPE.md), so
+/// the *correct* behavior is a categorized `GrammarError::LookaroundScope` refusal
+/// — exactly what `\1`/`\k`/`\g` produce ("not supported (by design) … a
+/// backreference …"). But the classifier's `has_backref` misses the `(?P=name)`
+/// spelling, so it slips past classification and lark-rs instead leaks a raw,
+/// uncategorized regex error (`Invalid regex pattern … regex parse error`). The
+/// XFAIL asserts the *categorized* refusal (matching `\1`), NOT support — this is
+/// not promotion to a supported feature. Distinct from RC6 (`\b`, different
+/// construct).
 #[test]
-#[ignore = "XFAIL (bounty N4): named backref (?P=name) leaks an uncategorized error"]
+#[ignore = "XFAIL (bounty N4): named backref (?P=name) leaks an uncategorized error instead of a categorized refusal"]
 fn n4_named_backref_categorized() {
-    // Python accepts and tokenizes this; lark-rs should at least categorize the
-    // refusal (or support it). Today it leaks a raw regex error at build.
     let g = "start: A\nA: /(?P<x>a)(?P=x)/\n";
-    let r = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual));
-    // Oracle behavior: Python builds and parses "aa". Assert lark-rs builds too.
+    let err = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual))
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    // A numeric backref `\1` yields the categorized refusal; `(?P=name)` must too.
     assert!(
-        r.is_ok(),
-        "N4: Python accepts (?P=name); lark-rs leaked an uncategorized regex error: {:?}",
-        r.err()
+        err.contains("not supported (by design)"),
+        "N4: (?P=name) should give the categorized backref refusal (like \\1), \
+         but lark-rs leaked: {err:?}"
     );
 }
 

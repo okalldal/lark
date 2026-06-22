@@ -8,7 +8,16 @@ divergence, regex-dialect taxonomy, and deterministic resource growth.
 
 Ten retooled strike teams ran against the same harness. After minimization,
 independent re-verification, and dedup against RC1–RC10, this catalog records
-**10 fresh root causes** (the "N" series) plus **4 variants** of round-1 causes.
+**9 fresh harness/API-confirmed root causes** + **1 provisional (source+empirical)
+root cause (N7)** + **4 variants** of round-1 causes.
+
+**Accounting note.** N1 is **one root cause** (`%override`/`%extend` directive
+modifiers dropped at the parser layer) with **three observable surfaces**
+(N1a/N1b/N1c) — not three root causes. The nine confirmed root causes are: N1,
+N2, N3, N4 (after its taxonomy fix below), N5, N6, N8, N9, N10. **N7** (binding
+deep-tree recursion) is real at the source level and demonstrated empirically, but
+the binding toolchains were unavailable, so it is **provisional** and **not
+encoded as an executable XFAIL** — see its entry.
 
 ## Target & method
 
@@ -34,7 +43,7 @@ independent re-verification, and dedup against RC1–RC10, this catalog records
 | N3  | High     | lexer (regex dialect)  | Global inline flag `(?i)` accepted; Python rejects ("global flags not at start") |
 | N5  | High     | config validation      | Illegal parser/lexer pairing (e.g. `lalr`+`dynamic`) silently accepted |
 | N6  | High     | config validation      | `ambiguity=` on `parser=lalr` silently ignored, not rejected |
-| N7  | High     | bindings (distribution)| C API + PyO3 materialize the tree with unbounded recursion → stack overflow on deep trees |
+| N7  | High *(provisional)* | bindings (distribution)| C API + PyO3 materialize the tree with unbounded recursion → stack overflow on deep trees (source+empirical; not encoded) |
 | N4  | Medium   | lexer (refusal taxonomy)| Named backref `(?P=name)` leaks an uncategorized regex error |
 | N8  | Medium   | core (positions)       | `start_pos`/`end_pos` are byte offsets, not char indices (non-ASCII) |
 | N9  | Medium   | perf (grammar size)    | `x~n..m` (≥50) lowers to O(n²) grammar size vs Python's O(log n) |
@@ -81,11 +90,18 @@ source and demotes the flag off position 0); lark-rs strips the wrapper into a f
 bitset and accepts + applies it. Scoped `(?i:…)` is fine on both — only the global
 form diverges. A new more-permissive validation family.
 
-### N4 — Named backreference leaks an uncategorized error (lexer / taxonomy)
-`A: /(?P<x>a)(?P=x)/` → Python accepts and tokenizes; lark-rs leaks a raw
-`Invalid regex pattern … regex parse error` instead of the documented
-`LookaroundScope::Backref` category (the classifier's `has_backref` covers
-`\1`/`\k`/`\g` but misses `(?P=name)`). Distinct from RC6 (`\b`, different construct).
+### N4 — Named backreference mis-categorized (lexer / taxonomy)
+`A: /(?P<x>a)(?P=x)/`. **Expected behavior is a *categorized refusal*, not
+support:** general backreferences are a documented OUT-OF-SCOPE non-goal
+(`docs/LOOKAROUND_SCOPE.md`), and a numeric backref `\1` correctly yields the
+categorized `GrammarError::LookaroundScope` message *"not supported (by design) …
+a backreference …"*. But the classifier's `has_backref` covers `\1`/`\k`/`\g` and
+misses the `(?P=name)` spelling, so it slips past classification and lark-rs leaks
+a raw `Invalid regex pattern … regex parse error` instead. The XFAIL
+(`n4_named_backref_categorized`) asserts the *categorized* refusal (parity with
+`\1`), not support — Python's acceptance is irrelevant here because lark-rs
+deliberately diverges on general backrefs. Distinct from RC6 (`\b`, different
+construct).
 
 ### N5 — Parser/lexer pairing legality not enforced (config validation)
 `start:"a"` with `lalr`+`dynamic` (also `cyk`+`contextual`, `earley`+`contextual`,
@@ -99,8 +115,11 @@ lexer and parses. The only pairing gate in the tree is the postlex+dynamic refus
 `options.ambiguity`, so it silently builds & parses. Per-backend-scoped rule that
 lark-rs omits for LALR.
 
-### N7 — Deep-tree recursive materialization in bindings (distribution)
-**Verification: source + empirical** (binding toolchains absent; not compiled).
+### N7 — Deep-tree recursive materialization in bindings (distribution) — PROVISIONAL
+**Verification: source + empirical (binding toolchains absent; NOT compiled, and
+NOT encoded as an executable XFAIL).** Severity High *if* reproduced in an actual
+binding test; treat as **provisional** until a binding/recursive-materialization
+repro lands. It is listed here as evidence, not as a confirmed, test-backed find.
 The C API `node_from_tree` and PyO3 `from_tree`/`pretty_into` walk the output tree
 with one unbounded native frame per level, contradicting the engine's own
 stack-safety invariant (#33/#151) — which the WASM serializer deliberately honors
