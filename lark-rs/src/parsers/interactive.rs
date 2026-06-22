@@ -64,9 +64,13 @@ pub struct InteractiveParser<'a> {
     stack: ParserStack,
     /// Owned input, lexed lazily from a hand-tracked cursor (avoids a
     /// self-referential borrow of a `LexerState`). `line`/`col` are 1-based to match
-    /// [`LexerState`](crate::lexer::LexerState).
+    /// [`LexerState`](crate::lexer::LexerState). `pos` is the **byte** offset (drives
+    /// regex slicing); `char_pos` is the **character** index a token's
+    /// `start_pos`/`end_pos` carry (Python parity, #278) — they diverge on non-ASCII
+    /// input, so the cursor must advance `pos` by byte length, never by `end_pos`.
     text: String,
     pos: usize,
+    char_pos: usize,
     line: usize,
     col: usize,
     /// The finished tree once a `$END` feed reached ACCEPT (Python's `.result`).
@@ -87,6 +91,7 @@ impl<'a> InteractiveParser<'a> {
             stack,
             text,
             pos: 0,
+            char_pos: 0,
             line: 1,
             col: 1,
             result: None,
@@ -106,6 +111,7 @@ impl<'a> InteractiveParser<'a> {
             stack,
             text,
             pos: 0,
+            char_pos: 0,
             line: 1,
             col: 1,
             result: None,
@@ -229,6 +235,7 @@ impl<'a> InteractiveParser<'a> {
             stack: self.stack.clone(),
             text: self.text.clone(),
             pos: self.pos,
+            char_pos: self.char_pos,
             line: self.line,
             col: self.col,
             result: self.result.clone(),
@@ -257,7 +264,9 @@ impl<'a> InteractiveParser<'a> {
     /// left off — after `exhaust_lexer`, the end of input; before any drive, the
     /// start).
     fn eof_token(&self) -> Token {
-        Token::end().with_position(self.line, self.col, self.pos, self.pos)
+        // `$END` carries the **character** index (Python parity, #278), not the byte
+        // offset.
+        Token::end().with_position(self.line, self.col, self.char_pos, self.char_pos)
     }
 
     /// Lex the next non-ignored token, advancing the cursor, or the positioned `$END`
@@ -274,9 +283,19 @@ impl<'a> InteractiveParser<'a> {
             }
             match &self.lexer {
                 LexerKind::Basic(lexer) => {
-                    match lexer.next_token_at(&self.text, self.pos, self.line, self.col) {
+                    match lexer.next_token_at(
+                        &self.text,
+                        self.pos,
+                        self.char_pos,
+                        self.line,
+                        self.col,
+                    ) {
                         Ok(token) => {
-                            self.pos = token.end_pos;
+                            // `end_pos` is a **char** index now (#278); advance the
+                            // byte cursor by the matched span's byte length, the char
+                            // cursor to `end_pos`.
+                            self.pos += token.value.len();
+                            self.char_pos = token.end_pos;
                             self.line = token.end_line;
                             self.col = token.end_column;
                             if lexer.is_ignored(token.type_id) {
@@ -298,16 +317,24 @@ impl<'a> InteractiveParser<'a> {
                 }
                 LexerKind::Contextual(lexer) => {
                     let parser_state = self.stack.position();
-                    match lexer.next_token(&self.text, self.pos, parser_state, self.line, self.col)
-                    {
+                    match lexer.next_token(
+                        &self.text,
+                        self.pos,
+                        self.char_pos,
+                        parser_state,
+                        self.line,
+                        self.col,
+                    ) {
                         // Ignored terminal (whitespace, comment): advance and continue.
                         Ok(Some(token)) if lexer.is_ignored(token.type_id) => {
-                            self.pos = token.end_pos;
+                            self.pos += token.value.len();
+                            self.char_pos = token.end_pos;
                             self.line = token.end_line;
                             self.col = token.end_column;
                         }
                         Ok(Some(token)) => {
-                            self.pos = token.end_pos;
+                            self.pos += token.value.len();
+                            self.char_pos = token.end_pos;
                             self.line = token.end_line;
                             self.col = token.end_column;
                             return Ok(token);
@@ -331,10 +358,15 @@ impl<'a> InteractiveParser<'a> {
                         // character misses even the root set and surfaces
                         // `UnexpectedCharacter`, again as batch does.
                         Ok(None) | Err(_) => {
-                            if let Some(token) =
-                                lexer.next_root_token(&self.text, self.pos, self.line, self.col)
-                            {
-                                self.pos = token.end_pos;
+                            if let Some(token) = lexer.next_root_token(
+                                &self.text,
+                                self.pos,
+                                self.char_pos,
+                                self.line,
+                                self.col,
+                            ) {
+                                self.pos += token.value.len();
+                                self.char_pos = token.end_pos;
                                 self.line = token.end_line;
                                 self.col = token.end_column;
                                 if lexer.is_ignored(token.type_id) {

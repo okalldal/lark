@@ -253,13 +253,16 @@ fn n6_ambiguity_on_lalr_rejected() {
 // Core correctness surfaced through the bindings.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// N8 (MEDIUM). `start_pos`/`end_pos` are byte offsets in lark-rs but char indices
-/// in Python Lark. On `"héllo"` (the `é` is 2 UTF-8 bytes) lark-rs reports
+/// N8 (MEDIUM). `start_pos`/`end_pos` were byte offsets in lark-rs but char indices
+/// in Python Lark. On `"héllo"` (the `é` is 2 UTF-8 bytes) lark-rs reported
 /// `end_pos=6`, Python `5`. `column`/`end_column` are char-based in both and match;
-/// only `*_pos` diverge. Core-rooted (`LexCursor` advances by byte length), copied
+/// only `*_pos` diverged. Core-rooted (`LexCursor` advanced by byte length), copied
 /// verbatim into the PyO3/WASM/C bindings under a Python-compatible API.
+// Fixed in #278: the lexer cursors (`LexCursor`/`LexerState`/the interactive and
+// Earley-dynamic cursors) now track a character index alongside the byte offset and
+// emit it as `start_pos`/`end_pos`; the byte offset stays the scanner cursor for
+// slicing. Live regression test, un-ignored from XFAIL.
 #[test]
-#[ignore = "XFAIL (bounty N8): start_pos/end_pos are byte offsets, not char indices"]
 fn n8_positions_are_char_indices() {
     let g = "start: A\nA: /h.llo/\n";
     let mut o = opts(ParserAlgorithm::Lalr, LexerType::Contextual);

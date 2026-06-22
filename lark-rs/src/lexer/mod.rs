@@ -255,11 +255,19 @@ impl BasicLexer {
     }
 }
 
-/// A running source cursor (byte offset + 1-based line/column), advanced one
-/// matched span or one skipped character at a time. Used by [`BasicLexer::lex`]
-/// so the newline-aware position bookkeeping lives in exactly one place.
+/// A running source cursor (byte offset + **character** offset + 1-based
+/// line/column), advanced one matched span or one skipped character at a time.
+/// Used by [`BasicLexer::lex`] so the newline-aware position bookkeeping lives in
+/// exactly one place.
+///
+/// `pos` is the **byte** offset — it drives all regex slicing (`text[pos..]`) and
+/// loop control. `char_pos` is the **character** index, which is what a `Token`'s
+/// `start_pos`/`end_pos` carry: Python Lark's `start_pos`/`end_pos` are char
+/// indices, not byte offsets, and the two diverge on any non-ASCII input (#278,
+/// bounty N8). Both advance together in [`feed`](Self::feed).
 struct LexCursor {
     pos: usize,
+    char_pos: usize,
     line: usize,
     col: usize,
 }
@@ -268,13 +276,14 @@ impl LexCursor {
     fn new() -> Self {
         LexCursor {
             pos: 0,
+            char_pos: 0,
             line: 1,
             col: 1,
         }
     }
 
     /// Advance the cursor over `value` (a matched terminal slice or a skipped
-    /// run of text), tracking newlines.
+    /// run of text), tracking newlines and the character count.
     fn feed(&mut self, value: &str) {
         for ch in value.chars() {
             if ch == '\n' {
@@ -283,6 +292,7 @@ impl LexCursor {
             } else {
                 self.col += 1;
             }
+            self.char_pos += 1;
         }
         self.pos += value.len();
     }
@@ -293,7 +303,9 @@ impl BasicLexer {
     /// advancing `cur` past it. Returns `None` when the matched terminal is an
     /// `%ignore` type (it still advances the cursor, but produces no token).
     fn make_token(&self, cur: &mut LexCursor, id: SymbolId, value: &str) -> Option<Token> {
-        let start_pos = cur.pos;
+        // `start_pos`/`end_pos` are **character** indices (Python parity, #278) —
+        // `cur.char_pos`, not the byte offset `cur.pos`.
+        let start_pos = cur.char_pos;
         let start_line = cur.line;
         let start_col = cur.col;
         cur.feed(value);
@@ -309,7 +321,7 @@ impl BasicLexer {
             end_line: cur.line,
             end_column: cur.col,
             start_pos,
-            end_pos: cur.pos,
+            end_pos: cur.char_pos,
         })
     }
 
@@ -335,13 +347,21 @@ impl BasicLexer {
         &self,
         text: &str,
         pos: usize,
+        char_pos: usize,
         line: usize,
         col: usize,
     ) -> Result<Token, ()> {
         match self.scanner.match_at(text, pos) {
             Some((id, value)) => {
-                let mut cur = LexCursor { pos, line, col };
-                let start_pos = cur.pos;
+                let mut cur = LexCursor {
+                    pos,
+                    char_pos,
+                    line,
+                    col,
+                };
+                // Character indices for `start_pos`/`end_pos` (#278), byte `pos`
+                // stays the scanner cursor.
+                let start_pos = cur.char_pos;
                 let start_line = cur.line;
                 let start_col = cur.col;
                 cur.feed(value);
@@ -354,7 +374,7 @@ impl BasicLexer {
                     end_line: cur.line,
                     end_column: cur.col,
                     start_pos,
-                    end_pos: cur.pos,
+                    end_pos: cur.char_pos,
                 })
             }
             None => Err(()),
@@ -394,7 +414,8 @@ impl Lexer for BasicLexer {
             }
         }
 
-        tokens.push(Token::end().with_position(cur.line, cur.col, cur.pos, cur.pos));
+        // `$END` carries the char index, not the byte offset (#278).
+        tokens.push(Token::end().with_position(cur.line, cur.col, cur.char_pos, cur.char_pos));
         Ok(tokens)
     }
 }
@@ -554,12 +575,24 @@ impl ContextualLexer {
         self.ignore.contains(&id)
     }
 
-    /// Build a [`Token`] for a `(id, value)` the scanner matched starting at `pos`,
-    /// with newline-aware end position. Shared by the per-state [`Self::next_token`]
-    /// and the root-fallback [`Self::next_root_token`] so the two cannot drift on
-    /// position bookkeeping.
-    fn build_token(&self, id: SymbolId, value: &str, pos: usize, line: usize, col: usize) -> Token {
+    /// Build a [`Token`] for a `(id, value)` the scanner matched starting at byte
+    /// offset `pos` / **character** index `char_pos`, with newline-aware end
+    /// position. Shared by the per-state [`Self::next_token`] and the root-fallback
+    /// [`Self::next_root_token`] so the two cannot drift on position bookkeeping.
+    ///
+    /// `start_pos`/`end_pos` carry the **character** indices (`char_pos`), matching
+    /// Python Lark (#278, bounty N8); the byte offset `pos` is only the scanner
+    /// cursor and never reaches the token.
+    fn build_token(
+        &self,
+        id: SymbolId,
+        value: &str,
+        char_pos: usize,
+        line: usize,
+        col: usize,
+    ) -> Token {
         let (mut end_line, mut end_column) = (line, col);
+        let mut nchars = 0usize;
         for ch in value.chars() {
             if ch == '\n' {
                 end_line += 1;
@@ -567,6 +600,7 @@ impl ContextualLexer {
             } else {
                 end_column += 1;
             }
+            nchars += 1;
         }
         Token {
             type_id: id,
@@ -576,16 +610,18 @@ impl ContextualLexer {
             column: col,
             end_line,
             end_column,
-            start_pos: pos,
-            end_pos: pos + value.len(),
+            start_pos: char_pos,
+            end_pos: char_pos + nchars,
         }
     }
 
-    /// Lex the next token at `pos` given the current parser state.
+    /// Lex the next token at byte offset `pos` / character index `char_pos` given the
+    /// current parser state.
     pub fn next_token(
         &self,
         text: &str,
         pos: usize,
+        char_pos: usize,
         state: usize,
         line: usize,
         col: usize,
@@ -602,11 +638,13 @@ impl ContextualLexer {
         };
 
         if let Some((id, value)) = scanner.match_at(text, pos) {
-            return Ok(Some(self.build_token(id, value, pos, line, col)));
+            return Ok(Some(self.build_token(id, value, char_pos, line, col)));
         }
 
         if pos >= text.len() {
-            return Ok(Some(Token::end().with_position(line, col, pos, pos)));
+            return Ok(Some(
+                Token::end().with_position(line, col, char_pos, char_pos),
+            ));
         }
 
         let ch = text[pos..].chars().next().unwrap();
@@ -632,6 +670,7 @@ impl ContextualLexer {
         &self,
         text: &str,
         pos: usize,
+        char_pos: usize,
         line: usize,
         col: usize,
     ) -> Option<Token> {
@@ -640,16 +679,21 @@ impl ContextualLexer {
             .get_or_build(&self.terminals, self.global_flags, self.backend);
         scanner
             .match_at(text, pos)
-            .map(|(id, value)| self.build_token(id, value, pos, line, col))
+            .map(|(id, value)| self.build_token(id, value, char_pos, line, col))
     }
 }
 
 // ─── LexerState: tracks position during incremental lexing ───────────────────
 
 /// Mutable state threaded through contextual lexing.
+///
+/// `pos` is the **byte** offset (drives regex slicing); `char_pos` is the
+/// **character** index that a token's `start_pos`/`end_pos` carry (Python parity,
+/// #278). Both advance together in [`advance_by`](Self::advance_by).
 pub struct LexerState<'a> {
     pub text: &'a str,
     pub pos: usize,
+    pub char_pos: usize,
     pub line: usize,
     pub col: usize,
 }
@@ -659,6 +703,7 @@ impl<'a> LexerState<'a> {
         LexerState {
             text,
             pos: 0,
+            char_pos: 0,
             line: 1,
             col: 1,
         }
@@ -668,8 +713,8 @@ impl<'a> LexerState<'a> {
         self.pos >= self.text.len()
     }
 
-    /// Advance `n` bytes, walking the consumed text so line/col stay
-    /// newline-aware (columns count characters, not bytes).
+    /// Advance `n` bytes, walking the consumed text so line/col and the character
+    /// index stay newline-aware (columns count characters, not bytes).
     pub fn advance_by(&mut self, n: usize) {
         for ch in self.text[self.pos..self.pos + n].chars() {
             if ch == '\n' {
@@ -678,6 +723,7 @@ impl<'a> LexerState<'a> {
             } else {
                 self.col += 1;
             }
+            self.char_pos += 1;
         }
         self.pos += n;
     }
