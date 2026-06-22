@@ -61,6 +61,16 @@ fn assert_build_rejected(grammar: &str, parser: ParserAlgorithm, lexer: LexerTyp
     );
 }
 
+/// Assert that building `grammar` succeeds (Python accepts it at build).
+fn assert_build_accepted(grammar: &str, parser: ParserAlgorithm, lexer: LexerType, why: &str) {
+    let r = build(grammar, parser, lexer, false);
+    assert!(
+        r.is_ok(),
+        "{why}: Python Lark accepts this grammar at build, but lark-rs rejected it: {:?}",
+        r.err()
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Grammar-loader: missing validation gates (lark-rs is more permissive than the
 // oracle — unfalsifiable permissiveness, ADR-0017 corollary → a bug).
@@ -223,15 +233,63 @@ A: /x\b/
 // Earley / dynamic lexer.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// RC8 (HIGH). A zero-width regexp terminal (`A: /a*/`) under the dynamic lexer.
-/// Python: `GrammarError: "Dynamic Earley doesn't allow zero-width regexps"`.
-/// lark-rs builds and parses under both `dynamic` and `dynamic_complete` — missing
-/// the validation gate, more permissive than the oracle.
+/// RC8 (HIGH, FIXED — #276). A zero-width regexp terminal (`A: /a*/`) under the
+/// dynamic lexer. Python: `GrammarError: "Dynamic Earley doesn't allow zero-width
+/// regexps"`. lark-rs used to build and parse under both `dynamic` and
+/// `dynamic_complete` — missing the validation gate, more permissive than the
+/// oracle. `DynamicMatcher::new` now rejects any terminal whose regexp can derive
+/// the empty string, matching Python's `min_width == 0` rule on both dynamic lexers.
 #[test]
-#[ignore = "XFAIL (bounty RC8): zero-width regexp under dynamic lexer not rejected"]
 fn rc8_zero_width_regexp_dynamic_rejected() {
     let g = "start: A\nA: /a*/\n";
     assert_build_rejected(g, ParserAlgorithm::Earley, LexerType::Dynamic, "RC8");
+    assert_build_rejected(
+        g,
+        ParserAlgorithm::Earley,
+        LexerType::DynamicComplete,
+        "RC8 (dynamic_complete)",
+    );
+}
+
+/// RC8 differential audit (#276). The zero-width gate matches Python Lark's
+/// `min_width == 0` rule across the dynamic-lexer surface — not just `/a*/`. Each
+/// pattern below was confirmed against Python Lark 1.3.1 (`get_regexp_width`): the
+/// `reject` set has `min_width == 0` and Python raises "Dynamic Earley doesn't allow
+/// zero-width regexps"; the `accept` set has `min_width >= 1` and Python builds. The
+/// gate uses the assertion-aware min-width oracle so it agrees with Python on the
+/// cases a plain `is_match("")` probe would miss — a zero-width *lookaround*
+/// terminal (`/a*(?=b)/`, which routes to the lowered DFA path) and a bare word
+/// boundary (`/\b/`, whose `min_width` is 0 in Python though it matches no empty
+/// string). It must not over-reject: a terminal that can derive empty *and* a
+/// non-empty string is rejected (Python rejects on min, not max width), but a
+/// non-nullable lookaround terminal (`/a+(?=b)/`) still builds.
+#[test]
+fn rc8_zero_width_dynamic_differential_audit() {
+    let reject: &[&str] = &[
+        "A: /a*/",      // min 0
+        "A: /a?/",      // min 0
+        "A: /(ab)*/",   // min 0
+        "A: /x*y*/",    // min 0
+        "A: /a*(?=b)/", // min 0, lookaround → lowered branch
+        "A: /(?=a)b*/", // min 0, lookaround → lowered branch
+        r"A: /\b/",     // min 0, bare word boundary (is_match("") is false)
+    ];
+    let accept: &[&str] = &[
+        "A: /a+/",        // min 1
+        "A: /ab/",        // min 2
+        "A: /a+(?=b)/",   // min 1, non-nullable lookaround → lowered branch
+        r#"A: /[^"\\]/"#, // min 1
+    ];
+    for lexer in [LexerType::Dynamic, LexerType::DynamicComplete] {
+        for body in reject {
+            let g = format!("start: A\n{body}\n");
+            assert_build_rejected(&g, ParserAlgorithm::Earley, lexer.clone(), body);
+        }
+        for body in accept {
+            let g = format!("start: A\n{body}\n");
+            assert_build_accepted(&g, ParserAlgorithm::Earley, lexer.clone(), body);
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
