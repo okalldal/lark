@@ -616,11 +616,17 @@ fn validate_config(options: &LarkOptions) -> Result<(), LarkError> {
         );
         if !allowed.contains(&options.lexer) {
             let parser_name = parser_name(&options.parser);
-            let expected = allowed
+            // Render the allowed set as a Python tuple `repr` so the message is
+            // byte-identical to `assert_config`'s `%s % (expected,)`. A 1-element
+            // tuple keeps its trailing comma — `('basic',)`, not `('basic')`.
+            let mut expected = allowed
                 .iter()
                 .map(|l| format!("'{}'", lexer_name(l)))
                 .collect::<Vec<_>>()
                 .join(", ");
+            if allowed.len() == 1 {
+                expected.push(',');
+            }
             return Err(cfg_err(format!(
                 "Parser '{parser_name}' does not support lexer '{lexer_str}', \
                  expected one of ({expected})"
@@ -672,12 +678,14 @@ pub fn build_frontend(
     // `ConfigurationError` checks (`lark.py` + `parser_frontends._validate_frontend_args`).
     // Run before any build work so an illegal pairing is rejected verbatim rather
     // than silently substituting a working lexer (bug-bounty N5/N6, issue #273).
-    validate_config(options)?;
-
-    // postlex rides every parser (LALR: basic + contextual; Earley/CYK: basic —
-    // issue #78), but never the dynamic lexer: scanning is folded into the Earley
-    // loop there, so no token stream exists for the hook to rewrite. Python Lark
-    // refuses the same pairing. Fail loudly rather than silently ignoring the hook.
+    //
+    // The postlex+dynamic refusal is checked *first*, mirroring Python's order
+    // (`lark.py:418` runs before `_validate_frontend_args` at `lark.py:517`): for a
+    // parser+lexer pairing that is *also* matrix-illegal (e.g. `lalr+dynamic+postlex`)
+    // Python reports the postlex message, not the matrix one. postlex rides every
+    // parser (LALR: basic + contextual; Earley/CYK: basic — issue #78), but never the
+    // dynamic lexer: scanning is folded into the Earley loop there, so no token stream
+    // exists for the hook to rewrite. Fail loudly rather than silently ignoring the hook.
     if options.postlex.is_some()
         && matches!(
             options.lexer,
@@ -685,9 +693,13 @@ pub fn build_frontend(
         )
     {
         return Err(LarkError::Grammar(GrammarError::Other {
-            msg: "Can't use postlex with a dynamic lexer. Use lexer='basic' instead".to_string(),
+            msg: "Can't use postlex with a dynamic lexer. Use basic or contextual instead"
+                .to_string(),
         }));
     }
+
+    validate_config(options)?;
+
     let driver = match options.parser {
         ParserAlgorithm::Lalr => build_lalr(grammar, options)?,
         ParserAlgorithm::Earley => build_earley(grammar, options)?,
@@ -959,6 +971,39 @@ mod config_validation_tests {
             err.to_string(),
             "Grammar error: Parser 'lalr' does not support lexer 'dynamic', \
              expected one of ('basic', 'contextual')"
+        );
+
+        // A single-element allowed set keeps Python's 1-tuple trailing comma:
+        // `('basic',)`, not `('basic')` (assert_config formats via `%s % (expected,)`).
+        let err = match Lark::new(
+            "start: \"a\"\n",
+            opts(ParserAlgorithm::Cyk, LexerType::Contextual),
+        ) {
+            Ok(_) => panic!("cyk+contextual is illegal but built"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err.to_string(),
+            "Grammar error: Parser 'cyk' does not support lexer 'contextual', \
+             expected one of ('basic',)"
+        );
+    }
+
+    #[test]
+    fn postlex_on_dynamic_lexer_takes_postlex_message_before_matrix() {
+        // For a pairing that is BOTH matrix-illegal and postlex+dynamic-illegal
+        // (lalr+dynamic+postlex), Python reports the postlex message first
+        // (`lark.py:418` precedes `_validate_frontend_args` at `lark.py:517`).
+        let mut o = opts(ParserAlgorithm::Lalr, LexerType::Dynamic);
+        o.postlex = Some(crate::postlex::Indenter::default());
+        let err = match Lark::new("start: \"a\"\n", o) {
+            Ok(_) => panic!("lalr+dynamic+postlex is illegal but built"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err.to_string(),
+            "Grammar error: Can't use postlex with a dynamic lexer. \
+             Use basic or contextual instead"
         );
     }
 
