@@ -73,7 +73,9 @@ def _py_result(grammar, text, **opts):
         lexer = opts.get("lexer")
         if lexer and lexer != "auto":
             kwargs["lexer"] = lexer
-        if opts.get("ambiguity"):
+        # Python Lark only accepts `ambiguity=` for the Earley parser; passing it
+        # to LALR/CYK raises a build error and would falsely flag a divergence.
+        if opts.get("ambiguity") and opts.get("parser", "lalr") == "earley":
             kwargs["ambiguity"] = opts["ambiguity"]
         if opts.get("strict"):
             kwargs["strict"] = True
