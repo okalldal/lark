@@ -573,10 +573,107 @@ fn lower_with_lexer_conf(grammar: &Grammar, options: &LarkOptions) -> (CompiledG
     (cg, lexer_conf)
 }
 
+/// Front-door config-legality check, mirroring Python Lark's `ConfigurationError`
+/// gates so an illegal `(parser, lexer)` pairing or an `ambiguity=` on a parser
+/// that doesn't disambiguate is **rejected at build** rather than silently
+/// accepted (lark-rs used to substitute a working lexer; bug-bounty N5/N6, #273).
+///
+/// Two rules, both lifted from the oracle:
+///
+///  * **Parser → allowed-lexer matrix** (Python `parser_frontends._validate_frontend_args`):
+///    `lalr → {basic, contextual}`, `earley → {basic, dynamic, dynamic_complete}`,
+///    `cyk → {basic}`. `LexerType::Auto` is always legal — Python resolves `'auto'`
+///    to a per-parser concrete lexer (`lalr→contextual`, `earley→dynamic|basic`,
+///    `cyk→basic`) *before* this check, so it never reaches the matrix; lark-rs
+///    resolves it inside each `build_*` the same way, so `Auto` is admitted here.
+///
+///  * **`ambiguity=` only for parsers that disambiguate** (Python `lark.py`:
+///    `"%r doesn't support disambiguation"`): Python rejects any *explicitly set*
+///    non-`auto` ambiguity unless `parser ∈ {earley, cyk}`. lark-rs has no `Auto`
+///    ambiguity variant — `Ambiguity::Resolve` *is* the auto-default — so the only
+///    user-distinguishable, oracle-falsifiable settings are `Explicit`/`Forest`.
+///    We reject those on `lalr` (the sole parser Python excludes); `Resolve` stays
+///    accepted everywhere (it is the default path, and Python accepts `earley`/`cyk`
+///    explicit/forest too). CYK's `cyk_ignores_ambiguity_option` test pins that
+///    `cyk + Explicit` still builds, matching the oracle.
+fn validate_config(options: &LarkOptions) -> Result<(), LarkError> {
+    let cfg_err = |msg: String| LarkError::Grammar(GrammarError::Other { msg });
+
+    // Parser → allowed-lexer matrix. `Auto` is resolved per-parser downstream and
+    // is legal for every parser, so it is never rejected here.
+    if !matches!(options.lexer, LexerType::Auto) {
+        let (allowed, lexer_str): (&[LexerType], &str) = (
+            match options.parser {
+                ParserAlgorithm::Lalr => &[LexerType::Basic, LexerType::Contextual],
+                ParserAlgorithm::Earley => &[
+                    LexerType::Basic,
+                    LexerType::Dynamic,
+                    LexerType::DynamicComplete,
+                ],
+                ParserAlgorithm::Cyk => &[LexerType::Basic],
+            },
+            lexer_name(&options.lexer),
+        );
+        if !allowed.contains(&options.lexer) {
+            let parser_name = parser_name(&options.parser);
+            let expected = allowed
+                .iter()
+                .map(|l| format!("'{}'", lexer_name(l)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(cfg_err(format!(
+                "Parser '{parser_name}' does not support lexer '{lexer_str}', \
+                 expected one of ({expected})"
+            )));
+        }
+    }
+
+    // `ambiguity=` only valid for parsers that disambiguate (earley, cyk). Only an
+    // explicitly-set `Explicit`/`Forest` is user-distinguishable from the default;
+    // reject those on lalr exactly as Python does.
+    if matches!(
+        options.ambiguity,
+        crate::Ambiguity::Explicit | crate::Ambiguity::Forest
+    ) && matches!(options.parser, ParserAlgorithm::Lalr)
+    {
+        return Err(cfg_err(
+            "'lalr' doesn't support disambiguation. \
+             Use one of these parsers instead: ('earley', 'cyk')"
+                .to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn parser_name(p: &ParserAlgorithm) -> &'static str {
+    match p {
+        ParserAlgorithm::Lalr => "lalr",
+        ParserAlgorithm::Earley => "earley",
+        ParserAlgorithm::Cyk => "cyk",
+    }
+}
+
+fn lexer_name(l: &LexerType) -> &'static str {
+    match l {
+        LexerType::Auto => "auto",
+        LexerType::Basic => "basic",
+        LexerType::Contextual => "contextual",
+        LexerType::Dynamic => "dynamic",
+        LexerType::DynamicComplete => "dynamic_complete",
+    }
+}
+
 pub fn build_frontend(
     grammar: &Grammar,
     options: &LarkOptions,
 ) -> Result<ParsingFrontend, LarkError> {
+    // Front-door config-legality gate, mirroring Python Lark's
+    // `ConfigurationError` checks (`lark.py` + `parser_frontends._validate_frontend_args`).
+    // Run before any build work so an illegal pairing is rejected verbatim rather
+    // than silently substituting a working lexer (bug-bounty N5/N6, issue #273).
+    validate_config(options)?;
+
     // postlex rides every parser (LALR: basic + contextual; Earley/CYK: basic —
     // issue #78), but never the dynamic lexer: scanning is folded into the Earley
     // loop there, so no token stream exists for the hook to rewrite. Python Lark
@@ -788,4 +885,124 @@ fn build_cyk(grammar: &Grammar, options: &LarkOptions) -> Result<Box<dyn ParserD
         lexer,
         postlex,
     }))
+}
+
+#[cfg(test)]
+mod config_validation_tests {
+    //! Front-door config-legality gate (`validate_config`, issue #273 / bounty
+    //! N5+N6). The accept/reject verdict for every `(parser, lexer)` pairing and
+    //! every `ambiguity=` setting is pinned against the Python Lark oracle
+    //! (`lark.py` + `parser_frontends._validate_frontend_args`), captured here as a
+    //! committed matrix because the compliance banks under-sample config validation.
+    //! The Python verdicts were taken directly from Lark 1.3.1 on 2026-06-22.
+    use crate::{Ambiguity, Lark, LarkOptions, LexerType, ParserAlgorithm};
+
+    fn opts(parser: ParserAlgorithm, lexer: LexerType) -> LarkOptions {
+        LarkOptions {
+            parser,
+            lexer,
+            start: vec!["start".to_string()],
+            ..Default::default()
+        }
+    }
+
+    fn builds(parser: ParserAlgorithm, lexer: LexerType) -> bool {
+        Lark::new("start: \"a\"\n", opts(parser, lexer)).is_ok()
+    }
+
+    #[test]
+    fn parser_lexer_matrix_matches_python() {
+        use LexerType::*;
+        use ParserAlgorithm::*;
+        // (parser, lexer, expected-accept) — exactly Python's
+        // `_validate_frontend_args` matrix, with `Auto` always legal (resolved
+        // per-parser downstream). N5 illegal pairings are the `false` rows.
+        let cases = [
+            // lalr → {basic, contextual}; dynamic/dynamic_complete illegal
+            (Lalr, Auto, true),
+            (Lalr, Basic, true),
+            (Lalr, Contextual, true),
+            (Lalr, Dynamic, false),
+            (Lalr, DynamicComplete, false),
+            // earley → {basic, dynamic, dynamic_complete}; contextual illegal
+            (Earley, Auto, true),
+            (Earley, Basic, true),
+            (Earley, Contextual, false),
+            (Earley, Dynamic, true),
+            (Earley, DynamicComplete, true),
+            // cyk → {basic}; everything else illegal
+            (Cyk, Auto, true),
+            (Cyk, Basic, true),
+            (Cyk, Contextual, false),
+            (Cyk, Dynamic, false),
+            (Cyk, DynamicComplete, false),
+        ];
+        for (parser, lexer, expect) in cases {
+            assert_eq!(
+                builds(parser.clone(), lexer.clone()),
+                expect,
+                "parser={parser:?} lexer={lexer:?}: lark-rs verdict diverges from Python oracle"
+            );
+        }
+    }
+
+    #[test]
+    fn illegal_pairing_message_matches_python() {
+        let err = match Lark::new(
+            "start: \"a\"\n",
+            opts(ParserAlgorithm::Lalr, LexerType::Dynamic),
+        ) {
+            Ok(_) => panic!("lalr+dynamic is illegal but built"),
+            Err(e) => e,
+        };
+        assert_eq!(
+            err.to_string(),
+            "Grammar error: Parser 'lalr' does not support lexer 'dynamic', \
+             expected one of ('basic', 'contextual')"
+        );
+    }
+
+    #[test]
+    fn ambiguity_on_lalr_rejected_others_accepted() {
+        // `Explicit`/`Forest` are only valid on parsers that disambiguate. Python
+        // rejects them on lalr ("'lalr' doesn't support disambiguation") but
+        // accepts them on earley and cyk; `Resolve` (the auto-default) is accepted
+        // everywhere.
+        for amb in [Ambiguity::Explicit, Ambiguity::Forest] {
+            let mut o = opts(ParserAlgorithm::Lalr, LexerType::Contextual);
+            o.ambiguity = amb.clone();
+            assert!(
+                Lark::new("start: \"a\"\n", o).is_err(),
+                "lalr + ambiguity={amb:?}: Python rejects disambiguation on lalr"
+            );
+
+            // earley accepts explicit; forest is a separate unsupported-feature
+            // refusal inside build_earley, not a config-legality rejection — so we
+            // only assert the config gate lets explicit through here.
+            if matches!(amb, Ambiguity::Explicit) {
+                let mut oe = opts(ParserAlgorithm::Earley, LexerType::Basic);
+                oe.ambiguity = amb.clone();
+                assert!(
+                    Lark::new("start: \"a\"\n", oe).is_ok(),
+                    "earley + ambiguity=explicit must build (Python accepts it)"
+                );
+                // cyk accepts explicit too (it is in Python's disambiguation set).
+                let mut oc = opts(ParserAlgorithm::Cyk, LexerType::Basic);
+                oc.ambiguity = amb.clone();
+                assert!(
+                    Lark::new("start: \"a\"\n", oc).is_ok(),
+                    "cyk + ambiguity=explicit must build (Python accepts it)"
+                );
+            }
+        }
+        // The default (Resolve) path must remain accepted on lalr.
+        assert!(
+            Lark::new(
+                "start: \"a\"\n",
+                opts(ParserAlgorithm::Lalr, LexerType::Contextual)
+            )
+            .is_ok(),
+            "lalr + default ambiguity (Resolve) must build"
+        );
+    }
 }
