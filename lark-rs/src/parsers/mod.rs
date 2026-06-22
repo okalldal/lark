@@ -8,7 +8,7 @@ pub mod tree_builder;
 pub use cyk::CykParser;
 pub use earley::EarleyParser;
 pub use interactive::InteractiveParser;
-pub use lalr::{build_lalr_table, LalrParser, ParseTable};
+pub use lalr::{build_lalr_table, LalrParser, ParseTable, RecoveryContext};
 pub use token_source::{
     BasicRecovering, Contextual, ContextualRecovering, LexFailure, PreLexed, TokenSource,
 };
@@ -16,7 +16,7 @@ pub use token_source::{
 // NodeValue, TreeBuilder) are crate-internal — issue #231 defers the public
 // trait shape. Internal code imports via `super::tree_builder::*` directly.
 
-use crate::error::{GrammarError, LarkError, ParseError, RecoveredTree};
+use crate::error::{GrammarError, LarkError, ParseError, RecoveredTree, RecoveryAction};
 use crate::grammar::intern::SymbolTable;
 use crate::grammar::{CompiledGrammar, Grammar};
 use crate::lexer::{
@@ -82,7 +82,7 @@ trait ParserDriver: Send {
         &self,
         _text: &str,
         _start: Option<&str>,
-        _on_error: &mut dyn FnMut(&ParseError) -> bool,
+        _on_error: &mut dyn FnMut(&ParseError, &mut RecoveryContext<'_>) -> RecoveryAction,
     ) -> Result<RecoveredTree, LarkError> {
         Err(recovery_unsupported())
     }
@@ -139,13 +139,21 @@ fn lalr_recover(
     lexer: Option<&BasicLexer>,
     text: &str,
     start: Option<&str>,
-    on_error: &mut dyn FnMut(&ParseError) -> bool,
+    on_error: &mut dyn FnMut(&ParseError, &mut RecoveryContext<'_>) -> RecoveryAction,
 ) -> Result<RecoveredTree, LarkError> {
     let Some(lexer) = lexer else {
         return Err(recovery_unsupported());
     };
     let mut errors = Vec::new();
-    let tokens = lexer.lex_recovering(text, on_error, &mut errors);
+    let tokens = {
+        let initial_state = parser.initial_state(start)?;
+        let mut lex_handler = |err: &ParseError| -> bool {
+            let mut stack = crate::parsers::lalr::ParserStack::for_state(initial_state);
+            let mut ctx = RecoveryContext::new(&mut stack, &parser.table);
+            !matches!(on_error(err, &mut ctx), RecoveryAction::Stop)
+        };
+        lexer.lex_recovering(text, &mut lex_handler, &mut errors)
+    };
     let tree = parser.parse_recovering(tokens, start, on_error, &mut errors)?;
     Ok(RecoveredTree { tree, errors })
 }
@@ -174,7 +182,7 @@ fn lalr_recover_postlex(
     symbols: &SymbolTable,
     text: &str,
     start: Option<&str>,
-    on_error: &mut dyn FnMut(&ParseError) -> bool,
+    on_error: &mut dyn FnMut(&ParseError, &mut RecoveryContext<'_>) -> RecoveryAction,
 ) -> Result<RecoveredTree, LarkError> {
     let mut errors = Vec::new();
     // Lazily lex the global terminal set and drive the streaming indenter +
@@ -215,7 +223,7 @@ impl ParserDriver for LalrBasic {
         &self,
         text: &str,
         start: Option<&str>,
-        on_error: &mut dyn FnMut(&ParseError) -> bool,
+        on_error: &mut dyn FnMut(&ParseError, &mut RecoveryContext<'_>) -> RecoveryAction,
     ) -> Result<RecoveredTree, LarkError> {
         lalr_recover(
             &self.parser,
@@ -268,7 +276,7 @@ impl ParserDriver for LalrContextual {
         &self,
         text: &str,
         start: Option<&str>,
-        on_error: &mut dyn FnMut(&ParseError) -> bool,
+        on_error: &mut dyn FnMut(&ParseError, &mut RecoveryContext<'_>) -> RecoveryAction,
     ) -> Result<RecoveredTree, LarkError> {
         let mut errors = Vec::new();
         let tree = self.parser.parse_contextual_recovering(
@@ -326,7 +334,7 @@ impl ParserDriver for LalrPostlex {
         &self,
         text: &str,
         start: Option<&str>,
-        on_error: &mut dyn FnMut(&ParseError) -> bool,
+        on_error: &mut dyn FnMut(&ParseError, &mut RecoveryContext<'_>) -> RecoveryAction,
     ) -> Result<RecoveredTree, LarkError> {
         lalr_recover_postlex(
             &self.parser,
@@ -369,7 +377,7 @@ impl ParserDriver for LalrContextualPostlex {
         &self,
         text: &str,
         start: Option<&str>,
-        on_error: &mut dyn FnMut(&ParseError) -> bool,
+        on_error: &mut dyn FnMut(&ParseError, &mut RecoveryContext<'_>) -> RecoveryAction,
     ) -> Result<RecoveredTree, LarkError> {
         let mut errors = Vec::new();
         let tree = self.parser.parse_contextual_postlex_recovering(
@@ -475,11 +483,10 @@ impl ParsingFrontend {
         self.driver.parse(text, start)
     }
 
-    /// Parse with panic-mode error recovery (issues #43, #94). On a token the parser
-    /// can't act on, `on_error` is consulted; returning `true` deletes that token
-    /// and resumes (single-token-deletion recovery, identical to Python Lark's
-    /// `on_error` driver), `false` stops with `tree: None` (no fabricated
-    /// derivation — issue #167) and the errors collected so far.
+    /// Parse with panic-mode error recovery (issues #43, #94, #223). On a token the
+    /// parser can't act on, `on_error` is consulted with a [`RecoveryContext`]; the
+    /// handler returns a [`RecoveryAction`] — `Delete` (delete the token and resume),
+    /// `Resume` (retry after feeding corrective tokens), or `Stop` (no derivation).
     ///
     /// Every LALR configuration supports recovery — basic or contextual lexer, with
     /// or without a postlex (Indenter) hook (issue #94: the indenter injects
@@ -497,7 +504,7 @@ impl ParsingFrontend {
         &self,
         text: &str,
         start: Option<&str>,
-        on_error: &mut dyn FnMut(&ParseError) -> bool,
+        on_error: &mut dyn FnMut(&ParseError, &mut RecoveryContext<'_>) -> RecoveryAction,
     ) -> Result<RecoveredTree, LarkError> {
         self.driver.parse_recovering(text, start, on_error)
     }
