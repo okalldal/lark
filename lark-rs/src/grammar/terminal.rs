@@ -214,6 +214,91 @@ fn normalize_python_escapes(pattern: &str) -> String {
     out
 }
 
+/// Find the first **global (bodiless) inline flag group** — `(?i)`, `(?ms)`, `(?i-s)`,
+/// `(?-i)`, … — anywhere in a terminal's regex source, returning its exact `(?flags)`
+/// text. This is the `(?flags)` form that sets flags for the rest of the enclosing
+/// expression, as opposed to the *scoped* `(?flags:…)` form (which has a body and a
+/// `:`). Python Lark rejects every terminal carrying one: it combines all terminals
+/// into one regex, wrapping each pattern, which demotes the flag off position 0 — so
+/// `re` raises either `global flags not at the start of the expression` (a leading
+/// group) or `Cannot compile token` (a mid-pattern group). Either way the terminal is
+/// unusable; lark-rs matches that rejection at build (N3, bounty H2). The scoped
+/// `(?flags:…)` form — accepted by both engines — is left untouched.
+///
+/// The scan honors backslash escapes (a literal `\(` is not a group) and character
+/// classes (`[(?i)]` is a class, not a flag group).
+fn find_global_inline_flag_group(pattern: &str) -> Option<String> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => {
+                i += 2; // skip the escape pair (a literal metachar, never structure)
+            }
+            '[' => {
+                // Skip a character class verbatim, honoring `\]`, `[^…]`, and a
+                // literal `]` as the first member.
+                i += 1;
+                if chars.get(i) == Some(&'^') {
+                    i += 1;
+                }
+                if chars.get(i) == Some(&']') {
+                    i += 1;
+                }
+                while i < chars.len() && chars[i] != ']' {
+                    i += if chars[i] == '\\' { 2 } else { 1 };
+                }
+                i += 1; // past the closing ']' (or end of input)
+            }
+            '(' if chars.get(i + 1) == Some(&'?') => {
+                // Read flag letters / `-` after "(?". A bodiless flag group ends in
+                // ')' with no ':' body; a scoped `(?flags:…)` has a ':' and is fine,
+                // and an assertion (`(?=`, `(?!`, `(?<`) or a named group (`(?P<`,
+                // `(?<name>`) is not flags-only either (none reach the ')' below).
+                let mut j = i + 2;
+                let mut saw_flag = false;
+                while let Some(&c) = chars.get(j) {
+                    if c.is_ascii_alphabetic() || c == '-' {
+                        saw_flag = true;
+                        j += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if saw_flag && chars.get(j) == Some(&')') {
+                    return Some(chars[i..=j].iter().collect());
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Reject a terminal's *user-authored* regex source that carries a **global (bodiless)
+/// inline flag group** — the N3 (bounty H2) parity gate. Called by the grammar loader
+/// on each `/…/` regex literal a user writes, *before* it composes into a pattern; the
+/// internally-generated `(?i)`-prefixed case-insensitive string-literal bake (`"x"i`)
+/// is a `LiteralVal::Str`, never a `LiteralVal::Re`, so it never reaches this gate (it
+/// is a Python-supported feature, not the user-authored global flag we reject). See
+/// [`find_global_inline_flag_group`].
+pub(crate) fn reject_global_inline_flags(pattern: &str) -> Result<(), GrammarError> {
+    if let Some(group) = find_global_inline_flag_group(pattern) {
+        return Err(GrammarError::InvalidRegex {
+            pattern: pattern.to_string(),
+            reason: format!(
+                "global inline flag group `{}` is not supported — Python Lark rejects it \
+                 (the combined-regex wrapper moves it off the start of the expression, so \
+                 `re` raises \"global flags not at the start\"). Use a scoped flag group \
+                 `(?flags:…)` or a terminal-level flag (`/…/i`) instead.",
+                group
+            ),
+        });
+    }
+    Ok(())
+}
+
 impl PatternRe {
     pub fn new(pattern: impl Into<String>, flags: u32) -> Result<Self, GrammarError> {
         let pattern = normalize_python_escapes(&pattern.into());
@@ -364,5 +449,70 @@ impl Eq for TerminalDef {}
 impl std::hash::Hash for TerminalDef {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.name.hash(state);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// N3: a *global* (bodiless) inline flag group is detected anywhere — leading or
+    /// mid-pattern — and `reject_global_inline_flags` (the loader gate on user regex
+    /// literals) rejects it. A scoped `(?flags:…)` group, an assertion, a named group,
+    /// an escaped `\(`, and a flag-looking char class are all left alone (no false
+    /// positive). `PatternRe::new` itself does NOT gate — it serves internally-composed
+    /// patterns (e.g. the `(?i)foo` case-insensitive string-literal bake) too.
+    #[test]
+    fn detects_only_bodiless_inline_flag_groups() {
+        // Rejected: bodiless flag groups (the global form Python rejects).
+        for p in [
+            "(?i)abc", "(?ms)x", "(?i-s)y", "(?-i)z", "a(?i)b", "x(?im)y",
+        ] {
+            assert!(
+                find_global_inline_flag_group(p).is_some(),
+                "{p:?} should be flagged as a global inline flag group"
+            );
+            assert!(
+                reject_global_inline_flags(p).is_err(),
+                "the loader gate must reject {p:?}"
+            );
+        }
+        // Accepted: scoped flag groups, assertions, named groups, escaped parens, and a
+        // char class whose contents merely look like a flag group.
+        for p in [
+            "(?i:abc)",
+            "(?-i:abc)",
+            "x(?i:y)z",
+            "(?=ab)cd",
+            "(?!ab)cd",
+            "(?P<name>x)",
+            "(?<name>x)",
+            r"\(?i\)abc", // escaped — not a group at all
+            "[(?i)]",     // a character class of literal chars
+            "[a-z]+",
+        ] {
+            assert!(
+                find_global_inline_flag_group(p).is_none(),
+                "{p:?} must NOT be flagged as a global inline flag group"
+            );
+            assert!(
+                reject_global_inline_flags(p).is_ok(),
+                "the loader gate must accept {p:?}"
+            );
+        }
+    }
+
+    /// The N3 gate lives in the loader (on user `/…/` literals), NOT in `PatternRe::new`,
+    /// so the internal case-insensitive string-literal bake — `(?i)foo` paired with the
+    /// `IGNORECASE` bitset, whose leading `(?i)` is load-bearing because `as_regex_str`
+    /// drops the separate flag bitset when the literal is *composed* into a larger regex
+    /// — still constructs cleanly through `PatternRe::new`.
+    #[test]
+    fn pattern_re_new_does_not_gate_the_internal_ci_bake() {
+        let p = PatternRe::new("(?i)foo", flags::IGNORECASE).expect("ci bake constructs");
+        assert_eq!(
+            p.pattern, "(?i)foo",
+            "the prefix must survive for as_regex_str composition"
+        );
     }
 }

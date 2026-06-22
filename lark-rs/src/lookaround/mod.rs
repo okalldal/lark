@@ -425,6 +425,24 @@ impl Parser<'_> {
             });
         }
 
+        // Named backreference `(?P=name)` (N4) — Python's `re` spelling of a
+        // backreference, keyed by group name. The `regex` crate rejects it (backrefs
+        // are not a regular language), and so does this front-end's named-*group* path
+        // (`consume_named_group_open` expects `<`, not `=`), which used to surface a raw
+        // `InvalidRegex` parse error and let `PatternRe::new` leak an *uncategorized*
+        // refusal. Keep it verbatim as a zero-width [`Node::Atom`] — exactly as the
+        // escape-spelled `\k<name>` backref stays a verbatim atom — so the pattern
+        // *parses*, reaches the lexer-build routing seam, and is refused with the
+        // **categorized** `LookaroundScope::Backref` error (`BacktrackingOnlySyntax`,
+        // OutOfScope), the same "not supported (by design) … a backreference" message
+        // `\1`/`\k`/`\g` produce. General backreferences remain out of scope — this
+        // categorizes the refusal, it does not promote them to support.
+        if self.at(1) == Some('?') && self.at(2) == Some('P') && self.at(3) == Some('=') {
+            if let Some(text) = self.try_named_backref() {
+                return Ok(Node::Atom(text));
+            }
+        }
+
         // Bodiless inline-flag group `(?imsx)` / `(?i-s)` — the `regex` crate accepts
         // it; it sets flags for the rest of the *enclosing* group and has no body of
         // its own. Keep it verbatim as a zero-width [`Node::Atom`] so the tree still
@@ -468,6 +486,33 @@ impl Parser<'_> {
             }
         }
         if saw_flag && self.chars.get(i).copied() == Some(')') {
+            let text: String = self.chars[start..=i].iter().collect();
+            self.pos = i + 1; // past the ')'
+            Some(text)
+        } else {
+            None
+        }
+    }
+
+    /// If the upcoming construct is a *named backreference* `(?P=name)` — `(?P=`
+    /// followed by a non-empty group name and a closing `)` — consume it and return
+    /// its verbatim source. Otherwise consume nothing and return `None` (so a genuine
+    /// `(?P<name>…` named *group* stays on its own path). The name is kept verbatim;
+    /// the backref's only consumer downstream is the categorized refusal, which never
+    /// inspects the name.
+    fn try_named_backref(&mut self) -> Option<String> {
+        // self.peek() == '(', at(1) == '?', at(2) == 'P', at(3) == '='
+        let start = self.pos;
+        let mut i = self.pos + 4; // past "(?P="
+        let mut saw_name = false;
+        while let Some(c) = self.chars.get(i).copied() {
+            if c == ')' {
+                break;
+            }
+            saw_name = true;
+            i += 1;
+        }
+        if saw_name && self.chars.get(i).copied() == Some(')') {
             let text: String = self.chars[start..=i].iter().collect();
             self.pos = i + 1; // past the ')'
             Some(text)
@@ -657,6 +702,8 @@ mod tests {
             "a(?i)b(?-i)c", // flag toggles mid-pattern
             "(?P<x>ab)",
             "(?<name>ab)",
+            "(?P<x>a)(?P=x)", // N4: a named backref round-trips as a verbatim atom
+            "(?P=x)",
             "\\(\\)\\|\\[", // escaped metacharacters
             "a{3}b{2,}c{1,4}",
             "x{not a quant}", // literal braces, not a quantifier
@@ -778,5 +825,24 @@ mod tests {
         }
         // A flag-*scoped* group still has a body and is preserved as a group.
         assert!(parse("(?i:abc)").unwrap().to_source() == "(?i:abc)");
+    }
+
+    /// N4: a Python named backreference `(?P=name)` parses (it used to error on the
+    /// named-group path), round-trips verbatim, and — like the escape-spelled `\k<n>`
+    /// — carries no *assertion* (it is a plain backref atom, refused downstream by the
+    /// categorized backtracking-only route, not by the lookaround classifier). A
+    /// genuine named *group* `(?P<name>…)` stays a group, not a backref.
+    #[test]
+    fn named_backref_parses_as_a_verbatim_atom() {
+        for p in ["(?P=x)", "(?P<x>a)(?P=x)", "a(?P=name)b"] {
+            let node = parse(p).unwrap_or_else(|e| panic!("parse {p:?} failed: {e:?}"));
+            assert_eq!(node.to_source(), p, "round-trip mismatch for {p:?}");
+            assert!(
+                !node.has_assertion(),
+                "{p:?} is a backref, not an assertion"
+            );
+        }
+        // The named *group* definition is unaffected (still a group, no backref).
+        assert_eq!(parse("(?P<x>ab)").unwrap().to_source(), "(?P<x>ab)");
     }
 }
