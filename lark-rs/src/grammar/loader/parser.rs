@@ -78,19 +78,27 @@ impl<'a> GrammarParser<'a> {
                 Ok(Some(Item::DeclareItem(syms)))
             }
             Some(Tok::Override) | Some(Tok::Extend) => {
-                self.lexer.next_tok()?; // consume modifier; treat same as normal for now
-                self.parse_item()
+                // `%override` / `%extend` modify the rule or terminal that
+                // follows. Tag the parsed definition with the directive so the
+                // compiler can replace (override) / prepend-to (extend) the
+                // pre-existing definition and reject a missing target — Python
+                // Lark's `_define(override=True)` / `_extend`.
+                let directive = match self.lexer.next_tok()? {
+                    Some(Tok::Override) => Directive::Override,
+                    _ => Directive::Extend,
+                };
+                self.parse_directive_target(directive).map(Some)
             }
             Some(Tok::RuleModifiers(_)) => {
-                let rule = self.parse_rule()?;
+                let rule = self.parse_rule(Directive::Plain)?;
                 Ok(Some(Item::RuleItem(rule)))
             }
             Some(Tok::Rule(_)) => {
-                let rule = self.parse_rule()?;
+                let rule = self.parse_rule(Directive::Plain)?;
                 Ok(Some(Item::RuleItem(rule)))
             }
             Some(Tok::Terminal(_)) => {
-                let term = self.parse_term()?;
+                let term = self.parse_term(Directive::Plain)?;
                 Ok(Some(Item::TermItem(term)))
             }
             Some(other) => {
@@ -98,6 +106,23 @@ impl<'a> GrammarParser<'a> {
                 let (line, col) = (self.lexer.line, self.lexer.col);
                 Err(GrammarError::SyntaxError { line, col, msg })
             }
+        }
+    }
+
+    /// Parse the rule or terminal that an `%override` / `%extend` directive
+    /// applies to, tagging it with `directive`. The directive grammar is
+    /// `_OVERRIDE (rule | term)` / `_EXTEND (rule | term)` (Python Lark's
+    /// `load_grammar.py`), so the next token must begin a rule or a terminal.
+    fn parse_directive_target(&mut self, directive: Directive) -> Result<Item, GrammarError> {
+        match self.lexer.peek_tok()?.cloned() {
+            Some(Tok::RuleModifiers(_)) | Some(Tok::Rule(_)) => {
+                Ok(Item::RuleItem(self.parse_rule(directive)?))
+            }
+            Some(Tok::Terminal(_)) => Ok(Item::TermItem(self.parse_term(directive)?)),
+            other => Err(self.err(format!(
+                "Expected a rule or terminal after %override/%extend, got {:?}",
+                other
+            ))),
         }
     }
 
@@ -110,7 +135,7 @@ impl<'a> GrammarParser<'a> {
         Ok(())
     }
 
-    fn parse_rule(&mut self) -> Result<RawRule, GrammarError> {
+    fn parse_rule(&mut self, directive: Directive) -> Result<RawRule, GrammarError> {
         // rule_modifiers?
         let modifiers = if let Some(Tok::RuleModifiers(_)) = self.lexer.peek_tok()? {
             if let Some(Tok::RuleModifiers(m)) = self.lexer.next_tok()? {
@@ -159,6 +184,7 @@ impl<'a> GrammarParser<'a> {
             params,
             priority,
             expansions,
+            directive,
         })
     }
 
@@ -181,7 +207,7 @@ impl<'a> GrammarParser<'a> {
         Ok(params)
     }
 
-    fn parse_term(&mut self) -> Result<RawTerm, GrammarError> {
+    fn parse_term(&mut self, directive: Directive) -> Result<RawTerm, GrammarError> {
         let name = match self.lexer.next_tok()? {
             Some(Tok::Terminal(n)) => n,
             other => return Err(self.err(format!("Expected terminal name, got {:?}", other))),
@@ -206,6 +232,7 @@ impl<'a> GrammarParser<'a> {
             name,
             priority,
             expansions,
+            directive,
         })
     }
 
