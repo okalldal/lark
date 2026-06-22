@@ -134,6 +134,14 @@ impl Lark {
     /// Supported on LALR without postlex, using the basic or contextual lexer.
     /// Other configurations (Earley, CYK, or LALR with a postlex/Indenter hook)
     /// return a typed error.
+    ///
+    /// The default start symbol is resolved against [`LarkOptions::start`] the
+    /// same way Python Lark's `_verify_start` does (issue #251): with exactly one
+    /// configured start it is used; with **more than one** configured start this
+    /// returns an error (Python's `ConfigurationError`, "more than 1 possible
+    /// start rule") — pick one explicitly via
+    /// [`parse_interactive_with_start`](Self::parse_interactive_with_start). The
+    /// choice is never a nondeterministic hash-map key.
     pub fn parse_interactive(&self, text: &str) -> Result<InteractiveParser<'_>, LarkError> {
         self.frontend.parse_interactive(text, None)
     }

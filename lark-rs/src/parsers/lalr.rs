@@ -47,6 +47,11 @@ pub struct ParseTable {
     pub goto: Vec<Vec<Option<u32>>>,
     /// Start state per start symbol.
     pub start_states: HashMap<SymbolId, usize>,
+    /// Configured start symbols, in `LarkOptions.start` order. Resolving a
+    /// default start (`initial_state(None)`) walks this list — never a
+    /// nondeterministic `start_states` key — to mirror Python Lark's
+    /// `_verify_start` (issue #251).
+    pub starts: Vec<SymbolId>,
     /// Compiled rules (indexed by rule index).
     pub rules: Vec<CompiledRule>,
     /// Symbol metadata (names for diagnostics, kind, …).
@@ -520,6 +525,7 @@ pub fn build_lalr_table(
         action,
         goto,
         start_states,
+        starts: grammar.start.clone(),
         rules: rules.clone(),
         symbols: grammar.symbols.clone(),
         n_terminals,
@@ -866,20 +872,64 @@ impl LalrParser {
     // ─── Shared LALR driver helpers ──────────────────────────────────────────
 
     /// Resolve the start symbol name to its initial state.
+    ///
+    /// A default start (`None`) is resolved against the ordered `starts` list,
+    /// never a nondeterministic `start_states` key — mirroring Python Lark's
+    /// `_verify_start` (issue #251):
+    ///   * exactly one configured start → use it;
+    ///   * more than one → reject (Python's `ConfigurationError`); the caller
+    ///     must pick one via `parse_interactive_with_start` / an explicit start;
+    ///   * none configured → reject (no start rule).
+    /// An explicit start not among the configured starts is likewise rejected
+    /// with Python's "Unknown start rule …" message — `start_states.get(&id)`
+    /// already rejects any non-start symbol, since its keys *are* the starts.
     pub(crate) fn initial_state(&self, start: Option<&str>) -> Result<usize, ParseError> {
         let start_id = match start {
+            // `start_states.get(&id)` below already rejects any non-start symbol
+            // (its keys *are* the configured starts), so no extra filter here.
             Some(name) => self.table.symbols.id(name),
-            None => self.table.start_states.keys().next().copied(),
+            None => match self.table.starts.as_slice() {
+                [only] => Some(*only),
+                [] => None,
+                _ => {
+                    return Err(ParseError::unexpected_eof(
+                        0,
+                        0,
+                        vec!["Lark initialized with more than 1 possible start rule. \
+                              Must specify which start rule to parse"
+                            .to_string()],
+                    ))
+                }
+            },
         };
         start_id
             .and_then(|id| self.table.start_states.get(&id).copied())
             .ok_or_else(|| {
-                ParseError::unexpected_eof(
-                    0,
-                    0,
-                    vec![format!("start symbol '{}'", start.unwrap_or("?"))],
-                )
+                let expected = match start {
+                    // Render the start list Python-`repr`-style (single quotes)
+                    // to match the oracle's `%r` formatting in `_verify_start`.
+                    Some(name) => format!(
+                        "Unknown start rule {}. Must be one of [{}]",
+                        name,
+                        self.start_names()
+                            .iter()
+                            .map(|n| format!("'{}'", n))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    None => "no start rule configured".to_string(),
+                };
+                ParseError::unexpected_eof(0, 0, vec![expected])
             })
+    }
+
+    /// The configured start symbol names, in order — for diagnostics.
+    fn start_names(&self) -> Vec<String> {
+        self.table
+            .starts
+            .iter()
+            .map(|&id| self.table.symbols.name(id).to_string())
+            .collect()
     }
 
     /// Valid terminal names for a state — used to build error reports.
