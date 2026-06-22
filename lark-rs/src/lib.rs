@@ -126,8 +126,9 @@ impl Lark {
     /// lexer is driven lazily, not up front, so the cursor can be created over
     /// incomplete or broken text.
     ///
-    /// Supported on LALR with the basic or contextual lexer; other parser
-    /// configurations return a typed error.
+    /// Supported on LALR without postlex, using the basic or contextual lexer.
+    /// Other configurations (Earley, CYK, or LALR with a postlex/Indenter hook)
+    /// return a typed error.
     pub fn parse_interactive(&self, text: &str) -> Result<InteractiveParser<'_>, LarkError> {
         self.frontend.parse_interactive(text, None)
     }
