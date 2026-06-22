@@ -49,7 +49,7 @@ Authoring a new ADR as `Accepted` is a Definition-of-Done failure (see
 | [0025](0025-no-backward-compat-pre-users.md) | Pre-users: breaking the public API is free — no backward-compatibility constraint until lark-rs has users | Accepted |
 | [0026](0026-behaviour-scoped-to-the-oracle.md) | Behaviour is scoped to the Python Lark oracle; beyond-oracle behaviour is escalate + needs a validation story (resolves #211) | Accepted |
 | [0027](0027-semantic-output-builders-direction.md) | Semantic output backends — `TreeBuilder` becomes the default impl of an internal `OutputBuilder` seam; LALR parity oracle-backed, fast backends relative-oracle-backed | Accepted |
-| [0028](0028-output-builder-public-api-shape.md) | Public `OutputBuilder` API shape — per-call `parse_into`, `is_discard` hook, `ctx` metadata, LALR-only; commit `Tree` + Rust `Custom`, `SpanTree` experimental, `Event`/`Tape` internal | Proposed |
+| [0029](0029-output-builder-public-api-shape.md) | Public `OutputBuilder` API shape — per-call `parse_into`, `is_discard` hook, `ctx` metadata, LALR-only; commit `Tree` + Rust `Custom`, `SpanTree` experimental, `Event`/`Tape` internal | Proposed |
 
 ## ADRs going forward — the governance audit trail
 

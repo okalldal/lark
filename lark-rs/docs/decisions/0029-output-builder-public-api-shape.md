@@ -1,4 +1,4 @@
-# ADR-0028: Public `OutputBuilder` API shape
+# ADR-0029: Public `OutputBuilder` API shape
 
 - **Status:** Proposed (pending architect ratification)
 - **Date:** 2026-06-21
