@@ -1,6 +1,6 @@
 # ADR-0028: RecoveryAction enum over direct &mut InteractiveParser for on_error
 
-- **Status:** Proposed (pending architect ratification)
+- **Status:** Accepted
 - **Date:** 2026-06-21 (updated 2026-06-22)
 
 ## Context
