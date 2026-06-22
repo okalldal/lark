@@ -54,7 +54,7 @@ mod tests;
 pub use collision::{check_regex_collisions, check_zero_width_terminals};
 pub use dynamic::DynamicMatcher;
 pub(crate) use pattern::strip_whole_pattern_flag_wrapper;
-pub use plan::{scanner_plan, ScannerPlan, UnlessEntry};
+pub use plan::{check_standalone_regex_hostable, scanner_plan, ScannerPlan, UnlessEntry};
 
 use std::collections::{HashMap, HashSet};
 
