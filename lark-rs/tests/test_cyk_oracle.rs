@@ -71,10 +71,17 @@ fn test_cyk_nullable_group_oracle() {
                         "{name}[{ci}] input={input:?}: expected parse failure, but parsing succeeded"
                     ));
                 }
-                // Should pass but Python Lark itself failed (skip)
-                (true, false, _) => {}
-                // Should fail but Python Lark passed (skip)
-                (false, true, _) => {}
+                // Contradictory: should_parse vs oracle disagree — fail, not skip
+                (true, false, _) => {
+                    failures.push(format!(
+                        "{name}[{ci}] input={input:?}: should_parse=true but oracle says ok=false (contradictory fixture)"
+                    ));
+                }
+                (false, true, _) => {
+                    failures.push(format!(
+                        "{name}[{ci}] input={input:?}: should_parse=false but oracle says ok=true (contradictory fixture)"
+                    ));
+                }
             }
         }
     }
