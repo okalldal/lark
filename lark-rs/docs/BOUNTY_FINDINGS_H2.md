@@ -89,10 +89,15 @@ flag (`global flags not at the start of the expression`, because Lark wraps the
 source and demotes the flag off position 0); lark-rs strips the wrapper into a flag
 bitset and accepts + applies it. Scoped `(?i:…)` is fine on both — only the global
 form diverges. A new more-permissive validation family.
-**Fixed (#274):** `PatternRe::new` now detects a *global* (bodiless) inline flag
-group `(?flags)` / `(?flags-flags)` anywhere in a terminal's regex source and rejects
-it at build (`InvalidRegex`), the unusable-in-Python parity choice; the scoped
-`(?flags:…)` form is untouched.
+**Fixed (#274):** the grammar loader now detects a *global* (bodiless) inline flag
+group `(?flags)` / `(?flags-flags)` anywhere in a **user `/…/` literal's** regex
+source and rejects it at build (`InvalidRegex`), the unusable-in-Python parity choice;
+the scoped `(?flags:…)` form is untouched. The gate is deliberately seated on the user
+literal sites in the loader (`grammar/terminal.rs::reject_global_inline_flags`, called
+from `grammar/loader/terminals.rs`), **not** in the shared `PatternRe::new` — that
+constructor is also used for the internal ci-literal bake (`"foo"i` → `(?i)foo`), and
+gating it there would break ci-literal composition (`("foo"i)+`); pinned by
+`pattern_re_new_does_not_gate_the_internal_ci_bake`.
 
 ### N4 — Named backreference mis-categorized (lexer / taxonomy)
 `A: /(?P<x>a)(?P=x)/`. **Expected behavior is a *categorized refusal*, not
