@@ -483,7 +483,7 @@ impl GrammarCompiler {
                 // resolved terminal — so a staged extend body for an imported
                 // terminal would be silently dropped. Rather than drop it, we leave
                 // the imported terminal unchanged; the divergence is pinned as an
-                // XFAIL (`n1_extend_imported_terminal_*`) and tracked in #287.
+                // XFAIL (`n1_extend_imported_terminal_*`) and tracked in #286.
                 if let Some(existing) = self.raw_terms.iter_mut().find(|prev| prev.name == t.name) {
                     let mut merged = t.expansions;
                     merged.append(&mut existing.expansions);
