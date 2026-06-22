@@ -557,6 +557,137 @@ CASES = [
             "C": {"action": "identity"},
         },
     },
+    # ── C4 (a): keyword/identifier `unless` retyping ──────────────────
+    {
+        "name": "unless_keyword_retype",
+        "description": (
+            "A string-literal keyword terminal (IF) retypes a NAME match via "
+            "Lark's `unless` mechanism; the token's retyped type drives callback "
+            "dispatch — IF tokens hit the IF method, plain identifiers hit NAME"
+        ),
+        "grammar": r"""
+            start: word+
+            word: NAME | IF
+            IF: "if"
+            NAME: /[a-z]+/
+            %ignore /\s+/
+        """,
+        "input": "if foo if bar",
+        "rule_actions": {
+            "start": {"action": "wrap_list"},
+            "word": {"action": "first_child"},
+        },
+        "token_actions": {
+            # Retyped keyword and plain identifier dispatch to distinct methods.
+            "IF": {"action": "prefix", "value": "kw:"},
+            "NAME": {"action": "upper"},
+        },
+    },
+    # ── C4 (a): ignored token never surfaces (no callback) ────────────
+    {
+        "name": "ignored_token_no_callback",
+        "description": (
+            "A %ignore'd NAMED terminal (WS) never reaches the tree, so its "
+            "callback never fires even though a WS method is defined — ignored "
+            "tokens do not surface to the transformer"
+        ),
+        "grammar": r"""
+            start: WORD+
+            WORD: /[a-z]+/
+            WS: /\s+/
+            %ignore WS
+        """,
+        "input": "foo bar baz",
+        "rule_actions": {
+            "start": {"action": "wrap_list"},
+        },
+        "token_actions": {
+            "WORD": {"action": "upper"},
+            # A method exists for the ignored terminal; it must NOT be invoked.
+            "WS": {"action": "discard"},
+        },
+    },
+    # ── C4 (b): Discard from a token callback under maybe_placeholders ─
+    {
+        "name": "discard_token_maybe_placeholders",
+        "description": (
+            "A token callback returns Discard for a PRESENT optional [B]: the "
+            "child is removed entirely (no None hole left behind), distinct from "
+            "the maybe_placeholders None inserted only for an ABSENT optional"
+        ),
+        "grammar": r"""
+            start: A [B] C
+            A: "a"
+            B: "b"
+            C: "c"
+            %ignore /\s+/
+        """,
+        "input": "a b c",
+        "rule_actions": {
+            "start": {"action": "wrap_list"},
+        },
+        "token_actions": {
+            "A": {"action": "stringify"},
+            # B is present in the input but its callback discards it.
+            "B": {"action": "discard"},
+            "C": {"action": "stringify"},
+        },
+        "parser_options": {"maybe_placeholders": True},
+    },
+    # ── C4 (b): the ABSENT-optional sibling under maybe_placeholders ──
+    {
+        "name": "discard_token_maybe_placeholders_absent",
+        "description": (
+            "Same grammar as discard_token_maybe_placeholders but with [B] "
+            "ABSENT: maybe_placeholders inserts a None at B's position and the "
+            "B token callback never fires — pins the sibling-position semantics"
+        ),
+        "grammar": r"""
+            start: A [B] C
+            A: "a"
+            B: "b"
+            C: "c"
+            %ignore /\s+/
+        """,
+        "input": "a c",
+        "rule_actions": {
+            "start": {"action": "wrap_list"},
+        },
+        "token_actions": {
+            "A": {"action": "stringify"},
+            "B": {"action": "discard"},
+            "C": {"action": "stringify"},
+        },
+        "parser_options": {"maybe_placeholders": True},
+    },
+    # ── C4 (c): template-expanded rule ────────────────────────────────
+    {
+        "name": "template_expanded",
+        "description": (
+            "A parameterized template `sep{item, COMMA}` expands but dispatches "
+            "on the template SOURCE name (`sep`); the named COMMA punctuation is "
+            "kept (a named terminal surfaces) while default-handled rules nest"
+        ),
+        "grammar": r"""
+            start: sep{item, COMMA}
+            sep{x, s}: x (s x)*
+            item: WORD
+            WORD: /[a-z]+/
+            COMMA: ","
+            %ignore /\s+/
+        """,
+        "input": "a, b, c",
+        "rule_actions": {
+            "start": {"action": "first_child"},
+            "item": {"action": "first_child"},
+            # `sep` is the template source name the engine dispatches on.
+            "sep": {"action": "wrap_list"},
+        },
+        "token_actions": {
+            "WORD": {"action": "upper"},
+            "COMMA": {"action": "stringify"},
+        },
+    },
 ]
 
 
@@ -607,6 +738,63 @@ def run_case(case: dict, parser: str, lexer: str) -> dict:
             "status": "transform_error",
             "error": str(e),
         }
+
+    entry = {
+        "status": "ok",
+        "value": _serialize_value(result),
+        "trace": trace,
+    }
+
+    # Also run the *embedded* transformer path (transformer=… on the parser),
+    # which Python wires differently from the post-parse `.transform(tree)` path:
+    # `_get_lexer_callbacks` only attaches a terminal callback for terminals the
+    # transformer defines an explicit method for, so the embedded path NEVER
+    # invokes `__default_token__` (settling the RFC §5 open question — see C4 /
+    # issue #229).  Recording both lets the fixture *pin* the divergence rather
+    # than guess it.  Embedded transform requires the LALR parser (Python rejects
+    # it on Earley/CYK), which every case here already uses.
+    entry["embedded"] = run_case_embedded(case, parser, lexer)
+
+    return entry
+
+
+def run_case_embedded(case: dict, parser: str, lexer: str) -> dict:
+    """Run the case through the *embedded* transformer path.
+
+    The transformer is attached at parse time (`Lark(..., transformer=T())`), so
+    Python applies callbacks during the parse rather than in a post-parse
+    `.transform(tree)` walk.  For these specs the two paths differ in exactly one
+    observable way: the embedded path does not wire `__default_token__`.
+    """
+    parser_options = case.get("parser_options", {})
+    visit_tokens = case.get("visit_tokens", True)
+
+    trace: list[dict] = []
+    transformer = build_transformer(
+        rule_actions=case.get("rule_actions", {}),
+        token_actions=case.get("token_actions", {}),
+        default_rule=case.get("default_rule"),
+        default_token=case.get("default_token"),
+        trace=trace,
+        visit_tokens=visit_tokens,
+    )
+
+    lark_opts = {
+        "parser": parser,
+        "lexer": lexer,
+        "start": "start",
+        "transformer": transformer,
+        **parser_options,
+    }
+    try:
+        lark_parser = Lark(case["grammar"], **lark_opts)
+    except Exception as e:
+        return {"status": "build_error", "error": str(e)}
+
+    try:
+        result = lark_parser.parse(case["input"])
+    except Exception as e:
+        return {"status": "parse_error", "error": str(e)}
 
     return {
         "status": "ok",
