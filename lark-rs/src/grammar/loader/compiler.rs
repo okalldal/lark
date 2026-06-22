@@ -265,7 +265,11 @@ impl GrammarCompiler {
             match item {
                 Item::RuleItem(r) => {
                     self.reserved_rule_names.insert(r.name.clone());
-                    if !r.params.is_empty() {
+                    // Register *plain* templates here; `%override`/`%extend` of a
+                    // template are resolved (with their pre-existence gate) during
+                    // the staging pass, so they must not pre-seed `self.templates`
+                    // ahead of that gate.
+                    if !r.params.is_empty() && r.directive == Directive::Plain {
                         self.templates.insert(
                             r.name.clone(),
                             (
@@ -348,9 +352,12 @@ impl GrammarCompiler {
                 Item::TermItem(t) => {
                     self.stage_term_directive(t, &mut defined_term_names)?;
                 }
-                Item::RuleItem(r) if r.directive == Directive::Plain && !r.params.is_empty() => {
-                    defined_rule_names.insert(r.name.clone());
-                    /* template — used on demand */
+                Item::RuleItem(r) if !r.params.is_empty() => {
+                    // A parameterized rule is a template, instantiated on demand
+                    // rather than compiled as a flat rule. The directive is
+                    // resolved against `self.templates` (which the first pass
+                    // pre-seeded only for the plain case).
+                    self.stage_template_directive(r, &mut defined_rule_names)?;
                 }
                 Item::RuleItem(r) => {
                     self.stage_rule_directive(r, &mut rule_items, &mut defined_rule_names)?;
@@ -467,20 +474,69 @@ impl GrammarCompiler {
                     });
                 }
                 // Prepend the new alternatives to the existing terminal. A
-                // same-grammar terminal is still a `RawTerm` (terminals resolve as
-                // a whole later); an imported terminal has already been compiled
-                // into `self.terminals`, which the terminal-resolution phase does
-                // not extend — stage the new body as a `RawTerm` so it is at least
-                // resolved, and record the divergence for imported targets.
+                // same-grammar terminal is still a `RawTerm` here (terminals
+                // resolve as a whole later), so splice onto its front.
+                //
+                // KNOWN GAP (#286): an *imported* terminal has already been
+                // compiled into `self.terminals` (not `raw_terms`), and
+                // `resolve_terminals` skips a `RawTerm` whose name is already a
+                // resolved terminal — so a staged extend body for an imported
+                // terminal would be silently dropped. Rather than drop it, we leave
+                // the imported terminal unchanged; the divergence is pinned as an
+                // XFAIL (`n1_extend_imported_terminal_*`) and tracked in #287.
                 if let Some(existing) = self.raw_terms.iter_mut().find(|prev| prev.name == t.name) {
                     let mut merged = t.expansions;
                     merged.append(&mut existing.expansions);
                     existing.expansions = merged;
-                } else {
-                    self.raw_terms.push(RawTerm {
-                        directive: Directive::Plain,
-                        ..t
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve a parameterized rule (template) definition's `%override` /
+    /// `%extend` directive (or register a plain template), against the running set
+    /// of defined rule names. A template lives in `self.templates` and is
+    /// instantiated on demand, so override *replaces* its tuple and extend
+    /// *prepends* alternatives there — never as a flat rule (whose body would try
+    /// to compile the template's parameters as ordinary symbols). Mirrors Python
+    /// Lark, which keys templates in the same `_definitions` map as plain rules.
+    fn stage_template_directive(
+        &mut self,
+        r: RawRule,
+        defined: &mut HashSet<String>,
+    ) -> Result<(), GrammarError> {
+        match r.directive {
+            Directive::Plain => {
+                // The first pass already registered the plain template; just
+                // record it as defined for any later directive's gate.
+                defined.insert(r.name.clone());
+            }
+            Directive::Override => {
+                if !defined.contains(&r.name) {
+                    return Err(GrammarError::Other {
+                        msg: format!("Cannot override a nonexisting rule {}", r.name),
                     });
+                }
+                self.templates.insert(
+                    r.name.clone(),
+                    (r.params, r.expansions, r.modifiers, r.priority),
+                );
+            }
+            Directive::Extend => {
+                if !defined.contains(&r.name) {
+                    return Err(GrammarError::Other {
+                        msg: format!("Can't extend rule {} as it wasn't defined before", r.name),
+                    });
+                }
+                // Prepend the new alternatives to the existing template body
+                // (Python's `base.children.insert(0, exp)`). The target is
+                // guaranteed registered: a plain template seeded `self.templates`
+                // in the first pass, and a prior override re-inserted it.
+                if let Some(entry) = self.templates.get_mut(&r.name) {
+                    let mut merged = r.expansions;
+                    merged.append(&mut entry.1);
+                    entry.1 = merged;
                 }
             }
         }

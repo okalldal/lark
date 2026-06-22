@@ -78,6 +78,53 @@ fn n1c_extend_nonexistent_rejected() {
     assert_build_rejected(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual), "N1c");
 }
 
+/// N1 differential pin (#269 audit). `%extend` / `%override` of a *parameterized
+/// rule* (template) must edit the template, not compile as a flat rule — Python
+/// instantiates `foo{C}` from the overridden / extended body. (Pre-fix the
+/// directive misrouted to `compile_rule`, which then rejected the template
+/// parameter as an "undefined rule".)
+#[test]
+fn n1_template_override_and_extend() {
+    let o = opts(ParserAlgorithm::Lalr, LexerType::Contextual);
+    // override: `foo{C}` is `"b" C`, so "ac" is rejected, "bc" parses.
+    let ov = Lark::new(
+        "foo{x}: \"a\" x\n%override foo{x}: \"b\" x\nstart: foo{C}\nC: \"c\"\n",
+        o.clone(),
+    )
+    .expect("template override builds");
+    assert!(
+        ov.parse("ac").is_err(),
+        "override replaced the template body"
+    );
+    assert!(ov.parse("bc").is_ok(), "override body parses");
+    // extend: both `"a" C` and `"b" C` arms are kept.
+    let ex = Lark::new(
+        "foo{x}: \"a\" x\n%extend foo{x}: \"b\" x\nstart: foo{C}\nC: \"c\"\n",
+        o,
+    )
+    .expect("template extend builds");
+    assert!(ex.parse("ac").is_ok(), "extend keeps the original arm");
+    assert!(ex.parse("bc").is_ok(), "extend adds the new arm");
+}
+
+/// N1 differential pin (#269 audit), XFAIL — tracked as #286. `%extend` of an
+/// *imported* terminal should add the new alternative (Python: `"z"` parses),
+/// but lark-rs drops it because the imported terminal is already resolved by the
+/// time the directive is staged. Same-grammar terminal extend and imported
+/// terminal *override* both work; only imported-terminal extend diverges.
+#[test]
+#[ignore = "XFAIL (#286): %extend of an imported terminal drops the new alternative"]
+fn n1_extend_imported_terminal_keeps_both() {
+    let g = "%import common.INT\nstart: INT\n%extend INT: \"z\"\n";
+    let lark =
+        Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).expect("grammar builds");
+    assert!(lark.parse("123").is_ok(), "the imported INT still parses");
+    assert!(
+        lark.parse("z").is_ok(),
+        "the extended `\"z\"` alternative should parse (Python accepts it)"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Lexer / regex dialect.
 // ─────────────────────────────────────────────────────────────────────────────
