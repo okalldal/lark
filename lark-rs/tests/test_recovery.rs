@@ -398,6 +398,49 @@ fn test_recovery_context_feed_wrong_token_errors() {
 }
 
 #[test]
+fn test_resume_at_eof_inserts_missing_token() {
+    // Blocker #1: Resume at $END must work. Insert a missing NUMBER at EOF,
+    // then Resume to retry $END — the parser should accept "1 + 0".
+    let lark = recovery_parser();
+    let result = lark
+        .parse_on_error("1 +", |_, ctx| {
+            ctx.feed("NUMBER", "0").expect("NUMBER should be accepted");
+            lark_rs::RecoveryAction::Resume
+        })
+        .unwrap();
+    let tree = result
+        .tree
+        .expect("resume at $END after insertion should produce a tree");
+    let clean = lark.parse("1 + 0").unwrap();
+    assert_eq!(format!("{tree}"), format!("{clean}"));
+}
+
+#[test]
+fn test_feed_rollback_is_transactional() {
+    // Blocker #5: A feed that partially succeeds (e.g. shifts then fails on
+    // a reduce) must roll back the stack so subsequent operations see the
+    // original state. We verify by feeding a wrong token, then feeding the
+    // right one — if rollback failed, the second feed would also fail.
+    let lark = recovery_parser();
+    let result = lark
+        .parse_on_error("1 + + 2", |_, ctx| {
+            // PLUS is wrong here (parser expects NUMBER after PLUS).
+            let bad = ctx.feed("PLUS", "+");
+            assert!(bad.is_err(), "PLUS should not be accepted");
+            // After rollback, NUMBER should still work.
+            ctx.feed("NUMBER", "0")
+                .expect("NUMBER should work after rollback");
+            lark_rs::RecoveryAction::Resume
+        })
+        .unwrap();
+    let tree = result
+        .tree
+        .expect("recovery via rollback + correct feed should produce a tree");
+    let clean = lark.parse("1 + 0 + 2").unwrap();
+    assert_eq!(format!("{tree}"), format!("{clean}"));
+}
+
+#[test]
 fn test_parse_with_recovery_uses_delete() {
     // parse_with_recovery is the convenience wrapper; verify it still works
     // after the signature change.
