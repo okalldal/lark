@@ -1,9 +1,17 @@
 # lark-rs Bug-Bounty Findings
 
 A differential strike-team sweep of lark-rs against **Python Lark 1.3.1** (the
-oracle). Ten teams probed disjoint root-cause buckets; this catalog records the
-**12 distinct, confirmed root causes** that survived minimization and independent
-re-verification.
+oracle). Ten teams probed disjoint root-cause buckets; after minimization,
+independent re-verification, and dedup-by-root-cause this catalog records:
+
+- **11 fresh, confirmed root causes** — RC1, RC2 (two surfaces, RC2/RC2b), RC4a,
+  RC4b, RC4c, RC5, RC6, RC7, RC8, RC9, RC10. Each has an executable XFAIL test in
+  `tests/test_bounty_findings.rs`.
+- **1 known-issue guard** — RC3 is the `maybe_placeholders=false` colliding-optional
+  parity gap of #252, already fixed by the merged PR #259; it reproduces here only
+  because that fix has not reached `master`. Kept as a guard, **not** counted fresh.
+
+Total: 13 tests (11 fresh causes + RC2b variant surface + RC3 known guard).
 
 ## Target & method
 
@@ -13,8 +21,13 @@ re-verification.
 - **Harness:** `tools/diffcheck.py` (`compare(grammar, input, **opts)`) drives the
   `diffcheck` binary (`src/bin/diffcheck.rs`) and Python Lark over the same
   (grammar, input, options) tuple, diffing accept/reject + tree shape (`_ambig`
-  children compared unordered). Every find below was re-run through `compare()`
-  after minimization.
+  children compared unordered). It exposes the **most commonly-tested** public
+  options — `parser`, `lexer`, `start`, `ambiguity`, `maybe_placeholders`,
+  `keep_all_tokens`, `strict` — but **not** the whole `LarkOptions` surface:
+  `g_regex_flags`, `base_path`, `import_sources`, `postlex`, and `lexer_backend`
+  are not yet wired (a worthwhile extension; some finds below were source-traced
+  precisely because they sit outside this matrix). Every find was re-run through
+  `compare()` after minimization (RC10 via `generate_standalone()` directly).
 - **Reproductions:** `tests/test_bounty_findings.rs` — one `#[ignore]` (XFAIL)
   test per find, asserting the Python-oracle behavior. They are green-by-ignore in
   CI; run `cargo test --test test_bounty_findings -- --ignored` to watch all 12 go
@@ -31,26 +44,26 @@ more permissive than the oracle is unfalsifiable → a bug.
 
 ## Severity summary
 
-| ID  | Sev      | Bucket          | One-line |
-|-----|----------|-----------------|----------|
-| RC1 | Critical | grammar-loader  | Duplicate rule definition silently merged, not rejected |
-| RC5 | Critical | lexer           | Terminal selection ignores `max_width` → wrong terminal chosen |
-| RC2 | High     | grammar-loader  | Duplicate terminal definition (import + `%declare`/local) not rejected |
-| RC3 | High     | grammar-loader  | Colliding optional expansion `[A] [A]` not rejected (mp=false) |
-| RC4a| High     | grammar-loader  | Alias on an inlined `_rule` not rejected |
-| RC4b| High     | grammar-loader  | `?` modifier on an inlined `_rule` not rejected |
-| RC4c| High     | grammar-loader  | Alias inside a parenthesized group not rejected |
-| RC7 | High     | lalr-table      | Undetected LALR reduce/reduce collision |
-| RC8 | High     | earley          | Zero-width regexp under dynamic lexer not rejected |
-| RC9 | High     | tree-shaping    | `expand1` keeps wrapper around a lone placeholder-`None` |
-| RC6 | Medium   | lexer           | `\b`/`\B` leaks an uncategorized `regex-automata` build error |
-| RC10| Medium   | distribution    | Standalone/`include_lark!` bakes lookaround → runtime panic |
+| ID  | Sev      | Fresh? | Bucket          | One-line |
+|-----|----------|--------|-----------------|----------|
+| RC5 | Critical | fresh  | lexer           | Regex `max_width` inference returns `None`, so finite regexes sort as unbounded → wrong terminal chosen |
+| RC1 | High     | fresh  | grammar-loader  | Duplicate rule definition silently merged, not rejected |
+| RC2 | High     | fresh  | grammar-loader  | Duplicate terminal definition (import + `%declare`/local) not rejected |
+| RC4a| High     | fresh  | grammar-loader  | Alias on an inlined `_rule` not rejected |
+| RC4b| High     | fresh  | grammar-loader  | `?` modifier on an inlined `_rule` not rejected |
+| RC4c| High     | fresh  | grammar-loader  | Alias inside a parenthesized group not rejected |
+| RC7 | High     | fresh  | lalr-table      | Undetected LALR reduce/reduce collision |
+| RC8 | High     | fresh  | earley          | Zero-width regexp under dynamic lexer not rejected |
+| RC9 | High     | fresh  | tree-shaping    | `expand1` keeps wrapper around a lone placeholder-`None` |
+| RC6 | Medium   | fresh  | lexer           | `\b`/`\B` leaks an uncategorized `regex-automata` build error |
+| RC10| Medium   | fresh  | distribution    | Standalone/`include_lark!` bakes lookaround instead of rejecting it → runtime panic |
+| RC3 | —        | KNOWN  | grammar-loader  | Colliding optional expansion `[A] [A]` (mp=false) — #252, fixed by merged PR #259 |
 
 ---
 
 ## Findings
 
-### RC1 — Duplicate rule definition silently merged (Critical, grammar-loader)
+### RC1 — Duplicate rule definition silently merged (High, grammar-loader)
 - **Grammar:** `start: a` / `a: "x"` / `a: "y"` · **Input:** `"y"`
 - **Options:** default (reproduces on all of lalr/contextual, lalr/basic,
   earley/dynamic, earley/basic, cyk/basic).
@@ -68,16 +81,19 @@ more permissive than the oracle is unfalsifiable → a bug.
 - **lark-rs:** keeps one definition silently and builds. Order-independent; same
   gap across the `%import`/`%declare`/local-redefinition surfaces.
 
-### RC3 — Colliding optional expansion not rejected (High, grammar-loader)
+### RC3 — Colliding optional expansion not rejected (KNOWN — #252 / PR #259)
 - **Grammar:** `start: [A] [A] "c"` / `A: "a"` · **Input:** `"c"`
 - **Options:** `maybe_placeholders=false` (default).
 - **Python:** build error — `Rules defined twice ... (colliding expansion of
-  optionals)`.
-- **lark-rs:** builds and accepts.
-- *Distinct from #258:* that case is `([A])?`/`[A]~0..1` under
-  `maybe_placeholders=true`, where both engines agree by rejecting. This is two
-  **sibling** optionals on the default `mp=false` path. (The nested `[A]?` form on
-  `mp=false` is the same root cause.)
+  optionals)`. **lark-rs:** builds and accepts.
+- **Status — NOT a fresh find.** This is the `maybe_placeholders=false`
+  colliding-optional parity gap tracked by **#252** and **already fixed by the
+  merged PR #259**, which oracle-checks `[A] [A]` by name (test
+  `test_literal_optional_pair_collides`). It still reproduces on the frozen target
+  SHA only because #259 landed on the sprint integration branch, not `master`; it
+  will pass once #255 lands. Retained as a guard, excluded from the fresh count.
+  (Earlier drafts mis-cited only #258 as the adjacent issue — the real prior art is
+  #252/#259.)
 
 ### RC4 — Alias / `?`-modifier placement not validated (High, grammar-loader)
 Three sibling gaps, all build-time validation Python performs and lark-rs skips:
@@ -90,19 +106,24 @@ Three sibling gaps, all build-time validation Python performs and lark-rs skips:
   `'foo'` used but not defined"*; lark-rs builds a `foo` node. (Reproduces for
   `(A -> foo)?`, `(A -> foo)+`, `(A -> foo | B -> bar)`.)
 
-### RC5 — Terminal selection ignores `max_width` (Critical, lexer)
+### RC5 — Regex `max_width` inference returns `None` (Critical, lexer)
 - **Grammar:** `start: A | B` / `A: /a+/` / `B: /aa?/` · **Input:** `"aaa"`
 - **Options:** reproduces under both `basic` and `contextual` lexers.
 - **Python:** `A = "aaa"` (the maximal match).
 - **lark-rs:** tries `B` first, commits to its greedy `"aa"`, leftover `"a"`
   rejects the parse.
-- **Root cause:** Python sorts terminals
-  `(-priority, -max_width, -len(pattern), name)` (`lark/lexer.py:583`), so an
-  *unbounded* pattern (`/a+/`, max_width = ∞) precedes a *bounded* one with a
-  longer regex source (`/aa?/`, max_width = 2). lark-rs sorts
-  `(-priority, -pattern_len, name)` — **missing the `max_width` term** (confirmed
-  in `lark-rs/CLAUDE.md`). Adding an explicit priority (`A.2`) makes lark-rs agree,
-  isolating the diagnosis.
+- **Root cause (corrected):** both engines sort terminals
+  `(-priority, -max_width, -len(pattern), name)` — Python at `lark/lexer.py:583`,
+  **lark-rs at `src/lexer/plan.rs:312`** (the sort key already includes
+  `max_width`; the `CLAUDE.md` note saying otherwise is stale). The real bug is in
+  *width inference*: `Pattern::max_width()` returns `None` for **every** regex
+  (`src/grammar/terminal.rs:23` — `Pattern::Re(_) => None`) and `plan.rs` maps
+  `None → usize::MAX`. So the *finite* `/aa?/` (true width 2) is treated as
+  unbounded, ties with the genuinely-unbounded `/a+/`, and `-len(pattern)` breaks
+  the tie the wrong way (longer source `aa?` first). Python computes the finite
+  width and keeps `/a+/` (∞) ahead of `/aa?/` (2). **Fix point: compute finite
+  max-width for bounded regexes — not the sort key.** Adding an explicit priority
+  (`A.2`) makes lark-rs agree, isolating the diagnosis.
 - **Same root cause, other public surfaces:**
   - `%ignore` steals a content char: `start: A+` / `A: /a+/` / `WS: /a? /` /
     `%ignore WS` on `"a a"` — Python emits `A A`; lark-rs emits one `A` (tree-shape
@@ -144,8 +165,14 @@ Three sibling gaps, all build-time validation Python performs and lark-rs skips:
   `?start: [A] B?`.
 
 ### RC10 — Standalone bakes lookaround → runtime panic (Medium, distribution)
-- **Verification:** source-traced + generator-binary output (not executed — kept
-  honest at medium).
+- **Verification:** confirmed at the generation boundary. `generate_standalone()`
+  returns `Ok` (baking raw lookaround) for both `A: /foo(?!bar)/` and
+  `%import python.STRING`, where the contract is to reject; the executable XFAIL
+  `rc10_standalone_rejects_lookaround` asserts the rejection and fails today. (The
+  downstream runtime panic itself is source-traced, not executed — the generated
+  parser is not compiled.)
+- **Grammar:** `start: A` / `A: /foo(?!bar)/` · **Options:** `parser=lalr`,
+  `lexer=basic` (standalone-eligible subset).
 - `standalone::bake()` → `lexer::scanner_plan()` maps each terminal via
   `to_inline_regex()` **without** going through the lookaround refusal seam
   (`route_fancy_only_terminal`). A lowered-lookaround terminal (e.g. `/foo(?!bar)/`,

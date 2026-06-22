@@ -15,12 +15,21 @@
 //! Target SHA (frozen baseline the finds were minimized against):
 //!   a005423  (branch claude/hackathon-baseline-bounty-08oolp)
 //!
-//! Full catalog (severity, root cause, blast radius): `docs/BOUNTY_FINDINGS.md`.
-//! These reproduce known-good Python behavior; none overlap the ineligible
-//! baseline issues (#176 seed-13, #210 seed-99, #258, #250, #228/#229, #253,
-//! lexer same-span tie-breaks).
+//! Accounting (see `docs/BOUNTY_FINDINGS.md` for the full catalog):
+//!   * 10 fresh, harness-confirmed root causes: RC1, RC2, RC4a, RC4b, RC4c, RC5,
+//!     RC6, RC7, RC8, RC9 (RC2b is a second *surface* of RC2, not a new cause).
+//!   * RC10 — fresh, confirmed at the standalone-generation boundary (its own test).
+//!   * RC3 — a KNOWN issue (#252, fixed by the merged PR #259 on the sprint
+//!     branch); it still reproduces on this target SHA only because that fix has
+//!     not reached `master` yet. Kept as a guard, NOT counted as a fresh find.
+//! That is 11 fresh root causes + 1 known-issue guard, across 13 tests.
+//!
+//! None of the fresh finds overlap the ineligible baseline set (#176 seed-13,
+//! #210 seed-99, #258, #250, #228/#229, #253, the equal-span lexer tie-break).
 
-use lark_rs::{Ambiguity, Child, Lark, LarkOptions, LexerType, ParseTree, ParserAlgorithm};
+use lark_rs::{
+    generate_standalone, Ambiguity, Child, Lark, LarkOptions, LexerType, ParseTree, ParserAlgorithm,
+};
 
 /// Build a parser with the given knobs; returns the `Result` so a test can assert
 /// either a build rejection (oracle rejects at construction) or a successful build.
@@ -57,7 +66,7 @@ fn assert_build_rejected(grammar: &str, parser: ParserAlgorithm, lexer: LexerTyp
 // oracle — unfalsifiable permissiveness, ADR-0017 corollary → a bug).
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// RC1 (CRITICAL). A rule defined twice with distinct bodies. Python:
+/// RC1 (HIGH). A rule defined twice with distinct bodies. Python:
 /// `GrammarError: Rule 'a' defined more than once`. lark-rs silently MERGES the
 /// two bodies into alternatives and accepts both. Default path; all five backends.
 #[test]
@@ -86,13 +95,17 @@ fn rc2b_duplicate_terminal_import_then_local_rejected() {
     assert_build_rejected(g, ParserAlgorithm::Lalr, LexerType::Contextual, "RC2b");
 }
 
-/// RC3 (HIGH). Two sibling optional-bracket terminals collide into a duplicate
-/// production. Python: `GrammarError: Rules defined twice ... (colliding expansion
-/// of optionals)`. lark-rs accepts. Default `maybe_placeholders=false` path —
-/// structurally distinct from the ineligible #258 (`([A])?`/`[A]~0..1` under
-/// maybe_placeholders=true, where both engines agree by rejecting).
+/// RC3 (KNOWN — not a fresh find). Two sibling optional-bracket terminals collide
+/// into a duplicate production. Python: `GrammarError: Rules defined twice ...
+/// (colliding expansion of optionals)`. lark-rs accepts. This is the
+/// `maybe_placeholders=false` colliding-optional parity gap of **#252**, already
+/// fixed by the merged **PR #259** (which oracle-checks `[A] [A]` explicitly, test
+/// `test_literal_optional_pair_collides`). It still reproduces on this target SHA
+/// only because #259 landed on the sprint branch, not `master`. Kept as a guard;
+/// it will pass once #255 lands. Counted as a known-issue duplicate, not a fresh
+/// find. (Distinct from #258, which is the mp=true case where both engines agree.)
 #[test]
-#[ignore = "XFAIL (bounty RC3): colliding optional expansion not rejected (mp=false)"]
+#[ignore = "XFAIL (bounty RC3): KNOWN #252/#259 colliding-optional parity gap (guard only)"]
 fn rc3_colliding_optional_expansion_rejected() {
     let g = "start: [A] [A] \"c\"\nA: \"a\"\n";
     assert_build_rejected(g, ParserAlgorithm::Lalr, LexerType::Contextual, "RC3");
@@ -149,13 +162,18 @@ fn rc7_lalr_reduce_reduce_collision_rejected() {
 // Lexer.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// RC5 (CRITICAL). Terminal selection ignores `max_width`. Python orders
-/// terminals by `(-priority, -max_width, -len(pattern), name)` (lark/lexer.py:583)
-/// so an *unbounded* terminal (`A: /a+/`, max_width = ∞) is tried before a
-/// *bounded* one with a longer regex source (`B: /aa?/`, max_width = 2). lark-rs
-/// orders by `(-priority, -pattern_len, name)` only — it tries `B` first, commits
-/// to its greedy 2-char match `"aa"`, and the leftover `"a"` rejects. Python takes
-/// the maximal `A="aaa"`. Same root cause underlies the `%ignore`-steals-a-char
+/// RC5 (CRITICAL). Terminal ordering uses the wrong width for regex terminals.
+/// Both engines sort terminals by `(-priority, -max_width, -len(pattern), name)`
+/// (Python: lark/lexer.py:583; lark-rs: src/lexer/plan.rs:312). The bug is in
+/// lark-rs's *width inference*: `Pattern::max_width()` returns `None` for **every**
+/// regex (`grammar/terminal.rs:23` — `Pattern::Re(_) => None`), and `plan.rs` maps
+/// `None → usize::MAX`. So a *finite* regex like `B: /aa?/` (true max_width = 2) is
+/// treated as unbounded, ties with the genuinely-unbounded `A: /a+/`, and the
+/// `-len(pattern)` tiebreak then wrongly puts `B` (longer source) first. lark-rs
+/// commits to `B`'s greedy `"aa"`, leaving `"a"` to reject; Python computes the
+/// finite width, keeps `A` (∞) ahead of `B` (2), and takes the maximal `A="aaa"`.
+/// Fix point: compute finite max-width for bounded regexes — NOT the sort key,
+/// which is already correct. Same root cause underlies the `%ignore`-steals-a-char
 /// and longest-vs-higher-rank variants (see catalog). Not the documented
 /// equal-span tie-break — the spans differ (3 vs 2).
 #[test]
@@ -242,5 +260,47 @@ fn rc9_expand1_collapses_lone_placeholder() {
         matches!(t.children[0], Child::None),
         "RC9: expected start[None] (expand1 collapsed the ?w wrapper), got {:?}",
         t.children[0]
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Distribution (standalone generation).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// RC10 (MEDIUM). The standalone generator (and `include_lark!`) silently bakes a
+/// lookaround terminal into the pure-`regex` runtime, which cannot compile it. The
+/// documented contract (STATUS.md / `lark_proc/src/lib.rs`) is that lookaround
+/// grammars are *"rejected at compile time with a clear error"* / *"not
+/// standalone-able"*. Instead `generate_standalone()` returns `Ok` with raw
+/// `(?!…)`/`(?<…)` baked into `scan_groups`; the generated runtime then panics at
+/// `Regex::new(...).expect("baked scanner regex is valid")` on first parse.
+///
+/// This test asserts the contract at the *generation boundary* (no need to compile
+/// the emitted parser): generation should be rejected. The core in-process engine
+/// builds the same grammar correctly (it lowers the lookaround into the DFA), so
+/// the gap is specific to the standalone bake path. Empirically reproduces both
+/// for an inline negative-lookahead terminal and for `%import python.STRING`.
+#[test]
+#[ignore = "XFAIL (bounty RC10): standalone bakes lookaround instead of rejecting it"]
+fn rc10_standalone_rejects_lookaround() {
+    let g = "start: A\nA: /foo(?!bar)/\n";
+    let opts = LarkOptions {
+        parser: ParserAlgorithm::Lalr,
+        lexer: LexerType::Basic,
+        start: vec!["start".to_string()],
+        ..Default::default()
+    };
+    // The core engine lowers the lookaround and builds fine...
+    assert!(
+        Lark::new(g, opts.clone()).is_ok(),
+        "RC10: precondition — the core engine should build this lowered-lookaround grammar"
+    );
+    // ...but the standalone bake path must REJECT it (the runtime can't host it).
+    let r = generate_standalone(g, &opts);
+    assert!(
+        r.is_err(),
+        "RC10: standalone generation should reject a lookaround grammar, but it \
+         returned Ok and baked an uncompilable regex (the generated parser panics \
+         at Regex::new on first parse)"
     );
 }

@@ -2,7 +2,9 @@
 //!
 //! Unlike `differ` (which is hard-wired to LALR + contextual on a fixture
 //! grammar for the fuzz minimizer), this binary takes an arbitrary grammar file,
-//! input file, and the full matrix of public options, then prints the lark-rs
+//! input file, and the commonly-tested public options (parser, lexer, start,
+//! ambiguity, maybe_placeholders, keep_all_tokens, strict — NOT g_regex_flags,
+//! base_path, import_sources, postlex, or lexer_backend), then prints the lark-rs
 //! result as oracle-shaped JSON. Its Python counterpart (`tools/diffcheck.py`)
 //! runs the same job through Python Lark and diffs the two — so a team can probe
 //! any (grammar, input, options) tuple and get a machine-checkable verdict.
