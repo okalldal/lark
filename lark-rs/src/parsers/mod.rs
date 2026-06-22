@@ -12,7 +12,9 @@ pub use lalr::{build_lalr_table, LalrParser, ParseTable};
 pub use token_source::{
     BasicRecovering, Contextual, ContextualRecovering, LexFailure, PreLexed, TokenSource,
 };
-pub use tree_builder::{NodeValue, OutputBuilder, Slot, TreeBuilder, TreeOutputBuilder};
+// OutputBuilder, Slot, TreeOutputBuilder (and their backward-compat aliases
+// NodeValue, TreeBuilder) are crate-internal — issue #231 defers the public
+// trait shape. Internal code imports via `super::tree_builder::*` directly.
 
 use crate::error::{GrammarError, LarkError, ParseError, RecoveredTree};
 use crate::grammar::intern::SymbolTable;
