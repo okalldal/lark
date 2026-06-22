@@ -553,3 +553,34 @@ fn test_no_action_fast_path_preserves_stack() {
     let clean = lark.parse("1 + 0").unwrap();
     assert_eq!(format!("{tree}"), format!("{clean}"));
 }
+
+#[test]
+fn test_feed_accept_at_lex_failure_returns_tree() {
+    // The lex-failure path also creates a RecoveryContext. If the handler feeds
+    // tokens that reach ACCEPT during a lex failure, the tree must be returned —
+    // not silently dropped.
+    //
+    // Grammar: start: NUMBER. Input: "@" (un-lexable). Handler feeds NUMBER "7"
+    // which completes the parse. The tree must equal parse("7").
+    let lark = Lark::new(
+        "start: NUMBER\n%import common.NUMBER\n%import common.WS\n%ignore WS\n",
+        LarkOptions {
+            parser: ParserAlgorithm::Lalr,
+            lexer: LexerType::Auto,
+            start: vec!["start".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let result = lark
+        .parse_on_error("@", |_, ctx| {
+            ctx.feed("NUMBER", "7").expect("NUMBER should be accepted");
+            lark_rs::RecoveryAction::Resume
+        })
+        .unwrap();
+    let tree = result
+        .tree
+        .expect("ACCEPT during lex failure must return a tree");
+    let clean = lark.parse("7").unwrap();
+    assert_eq!(format!("{tree}"), format!("{clean}"));
+}
