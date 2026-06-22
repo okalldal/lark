@@ -863,14 +863,23 @@ def main():
     n_total = sum(len(case["configs"]) for case in data["cases"])
     print(f"Wrote {out_path}: {n_cases} cases, {n_ok}/{n_total} configs ok")
 
-    # Fail loudly if any case errored unexpectedly.
+    # Fail loudly if any config errored unexpectedly. All configs are currently
+    # "ok", so there is no allow-list — a non-ok status is a real regression and
+    # must exit non-zero rather than ship a silently-broken transformer oracle.
+    non_ok = []
     for case in data["cases"]:
         for cfg_key, cfg_val in case["configs"].items():
             if cfg_val["status"] not in ("ok",):
-                print(
-                    f"  WARNING: {case['name']}:{cfg_key} -> {cfg_val['status']}: "
-                    f"{cfg_val.get('error', '?')}"
-                )
+                msg = (f"{case['name']}:{cfg_key} -> {cfg_val['status']}: "
+                       f"{cfg_val.get('error', '?')}")
+                non_ok.append(msg)
+                print(f"  WARNING: {msg}")
+    if non_ok:
+        print(
+            f"\nERROR: {len(non_ok)} transformer-oracle config(s) did not return status 'ok'. "
+            "Every config is expected to succeed; fix the spec/grammar (no allow-list)."
+        )
+        sys.exit(1)
 
 
 if __name__ == "__main__":
