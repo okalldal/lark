@@ -17,7 +17,7 @@ pub use token_source::{
 // trait shape. Internal code imports via `super::tree_builder::*` directly.
 
 use crate::error::{GrammarError, LarkError, ParseError, RecoveredTree, RecoveryAction};
-use crate::grammar::intern::SymbolTable;
+use crate::grammar::intern::{SymbolId, SymbolTable};
 use crate::grammar::{CompiledGrammar, Grammar};
 use crate::lexer::{
     check_regex_collisions, check_zero_width_terminals, BasicLexer, ContextualLexer,
@@ -47,6 +47,65 @@ pub fn basic_lexer_conf(cg: &CompiledGrammar, g_regex_flags: u32) -> LexerConf {
         })
         .collect();
     LexerConf::new(terminals, cg.ignore.clone()).with_global_flags(g_regex_flags)
+}
+
+/// Resolve a default (`None`) or explicit start name against the ordered list of
+/// configured start symbols, mirroring Python Lark's `_verify_start`
+/// (`lark/parser_frontends.py`). This is the single definition shared by **every**
+/// backend — LALR, Earley, and CYK — so the diagnostics are byte-identical
+/// (issues #251, #256):
+///   * `None` + exactly one configured start → use it;
+///   * `None` + more than one configured start → reject (Python's
+///     `ConfigurationError` "more than 1 possible start rule");
+///   * `None` + no configured start → reject ("no start rule configured");
+///   * `Some(name)` that is one of the configured starts → use it;
+///   * `Some(name)` that is *not* a configured start → reject with Python's
+///     "Unknown start rule …. Must be one of […]" message (rendered Python-`repr`
+///     style, single-quoted, to match `_verify_start`'s `%r` formatting).
+///
+/// Being *more permissive* than the oracle here (silently picking the first start,
+/// or accepting an explicit non-start rule name) is the divergence #256 closes for
+/// Earley + CYK, where LALR already matched (#251).
+pub fn resolve_start(
+    starts: &[SymbolId],
+    symbols: &SymbolTable,
+    start: Option<&str>,
+) -> Result<SymbolId, ParseError> {
+    match start {
+        None => match starts {
+            [only] => Ok(*only),
+            [] => Err(ParseError::unexpected_eof(
+                0,
+                0,
+                vec!["no start rule configured".to_string()],
+            )),
+            _ => Err(ParseError::unexpected_eof(
+                0,
+                0,
+                vec!["Lark initialized with more than 1 possible start rule. \
+                      Must specify which start rule to parse"
+                    .to_string()],
+            )),
+        },
+        Some(name) => match symbols.id(name) {
+            Some(id) if starts.contains(&id) => Ok(id),
+            _ => {
+                let one_of = starts
+                    .iter()
+                    .map(|&id| format!("'{}'", symbols.name(id)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err(ParseError::unexpected_eof(
+                    0,
+                    0,
+                    vec![format!(
+                        "Unknown start rule {}. Must be one of [{}]",
+                        name, one_of
+                    )],
+                ))
+            }
+        },
+    }
 }
 
 #[derive(Debug, Clone)]
