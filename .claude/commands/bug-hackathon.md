@@ -10,6 +10,8 @@ The command's job is to produce a **findings-only PR**: a catalog of confirmed, 
 
 Do not fix bugs in the same PR.
 
+When the findings PR is **merged** (the architect merges it — this command never merges its own PR), file the backlog issues per **Phase 9**. Phase 9 can also be run on its own later with `--file-issues`.
+
 ---
 
 ## Inputs
@@ -22,6 +24,7 @@ Optional arguments:
 - `--scope <text>`: extra user-specified focus.
 - `--exclude <issue-or-id>`: extra ineligible issue/root-cause IDs.
 - `--continue-from <catalog>`: prior bounty catalog to dedup against.
+- `--file-issues <round-or-pr>`: skip the sweep and run **Phase 9 only** — file the backlog issues for an already-merged findings PR/catalog (the normal post-merge step).
 
 If not specified, infer prior catalogs from:
 
@@ -343,6 +346,107 @@ If any answer is no, fix the catalog before opening the PR.
 
 ---
 
+## Phase 9 — File backlog issues (on merge)
+
+Runs **after the findings PR is merged** (the architect merges it; this command
+never merges its own PR). Invoke standalone post-merge with
+`--file-issues <round-or-pr>`. Goal: turn the catalog into a tracked,
+prioritizable backlog using the **hybrid** structure proven in the RC/N rounds —
+**one tracking epic + one issue per _fix site_** (the module/function a fix would
+touch). Not one issue per symptom (noisy, splits coupled fixes); not a single
+mega-issue (buries criticals, can't be prioritized or claimed in parallel).
+
+### Preconditions & idempotency
+
+1. Confirm the PR is **merged** and the catalog + XFAIL tests are on the base
+   branch (`git log`/PR state). Do not file issues for an unmerged PR.
+2. List existing open issues and **skip anything already filed** — match by the
+   RC/N/V identifiers or the burndown-epic link in the body. Re-running must never
+   double-file (create-or-update, like the rest of the kit).
+
+### Steps
+
+1. **Cluster by fix site.** Group the catalog's findings by the code location a
+   fix would touch, folding **variants and multi-surface findings into their
+   parent**. One issue per cluster, not per finding. (Worked clusters from prior
+   rounds: terminal-ordering `lexer/plan.rs`+`grammar/terminal.rs`; regex
+   dialect/taxonomy `lexer` classify/route; loader validation gates `loader/`;
+   config legality `parsers/mod.rs`+`lib.rs`; tree-shaping `tree_builder.rs`;
+   standalone bake `standalone/`; bindings `python/`+`lark_h/`.)
+2. **Ensure labels exist** (create missing ones idempotently via the GitHub MCP,
+   per `LABELS.md`): `lark-rs`, `kind:bug` (or `performance` for perf findings),
+   `prio:now|next|later`, `good-autonomous`, `needs-decision`, plus a topic label
+   (`lexer`/`loader`/`distribution`/`earley`/…). Apply only labels that exist —
+   the GitHub API rejects unknown labels.
+3. **Severity → priority.** Critical → `prio:now`; high → `prio:next`;
+   medium/low → `prio:later` (adjust by blast radius).
+4. **Set flags by fix contract** (Hard rule 7):
+   - settled, oracle-backed contract → `good-autonomous`;
+   - genuine fork (e.g. support-vs-categorized-refusal) → `needs-decision`, and
+     write that issue as a decision memo (background, options, recommendation,
+     consequences) so `/architect-brief` can read it;
+   - provisional (C-level) findings → no `good-autonomous`; done-when is "produce
+     an executable repro first".
+5. **Create one issue per cluster** (template below); prefix the title with the
+   cluster's max severity in brackets.
+6. **Create the tracking epic** (template below) with a checklist grouped by
+   severity linking every issue, plus catalog/test pointers and the accounting
+   block. Link each issue as a **native sub-issue** of the epic where the API
+   allows it; the checklist is the source of truth either way.
+7. **State the burndown convention** in the epic: *closing an issue = removing its
+   test's `#[ignore]`, turning the XFAIL into a permanent regression guard.*
+
+### Issue body template
+
+```
+<one paragraph: the divergence(s) in this fix-site cluster>
+
+- <ID> (<severity>). `<grammar>` on `<input>` (`<options>`). Python: <result>;
+  lark-rs: <result>. XFAIL: `<test name>`.
+- ... (additional surfaces / variants sharing this fix site)
+
+Fix site: `<module/function>`.
+Expected fix contract: support | reject-like-Python | reject-with-divergence | ADR.
+Catalog: `lark-rs/docs/BOUNTY_FINDINGS_<ROUND>.md` (<IDs>).
+Part of the XFAIL burndown epic #<epic>.
+```
+
+### Epic body template
+
+```
+# [epic] XFAIL burndown — <round>
+
+Tracking epic for <round> (PR #<pr>). Every finding is an `#[ignore]` (XFAIL)
+oracle test; closing an issue below = removing its `#[ignore]` (a permanent
+regression guard).
+
+Catalogs: <docs>. Tests: <files> (run `cargo test --test <...> -- --ignored`).
+Method: `tools/diffcheck.py` + the `diffcheck` binary vs Python Lark.
+
+### Critical
+- [ ] #<n> — <title> (<IDs>)
+### High
+- [ ] #<n> — <title> (<IDs>)
+### Medium
+- [ ] #<n> — <title> (<IDs>)
+
+### Accounting
+Fresh root causes / variants / known duplicates / provisional, and how findings
+map to issues (e.g. "19 findings → 14 fix-site issues").
+```
+
+### Issue-filing checklist
+
+- [ ] PR is merged; catalog + tests are on the base branch
+- [ ] No duplicate issues created (matched against existing open issues)
+- [ ] One issue per fix site; variants folded into parents
+- [ ] Labels exist and are applied; severity→priority mapping correct
+- [ ] `needs-decision` set on every genuine fix-contract fork (written as a memo)
+- [ ] Provisional findings carry "executable repro first", no `good-autonomous`
+- [ ] Epic created, links every issue, states the `#[ignore]`-removal convention
+
+---
+
 ## Output
 
 End with:
@@ -357,4 +461,15 @@ Known duplicates: <n>
 Provisional: <n>
 Ignored test command: <cmd>
 Recommended payout table: ...
+Next step: on merge, run Phase 9 (`--file-issues <round>`) to file the burndown epic + fix-site issues.
+```
+
+When Phase 9 has run (post-merge), end with:
+
+```
+Issues filed for <round>.
+Epic: #<epic>
+Fix-site issues: #<a>, #<b>, ... (<n> issues from <m> findings)
+needs-decision: #<...>
+Provisional (repro-first): #<...>
 ```
