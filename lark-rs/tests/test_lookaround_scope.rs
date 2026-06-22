@@ -313,7 +313,47 @@ fn scoreboard_rejections_are_identical_across_engines() {
                 "earley/dynamic_complete",
             ),
         ] {
+            // Oracle carve-out (#276): a pure-assertion, min-width-0 terminal is a
+            // *zero-width regexp* on the dynamic Earley lexer. Python's
+            // `EarleyRegexpMatcher` rejects it with "Dynamic Earley doesn't allow
+            // zero-width regexps" at matcher construction — *before* any lookaround
+            // classification — so on the two dynamic paths the categorized
+            // LookaroundScope error this row asserts on every other engine is
+            // pre-empted by the zero-width error (verified against Python Lark 1.3.1).
+            // lark-rs mirrors that ordering in `DynamicMatcher::new`. The LALR/basic
+            // path still gives the LookaroundScope error (its zero-width check runs on
+            // the combined scanner, not per-terminal), so only the dynamic rows differ.
+            let dynamic = matches!(lexer, LexerType::Dynamic | LexerType::DynamicComplete);
+            if case.name == "assertion_only_zero_width_branch" && dynamic {
+                assert_dynamic_zero_width_rejected(
+                    &case,
+                    parser,
+                    lexer,
+                    &format!("{} [{tag}]", case.name),
+                );
+                continue;
+            }
             assert_case(&case, parser, lexer, &format!("{} [{tag}]", case.name));
+        }
+    }
+}
+
+/// Assert a case is rejected on a dynamic Earley lexer with the zero-width-regexp
+/// error (Python's `EarleyRegexpMatcher` gate), not the LookaroundScope error.
+fn assert_dynamic_zero_width_rejected(
+    case: &ScopeCase,
+    parser: ParserAlgorithm,
+    lexer: LexerType,
+    tag: &str,
+) {
+    match build(case.grammar, case.g_regex_flags, parser, lexer) {
+        Err(LarkError::Grammar(GrammarError::Other { msg })) => assert!(
+            msg.contains("Dynamic Earley doesn't allow zero-width regexps"),
+            "{tag}: expected the zero-width-regexp rejection, got: {msg}"
+        ),
+        Err(other) => panic!("{tag}: expected the zero-width-regexp rejection, got {other}"),
+        Ok(_) => {
+            panic!("{tag}: a zero-width regexp built under the dynamic lexer (Python rejects it)")
         }
     }
 }

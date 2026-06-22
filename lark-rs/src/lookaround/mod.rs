@@ -254,6 +254,26 @@ pub fn parse(pattern: &str) -> Result<Node, GrammarError> {
     Ok(node)
 }
 
+/// Whether `pattern`'s regexp can derive the empty string — i.e. its **minimum**
+/// match width is zero. This is the lark-rs equivalent of Python Lark's
+/// `get_regexp_width(regexp)[0] == 0` (`lark/utils.py`), the test both the basic
+/// lexer (`Pattern.min_width == 0`) and the dynamic Earley lexer
+/// (`parser_frontends.py::EarleyRegexpMatcher`) use to reject zero-width terminals.
+///
+/// Unlike a `Regex::new(src).is_match("")` probe it (a) sees lookaround/boundary
+/// assertions the `regex` crate cannot even compile — `(?=…)`, `(?<=…)` — and (b)
+/// agrees with Python on bare word boundaries: `\b` has `min_width == 0` in Python
+/// (an `is_match("")` probe returns *false* for it, since the empty string has no
+/// word boundary). Computed by parsing the pattern into the shared assertion-aware
+/// [`Node`] tree and taking `width_range(...).0`, the single min/max-width routine
+/// the whole `lookaround` module shares. A pattern this front-end cannot parse
+/// (e.g. a genuine backreference) returns `None` — the caller then falls back to
+/// its own probe rather than over-rejecting.
+pub(crate) fn pattern_min_width_is_zero(pattern: &str) -> Option<bool> {
+    let node = parse(pattern).ok()?;
+    Some(lower::width_range(&node).0 == 0)
+}
+
 struct Parser<'a> {
     src: &'a str,
     chars: Vec<char>,

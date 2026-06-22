@@ -149,11 +149,18 @@ Three sibling gaps, all build-time validation Python performs and lark-rs skips:
   (Earley agrees → the conflict detector, not the loader). `r0+ | (r0)+` and
   arm-order variants diverge identically.
 
-### RC8 — Zero-width regexp under dynamic lexer not rejected (High, earley)
+### RC8 — Zero-width regexp under dynamic lexer not rejected (High, earley) — FIXED (#276)
 - **Grammar:** `start: A` / `A: /a*/` · **Input:** `"a"` · **Options:**
   `parser=earley`, `lexer=dynamic` (and `dynamic_complete`).
 - **Python:** build error — *"Dynamic Earley doesn't allow zero-width regexps"*.
-- **lark-rs:** builds and parses under both dynamic lexers.
+- **lark-rs:** ~~builds and parses under both dynamic lexers.~~ **Fixed:**
+  `DynamicMatcher::new` now rejects any terminal whose regexp can derive the empty
+  string, using the assertion-aware min-width oracle
+  (`lookaround::pattern_min_width_is_zero`, = Python's `get_regexp_width(...)[0] ==
+  0`) so it matches Python on lookaround (`/a*(?=b)/`) and bare-boundary (`/\b/`)
+  zero-width terminals too, not just `/a*/`. The XFAIL
+  `rc8_zero_width_regexp_dynamic_rejected` is green and joined by a differential
+  audit (`rc8_zero_width_dynamic_differential_audit`).
 
 ### RC9 — `expand1` keeps wrapper around a lone placeholder-`None` (High, tree-shaping)
 - **Grammar:** `start: w` / `?w: [A]` / `A: "a"` · **Input:** `""` · **Options:**
