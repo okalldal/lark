@@ -176,8 +176,7 @@ fn rc7_lalr_reduce_reduce_collision_rejected() {
 /// which is already correct. Same root cause underlies the `%ignore`-steals-a-char
 /// and longest-vs-higher-rank variants (see catalog). Not the documented
 /// equal-span tie-break — the spans differ (3 vs 2).
-#[test]
-#[ignore = "XFAIL (bounty RC5): terminal ordering ignores max_width"]
+#[test] // FIXED (#268): finite regex max-width inference + raw-pattern-length tiebreak.
 fn rc5_terminal_ordering_uses_max_width() {
     let g = "start: A | B\nA: /a+/\nB: /aa?/\n";
     let lark = build(g, ParserAlgorithm::Lalr, LexerType::Contextual, false)

@@ -686,7 +686,12 @@ impl GrammarCompiler {
         }
         self.terminals.retain(|t| used.contains(t.name.as_str()));
 
-        // Sort terminals by (priority desc, max_width desc, name asc)
+        // Sort terminals by (priority desc, max_width desc, raw_value_len desc,
+        // name asc) — the same total order the lexer plan uses
+        // (`lexer/plan.rs::sort_terminals`, Python `lark/lexer.py:583`). This sort
+        // feeds SymbolId assignment, so keeping the two in lockstep means the raw
+        // pattern-length tiebreak (#268, N2: flags stored separately, not baked into
+        // the length) can never diverge between interning order and lexer order.
         self.terminals.sort_by(|a, b| {
             b.priority
                 .cmp(&a.priority)
@@ -695,6 +700,7 @@ impl GrammarCompiler {
                     let aw = a.pattern.max_width().unwrap_or(usize::MAX);
                     bw.cmp(&aw)
                 })
+                .then_with(|| b.pattern.raw_value_len().cmp(&a.pattern.raw_value_len()))
                 .then_with(|| a.name.cmp(&b.name))
         });
 
