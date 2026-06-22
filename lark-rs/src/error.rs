@@ -86,6 +86,33 @@ pub enum ParseError {
     Postlex { msg: String },
 }
 
+/// What an `on_error` recovery handler wants to do after inspecting the error
+/// (issue #223).
+///
+/// Replaces the old `bool` return (`true` = delete, `false` = stop) with explicit
+/// semantics: the handler can delete the offending token, resume after feeding
+/// corrective tokens into the [`RecoveryContext`], or stop recovery entirely.
+///
+/// [`RecoveryContext`]: crate::parsers::lalr::RecoveryContext
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryAction {
+    /// Delete the offending token and retry the next one in the same parser
+    /// state — the old `true` behavior (single-token-deletion recovery).
+    Delete,
+    /// The handler has fed corrective tokens through the [`RecoveryContext`],
+    /// advancing the parser state. The errored token is **dropped** (matching
+    /// Python Lark's `resume_parse()`) and the *next* token is parsed in the
+    /// handler's new state. At `$END`, the sentinel is retried (there is no
+    /// next token). A no-progress guard prevents infinite loops: if the handler
+    /// did not feed any tokens, the recovery loop treats it as `Stop`.
+    ///
+    /// [`RecoveryContext`]: crate::parsers::lalr::RecoveryContext
+    Resume,
+    /// Stop recovery — no derivation is produced (`tree: None`). The old
+    /// `false` behavior.
+    Stop,
+}
+
 /// The result of parsing with error recovery enabled (issue #43).
 ///
 /// Rather than aborting on the first parse error, the recovering driver deletes

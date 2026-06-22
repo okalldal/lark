@@ -8,7 +8,7 @@ pub mod postlex;
 pub mod standalone;
 pub mod tree;
 
-pub use error::{GrammarError, LarkError, ParseError, RecoveredTree};
+pub use error::{GrammarError, LarkError, ParseError, RecoveredTree, RecoveryAction};
 pub use grammar::{
     load_grammar, lower,
     rule::{Rule, RuleOptions},
@@ -25,7 +25,7 @@ pub use lookaround::classify::{
 pub use lookaround::lower::{GuardSpec, LookbehindGuard, LowerDecline, LoweredBranch};
 pub use parsers::{
     basic_lexer_conf, lalr, EarleyParser, InteractiveParser, LexFailure, ParseTable, ParserConf,
-    TokenSource,
+    RecoveryContext, TokenSource,
 };
 pub use postlex::Indenter;
 pub use standalone::generate as generate_standalone;
@@ -90,18 +90,23 @@ impl Lark {
     /// or without a postlex (Indenter) hook (issue #94). Only Earley/CYK return an
     /// error. See [`RecoveredTree`] for the tree (`Option`) and error-node semantics.
     pub fn parse_with_recovery(&self, text: &str) -> Result<RecoveredTree, LarkError> {
-        self.parse_on_error(text, |_| true)
+        self.parse_on_error(text, |_, _| RecoveryAction::Delete)
     }
 
-    /// Parse with a custom `on_error` handler, mirroring Python Lark's `on_error`
-    /// callback. The handler is invoked for each parse error; return `true` to
-    /// recover (delete the offending token and resume) or `false` to stop. Stopping
-    /// before a valid parse yields `tree: None` (no fabricated derivation); the
-    /// recovered errors are collected in the returned [`RecoveredTree::errors`].
+    /// Parse with a custom `on_error` handler (issue #223). The handler receives
+    /// the error and a [`RecoveryContext`] exposing `accepts()`, `feed_token()`,
+    /// and `feed()` — the oracle-backed interactive recovery operations. Return a
+    /// [`RecoveryAction`]:
+    ///
+    /// * [`Delete`](RecoveryAction::Delete) — delete the offending token and resume.
+    /// * [`Resume`](RecoveryAction::Resume) — drop the errored token and parse the
+    ///   next one in the state the handler's feeds produced (at `$END`, retry the
+    ///   sentinel). Matching Python Lark's `resume_parse()`. No feeds → `Stop`.
+    /// * [`Stop`](RecoveryAction::Stop) — stop recovery; `tree: None`.
     pub fn parse_on_error(
         &self,
         text: &str,
-        mut on_error: impl FnMut(&ParseError) -> bool,
+        mut on_error: impl FnMut(&ParseError, &mut RecoveryContext<'_>) -> RecoveryAction,
     ) -> Result<RecoveredTree, LarkError> {
         self.frontend.parse_recovering(text, None, &mut on_error)
     }
@@ -111,7 +116,7 @@ impl Lark {
         &self,
         text: &str,
         start: &str,
-        mut on_error: impl FnMut(&ParseError) -> bool,
+        mut on_error: impl FnMut(&ParseError, &mut RecoveryContext<'_>) -> RecoveryAction,
     ) -> Result<RecoveredTree, LarkError> {
         self.frontend
             .parse_recovering(text, Some(start), &mut on_error)

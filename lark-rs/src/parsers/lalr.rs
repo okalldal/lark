@@ -16,7 +16,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
-use crate::error::{GrammarError, ParseError};
+use crate::error::{GrammarError, ParseError, RecoveryAction};
 use crate::grammar::analysis::GrammarAnalysis;
 use crate::grammar::intern::{CompiledGrammar, CompiledRule, SymbolId, SymbolTable};
 use crate::lexer::{BasicLexer, ContextualLexer};
@@ -690,6 +690,151 @@ impl ParserStack {
     }
 }
 
+/// A short-lived recovery view onto the parser's state machine (issue #223).
+///
+/// Passed to the `on_error` handler so it can inspect `accepts()` and feed
+/// corrective tokens (`feed`/`feed_token`) before returning a [`RecoveryAction`].
+/// It is backed by the same [`ParserStack`] the batch/recovery drivers use, but
+/// it is *not* the public [`InteractiveParser`]: its lifetime is scoped to the
+/// handler call and it does not own a lexer or input text.
+///
+/// Failed feeds are transactional: if `feed_token` returns `Err`, the stack is
+/// rolled back to its state before the call, so candidate-insertion patterns
+/// (try feed, fall back to Delete on failure) are safe.
+///
+/// [`RecoveryAction`]: crate::error::RecoveryAction
+/// [`InteractiveParser`]: super::interactive::InteractiveParser
+pub struct RecoveryContext<'a> {
+    stack: &'a mut ParserStack,
+    table: &'a ParseTable,
+    fed_count: usize,
+    accepted_tree: Option<ParseTree>,
+}
+
+impl<'a> RecoveryContext<'a> {
+    pub(crate) fn new(stack: &'a mut ParserStack, table: &'a ParseTable) -> Self {
+        RecoveryContext {
+            stack,
+            table,
+            fed_count: 0,
+            accepted_tree: None,
+        }
+    }
+
+    pub(crate) fn fed_count(&self) -> usize {
+        self.fed_count
+    }
+
+    /// The terminal names that would advance the parser from its current state,
+    /// sorted — identical to [`InteractiveParser::accepts`].
+    ///
+    /// [`InteractiveParser::accepts`]: super::interactive::InteractiveParser::accepts
+    pub fn accepts(&self) -> Vec<String> {
+        self.stack.accepts(self.table)
+    }
+
+    /// Feed one token, advancing through any REDUCEs to the next SHIFT or ACCEPT.
+    /// Returns `Ok(None)` on SHIFT and `Ok(Some(tree))` on ACCEPT, matching
+    /// [`InteractiveParser::feed_token`]'s return shape. Returns `Err` when the
+    /// parser has no action for the token.
+    ///
+    /// **On ACCEPT:** the tree is saved internally and the recovery loop will
+    /// short-circuit — the parse completed inside the handler. Further feeds
+    /// after ACCEPT are rejected.
+    ///
+    /// **Transactional on failure:** if the feed errors (including after partial
+    /// reductions), the stack is rolled back to its pre-call state so the handler
+    /// can safely try candidate insertions and fall back. The common case (no
+    /// action for the token) is checked before cloning the stack, so candidate-
+    /// insertion patterns pay O(1) per rejected candidate.
+    ///
+    /// Feeding `$END` is rejected — use [`RecoveryAction::Resume`] to retry the
+    /// current lookahead after feeding corrective tokens; completion is the
+    /// recovery loop's responsibility, not the handler's.
+    ///
+    /// [`InteractiveParser::feed_token`]: super::interactive::InteractiveParser::feed_token
+    /// [`RecoveryAction::Resume`]: crate::error::RecoveryAction::Resume
+    pub fn feed_token(&mut self, mut token: Token) -> Result<Option<ParseTree>, ParseError> {
+        if self.accepted_tree.is_some() {
+            return Err(ParseError::UnexpectedToken {
+                token: token.value,
+                token_type: token.type_,
+                line: token.line,
+                col: token.column,
+                expected: vec![],
+            });
+        }
+        match self.table.symbols.id(&token.type_) {
+            Some(id) => {
+                if id == SymbolId::END {
+                    return Err(ParseError::UnexpectedToken {
+                        token: token.value,
+                        token_type: token.type_,
+                        line: token.line,
+                        col: token.column,
+                        expected: self.accepts(),
+                    });
+                }
+                token.type_id = id;
+            }
+            None => {
+                return Err(ParseError::UnexpectedToken {
+                    token: token.value.clone(),
+                    token_type: token.type_.clone(),
+                    line: token.line,
+                    col: token.column,
+                    expected: self.accepts(),
+                })
+            }
+        }
+        let state = self.stack.position();
+        if self.table.action_at(state, token.type_id).is_none() {
+            let expected = self.accepts();
+            return Err(ParseError::UnexpectedToken {
+                token: token.value,
+                token_type: token.type_,
+                line: token.line,
+                col: token.column,
+                expected,
+            });
+        }
+        let snapshot = self.stack.clone();
+        match self.stack.feed_token(self.table, &token) {
+            Feed::Shifted => {
+                self.fed_count += 1;
+                Ok(None)
+            }
+            Feed::Accepted(tree) => {
+                self.fed_count += 1;
+                let ret = tree.clone();
+                self.accepted_tree = Some(tree);
+                Ok(Some(ret))
+            }
+            Feed::Error(e) => {
+                *self.stack = snapshot;
+                Err(e)
+            }
+            Feed::NoAction => {
+                *self.stack = snapshot;
+                let expected = self.accepts();
+                Err(ParseError::UnexpectedToken {
+                    token: token.value,
+                    token_type: token.type_,
+                    line: token.line,
+                    col: token.column,
+                    expected,
+                })
+            }
+        }
+    }
+
+    /// Feed a token by terminal name and value — convenience wrapper over
+    /// [`feed_token`](Self::feed_token).
+    pub fn feed(&mut self, terminal: &str, value: &str) -> Result<Option<ParseTree>, ParseError> {
+        self.feed_token(Token::new(terminal, value))
+    }
+}
+
 // ─── LALR parser execution ────────────────────────────────────────────────────
 
 pub struct LalrParser {
@@ -721,7 +866,7 @@ impl LalrParser {
     // ─── Shared LALR driver helpers ──────────────────────────────────────────
 
     /// Resolve the start symbol name to its initial state.
-    fn initial_state(&self, start: Option<&str>) -> Result<usize, ParseError> {
+    pub(crate) fn initial_state(&self, start: Option<&str>) -> Result<usize, ParseError> {
         let start_id = match start {
             Some(name) => self.table.symbols.id(name),
             None => self.table.start_states.keys().next().copied(),
@@ -829,16 +974,24 @@ impl LalrParser {
     // rather than fabricating a partial — see [`RecoveredTree`](crate::error::RecoveredTree)
     // and ADR-0019. The recorded `errors` remain the authoritative diagnostics.
 
-    /// Drive the state machine with recovery. Mirrors [`run`](Self::run) but, on a
-    /// token with no action, deletes it and continues (subject to `on_error`).
+    /// Drive the state machine with recovery (issue #223). Mirrors [`run`](Self::run)
+    /// but, on a token with no action, passes the error and a [`RecoveryContext`] to
+    /// the `on_error` handler. The handler returns a [`RecoveryAction`]:
+    ///
+    /// * [`Delete`](RecoveryAction::Delete) — delete the offending token, retry next.
+    /// * [`Resume`](RecoveryAction::Resume) — the handler fed corrective tokens via
+    ///   the context; the errored token is dropped (matching Python's `resume_parse`)
+    ///   and the next token is parsed in the handler's new state. At `$END` the
+    ///   sentinel is retried. A no-progress guard: no feeds → `Stop`.
+    /// * [`Stop`](RecoveryAction::Stop) — stop recovery, no derivation.
+    ///
     /// Every recovered error is pushed to `errors`. Returns `Some(tree)` on a
-    /// normal ACCEPT, or `None` when recovery cannot reach ACCEPT (premature `$END`,
-    /// or `on_error` returning `false`) — no synthetic tree is fabricated.
-    fn run_recovering<S: TokenSource>(
+    /// normal ACCEPT, or `None` when recovery cannot reach ACCEPT.
+    pub(crate) fn run_recovering<S: TokenSource>(
         &self,
         source: &mut S,
         start: Option<&str>,
-        on_error: &mut dyn FnMut(&ParseError) -> bool,
+        on_error: &mut dyn FnMut(&ParseError, &mut RecoveryContext<'_>) -> RecoveryAction,
         errors: &mut Vec<ParseError>,
     ) -> Result<Option<ParseTree>, ParseError> {
         let mut stack = ParserStack::new(self.initial_state(start)?);
@@ -846,16 +999,6 @@ impl LalrParser {
         loop {
             let token = match source.peek(stack.position()) {
                 Ok(tok) => tok,
-                // Character-level recovery (issue #93). For the basic-lexer recovery
-                // path the un-lexable characters are skipped up front by
-                // `BasicLexer::lex_recovering`, so its `PreLexed` source never lands
-                // here. The contextual recovery source ([`ContextualRecovering`]),
-                // which lexes lazily, *does* surface a lex failure here when neither
-                // the per-state nor the root scanner matches a position (issue #166):
-                // record it as an `UnexpectedCharacter`, consult `on_error`, and skip
-                // one character before resuming — Python's re-raised
-                // `UnexpectedCharacters` branch. `on_error` returning `false` stops
-                // with no derivation, exactly like a token-level stop.
                 Err(SourceError::Lex(failure)) => {
                     let err = ParseError::UnexpectedCharacter {
                         ch: failure.ch,
@@ -864,11 +1007,21 @@ impl LalrParser {
                         pos: failure.pos,
                         expected: "any token".to_string(),
                     };
-                    let cont = on_error(&err);
+                    let mut ctx = RecoveryContext::new(&mut stack, &self.table);
+                    let action = on_error(&err, &mut ctx);
+                    let handler_tree = ctx.accepted_tree.take();
                     errors.push(err);
-                    if !cont {
+                    if let Some(tree) = handler_tree {
+                        return Ok(Some(tree));
+                    }
+                    if matches!(action, RecoveryAction::Stop) {
                         return Ok(None);
                     }
+                    // Lex failures always skip one character — the character
+                    // can't be lexed regardless of action. Delete and Resume
+                    // are equivalent here (Python always calls
+                    // `s.line_ctr.feed(...)` to advance past the un-lexable
+                    // character).
                     source.skip_char();
                     continue;
                 }
@@ -881,24 +1034,42 @@ impl LalrParser {
                 Feed::Error(e) => return Err(e),
                 Feed::NoAction => {
                     let err = self.unexpected(stack.position(), &token);
-                    // Consult the handler for every error (as Python Lark does),
-                    // then record it. `$END` can't be deleted — there's nothing
-                    // after it — so stop regardless of the handler's answer, where
-                    // a normal token is deleted only if the handler agrees. When we
-                    // stop without an ACCEPT there is no real derivation, so return
-                    // `None` rather than a fabricated partial (issue #167, ADR-0019).
-                    let cont = on_error(&err);
+                    let is_end = token.type_id == SymbolId::END;
+                    let mut ctx = RecoveryContext::new(&mut stack, &self.table);
+                    let action = on_error(&err, &mut ctx);
+                    let fed = ctx.fed_count();
+                    let handler_tree = ctx.accepted_tree.take();
                     errors.push(err);
-                    if token.type_id == SymbolId::END || !cont {
-                        return Ok(None);
+                    if let Some(tree) = handler_tree {
+                        return Ok(Some(tree));
                     }
-                    source.advance(); // delete the offending token, retry in same state
-                                      // Generic resume hook (issue #94), invoked for every recovering
-                                      // source: a no-op for the plain sources (PreLexed /
-                                      // ContextualRecovering), and the indenter reset for a
-                                      // PostlexContextual source — mirroring Python's fresh
-                                      // `Indenter.process` per `resume_parse`.
-                    source.on_delete();
+                    match action {
+                        RecoveryAction::Delete if is_end => {
+                            return Ok(None);
+                        }
+                        RecoveryAction::Delete => {
+                            source.advance();
+                            source.on_delete();
+                        }
+                        RecoveryAction::Resume if fed == 0 => {
+                            return Ok(None);
+                        }
+                        RecoveryAction::Resume if is_end => {
+                            // At $END the handler fed corrective tokens;
+                            // retry $END in the (now-advanced) parser state.
+                        }
+                        RecoveryAction::Resume => {
+                            // Python's resume_parse() always drops the errored
+                            // token; the handler's feeds advanced the parser
+                            // state, and the *next* token is parsed in that
+                            // new state — not the errored one.
+                            source.advance();
+                            source.on_delete();
+                        }
+                        RecoveryAction::Stop => {
+                            return Ok(None);
+                        }
+                    }
                 }
             }
         }
@@ -911,7 +1082,7 @@ impl LalrParser {
         &self,
         tokens: Vec<Token>,
         start: Option<&str>,
-        on_error: &mut dyn FnMut(&ParseError) -> bool,
+        on_error: &mut dyn FnMut(&ParseError, &mut RecoveryContext<'_>) -> RecoveryAction,
         errors: &mut Vec<ParseError>,
     ) -> Result<Option<ParseTree>, ParseError> {
         self.run_recovering(&mut PreLexed::new(tokens), start, on_error, errors)
@@ -934,7 +1105,7 @@ impl LalrParser {
         text: &str,
         lexer: &ContextualLexer,
         start: Option<&str>,
-        on_error: &mut dyn FnMut(&ParseError) -> bool,
+        on_error: &mut dyn FnMut(&ParseError, &mut RecoveryContext<'_>) -> RecoveryAction,
         errors: &mut Vec<ParseError>,
     ) -> Result<Option<ParseTree>, ParseError> {
         self.run_recovering(
@@ -1000,7 +1171,7 @@ impl LalrParser {
         postlex: &crate::postlex::Indenter,
         symbols: &SymbolTable,
         start: Option<&str>,
-        on_error: &mut dyn FnMut(&ParseError) -> bool,
+        on_error: &mut dyn FnMut(&ParseError, &mut RecoveryContext<'_>) -> RecoveryAction,
         errors: &mut Vec<ParseError>,
     ) -> Result<Option<ParseTree>, ParseError> {
         let mut source = postlex_contextual_recovering_source(text, lexer, postlex, symbols)?;
@@ -1023,7 +1194,7 @@ impl LalrParser {
         postlex: &crate::postlex::Indenter,
         symbols: &SymbolTable,
         start: Option<&str>,
-        on_error: &mut dyn FnMut(&ParseError) -> bool,
+        on_error: &mut dyn FnMut(&ParseError, &mut RecoveryContext<'_>) -> RecoveryAction,
         errors: &mut Vec<ParseError>,
     ) -> Result<Option<ParseTree>, ParseError> {
         let mut source = postlex_basic_recovering_source(text, lexer, postlex, symbols)?;
