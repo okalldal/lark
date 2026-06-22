@@ -112,10 +112,16 @@ impl GrammarCompiler {
     fn subst_expr(expr: &Expr, subst: &HashMap<String, Value>) -> Expr {
         match expr {
             Expr::Value(v) => Expr::Value(Self::subst_value(v, subst)),
-            Expr::Repeat { inner, min, max } => Expr::Repeat {
+            Expr::Repeat {
+                inner,
+                min,
+                max,
+                kind,
+            } => Expr::Repeat {
                 inner: Box::new(Self::subst_expr(inner, subst)),
                 min: *min,
                 max: *max,
+                kind: *kind,
             },
             Expr::Group(alts) => Expr::Group(Self::substitute_template(alts, subst)),
             Expr::Maybe(alts) => Expr::Maybe(Self::substitute_template(alts, subst)),

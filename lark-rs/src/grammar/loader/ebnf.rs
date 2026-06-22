@@ -179,18 +179,36 @@ impl GrammarCompiler {
         // identical alternatives would reduce/reduce on the same item, so keep the
         // first occurrence of each (Python's grammar dedups identical rules too).
         //
-        // Under `maybe_placeholders=False` an *empty* alternative carries no output
-        // role — its maybe `_EMPTY` markers are stripped before tree build — so two
-        // empty arms that differ only in those markers are duplicate *empty* rules,
-        // which Python tolerates and dedups (`load_grammar.py`: the "Rules defined
-        // twice" check fires only for non-empty `dups[0].expansion`). Collapsing them
-        // here keeps a non-colliding nullable like `([A])?` from minting two empty
-        // productions at one origin — an LALR conflict Python never reports. A
-        // *non-empty* arm keeps its markers so a genuine `[A]~2 C`-style collision
-        // still reaches `dedup_and_check_alts`.
+        // Two *empty* alternatives that differ only in their maybe `_EMPTY` markers
+        // (gaps) are duplicate *empty* rules, which Python tolerates and dedups
+        // (`load_grammar.py`: the "Rules defined twice" check fires only for
+        // non-empty `dups[0].expansion`). Collapsing them here keeps a non-colliding
+        // nullable like `([A])?` (whose inner-`[A]` absent arm and outer-`?` ε are
+        // both empty) from minting two empty productions at one origin — the LALR
+        // reduce/reduce conflict Python never reports (#258). The dedup is keyed on
+        // the *syms only* so it runs in both modes, but the surviving arm differs:
+        //
+        //   - `maybe_placeholders=False`: the markers carry no output role (stripped
+        //     before tree build via `stored_output_gaps`), so canonicalize every
+        //     empty arm to a bare ε — `([A])?` parses `""` to zero children, matching
+        //     Python.
+        //   - `maybe_placeholders=True`: the markers *are* the absent `None`s, so keep
+        //     the first occurrence verbatim. The inner-`[A]` absent arm (1 None) is
+        //     emitted before the outer-`?` ε (0 Nones) in `present_forms` /
+        //     `compile_expansion`, so first-occurrence dedup preserves Python's
+        //     `(True,)` empty arm (`""` → `[None]`) rather than the bare ε.
+        //
+        // A *non-empty* arm always keeps its markers (untouched here), so a genuine
+        // `[A]~2 C` / `([A])? C`-style collision still reaches `dedup_and_check_alts`.
         let canon = |a: &CompiledAlt| -> CompiledAlt {
-            if !self.maybe_placeholders && a.0.is_empty() {
-                (Vec::new(), vec![0])
+            if a.0.is_empty() {
+                if self.maybe_placeholders {
+                    // Key on emptiness alone; keep the first empty arm's gaps so its
+                    // `None` count survives (`retain` keeps the first insert).
+                    (Vec::new(), Vec::new())
+                } else {
+                    (Vec::new(), vec![0])
+                }
             } else {
                 a.clone()
             }
@@ -419,14 +437,16 @@ impl GrammarCompiler {
                 return Ok(slot);
             }
         }
-        // A bounded `~n` / `~n..m` (the `?`/`*`/`+` shapes were consumed by
-        // `try_distribute` / the group check above; only `max: Some(_)` exact/range
-        // counts reach here) inlines into the parent's alternatives rather than
-        // minting a helper rule, matching Python's `_generate_repeats` (#176).
+        // A bounded `~n` / `~n..m` (the `?`/`*`/`+` operators were consumed by
+        // `try_distribute` / the group check above; only `~`-repeats with a finite
+        // `max` reach here — including `~0..1`, which `try_distribute` no longer
+        // intercepts as a `?`) inlines into the parent's alternatives rather than
+        // minting a helper rule, matching Python's `_generate_repeats` (#176/#258).
         if let Expr::Repeat {
             inner,
             min,
             max: Some(max),
+            ..
         } = &expr
         {
             if let Some(arms) = self.inline_repeat(inner, *min, *max, parent)? {
@@ -443,11 +463,17 @@ impl GrammarCompiler {
     /// emitting duplicate helper rules.
     fn try_distribute(&mut self, expr: &Expr, parent: &str) -> Result<Option<Slot>, GrammarError> {
         match expr {
-            // `X?` / `(...)?` → present forms of the inner.
+            // `X?` / `(...)?` → present forms of the inner. The `?` *operator* is
+            // Python's `maybe()`: when the inner is itself a `[Y]`, its absent arm
+            // inherits the inner's `None` placeholder (`([A])?` → `""` is `[None]`).
+            // A `~0..1` repeat shares this `(min: 0, max: Some(1))` shape but is *not*
+            // a `maybe` — its `k == 0` count is a pristine empty (`[A]~0..1` → `""` is
+            // `[]`), so it routes to `inline_repeat` instead (gated on `kind: Op`).
             Expr::Repeat {
                 inner,
                 min: 0,
                 max: Some(1),
+                kind: RepeatKind::Op,
             } => Ok(self
                 .present_forms((**inner).clone(), parent)?
                 .map(|present| Slot::Nullable {
@@ -461,6 +487,7 @@ impl GrammarCompiler {
                 inner,
                 min: 0,
                 max: None,
+                kind: RepeatKind::Op,
             } => {
                 let arms = self.inner_alternatives(inner, parent)?;
                 let plus = self.recurse_helper(arms);
@@ -489,10 +516,8 @@ impl GrammarCompiler {
     }
 
     /// The non-empty ("present") derivations of an expr, used when distributing a
-    /// leading nullable. Returns `None` when the expr cannot be safely distributed
-    /// — a `maybe_placeholders` `[X]` *nested under another nullable wrapper*
-    /// (e.g. `([X])?`), whose absent-with-placeholders middle alternative this
-    /// present/absent split cannot represent — so the caller keeps the helper.
+    /// leading nullable. Returns `None` only when the inner carries an alias (its
+    /// named subtree must survive a helper), so the caller keeps the helper.
     /// (A `[X]` standing directly at a rule position distributes via
     /// `try_distribute`'s own `Maybe` arm, placeholders and all.)
     fn present_forms(
@@ -504,18 +529,21 @@ impl GrammarCompiler {
         match expr {
             Expr::Value(v) => Ok(single(self.compile_value(v, parent)?)),
             Expr::Group(alts) => self.distributable_alternatives(alts, parent),
-            // Under `maybe_placeholders` the absent-with-`None`s middle alternative
-            // of a nested `[X]` cannot ride this present/absent split, so keep the
-            // helper. Without placeholders, the maybe's own absent arm is included
-            // as a present form carrying its positional `_EMPTY` markers (the same
-            // `[_EMPTY] * FindRuleSize` Python's `maybe` always emits), so a colliding
-            // `[A]~0..1 C` / `([A])? C` — where the absent-`[X]` and the outer ε both
-            // reduce to `start -> C` — reaches `dedup_and_check_alts` and is rejected
-            // in both modes (#252). The redundant *empty* arm (when there is no tail
-            // to attach the marker to, e.g. a lone `([A])?`) collapses against the
-            // outer ε in `compile_expansion`'s `maybe_placeholders=False`
-            // empty-arm canonicalization, so a non-colliding nullable still builds.
-            Expr::Maybe(_) if self.maybe_placeholders => Ok(None),
+            // A `[X]` nested under an outer `?` (`([X])?`) distributes the inner
+            // maybe's own present forms *plus* its absent arm carrying the positional
+            // `_EMPTY` markers (the same `[_EMPTY] * FindRuleSize` Python's `maybe`
+            // always emits), then the outer `?` re-adds a bare ε in
+            // `compile_expansion`. This holds in *both* modes (#258/#252):
+            //   - When the inner-absent and outer-ε arms coincide as duplicate
+            //     *empty* productions (a lone `([A])?`), `compile_expansion`'s
+            //     empty-arm dedup collapses them — keeping the first, None-bearing
+            //     arm under `maybe_placeholders` (Python's `(True,)`), or to a bare
+            //     ε without — so a non-colliding nullable builds instead of minting a
+            //     spurious second empty production (the #258 LALR conflict).
+            //   - When a tail follows (`([A])? C`), the inner-absent arm surfaces its
+            //     markers onto the tail (`C` with a leading None) and collides with
+            //     the outer-ε `C` in `dedup_and_check_alts` — the rejection Python
+            //     raises in both modes (#252).
             Expr::Maybe(alts) => {
                 let mut present = match self.distributable_alternatives(alts, parent)? {
                     Some(p) => p,
@@ -525,12 +553,16 @@ impl GrammarCompiler {
                 present.push((Vec::new(), vec![absent_nones]));
                 Ok(Some(present))
             }
-            // A nested `?` collapses: `(X?)?` ≡ `X?`, so drop the inner optionality
-            // and let the outer distribution re-add the single ε.
+            // A nested `?` operator collapses: `(X?)?` ≡ `X?`, so drop the inner
+            // optionality and let the outer distribution re-add the single ε. A
+            // `~0..1` repeat (`kind: Tilde`) is *not* collapsible this way — its
+            // `k == 0` count is a placeholder-free empty — so it falls through to the
+            // `~n..m` arm below and inlines via `inline_repeat`.
             Expr::Repeat {
                 inner,
                 min: 0,
                 max: Some(1),
+                kind: RepeatKind::Op,
             } => self.present_forms(*inner, parent),
             // `X*` / `X+` present form is the shared one-or-more recurse helper
             // (inner arms inlined, Python's `EBNF_to_BNF`).
@@ -538,23 +570,27 @@ impl GrammarCompiler {
                 inner,
                 min: 0,
                 max: None,
+                ..
             }
             | Expr::Repeat {
                 inner,
                 min: 1,
                 max: None,
+                ..
             } => {
                 let arms = self.inner_alternatives(&inner, parent)?;
                 let plus = self.recurse_helper(arms);
                 Ok(single(plus))
             }
-            // Bounded `~n` / `~n..m` nested under a distributed `?` inlines its
-            // counts as present forms too (the directly-positioned case is handled
-            // in `compile_slot`); large/aliased repeats fall back to the helper.
+            // Bounded `~n` / `~n..m` (including `~0..1`) nested under a distributed
+            // `?` inlines its counts as present forms too (the directly-positioned
+            // case is handled in `compile_slot`); large/aliased repeats fall back to
+            // the helper.
             Expr::Repeat {
                 inner,
                 min,
                 max: Some(max),
+                ..
             } => match self.inline_repeat(&inner, min, max, parent)? {
                 Some(arms) => Ok(Some(arms)),
                 None => Ok(single(self.compile_repeat(
@@ -610,7 +646,9 @@ impl GrammarCompiler {
             Expr::Value(v) => self.compile_value(v, parent),
             Expr::Group(alts) => self.compile_group(alts, parent, false),
             Expr::Maybe(alts) => self.compile_maybe(alts, parent),
-            Expr::Repeat { inner, min, max } => self.compile_repeat(*inner, min, max, parent),
+            Expr::Repeat {
+                inner, min, max, ..
+            } => self.compile_repeat(*inner, min, max, parent),
         }
     }
 

@@ -48,9 +48,27 @@ pub(super) enum Expr {
         inner: Box<Expr>,
         min: usize,
         max: Option<usize>,
+        kind: RepeatKind,
     },
     Group(Vec<AliasedExpansion>),
     Maybe(Vec<AliasedExpansion>),
+}
+
+/// Which surface operator produced a [`Expr::Repeat`]. The two cases that share a
+/// `(min, max)` — `X?` and `X~0..1` (both `min: 0, max: Some(1)`) — diverge under
+/// `maybe_placeholders`: `?` is Python's `maybe()` (the empty arm inherits the
+/// inner's placeholders, so `([A])?` parses `""` to `[None]`), whereas `~0..1` is
+/// `_generate_repeats` whose `k == 0` count is a *pristine* empty expansion with no
+/// placeholder, so `[A]~0..1` parses `""` to `[]`. The parser tags each node so
+/// `compile_slot` can route `?`/`*`/`+` through the maybe-bearing distribution and
+/// every `~n..m` (including `~0..1`) through the placeholder-free `inline_repeat`
+/// fan-out (#258).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RepeatKind {
+    /// A `?` / `*` / `+` operator (Python's `maybe` / `EBNF_to_BNF` recurse).
+    Op,
+    /// A `~n` / `~n..m` repetition (Python's `_generate_repeats`).
+    Tilde,
 }
 
 #[derive(Debug, Clone)]

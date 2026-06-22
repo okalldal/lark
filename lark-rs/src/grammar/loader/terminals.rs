@@ -390,7 +390,9 @@ impl GrammarCompiler {
                 let inner = Self::resolve_term_regex(referenced, by_name, imported, memo, stack)?;
                 format!("(?:{inner})")
             }
-            Expr::Repeat { inner, min, max } => {
+            Expr::Repeat {
+                inner, min, max, ..
+            } => {
                 let inner_re = Self::term_expr_regex(inner, by_name, imported, memo, stack)?;
                 let quantifier = match (*min, *max) {
                     (0, Some(1)) => "?".to_string(),
@@ -488,7 +490,9 @@ impl GrammarCompiler {
                     0,
                 )?))
             }
-            Expr::Repeat { inner, min, max } => {
+            Expr::Repeat {
+                inner, min, max, ..
+            } => {
                 let inner_pat = self.expr_to_pattern(inner)?;
                 // Inside a terminal, repetition becomes a regex quantifier.
                 // Bounded forms (`~n`, `~n..m`) must emit `{n}` / `{n,m}` / `{n,}`;
