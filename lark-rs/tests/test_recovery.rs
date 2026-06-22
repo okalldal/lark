@@ -346,20 +346,25 @@ fn test_recovery_context_accepts_exposes_valid_terminals() {
 }
 
 #[test]
-fn test_recovery_context_feed_inserts_token_then_resume() {
-    // Feed a missing NUMBER through the context, then Resume to retry the `+`
-    // that originally errored — it should now be valid in the advanced state.
+fn test_resume_drops_errored_token_at_non_eof() {
+    // Python's resume_parse() always drops the errored token. After the handler
+    // feeds corrective tokens, the *next* token is parsed in the new state —
+    // the errored token is NOT retried. Verified against Python Lark 1.3.1.
+    //
+    // Input "1 + + 2": error on 2nd `+` (expects NUMBER). Handler feeds
+    // NUMBER 0 → state becomes add(1, 0), expects PLUS/$END. Resume drops the
+    // 2nd `+`. Next token `2` (NUMBER) errors (expects PLUS/$END), and the
+    // handler falls back to Delete, dropping `2`. Result: tree "1 + 0".
     let lark = recovery_parser();
     let result = lark
-        .parse_on_error("+ 2", |_, ctx| {
-            ctx.feed("NUMBER", "0").expect("NUMBER should be accepted");
-            lark_rs::RecoveryAction::Resume
+        .parse_on_error("1 + + 2", |_, ctx| match ctx.feed("NUMBER", "0") {
+            Ok(_) => lark_rs::RecoveryAction::Resume,
+            Err(_) => lark_rs::RecoveryAction::Delete,
         })
         .unwrap();
-    let tree = result
-        .tree
-        .expect("resume after insertion should produce a tree");
-    let clean = lark.parse("0 + 2").unwrap();
+    assert_eq!(result.errors.len(), 2, "two errors: 2nd '+' and '2'");
+    let tree = result.tree.expect("recovery should produce a tree");
+    let clean = lark.parse("1 + 0").unwrap();
     assert_eq!(format!("{tree}"), format!("{clean}"));
 }
 
@@ -417,16 +422,17 @@ fn test_resume_at_eof_inserts_missing_token() {
 
 #[test]
 fn test_feed_rollback_is_transactional() {
-    // Blocker #5: A feed that partially succeeds (e.g. shifts then fails on
-    // a reduce) must roll back the stack so subsequent operations see the
+    // A failed feed must roll back the stack so subsequent operations see the
     // original state. We verify by feeding a wrong token, then feeding the
     // right one — if rollback failed, the second feed would also fail.
+    // Use the $END case (Resume retries $END) so the inserted token is the
+    // only recovery — no second error to complicate the trace.
     let lark = recovery_parser();
     let result = lark
-        .parse_on_error("1 + + 2", |_, ctx| {
+        .parse_on_error("1 +", |_, ctx| {
             // PLUS is wrong here (parser expects NUMBER after PLUS).
             let bad = ctx.feed("PLUS", "+");
-            assert!(bad.is_err(), "PLUS should not be accepted");
+            assert!(bad.is_err(), "PLUS should not be accepted after PLUS");
             // After rollback, NUMBER should still work.
             ctx.feed("NUMBER", "0")
                 .expect("NUMBER should work after rollback");
@@ -436,7 +442,7 @@ fn test_feed_rollback_is_transactional() {
     let tree = result
         .tree
         .expect("recovery via rollback + correct feed should produce a tree");
-    let clean = lark.parse("1 + 0 + 2").unwrap();
+    let clean = lark.parse("1 + 0").unwrap();
     assert_eq!(format!("{tree}"), format!("{clean}"));
 }
 

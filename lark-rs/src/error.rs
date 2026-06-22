@@ -100,10 +100,11 @@ pub enum RecoveryAction {
     /// state — the old `true` behavior (single-token-deletion recovery).
     Delete,
     /// The handler has fed corrective tokens through the [`RecoveryContext`],
-    /// advancing the parser state; retry the *same* lookahead token in the new
-    /// state. A no-progress guard prevents infinite loops: if the parser state
-    /// is unchanged after the handler returns `Resume`, the recovery loop
-    /// treats it as `Stop`.
+    /// advancing the parser state. The errored token is **dropped** (matching
+    /// Python Lark's `resume_parse()`) and the *next* token is parsed in the
+    /// handler's new state. At `$END`, the sentinel is retried (there is no
+    /// next token). A no-progress guard prevents infinite loops: if the handler
+    /// did not feed any tokens, the recovery loop treats it as `Stop`.
     ///
     /// [`RecoveryContext`]: crate::parsers::lalr::RecoveryContext
     Resume,
