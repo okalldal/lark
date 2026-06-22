@@ -603,23 +603,118 @@ fn test_pretty() {
     );
 }
 
-/// Unsupported configurations (Earley, CYK) return a typed error.
+/// LALR (basic and contextual, without postlex) supports interactive parsing.
 #[test]
-fn test_interactive_unsupported_parser() {
+fn test_interactive_supported_lalr() {
+    let grammar = "start: \"hello\"";
+    for lexer in [LexerType::Basic, LexerType::Contextual] {
+        let lark = Lark::new(
+            grammar,
+            LarkOptions {
+                parser: ParserAlgorithm::Lalr,
+                lexer: lexer.clone(),
+                start: vec!["start".to_string()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            lark.parse_interactive("hello").is_ok(),
+            "LALR + {lexer:?} should support parse_interactive"
+        );
+    }
+}
+
+/// Earley returns a typed error (not a panic) for parse_interactive.
+#[test]
+fn test_interactive_unsupported_earley() {
     let grammar = "start: \"hello\"";
     let lark = Lark::new(
         grammar,
         LarkOptions {
-            parser: ParserAlgorithm::Lalr,
-            lexer: LexerType::Contextual,
+            parser: ParserAlgorithm::Earley,
+            lexer: LexerType::Basic,
             start: vec!["start".to_string()],
             ..Default::default()
         },
     )
     .unwrap();
 
-    // LALR should work
-    assert!(lark.parse_interactive("hello").is_ok());
+    match lark.parse_interactive("hello") {
+        Ok(_) => panic!("Earley must refuse parse_interactive"),
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("interactive") && msg.contains("lalr"),
+                "Earley error should mention interactive + lalr, got: {msg}"
+            );
+        }
+    }
+}
+
+/// CYK returns a typed error (not a panic) for parse_interactive.
+#[test]
+fn test_interactive_unsupported_cyk() {
+    let grammar = "start: \"hello\"";
+    let lark = Lark::new(
+        grammar,
+        LarkOptions {
+            parser: ParserAlgorithm::Cyk,
+            lexer: LexerType::Basic,
+            start: vec!["start".to_string()],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    match lark.parse_interactive("hello") {
+        Ok(_) => panic!("CYK must refuse parse_interactive"),
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("interactive") && msg.contains("lalr"),
+                "CYK error should mention interactive + lalr, got: {msg}"
+            );
+        }
+    }
+}
+
+/// LALR + postlex (Indenter) returns a typed error for parse_interactive.
+#[test]
+fn test_interactive_unsupported_lalr_postlex() {
+    use lark_rs::Indenter;
+
+    // Use the real indenter grammar that the oracle tests rely on.
+    let grammar = load_grammar_file("indent");
+    let lark = Lark::new(
+        &grammar,
+        LarkOptions {
+            parser: ParserAlgorithm::Lalr,
+            lexer: LexerType::Basic,
+            start: vec!["start".to_string()],
+            postlex: Some(Indenter {
+                nl_type: "_NL".to_string(),
+                open_paren_types: vec![],
+                close_paren_types: vec![],
+                indent_type: "_INDENT".to_string(),
+                dedent_type: "_DEDENT".to_string(),
+                tab_len: 8,
+            }),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+
+    match lark.parse_interactive("hello\n") {
+        Ok(_) => panic!("LALR + postlex must refuse parse_interactive"),
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("interactive") && msg.contains("postlex"),
+                "LALR+postlex error should mention interactive + postlex, got: {msg}"
+            );
+        }
+    }
 }
 
 /// `parse_interactive_with_start` selects an alternative start symbol.
