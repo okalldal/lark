@@ -651,7 +651,12 @@ impl ParserStack {
         match self.value_stack.pop() {
             Some(Slot::Tree(t)) => Ok(ParseTree::Tree(t)),
             Some(Slot::Token(tok)) => Ok(ParseTree::Token(tok)),
-            // A start rule is never transparent, so its value is never Inline.
+            // A start rule is never transparent. The one way its value can be
+            // `Inline` is a top-level `?start` collapsing a lone-`None` placeholder
+            // (RC9 fix in tree_builder: lone-`None` expand1 → `Inline([None])`),
+            // which the public `ParseTree` (Tree|Token only) cannot represent as a
+            // bare `None`; that root-`?start` corner is a separate tracked divergence
+            // (#289). Treat it, like an empty stack, as no parse result.
             Some(Slot::Inline(_)) | None => Err(ParseError::unexpected_eof(0, 0, vec![])),
         }
     }

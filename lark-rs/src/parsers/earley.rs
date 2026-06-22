@@ -467,8 +467,12 @@ impl EarleyParser {
         Ok(match value {
             NodeValue::Tree(t) => ParseTree::Tree(t),
             NodeValue::Token(t) => ParseTree::Token(t),
-            // A start rule is never transparent, so its value is never Inline; be
-            // defensive rather than panic.
+            // A start rule is never transparent. Its value can still be `Inline`
+            // when a top-level `?start` collapses a lone-`None` placeholder (RC9 fix
+            // in tree_builder: lone-`None` expand1 → `Inline([None])`). The public
+            // `ParseTree` can't hold a bare `None`, so the single-`None` arm below
+            // falls back to an empty start node — that root-`?start` corner is a
+            // separate tracked divergence (#289). Stay defensive rather than panic.
             NodeValue::Inline(mut cs) if cs.len() == 1 => match cs.pop().unwrap() {
                 Child::Tree(t) => ParseTree::Tree(t),
                 Child::Token(t) => ParseTree::Token(t),
