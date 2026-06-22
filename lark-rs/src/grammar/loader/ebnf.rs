@@ -78,6 +78,14 @@ impl GrammarCompiler {
     pub(super) fn compile_rule(&mut self, raw: RawRule) -> Result<(), GrammarError> {
         let keep_all = raw.modifiers.contains('!') || self.global_keep_all;
         let expand1 = raw.modifiers.contains('?');
+        // Build-time placement validation Python Lark performs in
+        // `_make_rule_tuple` and its compile loop (`load_grammar.py`): an inlined
+        // (`_`-prefixed) rule may not use the `?rule` (expand1) modifier, nor carry
+        // an alias on any alternative — both name a subtree that the `_`-prefix is
+        // marked to splice away. A `!` modifier and a `?`/alias on a *normal* rule
+        // stay legal — only the `_`-prefix + `?`/alias combination is rejected
+        // (RC4a/RC4b).
+        Self::validate_inlined_rule_placement(&raw.name, expand1, &raw.expansions)?;
         let origin = NonTerminal::new(&raw.name);
         // Make keep_all visible to placeholder counting while this rule's body
         // (and the anonymous rules it expands into) is compiled.
@@ -90,6 +98,10 @@ impl GrammarCompiler {
         let mut compiled: Vec<(CompiledAlt, Option<String>)> = Vec::new();
         for alt in raw.expansions.into_iter() {
             let alias = alt.alias.clone();
+            // A nested alias (inside a `(...)`/`[...]`) is not a tree label — Python
+            // reads it as a rule reference and rejects (RC4c). The rule-top-level
+            // alias above is the legitimate one and is kept.
+            Self::reject_nested_aliases(&alt.expansion)?;
             for alt_c in self.compile_expansion(alt.expansion, &origin.name, true)? {
                 compiled.push((alt_c, alias.clone()));
             }
@@ -112,6 +124,78 @@ impl GrammarCompiler {
             ));
         }
         Ok(())
+    }
+
+    /// Reject the two inlined-rule placements Python Lark rejects at build
+    /// (`load_grammar.py`): an alias on, or the `?rule` (expand1) modifier on, a
+    /// rule whose name starts with `_` (RC4a/RC4b). The same check guards a
+    /// `_`-prefixed *template* name (e.g. `?_x{a}` / `_x{a}: a -> al`), which
+    /// Python rejects identically. Returns `Ok(())` for every non-`_` rule —
+    /// aliases and `?`/`!` on a normal rule remain legal.
+    pub(super) fn validate_inlined_rule_placement(
+        name: &str,
+        expand1: bool,
+        expansions: &[AliasedExpansion],
+    ) -> Result<(), GrammarError> {
+        if !name.starts_with('_') {
+            return Ok(());
+        }
+        if expand1 {
+            // Python: `_make_rule_tuple` — "Inlined rules (_rule) cannot use the
+            // ?rule modifier." (`load_grammar.py`).
+            return Err(GrammarError::Other {
+                msg: "Inlined rules (_rule) cannot use the ?rule modifier.".to_string(),
+            });
+        }
+        if let Some(alias) = expansions.iter().find_map(|e| e.alias.as_deref()) {
+            // Python: the compile loop — "Rule <name> is marked for expansion (it
+            // starts with an underscore) and isn't allowed to have aliases
+            // (alias=<alias>)" (`load_grammar.py`).
+            return Err(GrammarError::Other {
+                msg: format!(
+                    "Rule {name} is marked for expansion (it starts with an underscore) \
+                     and isn't allowed to have aliases (alias={alias})"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Reject a *nested* alias — one inside a `(...)` / `[...]` group — exactly as
+    /// Python Lark does (RC4c). In Lark's grammar, `-> NAME` is legal only at the
+    /// top level of an alternative; inside a group the `-> NAME` makes `NAME` a
+    /// rule reference, which Python then rejects: "Rule 'NAME' used but not
+    /// defined" when `NAME` is undefined, or an `AssertionError` ("Double alias not
+    /// allowed") when it is. Either way the grammar is rejected, so lark-rs rejects
+    /// a nested alias unconditionally rather than being more permissive than the
+    /// oracle (ADR-0017 corollary). The reported name matches Python's common case
+    /// (`(A -> foo)`, `(A -> foo)?`/`+`, `(A -> foo | B -> bar)`, `[A -> foo]`).
+    /// Recurses through every `Group`/`Maybe`/`Repeat` in a rule body; the
+    /// *rule-top-level* alias on each `AliasedExpansion` is left untouched (it is
+    /// the legitimate alias).
+    pub(super) fn reject_nested_aliases(exprs: &[Expr]) -> Result<(), GrammarError> {
+        for expr in exprs {
+            Self::reject_expr_nested_aliases(expr)?;
+        }
+        Ok(())
+    }
+
+    fn reject_expr_nested_aliases(expr: &Expr) -> Result<(), GrammarError> {
+        match expr {
+            Expr::Value(_) => Ok(()),
+            Expr::Repeat { inner, .. } => Self::reject_expr_nested_aliases(inner),
+            Expr::Group(alts) | Expr::Maybe(alts) => {
+                for alt in alts {
+                    if let Some(alias) = &alt.alias {
+                        return Err(GrammarError::UndefinedRule {
+                            name: alias.clone(),
+                        });
+                    }
+                    Self::reject_nested_aliases(&alt.expansion)?;
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Compile a list of `Expr` nodes into one or more alternative symbol
