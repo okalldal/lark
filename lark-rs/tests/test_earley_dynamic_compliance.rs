@@ -96,7 +96,15 @@ fn test_earley_dynamic_compliance_bank() {
     };
     let records = records.as_array().expect("bank is an array");
 
+    // Earley is fully implemented; a regression of the build probe must fail loudly
+    // rather than silently re-mark the whole dynamic bank XFAIL. The `unimplemented`
+    // branches below are retained as defensive no-ops (always false today).
     let unimplemented = earley_unimplemented();
+    assert!(
+        !unimplemented,
+        "Earley backend regressed to 'not yet implemented' — the dynamic-lexer \
+         compliance bank must run, not pass as uniform XFAIL"
+    );
 
     std::panic::set_hook(Box::new(|_| {}));
 
