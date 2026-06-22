@@ -399,27 +399,98 @@ fn rc9_v3_expand1_collapses_lone_placeholder_via_template() {
 /// builds the same grammar correctly (it lowers the lookaround into the DFA), so
 /// the gap is specific to the standalone bake path. Empirically reproduces both
 /// for an inline negative-lookahead terminal and for `%import python.STRING`.
+/// FIXED (#280). `rc10_standalone_rejects_lookaround` is now a regression guard:
+/// the standalone bake routes every terminal through the refusal seam
+/// (`check_standalone_regex_hostable`), rejecting at generation time what the
+/// pure-`regex` runtime cannot compile, instead of baking a panicking artifact.
 #[test]
-#[ignore = "XFAIL (bounty RC10): standalone bakes lookaround instead of rejecting it"]
 fn rc10_standalone_rejects_lookaround() {
-    let g = "start: A\nA: /foo(?!bar)/\n";
     let opts = LarkOptions {
         parser: ParserAlgorithm::Lalr,
         lexer: LexerType::Basic,
         start: vec!["start".to_string()],
         ..Default::default()
     };
-    // The core engine lowers the lookaround and builds fine...
+    // Both an inline negative-lookahead terminal and the bundled `python.STRING`
+    // (lowered into the DFA in-process, but not hostable by the plain-`regex` runtime).
+    for g in [
+        "start: A\nA: /foo(?!bar)/\n",
+        "start: STRING\n%import python.STRING\n",
+    ] {
+        // The core engine lowers the lookaround and builds fine...
+        assert!(
+            Lark::new(g, opts.clone()).is_ok(),
+            "RC10: precondition — the core engine should build this lowered-lookaround \
+             grammar ({g:?})"
+        );
+        // ...but the standalone bake path must REJECT it (the runtime can't host it),
+        // rather than return Ok and bake an uncompilable regex.
+        assert!(
+            generate_standalone(g, &opts).is_err(),
+            "RC10: standalone generation should reject the lookaround grammar {g:?}"
+        );
+    }
+}
+
+/// V1 (#280, extends RC10). A `\Z` anchor terminal: the plain-`regex` standalone
+/// runtime cannot compile `\Z`, so baking it verbatim panics the generated parser.
+/// The bake must reject at generation time. (`\Z` is mis-categorized as a lookaround
+/// error by the core taxonomy — issue #275/N10 — but the standalone contract only
+/// requires REJECTION, regardless of the precise category.)
+#[test]
+fn v1_standalone_rejects_z_anchor() {
+    let g = "start: A\nA: /foo\\Z/\n";
+    let opts = LarkOptions {
+        parser: ParserAlgorithm::Lalr,
+        lexer: LexerType::Basic,
+        start: vec!["start".to_string()],
+        ..Default::default()
+    };
     assert!(
-        Lark::new(g, opts.clone()).is_ok(),
-        "RC10: precondition — the core engine should build this lowered-lookaround grammar"
+        generate_standalone(g, &opts).is_err(),
+        "V1: standalone generation should reject a `\\Z` terminal the pure-`regex` \
+         runtime cannot host, but it returned Ok and baked a panicking regex"
     );
-    // ...but the standalone bake path must REJECT it (the runtime can't host it).
-    let r = generate_standalone(g, &opts);
+}
+
+/// V2 (#280, extends RC10). An oversized bounded repeat `[a-z]{200000}` exceeds the
+/// `regex` crate's compiled-size limit, so the baked combined scanner panics at
+/// `Regex::new`. The bake must reject at generation time. (The core *also*
+/// mis-categorizes this as a lookaround error — related to the anchor-dialect fork
+/// #275; the standalone contract here is only that generation REFUSES rather than
+/// baking a panicking artifact, regardless of category — see the #275 follow-up.)
+#[test]
+fn v2_standalone_rejects_oversized_repeat() {
+    let g = "start: A\nA: /[a-z]{200000}/\n";
+    let opts = LarkOptions {
+        parser: ParserAlgorithm::Lalr,
+        lexer: LexerType::Basic,
+        start: vec!["start".to_string()],
+        ..Default::default()
+    };
     assert!(
-        r.is_err(),
-        "RC10: standalone generation should reject a lookaround grammar, but it \
-         returned Ok and baked an uncompilable regex (the generated parser panics \
-         at Regex::new on first parse)"
+        generate_standalone(g, &opts).is_err(),
+        "V2: standalone generation should reject an oversized bounded repeat the \
+         pure-`regex` runtime cannot host, but it returned Ok and baked a panicking regex"
+    );
+}
+
+/// Parity floor (#280): the refusal seam must reject *only* what the pure-`regex`
+/// runtime cannot host — a normal standalone-able grammar must still bake. Guards
+/// against the fix over-rejecting (which would silently break the json/arithmetic
+/// fixtures and every standalone-eligible grammar).
+#[test]
+fn standalone_still_bakes_plain_grammar() {
+    let g = "start: A B\nA: /[a-z]+/\nB: /[0-9]+/\n";
+    let opts = LarkOptions {
+        parser: ParserAlgorithm::Lalr,
+        lexer: LexerType::Basic,
+        start: vec!["start".to_string()],
+        ..Default::default()
+    };
+    assert!(
+        generate_standalone(g, &opts).is_ok(),
+        "#280: a plain regex grammar with no lookaround/oversized terminals must still \
+         bake — the refusal seam must reject only what the runtime cannot host"
     );
 }
