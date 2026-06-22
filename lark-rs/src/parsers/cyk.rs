@@ -20,7 +20,7 @@
 //!     value wins under CYK, the inverse of Earley; we mirror it for parity).
 //!   * `revert` undoes the three CNF transforms to recover a tree of *original*
 //!     rule applications, which is then handed to the shared
-//!     [`TreeBuilder`](super::tree_builder::TreeBuilder) — the same rule→tree
+//!     [`TreeOutputBuilder`](super::tree_builder::TreeOutputBuilder) — the same rule→tree
 //!     shaping (filtering, `expand1`, transparent splicing, `keep_all_tokens`,
 //!     `maybe_placeholders`) the LALR and Earley backends use. So a CYK parse of
 //!     an unambiguous grammar yields a byte-identical tree to the other backends.
@@ -35,7 +35,10 @@ use crate::error::{GrammarError, ParseError};
 use crate::grammar::intern::{CompiledGrammar, SymbolId};
 use crate::tree::{Child, ParseTree, Token, Tree};
 
-use super::tree_builder::{NodeValue, TreeBuilder};
+use super::tree_builder::{Slot, TreeOutputBuilder};
+
+// Backward-compat alias within cyk — keeps diff minimal for this refactor.
+type NodeValue = Slot;
 
 /// Safety bound on the UNIT-elimination fixpoint. Real grammars converge in a
 /// handful of iterations; a pathological unit cycle (which Python's CYK would
@@ -92,7 +95,7 @@ struct CnfRule {
 /// occurrences. Each variant points back at the original rule and records, per
 /// original expansion position, whether that symbol is present in the variant.
 /// At tree-assembly time the omitted positions are refilled with the symbol's
-/// precomputed ε-value (see [`Cnf::epsilon_values`]), so the shared [`TreeBuilder`]
+/// precomputed ε-value (see [`Cnf::epsilon_values`]), so the shared [`TreeOutputBuilder`]
 /// still sees a child per original expansion symbol and applies the original
 /// rule's filtering / shaping unchanged.
 #[derive(Debug, Clone)]
@@ -112,7 +115,7 @@ struct Cnf {
     eff_rules: Vec<EffRule>,
     /// The value an ε-deriving non-terminal contributes when it is *omitted* by
     /// ε-removal — precomputed by assembling its empty production through the
-    /// shared [`TreeBuilder`], so an absent optional refills with exactly what the
+    /// shared [`TreeOutputBuilder`], so an absent optional refills with exactly what the
     /// other backends emit (an empty splice for `*`/`+`, a `None` placeholder for a
     /// `maybe_placeholders` `[...]`, an aliased empty node, …). Keyed by symbol id.
     epsilon_values: HashMap<SymbolId, NodeValue>,
@@ -138,7 +141,7 @@ struct Cell {
     weight: i32,
 }
 
-/// The reverted (original-grammar) parse tree, ready for [`TreeBuilder`].
+/// The reverted (original-grammar) parse tree, ready for [`TreeOutputBuilder`].
 enum Rev {
     Tok(Token),
     /// An application of original rule `usize` over these children, in expansion
@@ -267,11 +270,11 @@ impl CykParser {
             .clone();
 
         // Undo the CNF transforms to recover original rule applications, then
-        // shape them through the shared TreeBuilder. The recursion depth is the
+        // shape them through the shared TreeOutputBuilder. The recursion depth is the
         // parse-tree depth, O(n) in the worst case — but CYK's O(n³) table fill
         // already keeps any feasible input (and so the depth) small, unlike the
         // Earley perf path that needs a dedicated large stack.
-        let builder = TreeBuilder::new(&self.grammar.rules);
+        let builder = TreeOutputBuilder::new(&self.grammar.rules);
         let rev = revert(&root, &self.cnf.rules);
         let value = assemble_rev(rev, &builder, &self.cnf, &self.grammar);
         let start_name = self.grammar.symbols.name(start_id).to_string();
@@ -388,7 +391,7 @@ fn to_cnf(grammar: &CompiledGrammar) -> Result<CnfResult, GrammarError> {
 
 /// For every nullable non-terminal, precompute the [`NodeValue`] it yields when it
 /// derives ε — by assembling its lightest ε-production through the shared
-/// [`TreeBuilder`], recursively over its (also nullable) children. This is exactly
+/// [`TreeOutputBuilder`], recursively over its (also nullable) children. This is exactly
 /// what LALR/Earley produce for an empty derivation, so refilling an ε-removed
 /// (omitted) position with it keeps CYK's tree identical: an empty splice for a
 /// plain `*`/`?` helper, a `None` placeholder for a `maybe_placeholders` `[...]`,
@@ -397,7 +400,7 @@ fn compute_epsilon_values(
     grammar: &CompiledGrammar,
     nullable: &HashSet<Nt>,
 ) -> HashMap<SymbolId, NodeValue> {
-    let builder = TreeBuilder::new(&grammar.rules);
+    let builder = TreeOutputBuilder::new(&grammar.rules);
     let mut memo: HashMap<SymbolId, NodeValue> = HashMap::new();
     let mut visiting: HashSet<SymbolId> = HashSet::new();
     for nt in nullable {
@@ -413,7 +416,7 @@ fn eps_value(
     id: SymbolId,
     grammar: &CompiledGrammar,
     nullable: &HashSet<Nt>,
-    builder: &TreeBuilder,
+    builder: &TreeOutputBuilder,
     memo: &mut HashMap<SymbolId, NodeValue>,
     visiting: &mut HashSet<SymbolId>,
 ) -> NodeValue {
@@ -852,7 +855,7 @@ fn revert(node: &Rc<PNode>, cnf: &[CnfRule]) -> Rev {
     }
 }
 
-/// Fold a reverted tree into a [`NodeValue`] via the shared [`TreeBuilder`], so
+/// Fold a reverted tree into a [`NodeValue`] via the shared [`TreeOutputBuilder`], so
 /// CYK output is shaped (filtered, expanded, spliced) identically to LALR/Earley.
 ///
 /// The `present_mask` of each node's ε-variant drives reconstruction: the present
@@ -863,7 +866,7 @@ fn revert(node: &Rc<PNode>, cnf: &[CnfRule]) -> Rev {
 /// resulting tree matches LALR/Earley/Python exactly.
 fn assemble_rev(
     rev: Rev,
-    builder: &TreeBuilder,
+    builder: &TreeOutputBuilder,
     cnf: &Cnf,
     grammar: &CompiledGrammar,
 ) -> NodeValue {
@@ -957,7 +960,7 @@ mod tests {
     }
 
     /// On an unambiguous grammar, CYK must produce a byte-identical tree to LALR —
-    /// it shares the same lexer and TreeBuilder, so the only thing under test is the
+    /// it shares the same lexer and TreeOutputBuilder, so the only thing under test is the
     /// CNF round-trip (TERM/BIN/UNIT then revert). Covers a >2-symbol rule (BIN),
     /// punctuation filtering, a unit chain (UNIT), and left recursion.
     #[test]

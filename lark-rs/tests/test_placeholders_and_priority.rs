@@ -210,6 +210,75 @@ fn test_duplicate_alternatives_match_python_lark() {
 }
 
 #[test]
+fn test_maybe_placeholder_repeat_collision_rejected() {
+    // #212: `[A]~2 C` under maybe_placeholders distributes `[A]` into 2
+    // positions, producing alternatives that collide on expansion `A C` —
+    // Python Lark rejects this as "Rules defined twice". lark-rs must match.
+    let build_mp = |g: &str, parser: ParserAlgorithm| {
+        Lark::new(
+            g,
+            LarkOptions {
+                parser,
+                start: vec!["start".to_string()],
+                maybe_placeholders: true,
+                ..Default::default()
+            },
+        )
+    };
+    for parser in [ParserAlgorithm::Lalr, ParserAlgorithm::Earley] {
+        // Exact repeat: [A]~2 C
+        let g = "start: [A]~2 C\nA: \"a\"\nB: \"b\"\nC: \"c\"";
+        let err = build_mp(g, parser.clone()).err().unwrap_or_else(|| {
+            panic!("{parser:?}: `[A]~2 C` must be a load error (Python Lark rejects it)")
+        });
+        assert!(
+            err.to_string().contains("Rules defined twice"),
+            "{parser:?}: expected Python's diagnostic, got: {err}"
+        );
+
+        // Range repeat: [A]~1..3 C — the count-1 arm `A C` appears twice
+        // (the "A absent" and "absent A" forms of the count-2 slice).
+        let g = "start: [A]~1..3 C\nA: \"a\"\nC: \"c\"";
+        let err = build_mp(g, parser.clone()).err().unwrap_or_else(|| {
+            panic!("{parser:?}: `[A]~1..3 C` must be a load error (Python Lark rejects it)")
+        });
+        assert!(
+            err.to_string().contains("Rules defined twice"),
+            "{parser:?}: expected Python's diagnostic, got: {err}"
+        );
+
+        // Multi-arm maybe: [A|B]~2 C — also collides (the `A C` expansion
+        // from the two middle forms). Python rejects it the same way.
+        let g = "start: [A|B]~2 C\nA: \"a\"\nB: \"b\"\nC: \"c\"";
+        let err = build_mp(g, parser.clone()).err().unwrap_or_else(|| {
+            panic!("{parser:?}: `[A|B]~2 C` must be a load error (Python Lark rejects it)")
+        });
+        assert!(
+            err.to_string().contains("Rules defined twice"),
+            "{parser:?}: expected Python's diagnostic, got: {err}"
+        );
+
+        // Range starting at 0: [A]~0..2 C — the count-2 absent-absent and
+        // count-0 expansions both produce `C`, and count-2's middle forms
+        // both produce `A C`. Python rejects it.
+        let g = "start: [A]~0..2 C\nA: \"a\"\nC: \"c\"";
+        let err = build_mp(g, parser.clone()).err().unwrap_or_else(|| {
+            panic!("{parser:?}: `[A]~0..2 C` must be a load error (Python Lark rejects it)")
+        });
+        assert!(
+            err.to_string().contains("Rules defined twice"),
+            "{parser:?}: expected Python's diagnostic, got: {err}"
+        );
+
+        // [A]~1 C is fine — only one copy, no collision possible. Python builds
+        // it and parses `c` → [None, c] and `ac` → [a, c].
+        let g = "start: [A]~1 C\nA: \"a\"\nC: \"c\"";
+        build_mp(g, parser.clone())
+            .unwrap_or_else(|e| panic!("{parser:?}: `[A]~1 C` must load (Python does): {e}"));
+    }
+}
+
+#[test]
 fn test_oversized_negative_terminal_priority_saturates() {
     // `A.-99999999999999999999999` overflows i32; Lark (bignum priorities) accepts
     // it as an extremely low priority. We saturate to i32::MIN and still build/parse

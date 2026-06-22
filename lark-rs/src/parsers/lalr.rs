@@ -27,7 +27,7 @@ use super::token_source::{
     postlex_contextual_source, Contextual, ContextualRecovering, LexFailure, PreLexed, SourceError,
     TokenSource,
 };
-use super::tree_builder::{NodeValue, TreeBuilder};
+use super::tree_builder::{Slot, TreeOutputBuilder};
 
 // ─── Parse table ─────────────────────────────────────────────────────────────
 
@@ -526,7 +526,7 @@ pub fn build_lalr_table(
     })
 }
 
-// ─── LALR parser execution ────────────────────────────────────────────────────
+// ─── ParserStack: the shared state machine (#168) ───────────────────────────
 
 /// The two stacks plus the "feed one token" reduce-loop that drive every LALR
 /// parse. Lifting them out of [`LalrParser::run`]/`run_recovering` into a single
@@ -540,7 +540,7 @@ pub fn build_lalr_table(
 #[derive(Clone)]
 pub(crate) struct ParserStack {
     state_stack: Vec<usize>,
-    value_stack: Vec<NodeValue>,
+    value_stack: Vec<Slot>,
 }
 
 /// What feeding one token did to a [`ParserStack`].
@@ -581,7 +581,7 @@ impl ParserStack {
             match table.action_at(state, token.type_id).copied() {
                 Some(Action::Shift(next_state)) => {
                     self.state_stack.push(next_state);
-                    self.value_stack.push(NodeValue::Token(token.clone()));
+                    self.value_stack.push(Slot::Token(token.clone()));
                     return Feed::Shifted;
                 }
                 Some(Action::Reduce(rule_idx)) => {
@@ -601,7 +601,7 @@ impl ParserStack {
     }
 
     /// Apply a REDUCE: pop the rule's child values, shape the parent via the shared
-    /// [`TreeBuilder`], and follow GOTO. `at` supplies the position for the
+    /// [`TreeOutputBuilder`], and follow GOTO. `at` supplies the position for the
     /// (effectively unreachable) missing-GOTO error.
     fn reduce(
         &mut self,
@@ -612,14 +612,14 @@ impl ParserStack {
         let rule = &table.rules[rule_idx];
         let len = rule.expansion.len();
 
-        let child_values: Vec<NodeValue> = self
+        let child_values: Vec<Slot> = self
             .value_stack
             .drain(self.value_stack.len() - len..)
             .collect();
         for _ in 0..len {
             self.state_stack.pop();
         }
-        let value = TreeBuilder::new(&table.rules).assemble(rule_idx, child_values);
+        let value = TreeOutputBuilder::new(&table.rules).assemble(rule_idx, child_values);
 
         let top_state = self.position();
         let nt_index = rule.origin.index() - table.n_terminals;
@@ -643,10 +643,10 @@ impl ParserStack {
     /// collapse to a bare token, hence [`ParseTree`]).
     fn accept(&mut self) -> Result<ParseTree, ParseError> {
         match self.value_stack.pop() {
-            Some(NodeValue::Tree(t)) => Ok(ParseTree::Tree(t)),
-            Some(NodeValue::Token(tok)) => Ok(ParseTree::Token(tok)),
+            Some(Slot::Tree(t)) => Ok(ParseTree::Tree(t)),
+            Some(Slot::Token(tok)) => Ok(ParseTree::Token(tok)),
             // A start rule is never transparent, so its value is never Inline.
-            Some(NodeValue::Inline(_)) | None => Err(ParseError::unexpected_eof(0, 0, vec![])),
+            Some(Slot::Inline(_)) | None => Err(ParseError::unexpected_eof(0, 0, vec![])),
         }
     }
 
@@ -690,6 +690,8 @@ impl ParserStack {
     }
 }
 
+// ─── LALR parser execution ────────────────────────────────────────────────────
+
 pub struct LalrParser {
     pub table: ParseTable,
 }
@@ -717,10 +719,6 @@ impl LalrParser {
     }
 
     // ─── Shared LALR driver helpers ──────────────────────────────────────────
-    //
-    // `parse` and `parse_contextual` differ only in how they source the next
-    // token (a pre-lexed iterator vs. the contextual lexer). The state-machine
-    // core is shared through the helpers below so the two drivers stay thin.
 
     /// Resolve the start symbol name to its initial state.
     fn initial_state(&self, start: Option<&str>) -> Result<usize, ParseError> {
@@ -761,6 +759,12 @@ impl LalrParser {
     /// the batch driver and the interactive parser (issue #168).
     pub(crate) fn unexpected(&self, state: usize, token: &Token) -> ParseError {
         ParseError::unexpected_token(token, self.expected_at(state))
+    }
+
+    /// A fresh [`ParserStack`] at the start state for `start` — the seed of an
+    /// interactive parse (issue #168). The driver pairs it with the lexer + input.
+    pub(crate) fn initial_stack(&self, start: Option<&str>) -> Result<ParserStack, ParseError> {
+        Ok(ParserStack::new(self.initial_state(start)?))
     }
 
     /// Drive the LALR state machine against any [`TokenSource`]. The per-token
@@ -898,12 +902,6 @@ impl LalrParser {
                 }
             }
         }
-    }
-
-    /// A fresh [`ParserStack`] at the start state for `start` — the seed of an
-    /// interactive parse (issue #168). The driver pairs it with the lexer + input.
-    pub(crate) fn initial_stack(&self, start: Option<&str>) -> Result<ParserStack, ParseError> {
-        Ok(ParserStack::new(self.initial_state(start)?))
     }
 
     /// Recovering parse over a pre-tokenized sequence (basic lexer). See

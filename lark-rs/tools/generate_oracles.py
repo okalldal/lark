@@ -852,6 +852,88 @@ def generate_earley_dynamic():
     print(f"  {len(groups)} dynamic-lexer groups")
 
 
+# ─── CYK curated oracles (issue #186) ───────────────────────────────────────
+#
+# The CYK *compliance bank* (extract_lark_compliance.py) strip-mines Python
+# Lark's CYK test class, but its only `~n` cases use terminals (`"A"~2`),
+# never a nullable group — so the anonymous-helper carve-out (CYK accepts a
+# nullable EBNF helper the loader generates, e.g. `__anon_star_*` from `B*`)
+# is unbanked. These curated oracles close that gap: each grammar exercises
+# `~n` (and `*` / `?`) over a *nullable group* that Python Lark's CYK
+# accepts, pinned byte-for-byte so any future change to CYK's nullable-rule
+# handling that regresses the anon-helper path is caught.
+#
+# CYK always uses the basic lexer and resolve-ambiguity mode.
+#
+# (name, grammar, [(input, should_parse)])
+CYK_NULLABLE_GROUP_GRAMMARS = [
+    # `(B*)~2`: two repetitions of a nullable `B*` group — the grammar from
+    # the issue. `B*` lowers to a nullable anonymous helper; `~2` inlines two
+    # copies. Python Lark CYK builds and parses it; a blunt "reject every
+    # nullable origin" fix would over-reject it (#101 regression).
+    ("star_repeat", r"""
+start: A (B*)~2
+A: "a"
+B: "b"
+%ignore " "
+""", [
+        ("a",       True),   # both B* groups produce ε
+        ("a b",     True),   # one B* matches "b", the other ε
+        ("a b b",   True),   # each B* matches one "b"
+        ("a b b b", True),   # one B* matches two, the other one
+        ("",        False),  # A is required
+    ]),
+
+    # `(B?)~2`: two repetitions of a nullable `B?` optional — the `?`
+    # variant of the nullable-group pattern.
+    ("opt_repeat", r"""
+start: A (B?)~2
+A: "a"
+B: "b"
+%ignore " "
+""", [
+        ("a",     True),   # both B? produce ε
+        ("a b",   True),   # one B? matches "b", the other ε
+        ("a b b", True),   # each B? matches one "b"
+        ("",      False),  # A is required
+    ]),
+]
+
+
+def generate_cyk():
+    print("Generating CYK nullable-group oracles (#186)...")
+    groups = []
+    for name, grammar, cases in CYK_NULLABLE_GROUP_GRAMMARS:
+        built = []
+        for inp, should_parse in cases:
+            try:
+                lark = Lark(grammar, parser="cyk", lexer="basic",
+                            start="start", maybe_placeholders=False)
+                tree = lark.parse(inp)
+                ok, payload = True, tree_to_dict(tree)
+            except Exception as e:
+                ok, payload = False, str(e)
+            if should_parse and not ok:
+                print(f"  WARNING: {name} expected to parse {inp!r}: {payload}")
+            if not should_parse and ok:
+                print(f"  WARNING: {name} expected to reject {inp!r}")
+            built.append({
+                "input": inp,
+                "should_parse": should_parse,
+                "ok": ok,
+                "tree": payload if ok else None,
+                "error": payload if not ok else None,
+            })
+        groups.append({
+            "name": name,
+            "grammar": grammar,
+            "cases": built,
+        })
+    save_oracle("cyk", "cases", groups)
+    n_cases = sum(len(g["cases"]) for g in groups)
+    print(f"  {len(groups)} groups, {n_cases} cases")
+
+
 def save_oracle(suite, name, data):
     out_dir = ORACLES_DIR / suite
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -900,6 +982,7 @@ RECOVERY_CASES = [
     "#1 + 2",         # a different un-lexable char ('#') -> skip it
     "1 @@ 2",         # two consecutive bad chars -> 2 char skips (+ stray NUMBER)
     "1 @ + 2",        # un-lexable then a misplaced '+' -> char skip recovers the rest
+    "1 @ 2",          # un-lexable '@' (char skip) then stray NUMBER (token delete)
 ]
 
 
@@ -990,84 +1073,6 @@ def generate_recovery_contextual():
                 "tree": None,
             })
     save_oracle("recovery_contextual", "cases", results)
-
-
-# ─── Interactive parser (issue #168) ─────────────────────────────────────────
-#
-# Python Lark's `parse_interactive` hands back an `InteractiveParser` the caller
-# drives: `feed_token`, inspect `accepts()`, `feed_eof`, `exhaust_lexer`, resume.
-# lark-rs ports the oracle-backed subset of that surface (plus `feed(name,value)`
-# sugar; ADR-0026), so we drive the *same* operation script against both engines and
-# compare, step by step: the sorted `accepts()` set, each feed's success/expected,
-# the `exhaust_lexer` token output, and the final tree. Script ops:
-# "accepts", ["feed", TYPE, value], "exhaust" (drive the lexer), and "feed_eof".
-# A case may carry an "input" the lexer drives over (default "").
-
-INTERACTIVE_CASES = [
-    # A lone number: accepts NUMBER at the start, then can end.
-    {"name": "number",
-     "script": ["accepts", ["feed", "NUMBER", "7"], "accepts", "feed_eof"]},
-    # A full sum, inspecting accepts() after every feed.
-    {"name": "sum",
-     "script": ["accepts",
-                ["feed", "NUMBER", "1"], "accepts",
-                ["feed", "PLUS", "+"], "accepts",
-                ["feed", "NUMBER", "2"], "accepts",
-                "feed_eof"]},
-    # A misplaced PLUS at the start raises (only NUMBER is accepted there).
-    {"name": "bad_first",
-     "script": ["accepts", ["feed", "PLUS", "+"]]},
-    # A trailing '+' leaves the parser expecting a product, so feed_eof raises.
-    {"name": "premature_eof",
-     "script": [["feed", "NUMBER", "1"], ["feed", "PLUS", "+"], "accepts", "feed_eof"]},
-    # Lexer-driven: exhaust_lexer must yield Python's exact token stream, then
-    # feed_eof reaches the same final tree (the resume_parse result).
-    {"name": "exhaust_then_eof",
-     "input": "1 + 2",
-     "script": ["exhaust", "accepts", "feed_eof"]},
-]
-
-
-def generate_interactive():
-    print("Generating interactive-parser oracles (#168)...")
-    grammar = load_grammar("interactive")
-    results = []
-    for case in INTERACTIVE_CASES:
-        # lexer='basic' to match lark-rs's v1 interactive configuration.
-        lark = Lark(grammar, parser="lalr", lexer="basic", start="start",
-                    maybe_placeholders=False)
-        ip = lark.parse_interactive(case.get("input", ""))
-        steps = []
-        final_tree = None
-        for op in case["script"]:
-            if op == "accepts":
-                steps.append({"op": "accepts", "accepts": sorted(ip.accepts())})
-            elif op == "exhaust":
-                toks = ip.exhaust_lexer()
-                steps.append({"op": "exhaust",
-                              "tokens": [[str(t.type), str(t)] for t in toks]})
-            elif op == "feed_eof":
-                try:
-                    final_tree = ip.feed_eof()
-                    steps.append({"op": "feed_eof", "ok": True})
-                except UnexpectedToken as e:
-                    steps.append({"op": "feed_eof", "ok": False,
-                                  "expected": sorted(e.expected)})
-            else:
-                _, typ, val = op
-                try:
-                    ip.feed_token(Token(typ, val))
-                    steps.append({"op": "feed", "type": typ, "value": val, "ok": True})
-                except UnexpectedToken as e:
-                    steps.append({"op": "feed", "type": typ, "value": val, "ok": False,
-                                  "expected": sorted(e.expected)})
-        results.append({
-            "name": case["name"],
-            "input": case.get("input", ""),
-            "tree": tree_to_dict(final_tree) if final_tree is not None else None,
-            "steps": steps,
-        })
-    save_oracle("interactive", "cases", results)
 
 
 def generate_arithmetic():
@@ -1940,6 +1945,187 @@ def generate_json_corpus_manifest():
     print(f"  {passed}/{len(manifest)} files correctly handled by Python Lark")
 
 
+# ─── Interactive parser oracles (issues #168, #222) ──────────────────────────
+#
+# Each case records accept-sets at each step, tokens fed, and the final tree,
+# so the Rust tests can replay the sequence and compare at every point.
+
+def interactive_trace(lark_instance, text, manual_tokens=None):
+    """Run an interactive parse, returning a trace dict.
+
+    If `manual_tokens` is provided, feed them one by one (no lexer drive).
+    Otherwise, exhaust the lexer + feed_eof.
+    """
+    from lark import Token as LToken
+
+    p = lark_instance.parse_interactive(text)
+    trace = {
+        "text": text,
+        "initial_accepts": sorted(p.accepts()),
+        "steps": [],
+    }
+
+    if manual_tokens:
+        for (term, value) in manual_tokens:
+            accepts_before = sorted(p.accepts())
+            p.feed_token(LToken(term, value))
+            accepts_after = sorted(p.accepts())
+            trace["steps"].append({
+                "action": "feed",
+                "terminal": term,
+                "value": value,
+                "accepts_before": accepts_before,
+                "accepts_after": accepts_after,
+            })
+        result = p.feed_eof()
+        trace["result"] = tree_to_dict(result) if result else None
+        trace["final_accepts"] = sorted(p.accepts()) if not result else []
+    else:
+        tokens = p.exhaust_lexer()
+        for t in tokens:
+            trace["steps"].append({
+                "action": "exhaust",
+                "terminal": str(t.type),
+                "value": str(t),
+            })
+        accepts_after_exhaust = sorted(p.accepts())
+        trace["accepts_after_exhaust"] = accepts_after_exhaust
+        result = p.feed_eof()
+        trace["result"] = tree_to_dict(result) if result else None
+
+    return trace
+
+
+def generate_interactive():
+    print("Generating interactive parser oracles...")
+
+    cases = []
+
+    # ── Basic lexer (arithmetic.lark) ──
+    grammar_arith = load_grammar("arithmetic")
+    l_basic = Lark(grammar_arith, parser="lalr", lexer="basic")
+
+    # Case: exhaust_lexer + feed_eof, basic, "1 + 2 * 3"
+    cases.append({
+        "name": "basic_exhaust_1_plus_2_times_3",
+        "lexer": "basic",
+        "grammar": "arithmetic",
+        **interactive_trace(l_basic, "1 + 2 * 3"),
+    })
+
+    # Case: exhaust_lexer + feed_eof, basic, "(1 + 2) * 3"
+    cases.append({
+        "name": "basic_exhaust_parens",
+        "lexer": "basic",
+        "grammar": "arithmetic",
+        **interactive_trace(l_basic, "(1 + 2) * 3"),
+    })
+
+    # Case: manual feed, basic, "1 + 2"
+    cases.append({
+        "name": "basic_manual_1_plus_2",
+        "lexer": "basic",
+        "grammar": "arithmetic",
+        **interactive_trace(l_basic, "", manual_tokens=[
+            ("NUMBER", "1"),
+            ("PLUS", "+"),
+            ("NUMBER", "2"),
+        ]),
+    })
+
+    # Case: manual feed, basic, single number
+    cases.append({
+        "name": "basic_manual_single_number",
+        "lexer": "basic",
+        "grammar": "arithmetic",
+        **interactive_trace(l_basic, "", manual_tokens=[
+            ("NUMBER", "42"),
+        ]),
+    })
+
+    # Case: exhaust, basic, "-1"
+    cases.append({
+        "name": "basic_exhaust_neg",
+        "lexer": "basic",
+        "grammar": "arithmetic",
+        **interactive_trace(l_basic, "-1"),
+    })
+
+    # ── Contextual lexer (recovery_contextual.lark) ──
+    grammar_ctx = load_grammar("recovery_contextual")
+    l_ctx = Lark(grammar_ctx, parser="lalr", lexer="contextual")
+
+    # Case: exhaust_lexer + feed_eof, contextual, "[hello world] {foo bar}"
+    cases.append({
+        "name": "contextual_exhaust_hello_foo",
+        "lexer": "contextual",
+        "grammar": "recovery_contextual",
+        **interactive_trace(l_ctx, "[hello world] {foo bar}"),
+    })
+
+    # Case: manual feed, contextual
+    cases.append({
+        "name": "contextual_manual_hello_foo",
+        "lexer": "contextual",
+        "grammar": "recovery_contextual",
+        **interactive_trace(l_ctx, "", manual_tokens=[
+            ("LSQB", "["),
+            ("AWORD", "hello"),
+            ("RSQB", "]"),
+            ("LBRACE", "{"),
+            ("BWORD", "foo"),
+            ("RBRACE", "}"),
+        ]),
+    })
+
+    # Case: exhaust, contextual, single a_part and b_part with one word each
+    cases.append({
+        "name": "contextual_exhaust_single_words",
+        "lexer": "contextual",
+        "grammar": "recovery_contextual",
+        **interactive_trace(l_ctx, "[x] {y}"),
+    })
+
+    # ── Fork test: basic ──
+    from lark import Token as LToken
+    p = l_basic.parse_interactive("1 + 2")
+    p.exhaust_lexer()
+    fork = p.copy()
+    fork_trace = {
+        "name": "basic_fork",
+        "lexer": "basic",
+        "grammar": "arithmetic",
+        "text": "1 + 2",
+        "main_accepts_before_eof": sorted(p.accepts()),
+        "fork_accepts_before_eof": sorted(fork.accepts()),
+    }
+    r_main = p.feed_eof()
+    r_fork = fork.feed_eof()
+    fork_trace["main_result"] = tree_to_dict(r_main) if r_main else None
+    fork_trace["fork_result"] = tree_to_dict(r_fork) if r_fork else None
+    cases.append(fork_trace)
+
+    # ── Fork test: contextual ──
+    p2 = l_ctx.parse_interactive("[hello] {foo}")
+    p2.exhaust_lexer()
+    fork2 = p2.copy()
+    fork_trace2 = {
+        "name": "contextual_fork",
+        "lexer": "contextual",
+        "grammar": "recovery_contextual",
+        "text": "[hello] {foo}",
+        "main_accepts_before_eof": sorted(p2.accepts()),
+        "fork_accepts_before_eof": sorted(fork2.accepts()),
+    }
+    r_main2 = p2.feed_eof()
+    r_fork2 = fork2.feed_eof()
+    fork_trace2["main_result"] = tree_to_dict(r_main2) if r_main2 else None
+    fork_trace2["fork_result"] = tree_to_dict(r_fork2) if r_fork2 else None
+    cases.append(fork_trace2)
+
+    save_oracle("interactive", "cases", cases)
+
+
 if __name__ == "__main__":
     ORACLES_DIR.mkdir(parents=True, exist_ok=True)
     generate_arithmetic()
@@ -1960,6 +2146,7 @@ if __name__ == "__main__":
     generate_interactive()
     generate_earley()
     generate_earley_dynamic()
+    generate_cyk()
     generate_fuzz_corpus()
     generate_json_corpus_manifest()
     print("\nDone. Commit tests/fixtures/oracles/ to track expected outputs.")

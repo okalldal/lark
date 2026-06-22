@@ -219,11 +219,11 @@ src/
                       backed subset of Python's InteractiveParser + feed(name,value),
                       lazy basic-lexer v1, oracle-differentiated
     token_source.rs   TokenSource trait + PreLexed / Contextual (lexer⇄parser API)
-    tree_builder.rs   TreeBuilder — shared rule→tree shaping (LALR + Earley)
+    tree_builder.rs   OutputBuilder seam + TreeOutputBuilder (default tree shaping, all backends)
     earley.rs         Earley recognizer + SPPF + forest→tree +
                       dynamic lexer build_chart_dynamic/scan_dynamic
     cyk.rs            CYK parser: CNF conversion (TERM/BIN/UNIT + ε-removal) +
-                      O(n³) DP + CNF revert → shared TreeBuilder
+                      O(n³) DP + CNF revert → shared TreeOutputBuilder
 
 tests/
   common/mod.rs       Shared helpers: make_lalr(), load_oracle(), tree_matches_oracle()
@@ -345,7 +345,7 @@ CompiledGrammar
 
 Both tables are dense and indexed directly by id — the parse loop is an array
 index per token, never a string hash. Transparent rules splice via a
-`StackValue::Inline` rather than a post-hoc tree-name scan, and ACCEPT is the
+`Slot::Inline` rather than a post-hoc tree-name scan, and ACCEPT is the
 `is_start` flag — no name inspection anywhere on the engine path.
 
 ### Parse-Tree Assembly
@@ -404,7 +404,7 @@ so that `"3.14e10"` matches the right alternative.
 **`expand1` returns `Child`, not `Tree`.** The `?rule` modifier must be able to return a
 bare `Token` when the rule has a single terminal child — e.g., `?atom: NAME` should yield
 the `NAME` token directly, not `Tree("atom", [Token])`. This propagates all the way up
-(`?factor → ?term → ?expr`). The stack stores `StackValue::Token | StackValue::Tree`
+(`?factor → ?term → ?expr`). The stack stores `Slot::Token | Slot::Tree`
 for this reason.
 
 **SHIFT vs GOTO uses the real terminal name set.** A naive heuristic (`!name.starts_with('_')`)

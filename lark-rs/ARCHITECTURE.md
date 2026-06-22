@@ -58,7 +58,7 @@ parse trees and assert ours match (see
           ▼                                         ▼
   ┌─────────────────────────────────────────────────┐
   │ STAGE 4: PARSE   Lark::parse(input)              │
-  │   lexer  →  parser driver  →  TreeBuilder        │
+  │   lexer  →  parser driver  →  TreeOutputBuilder   │
   │   (text → tokens → reductions → tree shaping)    │
   └────────────────────────┬─────────────────────────┘
                            ▼
@@ -133,7 +133,7 @@ backtracking engine — that whole story lives in `lookaround/` and
 | `lalr.rs` | dense LALR(1) parse table + the parse loop |
 | `earley.rs` | Earley recognizer + SPPF forest + forest→tree + dynamic lexer |
 | `cyk.rs` | CYK parser (CNF conversion + O(n³) DP) |
-| `tree_builder.rs` | shared rule→tree shaping used by all three |
+| `tree_builder.rs` | `OutputBuilder` seam + `TreeOutputBuilder` (default tree shaping, used by all three) |
 | `token_source.rs` | the lexer⇄parser pull API |
 
 **Result types** (`tree.rs`, `error.rs`) — `Tree`, `Token`, and the error

@@ -1,0 +1,1389 @@
+{
+  "generator": "tools/generate_transformer_oracles.py",
+  "schema_version": 1,
+  "cases": [
+    {
+      "name": "arithmetic_eval",
+      "description": "Bottom-up arithmetic evaluator: tokens -> int, rules -> sum/product",
+      "grammar": "\n            start: expr\n            expr: term \"+\" term\n                | term\n            term: factor \"*\" factor\n                | factor\n            factor: NUMBER\n            NUMBER: /[0-9]+/\n            %ignore /\\s+/\n        ",
+      "input": "2 + 3 * 4",
+      "rule_actions": {
+        "start": {
+          "action": "first_child"
+        },
+        "expr": {
+          "action": "sum_children"
+        },
+        "term": {
+          "action": "product_children"
+        },
+        "factor": {
+          "action": "first_child"
+        }
+      },
+      "token_actions": {
+        "NUMBER": {
+          "action": "int_value"
+        }
+      },
+      "default_rule": null,
+      "default_token": null,
+      "visit_tokens": true,
+      "parser_options": {},
+      "configs": {
+        "lalr_basic": {
+          "status": "ok",
+          "value": 14,
+          "trace": [
+            {
+              "kind": "token",
+              "name": "NUMBER"
+            },
+            {
+              "kind": "rule",
+              "name": "factor"
+            },
+            {
+              "kind": "rule",
+              "name": "term"
+            },
+            {
+              "kind": "token",
+              "name": "NUMBER"
+            },
+            {
+              "kind": "rule",
+              "name": "factor"
+            },
+            {
+              "kind": "token",
+              "name": "NUMBER"
+            },
+            {
+              "kind": "rule",
+              "name": "factor"
+            },
+            {
+              "kind": "rule",
+              "name": "term"
+            },
+            {
+              "kind": "rule",
+              "name": "expr"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        },
+        "lalr_contextual": {
+          "status": "ok",
+          "value": 14,
+          "trace": [
+            {
+              "kind": "token",
+              "name": "NUMBER"
+            },
+            {
+              "kind": "rule",
+              "name": "factor"
+            },
+            {
+              "kind": "rule",
+              "name": "term"
+            },
+            {
+              "kind": "token",
+              "name": "NUMBER"
+            },
+            {
+              "kind": "rule",
+              "name": "factor"
+            },
+            {
+              "kind": "token",
+              "name": "NUMBER"
+            },
+            {
+              "kind": "rule",
+              "name": "factor"
+            },
+            {
+              "kind": "rule",
+              "name": "term"
+            },
+            {
+              "kind": "rule",
+              "name": "expr"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "json_value_builder",
+      "description": "JSON-like value builder: strings, numbers, arrays, objects",
+      "grammar": "\n            start: value\n            ?value: string | number | array | object | \"true\" | \"false\" | \"null\"\n            string: ESCAPED_STRING\n            number: NUMBER\n            array: \"[\" (value (\",\" value)*)? \"]\"\n            object: \"{\" (pair (\",\" pair)*)? \"}\"\n            pair: ESCAPED_STRING \":\" value\n\n            NUMBER: /\\-?[0-9]+(\\.[0-9]+)?/\n            ESCAPED_STRING: \"\\\"\" /[^\"]*/ \"\\\"\"\n            %ignore /\\s+/\n        ",
+      "input": "{\"key\": 42}",
+      "rule_actions": {
+        "start": {
+          "action": "first_child"
+        },
+        "string": {
+          "action": "first_child"
+        },
+        "number": {
+          "action": "first_child"
+        },
+        "array": {
+          "action": "wrap_list"
+        },
+        "object": {
+          "action": "wrap_dict",
+          "key": "object"
+        },
+        "pair": {
+          "action": "wrap_list"
+        }
+      },
+      "token_actions": {
+        "NUMBER": {
+          "action": "int_value"
+        },
+        "ESCAPED_STRING": {
+          "action": "stringify"
+        }
+      },
+      "default_rule": null,
+      "default_token": null,
+      "visit_tokens": true,
+      "parser_options": {},
+      "configs": {
+        "lalr_basic": {
+          "status": "ok",
+          "value": {
+            "object": [
+              [
+                "\"key\"",
+                42
+              ]
+            ]
+          },
+          "trace": [
+            {
+              "kind": "token",
+              "name": "ESCAPED_STRING"
+            },
+            {
+              "kind": "token",
+              "name": "NUMBER"
+            },
+            {
+              "kind": "rule",
+              "name": "number"
+            },
+            {
+              "kind": "rule",
+              "name": "pair"
+            },
+            {
+              "kind": "rule",
+              "name": "object"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        },
+        "lalr_contextual": {
+          "status": "ok",
+          "value": {
+            "object": [
+              [
+                "\"key\"",
+                42
+              ]
+            ]
+          },
+          "trace": [
+            {
+              "kind": "token",
+              "name": "ESCAPED_STRING"
+            },
+            {
+              "kind": "token",
+              "name": "NUMBER"
+            },
+            {
+              "kind": "rule",
+              "name": "number"
+            },
+            {
+              "kind": "rule",
+              "name": "pair"
+            },
+            {
+              "kind": "rule",
+              "name": "object"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "token_normalizer_upper",
+      "description": "Token normalizer: uppercase all NAME tokens, rules identity",
+      "grammar": "\n            start: greeting+\n            greeting: NAME PUNCT\n            NAME: /[a-zA-Z]+/\n            PUNCT: /[!.?]/\n            %ignore /\\s+/\n        ",
+      "input": "hello! world.",
+      "rule_actions": {},
+      "token_actions": {
+        "NAME": {
+          "action": "upper"
+        }
+      },
+      "default_rule": null,
+      "default_token": null,
+      "visit_tokens": true,
+      "parser_options": {},
+      "configs": {
+        "lalr_basic": {
+          "status": "ok",
+          "value": {
+            "type": "tree",
+            "data": "start",
+            "children": [
+              {
+                "type": "tree",
+                "data": "greeting",
+                "children": [
+                  "HELLO",
+                  {
+                    "type": "token",
+                    "token_type": "PUNCT",
+                    "value": "!"
+                  }
+                ]
+              },
+              {
+                "type": "tree",
+                "data": "greeting",
+                "children": [
+                  "WORLD",
+                  {
+                    "type": "token",
+                    "token_type": "PUNCT",
+                    "value": "."
+                  }
+                ]
+              }
+            ]
+          },
+          "trace": [
+            {
+              "kind": "token",
+              "name": "NAME"
+            },
+            {
+              "kind": "token",
+              "name": "NAME"
+            }
+          ]
+        },
+        "lalr_contextual": {
+          "status": "ok",
+          "value": {
+            "type": "tree",
+            "data": "start",
+            "children": [
+              {
+                "type": "tree",
+                "data": "greeting",
+                "children": [
+                  "HELLO",
+                  {
+                    "type": "token",
+                    "token_type": "PUNCT",
+                    "value": "!"
+                  }
+                ]
+              },
+              {
+                "type": "tree",
+                "data": "greeting",
+                "children": [
+                  "WORLD",
+                  {
+                    "type": "token",
+                    "token_type": "PUNCT",
+                    "value": "."
+                  }
+                ]
+              }
+            ]
+          },
+          "trace": [
+            {
+              "kind": "token",
+              "name": "NAME"
+            },
+            {
+              "kind": "token",
+              "name": "NAME"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "alias",
+      "description": "Rule alias: 'a -> alias_a' renames the tree node",
+      "grammar": "\n            start: item+\n            item: \"a\" -> item_a\n                | \"b\" -> item_b\n            %ignore /\\s+/\n        ",
+      "input": "a b a",
+      "rule_actions": {
+        "start": {
+          "action": "wrap_list"
+        },
+        "item_a": {
+          "action": "return_value",
+          "value": "got_a"
+        },
+        "item_b": {
+          "action": "return_value",
+          "value": "got_b"
+        }
+      },
+      "token_actions": {},
+      "default_rule": null,
+      "default_token": null,
+      "visit_tokens": true,
+      "parser_options": {},
+      "configs": {
+        "lalr_basic": {
+          "status": "ok",
+          "value": [
+            "got_a",
+            "got_b",
+            "got_a"
+          ],
+          "trace": [
+            {
+              "kind": "rule",
+              "name": "item_a"
+            },
+            {
+              "kind": "rule",
+              "name": "item_b"
+            },
+            {
+              "kind": "rule",
+              "name": "item_a"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        },
+        "lalr_contextual": {
+          "status": "ok",
+          "value": [
+            "got_a",
+            "got_b",
+            "got_a"
+          ],
+          "trace": [
+            {
+              "kind": "rule",
+              "name": "item_a"
+            },
+            {
+              "kind": "rule",
+              "name": "item_b"
+            },
+            {
+              "kind": "rule",
+              "name": "item_a"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "transparent_rule",
+      "description": "Transparent rule (_inner) inlines into parent",
+      "grammar": "\n            start: _inner+\n            _inner: WORD\n            WORD: /[a-z]+/\n            %ignore /\\s+/\n        ",
+      "input": "foo bar",
+      "rule_actions": {
+        "start": {
+          "action": "join_children",
+          "sep": ","
+        }
+      },
+      "token_actions": {
+        "WORD": {
+          "action": "upper"
+        }
+      },
+      "default_rule": null,
+      "default_token": null,
+      "visit_tokens": true,
+      "parser_options": {},
+      "configs": {
+        "lalr_basic": {
+          "status": "ok",
+          "value": "FOO,BAR",
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        },
+        "lalr_contextual": {
+          "status": "ok",
+          "value": "FOO,BAR",
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "expand1",
+      "description": "?rule (expand1) collapses single-child rules",
+      "grammar": "\n            start: wrapper\n            ?wrapper: inner\n            inner: WORD\n            WORD: /[a-z]+/\n        ",
+      "input": "hello",
+      "rule_actions": {
+        "start": {
+          "action": "first_child"
+        },
+        "inner": {
+          "action": "first_child"
+        }
+      },
+      "token_actions": {
+        "WORD": {
+          "action": "upper"
+        }
+      },
+      "default_rule": null,
+      "default_token": null,
+      "visit_tokens": true,
+      "parser_options": {},
+      "configs": {
+        "lalr_basic": {
+          "status": "ok",
+          "value": "HELLO",
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "inner"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        },
+        "lalr_contextual": {
+          "status": "ok",
+          "value": "HELLO",
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "inner"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "filtered_punctuation",
+      "description": "Punctuation tokens (string literals) are filtered by default",
+      "grammar": "\n            start: item (\",\" item)*\n            item: WORD\n            WORD: /[a-z]+/\n            %ignore /\\s+/\n        ",
+      "input": "foo, bar, baz",
+      "rule_actions": {
+        "start": {
+          "action": "join_children",
+          "sep": "+"
+        },
+        "item": {
+          "action": "first_child"
+        }
+      },
+      "token_actions": {
+        "WORD": {
+          "action": "upper"
+        }
+      },
+      "default_rule": null,
+      "default_token": null,
+      "visit_tokens": true,
+      "parser_options": {},
+      "configs": {
+        "lalr_basic": {
+          "status": "ok",
+          "value": "FOO+BAR+BAZ",
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        },
+        "lalr_contextual": {
+          "status": "ok",
+          "value": "FOO+BAR+BAZ",
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "keep_all_tokens",
+      "description": "keep_all_tokens=True preserves punctuation tokens",
+      "grammar": "\n            start: item (\",\" item)*\n            item: WORD\n            WORD: /[a-z]+/\n            %ignore /\\s+/\n        ",
+      "input": "foo, bar",
+      "rule_actions": {
+        "start": {
+          "action": "concat_children"
+        },
+        "item": {
+          "action": "first_child"
+        }
+      },
+      "token_actions": {
+        "WORD": {
+          "action": "identity"
+        }
+      },
+      "default_rule": null,
+      "default_token": null,
+      "visit_tokens": true,
+      "parser_options": {
+        "keep_all_tokens": true
+      },
+      "configs": {
+        "lalr_basic": {
+          "status": "ok",
+          "value": "foo,bar",
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        },
+        "lalr_contextual": {
+          "status": "ok",
+          "value": "foo,bar",
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "maybe_placeholders_true",
+      "description": "maybe_placeholders=True: bracket-optional [X] missing -> None placeholder",
+      "grammar": "\n            start: WORD [NUMBER]\n            WORD: /[a-z]+/\n            NUMBER: /[0-9]+/\n            %ignore /\\s+/\n        ",
+      "input": "hello",
+      "rule_actions": {
+        "start": {
+          "action": "wrap_list"
+        }
+      },
+      "token_actions": {
+        "WORD": {
+          "action": "stringify"
+        },
+        "NUMBER": {
+          "action": "int_value"
+        }
+      },
+      "default_rule": null,
+      "default_token": null,
+      "visit_tokens": true,
+      "parser_options": {
+        "maybe_placeholders": true
+      },
+      "configs": {
+        "lalr_basic": {
+          "status": "ok",
+          "value": [
+            "hello",
+            null
+          ],
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        },
+        "lalr_contextual": {
+          "status": "ok",
+          "value": [
+            "hello",
+            null
+          ],
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "maybe_placeholders_false",
+      "description": "maybe_placeholders=False: bracket-optional [X] missing -> absent",
+      "grammar": "\n            start: WORD [NUMBER]\n            WORD: /[a-z]+/\n            NUMBER: /[0-9]+/\n            %ignore /\\s+/\n        ",
+      "input": "hello",
+      "rule_actions": {
+        "start": {
+          "action": "wrap_list"
+        }
+      },
+      "token_actions": {
+        "WORD": {
+          "action": "stringify"
+        },
+        "NUMBER": {
+          "action": "int_value"
+        }
+      },
+      "default_rule": null,
+      "default_token": null,
+      "visit_tokens": true,
+      "parser_options": {
+        "maybe_placeholders": false
+      },
+      "configs": {
+        "lalr_basic": {
+          "status": "ok",
+          "value": [
+            "hello"
+          ],
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        },
+        "lalr_contextual": {
+          "status": "ok",
+          "value": [
+            "hello"
+          ],
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "discard_token",
+      "description": "Token callback returns Discard, removing it from parent's children",
+      "grammar": "\n            start: item+\n            item: WORD NOISE?\n            WORD: /[a-z]+/\n            NOISE: /[!@#]+/\n            %ignore /\\s+/\n        ",
+      "input": "hello! world",
+      "rule_actions": {
+        "start": {
+          "action": "wrap_list"
+        },
+        "item": {
+          "action": "first_child"
+        }
+      },
+      "token_actions": {
+        "WORD": {
+          "action": "upper"
+        },
+        "NOISE": {
+          "action": "discard"
+        }
+      },
+      "default_rule": null,
+      "default_token": null,
+      "visit_tokens": true,
+      "parser_options": {},
+      "configs": {
+        "lalr_basic": {
+          "status": "ok",
+          "value": [
+            "HELLO",
+            "WORLD"
+          ],
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "token",
+              "name": "NOISE"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        },
+        "lalr_contextual": {
+          "status": "ok",
+          "value": [
+            "HELLO",
+            "WORLD"
+          ],
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "token",
+              "name": "NOISE"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "discard_rule",
+      "description": "Rule callback returns Discard, removing it from parent's children",
+      "grammar": "\n            start: (keep | drop)+\n            keep: WORD\n            drop: NUMBER\n            WORD: /[a-z]+/\n            NUMBER: /[0-9]+/\n            %ignore /\\s+/\n        ",
+      "input": "hello 42 world",
+      "rule_actions": {
+        "start": {
+          "action": "wrap_list"
+        },
+        "keep": {
+          "action": "first_child"
+        },
+        "drop": {
+          "action": "discard"
+        }
+      },
+      "token_actions": {
+        "WORD": {
+          "action": "upper"
+        },
+        "NUMBER": {
+          "action": "int_value"
+        }
+      },
+      "default_rule": null,
+      "default_token": null,
+      "visit_tokens": true,
+      "parser_options": {},
+      "configs": {
+        "lalr_basic": {
+          "status": "ok",
+          "value": [
+            "HELLO",
+            "WORLD"
+          ],
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "keep"
+            },
+            {
+              "kind": "token",
+              "name": "NUMBER"
+            },
+            {
+              "kind": "rule",
+              "name": "drop"
+            },
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "keep"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        },
+        "lalr_contextual": {
+          "status": "ok",
+          "value": [
+            "HELLO",
+            "WORLD"
+          ],
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "keep"
+            },
+            {
+              "kind": "token",
+              "name": "NUMBER"
+            },
+            {
+              "kind": "rule",
+              "name": "drop"
+            },
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "keep"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "default_rule_handler",
+      "description": "__default__ handles rules without explicit callbacks",
+      "grammar": "\n            start: alpha beta\n            alpha: WORD\n            beta: NUMBER\n            WORD: /[a-z]+/\n            NUMBER: /[0-9]+/\n            %ignore /\\s+/\n        ",
+      "input": "hello 42",
+      "rule_actions": {
+        "alpha": {
+          "action": "first_child"
+        }
+      },
+      "token_actions": {
+        "WORD": {
+          "action": "upper"
+        },
+        "NUMBER": {
+          "action": "int_value"
+        }
+      },
+      "default_rule": {
+        "action": "wrap_list"
+      },
+      "default_token": null,
+      "visit_tokens": true,
+      "parser_options": {},
+      "configs": {
+        "lalr_basic": {
+          "status": "ok",
+          "value": [
+            "HELLO",
+            [
+              42
+            ]
+          ],
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "alpha"
+            },
+            {
+              "kind": "token",
+              "name": "NUMBER"
+            },
+            {
+              "kind": "default_rule",
+              "name": "beta"
+            },
+            {
+              "kind": "default_rule",
+              "name": "start"
+            }
+          ]
+        },
+        "lalr_contextual": {
+          "status": "ok",
+          "value": [
+            "HELLO",
+            [
+              42
+            ]
+          ],
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "alpha"
+            },
+            {
+              "kind": "token",
+              "name": "NUMBER"
+            },
+            {
+              "kind": "default_rule",
+              "name": "beta"
+            },
+            {
+              "kind": "default_rule",
+              "name": "start"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "default_token_handler",
+      "description": "__default_token__ handles tokens without explicit callbacks",
+      "grammar": "\n            start: item+\n            item: WORD | NUMBER\n            WORD: /[a-z]+/\n            NUMBER: /[0-9]+/\n            %ignore /\\s+/\n        ",
+      "input": "hello 42 world",
+      "rule_actions": {
+        "start": {
+          "action": "wrap_list"
+        },
+        "item": {
+          "action": "first_child"
+        }
+      },
+      "token_actions": {
+        "WORD": {
+          "action": "upper"
+        }
+      },
+      "default_rule": null,
+      "default_token": {
+        "action": "prefix",
+        "value": "tok:"
+      },
+      "visit_tokens": true,
+      "parser_options": {},
+      "configs": {
+        "lalr_basic": {
+          "status": "ok",
+          "value": [
+            "HELLO",
+            "tok:42",
+            "WORLD"
+          ],
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "default_token",
+              "name": "NUMBER"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        },
+        "lalr_contextual": {
+          "status": "ok",
+          "value": [
+            "HELLO",
+            "tok:42",
+            "WORLD"
+          ],
+          "trace": [
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "default_token",
+              "name": "NUMBER"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "token",
+              "name": "WORD"
+            },
+            {
+              "kind": "rule",
+              "name": "item"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "callback_order_trace",
+      "description": "Traces the exact bottom-up callback order across rules and tokens",
+      "grammar": "\n            start: first second\n            first: A B\n            second: C\n            A: \"a\"\n            B: \"b\"\n            C: \"c\"\n            %ignore /\\s+/\n        ",
+      "input": "a b c",
+      "rule_actions": {
+        "start": {
+          "action": "identity"
+        },
+        "first": {
+          "action": "identity"
+        },
+        "second": {
+          "action": "identity"
+        }
+      },
+      "token_actions": {
+        "A": {
+          "action": "identity"
+        },
+        "B": {
+          "action": "identity"
+        },
+        "C": {
+          "action": "identity"
+        }
+      },
+      "default_rule": null,
+      "default_token": null,
+      "visit_tokens": true,
+      "parser_options": {},
+      "configs": {
+        "lalr_basic": {
+          "status": "ok",
+          "value": {
+            "type": "tree",
+            "data": "start",
+            "children": [
+              {
+                "type": "tree",
+                "data": "first",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "A",
+                    "value": "a"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "B",
+                    "value": "b"
+                  }
+                ]
+              },
+              {
+                "type": "tree",
+                "data": "second",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "C",
+                    "value": "c"
+                  }
+                ]
+              }
+            ]
+          },
+          "trace": [
+            {
+              "kind": "token",
+              "name": "A"
+            },
+            {
+              "kind": "token",
+              "name": "B"
+            },
+            {
+              "kind": "rule",
+              "name": "first"
+            },
+            {
+              "kind": "token",
+              "name": "C"
+            },
+            {
+              "kind": "rule",
+              "name": "second"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        },
+        "lalr_contextual": {
+          "status": "ok",
+          "value": {
+            "type": "tree",
+            "data": "start",
+            "children": [
+              {
+                "type": "tree",
+                "data": "first",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "A",
+                    "value": "a"
+                  },
+                  {
+                    "type": "token",
+                    "token_type": "B",
+                    "value": "b"
+                  }
+                ]
+              },
+              {
+                "type": "tree",
+                "data": "second",
+                "children": [
+                  {
+                    "type": "token",
+                    "token_type": "C",
+                    "value": "c"
+                  }
+                ]
+              }
+            ]
+          },
+          "trace": [
+            {
+              "kind": "token",
+              "name": "A"
+            },
+            {
+              "kind": "token",
+              "name": "B"
+            },
+            {
+              "kind": "rule",
+              "name": "first"
+            },
+            {
+              "kind": "token",
+              "name": "C"
+            },
+            {
+              "kind": "rule",
+              "name": "second"
+            },
+            {
+              "kind": "rule",
+              "name": "start"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

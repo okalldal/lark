@@ -1,50 +1,137 @@
 [
   {
-    "name": "number",
-    "input": "",
-    "tree": {
+    "name": "basic_exhaust_1_plus_2_times_3",
+    "lexer": "basic",
+    "grammar": "arithmetic",
+    "text": "1 + 2 * 3",
+    "initial_accepts": [
+      "LPAR",
+      "MINUS",
+      "NAME",
+      "NUMBER",
+      "PLUS"
+    ],
+    "steps": [
+      {
+        "action": "exhaust",
+        "terminal": "NUMBER",
+        "value": "1"
+      },
+      {
+        "action": "exhaust",
+        "terminal": "PLUS",
+        "value": "+"
+      },
+      {
+        "action": "exhaust",
+        "terminal": "NUMBER",
+        "value": "2"
+      },
+      {
+        "action": "exhaust",
+        "terminal": "STAR",
+        "value": "*"
+      },
+      {
+        "action": "exhaust",
+        "terminal": "NUMBER",
+        "value": "3"
+      }
+    ],
+    "accepts_after_exhaust": [
+      "$END",
+      "MINUS",
+      "PLUS",
+      "SLASH",
+      "STAR"
+    ],
+    "result": {
       "type": "tree",
-      "data": "start",
+      "data": "add",
       "children": [
         {
           "type": "token",
           "token_type": "NUMBER",
-          "value": "7"
+          "value": "1"
+        },
+        {
+          "type": "tree",
+          "data": "mul",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "2"
+            },
+            {
+              "type": "token",
+              "token_type": "NUMBER",
+              "value": "3"
+            }
+          ]
         }
       ]
-    },
-    "steps": [
-      {
-        "op": "accepts",
-        "accepts": [
-          "NUMBER"
-        ]
-      },
-      {
-        "op": "feed",
-        "type": "NUMBER",
-        "value": "7",
-        "ok": true
-      },
-      {
-        "op": "accepts",
-        "accepts": [
-          "$END",
-          "PLUS"
-        ]
-      },
-      {
-        "op": "feed_eof",
-        "ok": true
-      }
-    ]
+    }
   },
   {
-    "name": "sum",
-    "input": "",
-    "tree": {
+    "name": "basic_exhaust_parens",
+    "lexer": "basic",
+    "grammar": "arithmetic",
+    "text": "(1 + 2) * 3",
+    "initial_accepts": [
+      "LPAR",
+      "MINUS",
+      "NAME",
+      "NUMBER",
+      "PLUS"
+    ],
+    "steps": [
+      {
+        "action": "exhaust",
+        "terminal": "LPAR",
+        "value": "("
+      },
+      {
+        "action": "exhaust",
+        "terminal": "NUMBER",
+        "value": "1"
+      },
+      {
+        "action": "exhaust",
+        "terminal": "PLUS",
+        "value": "+"
+      },
+      {
+        "action": "exhaust",
+        "terminal": "NUMBER",
+        "value": "2"
+      },
+      {
+        "action": "exhaust",
+        "terminal": "RPAR",
+        "value": ")"
+      },
+      {
+        "action": "exhaust",
+        "terminal": "STAR",
+        "value": "*"
+      },
+      {
+        "action": "exhaust",
+        "terminal": "NUMBER",
+        "value": "3"
+      }
+    ],
+    "accepts_after_exhaust": [
+      "$END",
+      "MINUS",
+      "PLUS",
+      "SLASH",
+      "STAR"
+    ],
+    "result": {
       "type": "tree",
-      "data": "start",
+      "data": "mul",
       "children": [
         {
           "type": "tree",
@@ -57,182 +144,583 @@
             },
             {
               "type": "token",
-              "token_type": "PLUS",
-              "value": "+"
-            },
-            {
-              "type": "token",
               "token_type": "NUMBER",
               "value": "2"
             }
           ]
+        },
+        {
+          "type": "token",
+          "token_type": "NUMBER",
+          "value": "3"
         }
       ]
-    },
+    }
+  },
+  {
+    "name": "basic_manual_1_plus_2",
+    "lexer": "basic",
+    "grammar": "arithmetic",
+    "text": "",
+    "initial_accepts": [
+      "LPAR",
+      "MINUS",
+      "NAME",
+      "NUMBER",
+      "PLUS"
+    ],
     "steps": [
       {
-        "op": "accepts",
-        "accepts": [
-          "NUMBER"
+        "action": "feed",
+        "terminal": "NUMBER",
+        "value": "1",
+        "accepts_before": [
+          "LPAR",
+          "MINUS",
+          "NAME",
+          "NUMBER",
+          "PLUS"
+        ],
+        "accepts_after": [
+          "$END",
+          "MINUS",
+          "PLUS",
+          "SLASH",
+          "STAR"
         ]
       },
       {
-        "op": "feed",
-        "type": "NUMBER",
-        "value": "1",
-        "ok": true
-      },
-      {
-        "op": "accepts",
-        "accepts": [
+        "action": "feed",
+        "terminal": "PLUS",
+        "value": "+",
+        "accepts_before": [
           "$END",
+          "MINUS",
+          "PLUS",
+          "SLASH",
+          "STAR"
+        ],
+        "accepts_after": [
+          "LPAR",
+          "MINUS",
+          "NAME",
+          "NUMBER",
           "PLUS"
         ]
       },
       {
-        "op": "feed",
-        "type": "PLUS",
-        "value": "+",
-        "ok": true
-      },
-      {
-        "op": "accepts",
-        "accepts": [
-          "NUMBER"
-        ]
-      },
-      {
-        "op": "feed",
-        "type": "NUMBER",
+        "action": "feed",
+        "terminal": "NUMBER",
         "value": "2",
-        "ok": true
-      },
-      {
-        "op": "accepts",
-        "accepts": [
-          "$END",
+        "accepts_before": [
+          "LPAR",
+          "MINUS",
+          "NAME",
+          "NUMBER",
           "PLUS"
+        ],
+        "accepts_after": [
+          "$END",
+          "MINUS",
+          "PLUS",
+          "SLASH",
+          "STAR"
         ]
-      },
-      {
-        "op": "feed_eof",
-        "ok": true
       }
-    ]
+    ],
+    "result": {
+      "type": "tree",
+      "data": "add",
+      "children": [
+        {
+          "type": "token",
+          "token_type": "NUMBER",
+          "value": "1"
+        },
+        {
+          "type": "token",
+          "token_type": "NUMBER",
+          "value": "2"
+        }
+      ]
+    },
+    "final_accepts": []
   },
   {
-    "name": "bad_first",
-    "input": "",
-    "tree": null,
+    "name": "basic_manual_single_number",
+    "lexer": "basic",
+    "grammar": "arithmetic",
+    "text": "",
+    "initial_accepts": [
+      "LPAR",
+      "MINUS",
+      "NAME",
+      "NUMBER",
+      "PLUS"
+    ],
     "steps": [
       {
-        "op": "accepts",
-        "accepts": [
-          "NUMBER"
-        ]
-      },
-      {
-        "op": "feed",
-        "type": "PLUS",
-        "value": "+",
-        "ok": false,
-        "expected": [
-          "NUMBER"
+        "action": "feed",
+        "terminal": "NUMBER",
+        "value": "42",
+        "accepts_before": [
+          "LPAR",
+          "MINUS",
+          "NAME",
+          "NUMBER",
+          "PLUS"
+        ],
+        "accepts_after": [
+          "$END",
+          "MINUS",
+          "PLUS",
+          "SLASH",
+          "STAR"
         ]
       }
-    ]
+    ],
+    "result": {
+      "type": "token",
+      "token_type": "NUMBER",
+      "value": "42"
+    },
+    "final_accepts": []
   },
   {
-    "name": "premature_eof",
-    "input": "",
-    "tree": null,
+    "name": "basic_exhaust_neg",
+    "lexer": "basic",
+    "grammar": "arithmetic",
+    "text": "-1",
+    "initial_accepts": [
+      "LPAR",
+      "MINUS",
+      "NAME",
+      "NUMBER",
+      "PLUS"
+    ],
     "steps": [
       {
-        "op": "feed",
-        "type": "NUMBER",
-        "value": "1",
-        "ok": true
+        "action": "exhaust",
+        "terminal": "MINUS",
+        "value": "-"
       },
       {
-        "op": "feed",
-        "type": "PLUS",
-        "value": "+",
-        "ok": true
-      },
-      {
-        "op": "accepts",
-        "accepts": [
-          "NUMBER"
-        ]
-      },
-      {
-        "op": "feed_eof",
-        "ok": false,
-        "expected": [
-          "NUMBER"
-        ]
+        "action": "exhaust",
+        "terminal": "NUMBER",
+        "value": "1"
       }
-    ]
+    ],
+    "accepts_after_exhaust": [
+      "$END",
+      "MINUS",
+      "PLUS",
+      "SLASH",
+      "STAR"
+    ],
+    "result": {
+      "type": "tree",
+      "data": "neg",
+      "children": [
+        {
+          "type": "token",
+          "token_type": "NUMBER",
+          "value": "1"
+        }
+      ]
+    }
   },
   {
-    "name": "exhaust_then_eof",
-    "input": "1 + 2",
-    "tree": {
+    "name": "contextual_exhaust_hello_foo",
+    "lexer": "contextual",
+    "grammar": "recovery_contextual",
+    "text": "[hello world] {foo bar}",
+    "initial_accepts": [
+      "LSQB"
+    ],
+    "steps": [
+      {
+        "action": "exhaust",
+        "terminal": "LSQB",
+        "value": "["
+      },
+      {
+        "action": "exhaust",
+        "terminal": "AWORD",
+        "value": "hello"
+      },
+      {
+        "action": "exhaust",
+        "terminal": "AWORD",
+        "value": "world"
+      },
+      {
+        "action": "exhaust",
+        "terminal": "RSQB",
+        "value": "]"
+      },
+      {
+        "action": "exhaust",
+        "terminal": "LBRACE",
+        "value": "{"
+      },
+      {
+        "action": "exhaust",
+        "terminal": "BWORD",
+        "value": "foo"
+      },
+      {
+        "action": "exhaust",
+        "terminal": "BWORD",
+        "value": "bar"
+      },
+      {
+        "action": "exhaust",
+        "terminal": "RBRACE",
+        "value": "}"
+      }
+    ],
+    "accepts_after_exhaust": [
+      "$END"
+    ],
+    "result": {
       "type": "tree",
       "data": "start",
       "children": [
         {
           "type": "tree",
-          "data": "add",
+          "data": "a_part",
           "children": [
             {
               "type": "token",
-              "token_type": "NUMBER",
-              "value": "1"
+              "token_type": "AWORD",
+              "value": "hello"
             },
             {
               "type": "token",
-              "token_type": "PLUS",
-              "value": "+"
+              "token_type": "AWORD",
+              "value": "world"
+            }
+          ]
+        },
+        {
+          "type": "tree",
+          "data": "b_part",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "BWORD",
+              "value": "foo"
             },
             {
               "type": "token",
-              "token_type": "NUMBER",
-              "value": "2"
+              "token_type": "BWORD",
+              "value": "bar"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "contextual_manual_hello_foo",
+    "lexer": "contextual",
+    "grammar": "recovery_contextual",
+    "text": "",
+    "initial_accepts": [
+      "LSQB"
+    ],
+    "steps": [
+      {
+        "action": "feed",
+        "terminal": "LSQB",
+        "value": "[",
+        "accepts_before": [
+          "LSQB"
+        ],
+        "accepts_after": [
+          "AWORD"
+        ]
+      },
+      {
+        "action": "feed",
+        "terminal": "AWORD",
+        "value": "hello",
+        "accepts_before": [
+          "AWORD"
+        ],
+        "accepts_after": [
+          "AWORD",
+          "RSQB"
+        ]
+      },
+      {
+        "action": "feed",
+        "terminal": "RSQB",
+        "value": "]",
+        "accepts_before": [
+          "AWORD",
+          "RSQB"
+        ],
+        "accepts_after": [
+          "LBRACE"
+        ]
+      },
+      {
+        "action": "feed",
+        "terminal": "LBRACE",
+        "value": "{",
+        "accepts_before": [
+          "LBRACE"
+        ],
+        "accepts_after": [
+          "BWORD"
+        ]
+      },
+      {
+        "action": "feed",
+        "terminal": "BWORD",
+        "value": "foo",
+        "accepts_before": [
+          "BWORD"
+        ],
+        "accepts_after": [
+          "BWORD",
+          "RBRACE"
+        ]
+      },
+      {
+        "action": "feed",
+        "terminal": "RBRACE",
+        "value": "}",
+        "accepts_before": [
+          "BWORD",
+          "RBRACE"
+        ],
+        "accepts_after": [
+          "$END"
+        ]
+      }
+    ],
+    "result": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "a_part",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "AWORD",
+              "value": "hello"
+            }
+          ]
+        },
+        {
+          "type": "tree",
+          "data": "b_part",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "BWORD",
+              "value": "foo"
             }
           ]
         }
       ]
     },
+    "final_accepts": []
+  },
+  {
+    "name": "contextual_exhaust_single_words",
+    "lexer": "contextual",
+    "grammar": "recovery_contextual",
+    "text": "[x] {y}",
+    "initial_accepts": [
+      "LSQB"
+    ],
     "steps": [
       {
-        "op": "exhaust",
-        "tokens": [
-          [
-            "NUMBER",
-            "1"
-          ],
-          [
-            "PLUS",
-            "+"
-          ],
-          [
-            "NUMBER",
-            "2"
-          ]
-        ]
+        "action": "exhaust",
+        "terminal": "LSQB",
+        "value": "["
       },
       {
-        "op": "accepts",
-        "accepts": [
-          "$END",
-          "PLUS"
-        ]
+        "action": "exhaust",
+        "terminal": "AWORD",
+        "value": "x"
       },
       {
-        "op": "feed_eof",
-        "ok": true
+        "action": "exhaust",
+        "terminal": "RSQB",
+        "value": "]"
+      },
+      {
+        "action": "exhaust",
+        "terminal": "LBRACE",
+        "value": "{"
+      },
+      {
+        "action": "exhaust",
+        "terminal": "BWORD",
+        "value": "y"
+      },
+      {
+        "action": "exhaust",
+        "terminal": "RBRACE",
+        "value": "}"
       }
-    ]
+    ],
+    "accepts_after_exhaust": [
+      "$END"
+    ],
+    "result": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "a_part",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "AWORD",
+              "value": "x"
+            }
+          ]
+        },
+        {
+          "type": "tree",
+          "data": "b_part",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "BWORD",
+              "value": "y"
+            }
+          ]
+        }
+      ]
+    }
+  },
+  {
+    "name": "basic_fork",
+    "lexer": "basic",
+    "grammar": "arithmetic",
+    "text": "1 + 2",
+    "main_accepts_before_eof": [
+      "$END",
+      "MINUS",
+      "PLUS",
+      "SLASH",
+      "STAR"
+    ],
+    "fork_accepts_before_eof": [
+      "$END",
+      "MINUS",
+      "PLUS",
+      "SLASH",
+      "STAR"
+    ],
+    "main_result": {
+      "type": "tree",
+      "data": "add",
+      "children": [
+        {
+          "type": "token",
+          "token_type": "NUMBER",
+          "value": "1"
+        },
+        {
+          "type": "token",
+          "token_type": "NUMBER",
+          "value": "2"
+        }
+      ]
+    },
+    "fork_result": {
+      "type": "tree",
+      "data": "add",
+      "children": [
+        {
+          "type": "token",
+          "token_type": "NUMBER",
+          "value": "1"
+        },
+        {
+          "type": "token",
+          "token_type": "NUMBER",
+          "value": "2"
+        }
+      ]
+    }
+  },
+  {
+    "name": "contextual_fork",
+    "lexer": "contextual",
+    "grammar": "recovery_contextual",
+    "text": "[hello] {foo}",
+    "main_accepts_before_eof": [
+      "$END"
+    ],
+    "fork_accepts_before_eof": [
+      "$END"
+    ],
+    "main_result": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "a_part",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "AWORD",
+              "value": "hello"
+            }
+          ]
+        },
+        {
+          "type": "tree",
+          "data": "b_part",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "BWORD",
+              "value": "foo"
+            }
+          ]
+        }
+      ]
+    },
+    "fork_result": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "a_part",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "AWORD",
+              "value": "hello"
+            }
+          ]
+        },
+        {
+          "type": "tree",
+          "data": "b_part",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "BWORD",
+              "value": "foo"
+            }
+          ]
+        }
+      ]
+    }
   }
 ]

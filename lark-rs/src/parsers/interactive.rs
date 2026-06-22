@@ -1,4 +1,4 @@
-//! Interactive LALR parser (issue #168).
+//! Interactive LALR parser (issues #168, #222).
 //!
 //! A driveable parser: feed tokens one at a time, inspect which terminals the
 //! parser would accept next, fork an independent cursor, and resume automated
@@ -6,9 +6,7 @@
 //! `InteractiveParser` (`lark/parsers/lalr_interactive_parser.py`) — `feed_token`,
 //! `accepts`, `feed_eof`, `exhaust_lexer`, `resume`, `copy` (here `fork`),
 //! `pretty`, `result` — plus one ergonomic wrapper, [`feed`](InteractiveParser::feed)
-//! `(name, value)` over `feed_token`. Python's `choices()` / `__eq__` /
-//! `ImmutableInteractiveParser` are not part of v1 (ADR-0026: only what the oracle
-//! grounds, plus the named convenience). The shared operations are differentially
+//! `(name, value)` over `feed_token`. The shared operations are differentially
 //! tested against Python (`tests/test_interactive.rs`).
 //!
 //! It is a *view* onto the shared state machine: every mutation goes through
@@ -20,14 +18,38 @@
 //! parser*, not up front: `parse_interactive` over broken editor text succeeds, and
 //! an un-lexable character surfaces only when `exhaust_lexer`/`resume` reaches it.
 //! Manual `feed`/`feed_token` inject caller-supplied tokens and ignore the lexer.
-//! v1 lexes with the **basic** lexer; the contextual lexer is a follow-up.
+//!
+//! **Two lexer paths** (issue #222): the basic lexer lexes with the global terminal
+//! set (all terminals at every position); the contextual lexer narrows terminals
+//! by the live parser state (via `ContextualLexer::next_token`) and falls back to
+//! the root (full-terminal) scanner on a per-state miss — exactly the machinery
+//! the contextual recovery source uses (#166). A grammar whose contextual lexer
+//! is load-bearing (overlapping terminals disambiguated only by state) must use
+//! the contextual path; the basic path would mis-tokenize under `exhaust_lexer`.
 
 use crate::error::ParseError;
 use crate::grammar::intern::SymbolId;
-use crate::lexer::BasicLexer;
+use crate::lexer::{BasicLexer, ContextualLexer};
 use crate::tree::{ParseTree, Token};
 
 use super::lalr::{Feed, LalrParser, ParserStack};
+
+/// Which lexer drives the lazy `exhaust_lexer`/`resume` path.
+enum LexerKind<'a> {
+    /// Basic (global) lexer: lexes one token at a time with all terminals.
+    Basic(&'a BasicLexer),
+    /// Contextual lexer: narrows terminals by the current parser state (#222).
+    Contextual(&'a ContextualLexer),
+}
+
+impl Clone for LexerKind<'_> {
+    fn clone(&self) -> Self {
+        match self {
+            LexerKind::Basic(l) => LexerKind::Basic(l),
+            LexerKind::Contextual(l) => LexerKind::Contextual(l),
+        }
+    }
+}
 
 /// A driveable LALR parse in progress. Obtained from
 /// [`Lark::parse_interactive`](crate::Lark::parse_interactive).
@@ -38,9 +60,7 @@ use super::lalr::{Feed, LalrParser, ParserStack};
 /// [`accepts`](Self::accepts), never by poking the stack.
 pub struct InteractiveParser<'a> {
     parser: &'a LalrParser,
-    /// The basic lexer driven lazily by `exhaust_lexer`/`resume`. `None` leaves
-    /// those ops a no-op (manual-feed-only); v1 always wires `Some`.
-    lexer: Option<&'a BasicLexer>,
+    lexer: LexerKind<'a>,
     stack: ParserStack,
     /// Owned input, lexed lazily from a hand-tracked cursor (avoids a
     /// self-referential borrow of a `LexerState`). `line`/`col` are 1-based to match
@@ -54,15 +74,35 @@ pub struct InteractiveParser<'a> {
 }
 
 impl<'a> InteractiveParser<'a> {
-    pub(crate) fn new(
+    /// Build an interactive parser over the **basic** lexer (issue #168).
+    pub(crate) fn new_basic(
         parser: &'a LalrParser,
-        lexer: Option<&'a BasicLexer>,
+        lexer: &'a BasicLexer,
         stack: ParserStack,
         text: String,
     ) -> Self {
         InteractiveParser {
             parser,
-            lexer,
+            lexer: LexerKind::Basic(lexer),
+            stack,
+            text,
+            pos: 0,
+            line: 1,
+            col: 1,
+            result: None,
+        }
+    }
+
+    /// Build an interactive parser over the **contextual** lexer (issue #222).
+    pub(crate) fn new_contextual(
+        parser: &'a LalrParser,
+        lexer: &'a ContextualLexer,
+        stack: ParserStack,
+        text: String,
+    ) -> Self {
+        InteractiveParser {
+            parser,
+            lexer: LexerKind::Contextual(lexer),
             stack,
             text,
             pos: 0,
@@ -81,9 +121,7 @@ impl<'a> InteractiveParser<'a> {
     /// `ParserState.feed_token` indexes `states[state][token.type]` — including
     /// `$END`, which is interned under that name. A caller-built
     /// `Token::new("NUMBER", "1")` therefore Just Works, and a foreign or mutated
-    /// token's numeric `type_id` is **not trusted**: a token whose `type_` is
-    /// `"NUMBER"` but whose `type_id` is some other parser's id still feeds as
-    /// `NUMBER` here, never under the stale id. An unknown name errors.
+    /// token's numeric `type_id` is **not trusted**: it is re-resolved by name.
     ///
     /// Once the parse has reached ACCEPT (`result().is_some()`) it is **finished**:
     /// further feeds error (with an empty expected set, matching `accepts() == []`).
@@ -117,7 +155,7 @@ impl<'a> InteractiveParser<'a> {
 
     /// Build and feed a token by terminal *name* — the form [`accepts`](Self::accepts)
     /// returns. A thin ergonomic wrapper over [`feed_token`](Self::feed_token)
-    /// (`feed("NUMBER", "1")` ≡ `feed_token(Token::new("NUMBER", "1"))`); the name is
+    /// (`feed("NUMBER", "1")` == `feed_token(Token::new("NUMBER", "1"))`); the name is
     /// resolved by `feed_token`.
     pub fn feed(&mut self, terminal: &str, value: &str) -> Result<Option<ParseTree>, ParseError> {
         self.feed_token(Token::new(terminal, value))
@@ -140,15 +178,20 @@ impl<'a> InteractiveParser<'a> {
     ///
     /// The `$END` position comes from the **lazy lexer cursor** (where lexing left
     /// off), *not* from the last manually-fed token — so after `exhaust_lexer` it is
-    /// the end of input, and before any lexer drive it is the start (`1,1`). v1 does
-    /// not expose Python's optional `last_token` position-borrowing.
+    /// the end of input, and before any lexer drive it is the start (`1,1`).
     pub fn feed_eof(&mut self) -> Result<Option<ParseTree>, ParseError> {
         self.feed_token(self.eof_token())
     }
 
-    /// Feed the rest of the (basic-lexer) token stream, **without** a `$END`;
-    /// returns the tokens consumed. An un-lexable character raises here (Python's
-    /// lazy `UnexpectedCharacters`), not at construction. Mirrors `exhaust_lexer`.
+    /// Feed the rest of the token stream, **without** a `$END`; returns the tokens
+    /// consumed. An un-lexable character raises here (Python's lazy
+    /// `UnexpectedCharacters`), not at construction. Mirrors `exhaust_lexer`.
+    ///
+    /// For the **contextual** lexer (#222), each token is lexed at the *current*
+    /// parser state (via `ContextualLexer::next_token`), narrowing to the terminals
+    /// valid in that state — with root-lexer fallback on a per-state miss, exactly
+    /// as the batch contextual parse does. The parser state changes after each
+    /// `feed_token`, so the *next* lex uses the updated state.
     pub fn exhaust_lexer(&mut self) -> Result<Vec<Token>, ParseError> {
         let mut fed = Vec::new();
         loop {
@@ -166,10 +209,8 @@ impl<'a> InteractiveParser<'a> {
     /// Resume fully-automated parsing to completion: feed the rest of the lexer, then
     /// a `$END`. Returns the finished tree. Mirrors Python's `resume_parse`.
     ///
-    /// Rust API shape (not a Python-parity claim): this **consumes** the cursor
-    /// (`self`), since after resuming to `$END` there is nothing more to drive — you
-    /// wanted the tree, not the handle. The step-wise ops (`feed_token`/`feed_eof`)
-    /// keep `&mut self`. Fork first (`p.fork().resume()`) if you need the cursor back.
+    /// Consumes the cursor (`self`), since after resuming to `$END` there is nothing
+    /// more to drive. Fork first (`p.fork().resume()`) if you need the cursor back.
     pub fn resume(mut self) -> Result<ParseTree, ParseError> {
         self.exhaust_lexer()?;
         match self.feed_eof()? {
@@ -184,7 +225,7 @@ impl<'a> InteractiveParser<'a> {
     pub fn fork(&self) -> InteractiveParser<'a> {
         InteractiveParser {
             parser: self.parser,
-            lexer: self.lexer,
+            lexer: self.lexer.clone(),
             stack: self.stack.clone(),
             text: self.text.clone(),
             pos: self.pos,
@@ -210,46 +251,93 @@ impl<'a> InteractiveParser<'a> {
         )
     }
 
-    // ─── Lazy basic-lexer cursor ─────────────────────────────────────────────
+    // ─── Lazy lexer cursor ───────────────────────────────────────────────────
 
     /// The synthetic `$END` token at the current cursor (its position is where lexing
     /// left off — after `exhaust_lexer`, the end of input; before any drive, the
-    /// start). This is what fixes premature-EOF diagnostics carrying a real location.
+    /// start).
     fn eof_token(&self) -> Token {
         Token::end().with_position(self.line, self.col, self.pos, self.pos)
     }
 
     /// Lex the next non-ignored token, advancing the cursor, or the positioned `$END`
-    /// at end of input. `Err(UnexpectedCharacter)` at an un-lexable character (Python
-    /// raises here rather than recovering — that is the recovery path's job, not the
-    /// interactive parser's). A no-op `$END` when there is no lexer wired.
+    /// at end of input. `Err(UnexpectedCharacter)` at an un-lexable character.
+    ///
+    /// For the **contextual** lexer (#222), lexes at the current parser state via
+    /// `ContextualLexer::next_token`, with root-lexer fallback on a per-state miss.
+    /// For the **basic** lexer, lexes the global terminal set via
+    /// `BasicLexer::next_token_at`.
     fn next_lexed(&mut self) -> Result<Token, ParseError> {
-        let Some(lexer) = self.lexer else {
-            return Ok(self.eof_token());
-        };
         loop {
             if self.pos >= self.text.len() {
                 return Ok(self.eof_token());
             }
-            match lexer.next_token_at(&self.text, self.pos, self.line, self.col) {
-                Ok(token) => {
-                    self.pos = token.end_pos;
-                    self.line = token.end_line;
-                    self.col = token.end_column;
-                    if lexer.is_ignored(token.type_id) {
-                        continue;
+            match &self.lexer {
+                LexerKind::Basic(lexer) => {
+                    match lexer.next_token_at(&self.text, self.pos, self.line, self.col) {
+                        Ok(token) => {
+                            self.pos = token.end_pos;
+                            self.line = token.end_line;
+                            self.col = token.end_column;
+                            if lexer.is_ignored(token.type_id) {
+                                continue;
+                            }
+                            return Ok(token);
+                        }
+                        Err(()) => {
+                            let ch = self.text[self.pos..].chars().next().unwrap();
+                            return Err(ParseError::UnexpectedCharacter {
+                                ch,
+                                line: self.line,
+                                col: self.col,
+                                pos: self.pos,
+                                expected: "any token".to_string(),
+                            });
+                        }
                     }
-                    return Ok(token);
                 }
-                Err(()) => {
-                    let ch = self.text[self.pos..].chars().next().unwrap();
-                    return Err(ParseError::UnexpectedCharacter {
-                        ch,
-                        line: self.line,
-                        col: self.col,
-                        pos: self.pos,
-                        expected: "any token".to_string(),
-                    });
+                LexerKind::Contextual(lexer) => {
+                    let parser_state = self.stack.position();
+                    match lexer.next_token(&self.text, self.pos, parser_state, self.line, self.col)
+                    {
+                        // Ignored terminal (whitespace, comment): advance and continue.
+                        Ok(Some(token)) if lexer.is_ignored(token.type_id) => {
+                            self.pos = token.end_pos;
+                            self.line = token.end_line;
+                            self.col = token.end_column;
+                        }
+                        Ok(Some(token)) => {
+                            self.pos = token.end_pos;
+                            self.line = token.end_line;
+                            self.col = token.end_column;
+                            return Ok(token);
+                        }
+                        // Per-state miss: try the root (full-terminal) scanner as a
+                        // fallback, exactly as the contextual recovery source does
+                        // (#166). A root match is an out-of-context-but-valid token
+                        // we surface to the caller. A root miss is un-lexable.
+                        Ok(None) | Err(_) => {
+                            if let Some(token) =
+                                lexer.next_root_token(&self.text, self.pos, self.line, self.col)
+                            {
+                                self.pos = token.end_pos;
+                                self.line = token.end_line;
+                                self.col = token.end_column;
+                                if lexer.is_ignored(token.type_id) {
+                                    continue;
+                                }
+                                return Ok(token);
+                            }
+                            let ch = self.text[self.pos..].chars().next().unwrap();
+                            return Err(ParseError::UnexpectedCharacter {
+                                ch,
+                                line: self.line,
+                                col: self.col,
+                                pos: self.pos,
+                                expected: "any token".to_string(),
+                            });
+                        }
+                    }
                 }
             }
         }

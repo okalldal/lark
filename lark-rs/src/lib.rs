@@ -117,18 +117,23 @@ impl Lark {
             .parse_recovering(text, Some(start), &mut on_error)
     }
 
-    /// Begin an interactive parse (issue #168), mirroring Python Lark's
-    /// `parse_interactive`. Returns an [`InteractiveParser`] the caller drives:
-    /// feed tokens (`feed`/`feed_token`), inspect what is accepted (`accepts`),
-    /// fork (`fork`), or resume automated parsing (`resume`).
+    /// Begin an interactive parse (issues #168, #222).
     ///
-    /// v1 is supported on the **basic-lexer LALR** configuration; other
-    /// configurations return a typed error (contextual lexer is a follow-up).
+    /// Returns an [`InteractiveParser`] — a driveable cursor into a live LALR
+    /// parse. The caller feeds tokens one at a time (`feed`/`feed_token`),
+    /// inspects which terminals the parser would accept (`accepts`), forks
+    /// independent cursors, and resumes automated parsing (`resume`). The
+    /// lexer is driven lazily, not up front, so the cursor can be created over
+    /// incomplete or broken text.
+    ///
+    /// Supported on LALR without postlex, using the basic or contextual lexer.
+    /// Other configurations (Earley, CYK, or LALR with a postlex/Indenter hook)
+    /// return a typed error.
     pub fn parse_interactive(&self, text: &str) -> Result<InteractiveParser<'_>, LarkError> {
         self.frontend.parse_interactive(text, None)
     }
 
-    /// As [`parse_interactive`](Self::parse_interactive), from an explicit start.
+    /// As [`parse_interactive`](Self::parse_interactive), from an explicit start symbol.
     pub fn parse_interactive_with_start(
         &self,
         text: &str,

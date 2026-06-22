@@ -12,7 +12,9 @@ pub use lalr::{build_lalr_table, LalrParser, ParseTable};
 pub use token_source::{
     BasicRecovering, Contextual, ContextualRecovering, LexFailure, PreLexed, TokenSource,
 };
-pub use tree_builder::{NodeValue, TreeBuilder};
+// OutputBuilder, Slot, TreeOutputBuilder (and their backward-compat aliases
+// NodeValue, TreeBuilder) are crate-internal — issue #231 defers the public
+// trait shape. Internal code imports via `super::tree_builder::*` directly.
 
 use crate::error::{GrammarError, LarkError, ParseError, RecoveredTree};
 use crate::grammar::intern::SymbolTable;
@@ -86,9 +88,9 @@ trait ParserDriver: Send {
     }
 
     /// Begin an interactive parse (issue #168). The default is the typed refusal;
-    /// the basic-lexer LALR driver overrides it. v1 is basic-lexer + LALR only — the
-    /// contextual lexer and the postlex drivers are follow-ups (mirroring how
-    /// recovery was extended to them in #166/#94).
+    /// the LALR drivers override it (basic lexer: #168, contextual: #222). The
+    /// postlex drivers are a follow-up (mirroring how recovery was extended to
+    /// them in #94).
     fn parse_interactive(
         &self,
         _text: &str,
@@ -98,14 +100,6 @@ trait ParserDriver: Send {
     }
 }
 
-/// The typed refusal for a configuration without interactive-parsing support
-/// (issue #168). v1 supports LALR over the basic lexer only.
-fn interactive_unsupported() -> LarkError {
-    LarkError::Grammar(GrammarError::Other {
-        msg: "interactive parsing requires parser='lalr' with lexer='basic'".to_string(),
-    })
-}
-
 /// The typed refusal for a configuration without recovery support — shared by
 /// the trait default and [`lalr_recover`]'s missing-lexer arm so the message
 /// cannot drift between them. Recovery is LALR-only (on every lexer/postlex
@@ -113,6 +107,15 @@ fn interactive_unsupported() -> LarkError {
 fn recovery_unsupported() -> LarkError {
     LarkError::Grammar(GrammarError::Other {
         msg: "error recovery requires parser='lalr'".to_string(),
+    })
+}
+
+/// The typed refusal for a configuration without interactive-parsing support
+/// (issue #168). Supported on LALR with the basic or contextual lexer; the
+/// postlex drivers are a follow-up.
+fn interactive_unsupported() -> LarkError {
+    LarkError::Grammar(GrammarError::Other {
+        msg: "interactive parsing requires parser='lalr' (without postlex)".to_string(),
     })
 }
 
@@ -226,17 +229,16 @@ impl ParserDriver for LalrBasic {
     /// Interactive parse over the basic lexer (issue #168). Construction does **not**
     /// lex — the [`InteractiveParser`] lexes lazily as the caller drives it, so it can
     /// be created over broken editor text and an un-lexable character surfaces only
-    /// when `exhaust_lexer`/`resume` reaches it (matching Python). Manual
-    /// `feed`/`accepts` ignore the lexer entirely.
+    /// when `exhaust_lexer`/`resume` reaches it (matching Python).
     fn parse_interactive(
         &self,
         text: &str,
         start: Option<&str>,
     ) -> Result<InteractiveParser<'_>, LarkError> {
         let stack = self.parser.initial_stack(start)?;
-        Ok(InteractiveParser::new(
+        Ok(InteractiveParser::new_basic(
             &self.parser,
-            Some(&self.lexer),
+            &self.lexer,
             stack,
             text.to_string(),
         ))
@@ -277,6 +279,25 @@ impl ParserDriver for LalrContextual {
             &mut errors,
         )?;
         Ok(RecoveredTree { tree, errors })
+    }
+
+    /// Interactive parse over the contextual lexer (issue #222). The lazy cursor
+    /// lexes via `ContextualLexer::next_token` at the live parser state, with
+    /// root-lexer fallback — exactly the machinery the contextual recovery source
+    /// uses (#166). A grammar whose contextual lexer is load-bearing (AWORD vs
+    /// BWORD) gets correctly typed tokens under `exhaust_lexer`/`resume`.
+    fn parse_interactive(
+        &self,
+        text: &str,
+        start: Option<&str>,
+    ) -> Result<InteractiveParser<'_>, LarkError> {
+        let stack = self.parser.initial_stack(start)?;
+        Ok(InteractiveParser::new_contextual(
+            &self.parser,
+            &self.lexer,
+            stack,
+            text.to_string(),
+        ))
     }
 }
 
@@ -481,8 +502,8 @@ impl ParsingFrontend {
         self.driver.parse_recovering(text, start, on_error)
     }
 
-    /// Begin an interactive parse (issue #168). Supported on the basic-lexer LALR
-    /// configuration; other configurations return the typed refusal.
+    /// Begin an interactive parse (issues #168, #222). Supported on LALR with the
+    /// basic or contextual lexer; other configurations return a typed error.
     pub fn parse_interactive(
         &self,
         text: &str,
