@@ -40,7 +40,7 @@ use crate::tree::{Child, Token, Tree};
 /// `Clone` so the Earley forest-walk can memoize a shared SPPF node's assembled
 /// value (a DAG node is reachable by many parents).
 #[derive(Clone)]
-pub enum Slot {
+pub(crate) enum Slot {
     Token(Token),
     Tree(Tree),
     /// Children of a transparent (`_rule` / `__anon_*`) reduction, to be spliced
@@ -49,7 +49,7 @@ pub enum Slot {
 }
 
 // Backward-compat alias: all internal code that used `NodeValue` keeps compiling.
-pub type NodeValue = Slot;
+pub(crate) type NodeValue = Slot;
 
 // ─── OutputBuilder trait ────────────────────────────────────────────────────
 
@@ -62,7 +62,7 @@ pub type NodeValue = Slot;
 ///
 /// This trait is **internal** — it is not part of the public API. The public
 /// trait shape (for user-facing semantic actions) is deferred to issue #231.
-pub trait OutputBuilder {
+pub(crate) trait OutputBuilder {
     /// The value type this builder produces for a non-terminal node.
     /// For the default tree builder, this is `Child`.
     type Value;
@@ -85,7 +85,7 @@ pub trait OutputBuilder {
 /// compiled rules from the parse table; holds no mutable state, so a fresh one can
 /// be made per reduction for free. Token filtering is per *rule position* (each
 /// rule carries its own keep mask), not per terminal — see [`CompiledRule::filter_pos`].
-pub struct TreeOutputBuilder<'g> {
+pub(crate) struct TreeOutputBuilder<'g> {
     rules: &'g [CompiledRule],
 }
 
@@ -195,4 +195,4 @@ impl<'g> TreeOutputBuilder<'g> {
 // Backward-compat: keep `TreeBuilder` as a type alias so any code outside the
 // core three files (earley.rs, cyk.rs, lalr.rs) that references it by name
 // keeps compiling without a rename. This alias is crate-internal only.
-pub type TreeBuilder<'g> = TreeOutputBuilder<'g>;
+pub(crate) type TreeBuilder<'g> = TreeOutputBuilder<'g>;
