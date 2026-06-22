@@ -242,6 +242,10 @@ tests/
   test_interactive.rs Interactive-parser oracle (#168) — step-granular differential
                       (accepts() traces + feed results + final tree) vs Python's
                       InteractiveParser, plus relative oracles (resume==parse, etc.)
+                      and invalid-input/error-semantics cases (#250,
+                      interactive/error_cases.json): error variant + token/char +
+                      accepts()-survives-error, incl. the contextual root-fallback
+                      pin (state-invalid token == batch UnexpectedToken)
   test_recovery.rs    Error-recovery oracle (#43) — single-token-deletion recovery
                       vs Python Lark's `on_error` driver
   test_indenter_recovery.rs  Error recovery over the LALR + Indenter (postlex) path

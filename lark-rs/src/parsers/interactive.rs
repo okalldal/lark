@@ -316,6 +316,20 @@ impl<'a> InteractiveParser<'a> {
                         // fallback, exactly as the contextual recovery source does
                         // (#166). A root match is an out-of-context-but-valid token
                         // we surface to the caller. A root miss is un-lexable.
+                        //
+                        // Root-fallback error semantics (#250, pinned by
+                        // `test_interactive_error_oracle`). This mirrors
+                        // `ContextualRecovering`, not `Contextual` — but it is **not**
+                        // more permissive than a batch contextual parse. The fallback
+                        // only decides *which lexer* surfaces a token; the parser's
+                        // action table remains the sole authority on validity. So a
+                        // globally-valid but state-invalid token (e.g. `}` in `a_part`
+                        // state) is matched by the root scanner, fed, and rejected with
+                        // the *same* `UnexpectedToken` the batch contextual parse raises
+                        // (verified against Python Lark, whose contextual lexer likewise
+                        // falls back to the full terminal set). A genuinely unlexable
+                        // character misses even the root set and surfaces
+                        // `UnexpectedCharacter`, again as batch does.
                         Ok(None) | Err(_) => {
                             if let Some(token) =
                                 lexer.next_root_token(&self.text, self.pos, self.line, self.col)
