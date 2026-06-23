@@ -467,7 +467,9 @@ The finalized omnibus body therefore owns the whole sprint's record:
 - the **included issues as `Closes #N`** (these live on the omnibus *only*);
 - **review + CI evidence** per child;
 - any **`needs-decision` items excluded** from the sprint, with their memos;
-- any **follow-up issues** filed during the sprint.
+- any **follow-up issues** filed during the sprint, in the two enumerated arms — *product
+  follow-ups* and *kaizen follow-ups* — kept separate (§9), so a missing kaizen arm is
+  visible, never silent.
 
 **The architect gives final approval by merging the omnibus PR into `master`.** The
 session does not merge it.
@@ -500,10 +502,23 @@ The sprint is finished only once the omnibus PR is merged by the architect. Afte
   architect (architect decision, 2026-06-19). (A **second**, distinct git-proxy edge: the
   proxy can reject a *legitimate fast-forward push* to the branch tip — handled at §7
   finalize with re-sync + retry-with-backoff and a confirm-landed check; see #312.);
+- **File every retro-flagged kaizen item before reporting done (required, checkable —
+  not implicit).** Walk the aggregated Retrospective and every worker/review/orchestrator
+  `RETRO:` note: for each note tagged "kaizen" / "KIT BUG" / "file as follow-up" (i.e. a
+  kit/process fix, not a product bug), **confirm a tracking issue exists** — labelled
+  `kaizen` per `lark-rs/docs/LABELS.md` — and **link it in the close-out report**. The
+  close-out is **not done** until each such note is either filed as a `kaizen` issue or
+  explicitly marked already-tracked/duplicate (with the existing issue linked). This is
+  the §9 close-out enforcing PRINCIPLES §7 on *itself* — sprint #284 reliably filed its
+  product follow-ups but silently dropped every kaizen follow-up its own retro flagged
+  (recovered late as #309–#314); the same close-out step that demands "never silently
+  drop" must not drop here.
 - post the single batched close-out: what landed, the parked `needs-decision` inbox
-  (each with a recommendation, `/triage`-shaped), any follow-ups filed, and the
-  **aggregated Retrospective** (deduped + grouped, per the Retrospective section) so the
-  architect sees every process quirk the sprint surfaced in one place;
+  (each with a recommendation, `/triage`-shaped), **follow-ups filed in two enumerated
+  arms — *product follow-ups filed* AND *kaizen follow-ups filed* — listed separately**
+  (so a zero-kaizen close-out is conspicuous and must be explicitly justified, never
+  silent), and the **aggregated Retrospective** (deduped + grouped, per the Retrospective
+  section) so the architect sees every process quirk the sprint surfaced in one place;
 - emit the **Architect Action Memo + Durability Warrant** (template below) as a **comment
   on the omnibus PR** (it persists after merge). This is a **required** §9 deliverable.
 
@@ -565,7 +580,12 @@ it's felt and surfaced to the architect at the end — the point is to fix the *
   report: deduped and grouped (instructions / steps / tooling / know-how), each item with
   a concrete suggested fix. Persistent fixes that change the constitution or a command
   ride their **own** governance PR (§9 / PRINCIPLES.md §9) — file them as follow-up
-  issues rather than smuggling them into the omnibus.
+  issues rather than smuggling them into the omnibus. **Filing them is a required §9
+  close-out deliverable, not optional cleanup:** every retro-flagged kaizen/KIT-BUG item
+  is filed as a `kaizen` issue (or marked already-tracked) and counted in the close-out's
+  *kaizen follow-ups filed* arm before the sprint reports done — leaving a flagged item
+  unfiled is the §7 violation #284 committed (dropped them silently; recovered as
+  #309–#314).
 
 ## Guardrails (binding)
 
