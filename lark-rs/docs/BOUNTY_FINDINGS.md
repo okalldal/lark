@@ -157,7 +157,12 @@ Three sibling gaps, all build-time validation Python performs and lark-rs skips:
   agrees). The XFAIL `rc7_lalr_reduce_reduce_collision_rejected` is green and joined
   by a full differential audit (`rc7_reduce_reduce_differential_matches_oracle`)
   pinning the `+`/arm-order/nested/two-rule/tail-guarded reject family and the
-  legitimate-sharing accept family against Python Lark 1.3.1. LALR bank stays 512/512.
+  legitimate-sharing accept family against Python Lark 1.3.1. The audit also
+  **propagates through `%import`** (`imports.rs::copy_imported`): an over-share inside
+  (or reached through nested) imports is rejected exactly as the direct form is, pinned
+  by `rc7_reduce_reduce_differential_matches_oracle_via_import` (whole-imported,
+  straddling, parent-own-plus-import, nested — reject and genuine-accept cells, all
+  grounded on `Lark.open`). LALR bank stays 512/512.
 
 ### RC8 — Zero-width regexp under dynamic lexer not rejected (High, earley) — FIXED (#276)
 - **Grammar:** `start: A` / `A: /a*/` · **Input:** `"a"` · **Options:**

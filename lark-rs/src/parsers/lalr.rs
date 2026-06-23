@@ -549,6 +549,14 @@ pub fn build_lalr_table(
 /// A no-op when no shadow is attached (no over-share was detected). Shared by both
 /// LALR build paths — the live frontend (`build_lalr`) and standalone generation —
 /// so the rejection contract can never drift between them.
+///
+/// Naming note: the over-share the audit *targets* is a reduce/reduce collision, but
+/// the function runs the full [`build_lalr_table`], so in `strict` mode it also
+/// surfaces any **shift/reduce** conflict the shadow's split helpers expose — i.e. it
+/// reports whatever `Conflict` Python's un-shared model would, not reduce/reduce
+/// exclusively. The shadow is a structural superset of the real recurse rules (split,
+/// never merged), so any conflict it surfaces is one the sharing masked, never a
+/// spurious one.
 pub fn audit_lalr_reduce_reduce(
     grammar: &crate::grammar::Grammar,
     strict: bool,
