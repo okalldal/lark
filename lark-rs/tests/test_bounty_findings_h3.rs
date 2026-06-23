@@ -127,12 +127,11 @@ fn h3_alias_in_terminal_rejected() {
 /// H4 (HIGH). `lexer="auto"` (the *default*) with `parser="earley"` must resolve to
 /// the **dynamic** (parse-directed) lexer when there is no postlex, exactly as Python
 /// Lark does (`lark/lark.py`: auto→dynamic for earley, basic only with a postlex).
-/// lark-rs's `build_earley` (`src/parsers/mod.rs`) has a catch-all arm that routes
-/// `LexerType::Auto` to the **basic** lexer, so the common `Lark(g, parser="earley")`
-/// idiom silently uses a different lexer than Python — changing accept/reject (here)
-/// and tree shape. The whole Earley suite masks it by forcing an explicit lexer.
+/// Fixed in #334: `build_earley` (`src/parsers/mod.rs`) now resolves `LexerType::Auto`
+/// to `Dynamic` (no postlex) / `Basic` (postlex) before the lexer match, mirroring
+/// `lark/lark.py:399-413`, so the common `Lark(g, parser="earley")` idiom uses the
+/// same lexer as Python. Previously a catch-all arm routed `Auto` to the basic lexer.
 #[test]
-#[ignore = "XFAIL (bounty H4): earley+auto routes to the basic lexer instead of dynamic"]
 fn h4_earley_auto_lexer_is_dynamic() {
     let g = "start: \"print\" NAME\nNAME: /[a-z]+/\n%ignore \" \"\n";
     let lark = Lark::new(g, opts(ParserAlgorithm::Earley, LexerType::Auto)).expect("H4: builds");
