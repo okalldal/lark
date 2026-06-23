@@ -104,7 +104,7 @@ Turn `.lark` text into a `Grammar`. One module per pipeline phase:
 | `parser.rs` | recursive-descent parser → raw AST (`ast.rs`) |
 | `compiler.rs` | lowers the AST into a `Grammar`; orchestrates the helpers below |
 | `terminals.rs` | terminal algebra → regex; terminal ordering rules |
-| `ebnf.rs` | expands `* + ? \| (...)` into anonymous helper rules |
+| `ebnf.rs` | expands `* + ? \| (...)` into anonymous helper rules; mints the Python-faithful reduce/reduce **audit shadow** when its helper sharing over-shares (RC7/#272, ADR-0013) |
 | `templates.rs` | parameterized rules (`_sep{x, sep}`) |
 | `imports.rs` | `%import` resolution (bundled libs + sibling files) |
 
@@ -130,7 +130,7 @@ backtracking engine — that whole story lives in `lookaround/` and
 
 | Module | Responsibility |
 |---|---|
-| `lalr.rs` | dense LALR(1) parse table + the parse loop |
+| `lalr.rs` | dense LALR(1) parse table + the parse loop; `audit_lalr_reduce_reduce` gates the build on the EBNF audit shadow (RC7/#272), shared by the live build and standalone |
 | `earley.rs` | Earley recognizer + SPPF forest + forest→tree + dynamic lexer |
 | `cyk.rs` | CYK parser (CNF conversion + O(n³) DP) |
 | `tree_builder.rs` | `OutputBuilder` seam + `TreeOutputBuilder` (default tree shaping, used by all three) |

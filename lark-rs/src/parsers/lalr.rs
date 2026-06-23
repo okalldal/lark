@@ -532,6 +532,34 @@ pub fn build_lalr_table(
     })
 }
 
+/// Run the post-lowering reduce/reduce collision audit (RC7/#272, ADR-0013) for a
+/// surface [`Grammar`](crate::grammar::Grammar) about to be built as LALR.
+///
+/// The load-bearing EBNF helper *sharing* (`recurse_cache`) can fuse two recurse
+/// helpers Python Lark mints distinctly (`start: r0* | (r0)*`), masking a
+/// reduce/reduce collision Python rejects at build. When the loader detected such an
+/// over-share it attached a Python-faithful audit shadow (`Grammar::lalr_audit` —
+/// the same grammar re-lowered with recurse helpers keyed on the inner source-AST).
+/// This lowers that shadow and runs the *same* conflict detector over it, surfacing
+/// any `Conflict` it reports. The sharing stays load-bearing for the real parse
+/// table — the shadow only gates the build, never parses. The shadow is structurally
+/// a superset of the real grammar's recurse rules (split, never merged), so it can
+/// only ever expose the masked collision, never invent a spurious one.
+///
+/// A no-op when no shadow is attached (no over-share was detected). Shared by both
+/// LALR build paths — the live frontend (`build_lalr`) and standalone generation —
+/// so the rejection contract can never drift between them.
+pub fn audit_lalr_reduce_reduce(
+    grammar: &crate::grammar::Grammar,
+    strict: bool,
+) -> Result<(), GrammarError> {
+    if let Some(shadow) = &grammar.lalr_audit {
+        let shadow_cg = crate::grammar::lower(shadow);
+        build_lalr_table(&shadow_cg, strict)?;
+    }
+    Ok(())
+}
+
 // ─── ParserStack: the shared state machine (#168) ───────────────────────────
 
 /// The two stacks plus the "feed one token" reduce-loop that drive every LALR

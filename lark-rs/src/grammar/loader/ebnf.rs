@@ -574,7 +574,7 @@ impl GrammarCompiler {
                 kind: RepeatKind::Op,
             } => {
                 let arms = self.inner_alternatives(inner, parent)?;
-                let plus = self.recurse_helper(arms);
+                let plus = self.recurse_helper_keyed(arms, &inner.python_recurse_key());
                 Ok(Some(Slot::Nullable {
                     present: vec![(vec![plus], vec![0, 0])],
                     absent_nones: 0,
@@ -663,7 +663,7 @@ impl GrammarCompiler {
                 ..
             } => {
                 let arms = self.inner_alternatives(&inner, parent)?;
-                let plus = self.recurse_helper(arms);
+                let plus = self.recurse_helper_keyed(arms, &inner.python_recurse_key());
                 Ok(single(plus))
             }
             // Bounded `~n` / `~n..m` (including `~0..1`) nested under a distributed
@@ -1096,7 +1096,16 @@ impl GrammarCompiler {
     /// expression only, no `keep_all` context). Without this normalization, two
     /// separate helpers with identical bodies cause an unresolvable LALR
     /// reduce/reduce conflict.
-    fn recurse_helper(&mut self, mut arms: Vec<CompiledAlt>) -> Symbol {
+    ///
+    /// `ast_key` is the inner expression's source-AST structural key
+    /// (`Expr::python_recurse_key`). In the audit shadow (`python_keyed_recurse`,
+    /// RC7/#272) the cache is keyed on `ast_key` so the share/split decision matches
+    /// Python Lark's `EBNF_to_BNF._add_recurse_rule` (which keys on the inner `expr`
+    /// Tree) instead of the compiled arms; in the normal pass the load-bearing
+    /// compiled-arms sharing (ADR-0013) is preserved verbatim and `ast_key` only
+    /// records the over-share evidence (`recurse_cache_origin_key`) the loader uses
+    /// to decide whether to build the audit shadow at all.
+    fn recurse_helper_keyed(&mut self, mut arms: Vec<CompiledAlt>, ast_key: &str) -> Symbol {
         // Dedup identical arms (first occurrence wins, order preserved). Python
         // Lark's `EBNF_to_BNF` builds the one-or-more rule from the *set* of inner
         // expansions, so `("b" | "b")*` collapses to a single recurse arm. Without
@@ -1121,10 +1130,48 @@ impl GrammarCompiler {
         } else {
             self.current_keep_all
         };
+        // Audit shadow (RC7/#272): key on the inner-AST structural key so the
+        // share/split decision matches Python Lark's `_add_recurse_rule`
+        // (`rules_cache[expr]`), reproducing the un-shared helper split. The real
+        // pass keeps the load-bearing compiled-arms key (ADR-0013).
+        if self.python_keyed_recurse {
+            let ast_cache_key = (ast_key.to_string(), effective_keep_all);
+            if let Some(name) = self.recurse_cache_ast.get(&ast_cache_key) {
+                return Symbol::NonTerminal(NonTerminal::new(name));
+            }
+            let name = self.emit_recurse_rule(arms, effective_keep_all);
+            self.recurse_cache_ast.insert(ast_cache_key, name.clone());
+            return Symbol::NonTerminal(NonTerminal::new(&name));
+        }
         let key = (arms.clone(), effective_keep_all);
         if let Some(name) = self.recurse_cache.get(&key) {
+            // A real (compiled-arms) cache hit. If the inner-AST shape differs from
+            // the one that created this helper, the sharing has fused two helpers
+            // Python Lark would mint distinctly — flag the over-share so the loader
+            // knows an audit shadow (RC7/#272) is worth building.
+            if self
+                .recurse_cache_origin_key
+                .get(&key)
+                .is_some_and(|origin| origin != ast_key)
+            {
+                self.recurse_overshare_seen = true;
+            }
             return Symbol::NonTerminal(NonTerminal::new(name));
         }
+        let name = self.emit_recurse_rule(arms.clone(), effective_keep_all);
+        self.recurse_cache.insert(key.clone(), name.clone());
+        self.recurse_cache_origin_key
+            .insert(key, ast_key.to_string());
+        Symbol::NonTerminal(NonTerminal::new(&name))
+    }
+
+    /// Emit a fresh one-or-more recurse rule for the (already-deduped) inner `arms`
+    /// — Python Lark's `EBNF_to_BNF` `P: a0 | … | P a0 | …`. Returns the new
+    /// helper's name; the caller records it under whichever cache key
+    /// ([`recurse_helper_keyed`](Self::recurse_helper_keyed) — compiled arms in the
+    /// real pass, inner-AST key in the audit shadow). Factored out so both keyings
+    /// share one byte-identical emission.
+    fn emit_recurse_rule(&mut self, arms: Vec<CompiledAlt>, effective_keep_all: bool) -> String {
         let name = self.fresh_anon_rule(AnonKind::Plus);
         let nt = NonTerminal::new(&name);
         let opts = RuleOptions {
@@ -1157,8 +1204,7 @@ impl GrammarCompiler {
             self.rules
                 .push(Rule::new(nt.clone(), rec, None, rule_opts, k + i));
         }
-        self.recurse_cache.insert(key, name);
-        Symbol::NonTerminal(nt)
+        name
     }
 
     fn compile_repeat(
@@ -1173,7 +1219,8 @@ impl GrammarCompiler {
                 // inner+ → one-or-more, via the shared recurse helper with the
                 // inner's alternatives inlined (Python's `EBNF_to_BNF`).
                 let arms = self.inner_alternatives(&inner, parent)?;
-                Ok(self.recurse_helper(arms))
+                let ast_key = inner.python_recurse_key();
+                Ok(self.recurse_helper_keyed(arms, &ast_key))
             }
             (0, None) => {
                 // inner* reached here only when a *single symbol* is required (the
@@ -1185,7 +1232,7 @@ impl GrammarCompiler {
                 // such `x*` share the wrapper, so they collapse instead of colliding
                 // under LALR.
                 let arms = self.inner_alternatives(&inner, parent)?;
-                let plus = self.recurse_helper(arms);
+                let plus = self.recurse_helper_keyed(arms, &inner.python_recurse_key());
                 Ok(self.intern_helper(HelperKind::Star, vec![((vec![plus], vec![0, 0]), None)]))
             }
             (0, Some(1)) => {

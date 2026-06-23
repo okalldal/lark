@@ -33,4 +33,17 @@ pub struct Grammar {
     /// copies this onto [`SymbolInfo::anon_kind`] so the engine can key empty-rule
     /// rejection on provenance, not name spelling (#101, ADR-0024).
     pub anon_kinds: HashMap<String, AnonKind>,
+    /// Optional Python-faithful **audit shadow** of this grammar, used only by the
+    /// LALR build to detect a reduce/reduce collision the load-bearing EBNF helper
+    /// *sharing* (ADR-0013) masks (RC7/#272). It is this same grammar re-lowered
+    /// with recurse helpers keyed on the inner *source-AST* (Python Lark's
+    /// `EBNF_to_BNF._add_recurse_rule`), so `r0*` and `(r0)*` get distinct helpers
+    /// exactly as Python mints them. `build_lalr` runs the real conflict detector
+    /// over the shadow's lowering and surfaces any `Conflict` it finds; the shadow
+    /// never parses input. `None` means no recurse helper was over-shared (nothing
+    /// to audit) or this grammar *is* the shadow (the audit does not recurse — a
+    /// shadow's own `lalr_audit` is always `None`). Set once by the loader. NB the
+    /// derived [`Clone`] deep-copies this `Box` like any other field; `Grammar` is
+    /// not cloned on any build path, so the shadow is never duplicated in practice.
+    pub lalr_audit: Option<Box<Grammar>>,
 }

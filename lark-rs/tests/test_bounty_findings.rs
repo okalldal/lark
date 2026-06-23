@@ -156,14 +156,133 @@ fn rc4c_alias_inside_group_rejected() {
 
 /// RC7 (HIGH). Two star-arms differing only by parenthesization build distinct
 /// but equivalent star-helper rules; Python's LALR analysis reports a
-/// `Reduce/Reduce collision` and rejects at build. lark-rs builds the table and
-/// parses, masking real ambiguity. LALR-only (Earley agrees → conflict detector,
-/// not the loader).
+/// `Reduce/Reduce collision` and rejects at build. lark-rs used to build the table
+/// and parse, masking real ambiguity.
+///
+/// FIXED (#272, Option A — amends ADR-0013): the load-bearing EBNF helper *sharing*
+/// (`recurse_cache`) fuses `r0*` and `(r0)*` into one helper, so the conflict
+/// detector (correct) never sees two rules to collide. Rather than un-share (which
+/// regresses the LALR bank 512→482), the loader builds a Python-faithful **audit
+/// shadow** — the same grammar with recurse helpers keyed on the inner *source-AST*
+/// (Python Lark's `EBNF_to_BNF._add_recurse_rule`), so the two helpers split exactly
+/// as Python mints them — and the LALR build runs the *real* conflict detector over
+/// the shadow, surfacing the collision the sharing masks. LALR-only (Earley agrees).
+/// The differential family (`+` variant, arm-order, nested, two-rule, tail-guarded,
+/// and the legitimate-sharing accept cases) is pinned in `rc7_*` tests below.
 #[test]
-#[ignore = "XFAIL (bounty RC7): undetected LALR reduce/reduce collision"]
 fn rc7_lalr_reduce_reduce_collision_rejected() {
     let g = "start: r0* | (r0)*\nr0: \"a\"\n";
     assert_build_rejected(g, ParserAlgorithm::Lalr, LexerType::Contextual, "RC7");
+}
+
+/// RC7 differential audit (#272): the reduce/reduce collision audit must match
+/// Python Lark 1.3.1's accept/reject verdict *exactly* — reject only what Python
+/// rejects, and never redden a legitimate sharing case Python accepts. Pinned
+/// directly against the oracle's measured verdicts (Python Lark 1.3.1).
+#[test]
+fn rc7_reduce_reduce_differential_matches_oracle() {
+    // (name, grammar, python_rejects?)
+    let cases: &[(&str, &str, bool)] = &[
+        // — Python REJECTS: distinct-inner-AST star/plus helpers that collide. —
+        ("r0*|(r0)*", "start: r0* | (r0)*\nr0: \"a\"\n", true),
+        ("r0+|(r0)+", "start: r0+ | (r0)+\nr0: \"a\"\n", true),
+        (
+            "arm-order (r0)*|r0*",
+            "start: (r0)* | r0*\nr0: \"a\"\n",
+            true,
+        ),
+        (
+            "nested ((r0))*|r0*",
+            "start: ((r0))* | r0*\nr0: \"a\"\n",
+            true,
+        ),
+        (
+            "tail (r0)* X | r0*",
+            "start: (r0)* X | r0*\nr0: \"a\"\nX: \"x\"\n",
+            true,
+        ),
+        (
+            "two-rule x:a+/y:a+",
+            "start: x | y\nx: a+\ny: a+\na: \"a\"\n",
+            true,
+        ),
+        (
+            "cross-rule p:r0* q:(r0)*",
+            "start: p | q\np: r0*\nq: (r0)*\nr0: \"a\"\n",
+            true,
+        ),
+        // Python shares the recurse core grammar-wide (its `rules_cache`), so two
+        // rules each `WORD+` collide on the *shared* `__foo_plus_0`. lark-rs shares
+        // too and its plain detector already catches this — no over-share audit
+        // needed, but it must stay rejected.
+        (
+            "foo:WORD+/bar:WORD+",
+            "start: foo | bar\nfoo: WORD+\nbar: WORD+\n%import common.WORD\n",
+            true,
+        ),
+        (
+            "a:(\",\"X)*/b:(\",\"X)*",
+            "start: a | b\na: (\",\" X)*\nb: (\",\" X)*\nX: \"x\"\n",
+            true,
+        ),
+        // keep_all (`!`) context: `A+` plain vs `(A)+` under `!` — distinct inner
+        // AST, so Python splits and rejects. The shadow keys on `(ast_key,
+        // keep_all)`; pins that the keep_all dimension does not perturb the verdict.
+        ("!a: A+ | (A)+", "start: a\n!a: A+ | (A)+\nA: \"a\"\n", true),
+        // Templates: two usages whose inner AST differs (`u{r0}` vs plain `r0`)
+        // split exactly as Python's post-instantiation `rules_cache` would.
+        (
+            "template u{r0}*|r0*",
+            "start: u{r0}* | r0*\nu{a}: a\nr0: \"x\"\n",
+            true,
+        ),
+        (
+            "two-template u{r0}*|v{r0}*",
+            "start: u{r0}* | v{r0}*\nu{a}: a\nv{a}: a\nr0: \"x\"\n",
+            true,
+        ),
+        // — Python ACCEPTS: the audit must NOT over-reject these. —
+        // Same inner under two arms that genuinely differ (trailing `b`) — accept.
+        (
+            "same-rule A+ | A+ B",
+            "start: A+ | A+ B\nA: \"a\"\nB: \"b\"\n",
+            false,
+        ),
+        // Distinct inner symbols ⇒ distinct, non-colliding helpers.
+        (
+            "r0*|(s0)*",
+            "start: r0* | (s0)*\nr0: \"a\"\ns0: \"b\"\n",
+            false,
+        ),
+        // Distinct left-context (A / B) ⇒ the two split helpers never reach a
+        // common state, so no reduce/reduce even though their bodies coincide.
+        (
+            "guarded A r0*|B (r0)*",
+            "start: A r0* | B (r0)*\nr0: \"x\"\nA: \"a\"\nB: \"b\"\n",
+            false,
+        ),
+        // Legitimate sharing Python accepts — the arms genuinely differ.
+        ("a+ b | a+", "start: a+ b | a+\na: \"a\"\nb: \"b\"\n", false),
+        ("a* b | a+", "start: a* b | a+\na: \"a\"\nb: \"b\"\n", false),
+        // Identical inner AST shares one helper in *both* engines — accept.
+        ("r0*|r0*", "start: r0* | r0*\nr0: \"a\"\n", false),
+        ("single (\",\"X)*", "start: (\",\" X)*\nX: \"x\"\n", false),
+    ];
+    for (name, g, rejects) in cases {
+        let r = build(g, ParserAlgorithm::Lalr, LexerType::Contextual, false);
+        if *rejects {
+            assert!(
+                r.is_err(),
+                "RC7 differential: Python rejects `{name}`, but lark-rs accepted it"
+            );
+        } else {
+            assert!(
+                r.is_ok(),
+                "RC7 differential: Python accepts `{name}`, but lark-rs rejected it: {:?}",
+                r.err()
+            );
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -52,7 +52,7 @@ more permissive than the oracle is unfalsifiable → a bug.
 | RC4a| High     | fresh  | grammar-loader  | Alias on an inlined `_rule` not rejected |
 | RC4b| High     | fresh  | grammar-loader  | `?` modifier on an inlined `_rule` not rejected |
 | RC4c| High     | fresh  | grammar-loader  | Alias inside a parenthesized group not rejected |
-| RC7 | High     | fresh  | lalr-table      | Undetected LALR reduce/reduce collision |
+| RC7 | High     | fresh  | ebnf-loader     | Undetected LALR reduce/reduce collision — FIXED #272 (audit shadow; site is `ebnf.rs` sharing, not the detector) |
 | RC8 | High     | fresh  | earley          | Zero-width regexp under dynamic lexer not rejected |
 | RC9 | High     | fresh  | tree-shaping    | `expand1` keeps wrapper around a lone placeholder-`None` |
 | RC6 | Medium   | fresh  | lexer           | `\b`/`\B` leaks an uncategorized `regex-automata` build error |
@@ -141,13 +141,23 @@ Three sibling gaps, all build-time validation Python performs and lark-rs skips:
   `\b` prefix/suffix/bare and `\B`, both lexers. Distinct from the documented
   `\<`/`\>` normalization.
 
-### RC7 — Undetected LALR reduce/reduce collision (High, lalr-table)
+### RC7 — Undetected LALR reduce/reduce collision (High, lalr-table) — FIXED (#272)
 - **Grammar:** `start: r0* | (r0)*` / `r0: "a"` · **Input:** `"a"`
 - **Python:** build error — `Reduce/Reduce collision … between <__start_star_0 :
   r0>` and `<__start_star_1 : r0>`.
-- **lark-rs:** builds the table and parses, masking the ambiguity. LALR-only
-  (Earley agrees → the conflict detector, not the loader). `r0+ | (r0)+` and
-  arm-order variants diverge identically.
+- **lark-rs:** ~~builds the table and parses, masking the ambiguity.~~ **Fixed
+  (Option A, amends ADR-0013):** the corrected fix site is `grammar/loader/ebnf.rs`
+  (the `recurse_cache` *sharing*), not `parsers/lalr.rs` — the conflict detector is
+  correct, it just never saw two rules because the load-bearing helper sharing fused
+  `r0*` and `(r0)*` into one helper. Un-sharing regresses the LALR bank 512→482, so
+  instead the loader mints a Python-faithful **audit shadow** (recurse helpers keyed
+  on the inner source-AST, `Expr::python_recurse_key`) whenever it detects an
+  over-share, and the LALR build runs the *real* conflict detector over the shadow to
+  surface the masked collision (`parsers/mod.rs::build_lalr`). LALR-only (Earley
+  agrees). The XFAIL `rc7_lalr_reduce_reduce_collision_rejected` is green and joined
+  by a full differential audit (`rc7_reduce_reduce_differential_matches_oracle`)
+  pinning the `+`/arm-order/nested/two-rule/tail-guarded reject family and the
+  legitimate-sharing accept family against Python Lark 1.3.1. LALR bank stays 512/512.
 
 ### RC8 — Zero-width regexp under dynamic lexer not rejected (High, earley) — FIXED (#276)
 - **Grammar:** `start: A` / `A: /a*/` · **Input:** `"a"` · **Options:**

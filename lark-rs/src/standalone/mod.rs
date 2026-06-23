@@ -163,6 +163,10 @@ fn bake(grammar_src: &str, options: &LarkOptions) -> Result<Baked, LarkError> {
     )?;
     let cg = crate::grammar::lower(&grammar);
     let table = build_lalr_table(&cg, options.strict)?;
+    // Run the same post-lowering reduce/reduce audit the live LALR build runs
+    // (RC7/#272, ADR-0013) — shared helper so standalone generation can never bake a
+    // parser for a grammar the live LALR build and the oracle reject.
+    crate::parsers::lalr::audit_lalr_reduce_reduce(&grammar, options.strict)?;
     let lexer_conf = basic_lexer_conf(&cg, options.g_regex_flags);
 
     // Mirror build_frontend's LALR/basic sanitization (the standalone lexer is the
