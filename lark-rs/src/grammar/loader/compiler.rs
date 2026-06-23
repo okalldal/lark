@@ -754,6 +754,21 @@ impl GrammarCompiler {
             self.rules.iter().map(|r| r.origin.name.as_str()).collect();
         let defined_terms: std::collections::HashSet<&str> =
             self.terminals.iter().map(|t| t.name.as_str()).collect();
+        // A start symbol (default `start` or a custom one) that resolves to no
+        // defined rule is rejected here, exactly as Python Lark does
+        // (`GrammarError: Using an undefined rule: NonTerminal('start')`). Without
+        // this gate, `lower()` reached an undefined start at
+        // `symbols.id(s).expect("start symbol interned")` and **panicked** instead
+        // of returning a clean error — a robustness/DoS hole on user- or
+        // attacker-supplied grammars (bug-bounty H1, #330). A start is always a
+        // non-terminal, so only the rule set matters.
+        for start in &self.start {
+            if !defined_rules.contains(start.as_str()) {
+                return Err(GrammarError::UndefinedRule {
+                    name: start.clone(),
+                });
+            }
+        }
         for rule in &self.rules {
             for sym in &rule.expansion {
                 match sym {
