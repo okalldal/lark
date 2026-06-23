@@ -979,12 +979,21 @@ fn test_interactive_error_oracle() {
             }
         }
 
-        // Reuse-after-error (scenario 4): re-driving the same cursor must re-surface
-        // the same error kind — Python does NOT refuse reuse.
+        // Reuse-after-error: re-driving the same cursor. Python never *refuses*
+        // reuse, but whether the re-drive re-raises is asymmetric and pinned per
+        // case:
+        //   * unlexable char (`contextual_reuse_after_exhaust_error`, #250): the
+        //     lexer stopped AT the bad char, which is still un-consumed, so reuse
+        //     re-surfaces the SAME `UnexpectedCharacter` (`reuse_raised=true`).
+        //   * parser-rejected lexed token
+        //     (`contextual_reuse_after_parser_rejected_token`, #265): the rejected
+        //     `}` was already pulled out of the now-exhausted lexer, so reuse finds
+        //     nothing left and returns cleanly — no re-raise, no advance, no refusal
+        //     (`reuse_raised=false`). accepts() must still survive across the reuse.
         if let Some(reuse_raised) = case.get("reuse_raised").and_then(|v| v.as_bool()) {
             let reuse_result = drive_failing(&mut p, drive, case);
-            match reuse_result {
-                Err(e) if reuse_raised => {
+            match (reuse_result, reuse_raised) {
+                (Err(e), true) => {
                     let expected_kind = case["reuse_error_kind"].as_str().unwrap_or("?");
                     let actual_kind = error_kind(&e);
                     if actual_kind != expected_kind {
@@ -993,10 +1002,26 @@ fn test_interactive_error_oracle() {
                         ));
                     }
                 }
-                Ok(_) if reuse_raised => {
+                (Ok(_), true) => {
                     failures.push(format!("{name}: reuse expected an error, but succeeded"));
                 }
-                _ => {}
+                (Err(e), false) => {
+                    failures.push(format!(
+                        "{name}: reuse expected a clean no-op (lexer exhausted), but errored: {e}"
+                    ));
+                }
+                (Ok(_), false) => {}
+            }
+
+            // accepts() must survive the reuse drive too (the cursor stays pinned).
+            if let Some(expected_after) = case.get("accepts_after_error") {
+                let expected = json_str_vec(expected_after);
+                let actual = p.accepts();
+                if actual != expected {
+                    failures.push(format!(
+                        "{name}: accepts after reuse mismatch:\n  expected: {expected:?}\n  actual:   {actual:?}"
+                    ));
+                }
             }
         }
     }
@@ -1072,4 +1097,41 @@ fn check_error_detail(
         }
         ParseError::Postlex { .. } => {}
     }
+}
+
+// ─── #265: cursor-reuse semantics after a PARSER-REJECTED LEXED token ─────────
+//
+// The headline reuse-after-`[}` no-op is pinned by the oracle replay above
+// (`contextual_reuse_after_parser_rejected_token`: exhaust raises `UnexpectedToken`,
+// reuse is a clean no-op because the rejected `}` was already pulled out of the
+// now-exhausted lexer). This test adds the two cursor-reuse scenarios the oracle
+// harness does NOT cover (it only re-drives with the same `exhaust`), each probed
+// against Python Lark 1.3.1 on the same grammar:
+//
+//   A. feeding a DIFFERENT valid token after the rejection advances cleanly — the
+//      cursor survives the parser-rejected token (Python: `feed_token(AWORD)` OK,
+//      `accepts()` becomes `["AWORD","RSQB"]`).
+//   B. re-feeding the SAME rejected token re-raises `UnexpectedToken` — the cursor
+//      did not advance past the rejection (Python: `feed_token(RBRACE)` re-raises).
+//
+// Together these nail down that a parser-rejected lexed token leaves the cursor
+// pinned on the rejecting state (it does NOT silently advance or poison the cursor).
+#[test]
+fn test_interactive_parser_rejected_token_cursor_reuse() {
+    let lark = make_interactive_parser("recovery_contextual", "contextual");
+
+    // A. Feeding a DIFFERENT valid token after the rejection advances the cursor.
+    let mut p = lark.parse_interactive("[}").unwrap();
+    p.exhaust_lexer().expect_err("[} must raise");
+    p.feed("AWORD", "hi")
+        .expect("a state-valid token must feed cleanly after the rejection");
+    assert_eq!(p.accepts(), vec!["AWORD".to_string(), "RSQB".to_string()]);
+
+    // B. Re-feeding the SAME rejected token re-raises (the cursor did not advance).
+    let mut p = lark.parse_interactive("[}").unwrap();
+    p.exhaust_lexer().expect_err("[} must raise");
+    let again = p
+        .feed("RBRACE", "}")
+        .expect_err("re-feeding the rejected } must re-raise UnexpectedToken");
+    assert_eq!(error_kind(&again), "UnexpectedToken");
 }

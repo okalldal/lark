@@ -58,6 +58,11 @@ fancy-regex = { version = "0.18", optional = true }
 # `regex` crate has no intersection/emptiness test, so we drop to its automata
 # layer and run a product construction over two terminals' DFAs.
 regex-automata = "0.4"
+# `regex-syntax` (already in the tree via `regex`) gives us the parsed HIR used to
+# compute a terminal's finite max-width for Python-parity terminal ordering (#268):
+# Python's `sre_parse.getwidth()[1]`. We walk the HIR in *characters* (not the HIR's
+# byte length) so a multibyte literal counts as Python counts it.
+regex-syntax = "0.8"
 indexmap = "2"
 thiserror = "1"
 smallvec = "1"

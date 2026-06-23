@@ -170,17 +170,19 @@ impl CykParser {
         Ok(CykParser { grammar, cnf })
     }
 
-    fn start_id(&self, start: Option<&str>) -> Option<SymbolId> {
-        match start {
-            Some(name) => self.grammar.symbols.id(name),
-            None => self.grammar.start.first().copied(),
-        }
+    /// Resolve the start symbol, mirroring Python Lark's `_verify_start` via the
+    /// shared [`resolve_start`](super::resolve_start) — a default (`None`) start
+    /// is the single configured one or a rejection on >1 starts (issue #256),
+    /// and an explicit start must be one of the configured starts. Identical to
+    /// LALR's and Earley's resolution, so the diagnostics match.
+    fn start_id(&self, start: Option<&str>) -> Result<SymbolId, ParseError> {
+        super::resolve_start(&self.grammar.start, &self.grammar.symbols, start)
     }
 
     /// Parse `tokens` (a basic-lexer stream; a trailing `$END` is ignored) from
     /// `start` into a [`ParseTree`].
     pub fn parse(&self, tokens: &[Token], start: Option<&str>) -> Result<ParseTree, ParseError> {
-        let start_id = self.start_id(start).ok_or_else(parse_failed)?;
+        let start_id = self.start_id(start)?;
         let toks: Vec<&Token> = tokens
             .iter()
             .filter(|t| t.type_id != SymbolId::END)

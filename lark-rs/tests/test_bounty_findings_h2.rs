@@ -6,9 +6,12 @@
 //! grammar → wrong token/parse, config/backend validation drift, distribution and
 //! binding divergence, regex-dialect taxonomy, and deterministic resource growth.
 //!
-//! Each test asserts the **Python Lark 1.3.1** (oracle) behavior, so it fails
-//! against lark-rs today and is marked `#[ignore]` (XFAIL — Rust has no native
-//! one). Run them with:
+//! Each test asserts the **Python Lark 1.3.1** (oracle) behavior. This file began
+//! as an XFAIL catalog; as each finding is fixed its `#[ignore]` is dropped and the
+//! test becomes a live regression guard, while the remaining known divergences stay
+//! `#[ignore]`d (XFAIL — Rust has no native one). It is therefore a *mix* — consult
+//! each test's own attribute, not this header, for its status. Run only the
+//! still-open XFAILs with:
 //!
 //!     cargo test --test test_bounty_findings_h2 -- --ignored
 //!
@@ -49,8 +52,8 @@ fn assert_build_rejected(grammar: &str, o: LarkOptions, why: &str) {
 
 /// N1a (CRITICAL). `%override start: B` should *replace* `start`, so only `"b"`
 /// parses. lark-rs merges to `start: A | B` and wrongly accepts `"a"`.
+/// Fixed in #269: directives now reach the compiler, which replaces the body.
 #[test]
-#[ignore = "XFAIL (bounty N1a): %override merges instead of replacing"]
 fn n1a_override_replaces_not_merges() {
     let g = "start: A\n%override start: B\nA: \"a\"\nB: \"b\"\n";
     let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual))
@@ -63,21 +66,66 @@ fn n1a_override_replaces_not_merges() {
 }
 
 /// N1b (HIGH). `%override` of a rule that does not exist. Python:
-/// `GrammarError: Cannot override a nonexisting rule`.
+/// `GrammarError: Cannot override a nonexisting rule`. Fixed in #269.
 #[test]
-#[ignore = "XFAIL (bounty N1b): %override of a non-existent rule not rejected"]
 fn n1b_override_nonexistent_rejected() {
     let g = "%override foo: A\nstart: A\nA: \"a\"\n";
     assert_build_rejected(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual), "N1b");
 }
 
 /// N1c (HIGH). `%extend` of a rule that does not exist. Python:
-/// `GrammarError: Can't extend rule foo as it wasn't defined before`.
+/// `GrammarError: Can't extend rule foo as it wasn't defined before`. Fixed in #269.
 #[test]
-#[ignore = "XFAIL (bounty N1c): %extend of a non-existent rule not rejected"]
 fn n1c_extend_nonexistent_rejected() {
     let g = "%extend foo: A\nstart: A\nA: \"a\"\n";
     assert_build_rejected(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual), "N1c");
+}
+
+/// N1 differential pin (#269 audit). `%extend` / `%override` of a *parameterized
+/// rule* (template) must edit the template, not compile as a flat rule — Python
+/// instantiates `foo{C}` from the overridden / extended body. (Pre-fix the
+/// directive misrouted to `compile_rule`, which then rejected the template
+/// parameter as an "undefined rule".)
+#[test]
+fn n1_template_override_and_extend() {
+    let o = opts(ParserAlgorithm::Lalr, LexerType::Contextual);
+    // override: `foo{C}` is `"b" C`, so "ac" is rejected, "bc" parses.
+    let ov = Lark::new(
+        "foo{x}: \"a\" x\n%override foo{x}: \"b\" x\nstart: foo{C}\nC: \"c\"\n",
+        o.clone(),
+    )
+    .expect("template override builds");
+    assert!(
+        ov.parse("ac").is_err(),
+        "override replaced the template body"
+    );
+    assert!(ov.parse("bc").is_ok(), "override body parses");
+    // extend: both `"a" C` and `"b" C` arms are kept.
+    let ex = Lark::new(
+        "foo{x}: \"a\" x\n%extend foo{x}: \"b\" x\nstart: foo{C}\nC: \"c\"\n",
+        o,
+    )
+    .expect("template extend builds");
+    assert!(ex.parse("ac").is_ok(), "extend keeps the original arm");
+    assert!(ex.parse("bc").is_ok(), "extend adds the new arm");
+}
+
+/// N1 differential pin (#269 audit), XFAIL — tracked as #286. `%extend` of an
+/// *imported* terminal should add the new alternative (Python: `"z"` parses),
+/// but lark-rs drops it because the imported terminal is already resolved by the
+/// time the directive is staged. Same-grammar terminal extend and imported
+/// terminal *override* both work; only imported-terminal extend diverges.
+#[test]
+#[ignore = "XFAIL (#286): %extend of an imported terminal drops the new alternative"]
+fn n1_extend_imported_terminal_keeps_both() {
+    let g = "%import common.INT\nstart: INT\n%extend INT: \"z\"\n";
+    let lark =
+        Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).expect("grammar builds");
+    assert!(lark.parse("123").is_ok(), "the imported INT still parses");
+    assert!(
+        lark.parse("z").is_ok(),
+        "the extended `\"z\"` alternative should parse (Python accepts it)"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -91,8 +139,7 @@ fn n1c_extend_nonexistent_rejected() {
 /// wrapped len 7) outranks the equal `A: /aa/` and the name-asc tiebreak is
 /// subverted: Python emits `A`, lark-rs emits `B`. Distinct from RC5 (max_width):
 /// both widths tie; the bug is the flag-wrapper length leaking into the tiebreak.
-#[test]
-#[ignore = "XFAIL (bounty N2): flagged regex terminal mis-ranked by wrapped length"]
+#[test] // FIXED (#268): raw-pattern-length tiebreak strips the baked flag wrapper.
 fn n2_flagged_terminal_ranking() {
     let g = "start: A | B\nA: /aa/\nB: /aa/i\n";
     let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual))
@@ -116,8 +163,8 @@ fn n2_flagged_terminal_ranking() {
 /// `error: global flags not at the start of the expression`. lark-rs strips the
 /// wrapper into a flag bitset and accepts + applies it. (Scoped `(?i:…)` is fine on
 /// both — only the global form diverges.) A new more-permissive validation family.
-#[test]
-#[ignore = "XFAIL (bounty N3): global inline regex flag (?i) accepted, Python rejects"]
+#[test] // FIXED (#274): a global (bodiless) inline flag group is rejected at build,
+        // while scoped `(?i:…)` stays accepted — `PatternRe::new` parity gate.
 fn n3_global_inline_flag_rejected() {
     let g = "start: A\nA: /(?i)abc/\n";
     assert_build_rejected(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual), "N3");
@@ -133,8 +180,8 @@ fn n3_global_inline_flag_rejected() {
 /// XFAIL asserts the *categorized* refusal (matching `\1`), NOT support — this is
 /// not promotion to a supported feature. Distinct from RC6 (`\b`, different
 /// construct).
-#[test]
-#[ignore = "XFAIL (bounty N4): named backref (?P=name) leaks an uncategorized error instead of a categorized refusal"]
+#[test] // FIXED (#274): the front-end keeps `(?P=name)` verbatim, so it routes through
+        // the categorized backref refusal (`BacktrackingOnlySyntax`) like `\1`/`\k`.
 fn n4_named_backref_categorized() {
     let g = "start: A\nA: /(?P<x>a)(?P=x)/\n";
     let err = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual))
@@ -174,8 +221,10 @@ A: /x\Z/
 /// `cyk`+`contextual`, `earley`+`contextual`); lark-rs silently substitutes a
 /// working lexer and parses. The only pairing gate in the tree is the
 /// postlex+dynamic refusal. Distinct from RC8 (zero-width *content* on dynamic).
+// Fixed in #273: a front-door config-legality gate (`parsers::validate_config`)
+// now mirrors Python's parser→allowed-lexer matrix, so this is a live regression
+// test (un-ignored from XFAIL).
 #[test]
-#[ignore = "XFAIL (bounty N5): illegal parser/lexer pairing not rejected"]
 fn n5_illegal_parser_lexer_pairing_rejected() {
     let g = "start: \"a\"\n";
     assert_build_rejected(
@@ -193,8 +242,9 @@ fn n5_illegal_parser_lexer_pairing_rejected() {
 /// N6 (HIGH). `ambiguity=` is only valid for Earley/CYK; Python raises
 /// `ConfigurationError: 'lalr' doesn't support disambiguation`. lark-rs's
 /// `build_lalr` never reads `options.ambiguity`, so it silently accepts and builds.
+// Fixed in #273: `validate_config` rejects `ambiguity=explicit|forest` on
+// `parser=lalr` (live regression test, un-ignored from XFAIL).
 #[test]
-#[ignore = "XFAIL (bounty N6): ambiguity= on parser=lalr not rejected"]
 fn n6_ambiguity_on_lalr_rejected() {
     let g = "start: \"a\"\n";
     let mut o = opts(ParserAlgorithm::Lalr, LexerType::Contextual);
@@ -206,13 +256,16 @@ fn n6_ambiguity_on_lalr_rejected() {
 // Core correctness surfaced through the bindings.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// N8 (MEDIUM). `start_pos`/`end_pos` are byte offsets in lark-rs but char indices
-/// in Python Lark. On `"héllo"` (the `é` is 2 UTF-8 bytes) lark-rs reports
+/// N8 (MEDIUM). `start_pos`/`end_pos` were byte offsets in lark-rs but char indices
+/// in Python Lark. On `"héllo"` (the `é` is 2 UTF-8 bytes) lark-rs reported
 /// `end_pos=6`, Python `5`. `column`/`end_column` are char-based in both and match;
-/// only `*_pos` diverge. Core-rooted (`LexCursor` advances by byte length), copied
+/// only `*_pos` diverged. Core-rooted (`LexCursor` advanced by byte length), copied
 /// verbatim into the PyO3/WASM/C bindings under a Python-compatible API.
+// Fixed in #278: the lexer cursors (`LexCursor`/`LexerState`/the interactive and
+// Earley-dynamic cursors) now track a character index alongside the byte offset and
+// emit it as `start_pos`/`end_pos`; the byte offset stays the scanner cursor for
+// slicing. Live regression test, un-ignored from XFAIL.
 #[test]
-#[ignore = "XFAIL (bounty N8): start_pos/end_pos are byte offsets, not char indices"]
 fn n8_positions_are_char_indices() {
     let g = "start: A\nA: /h.llo/\n";
     let mut o = opts(ParserAlgorithm::Lalr, LexerType::Contextual);
@@ -242,8 +295,11 @@ fn n8_positions_are_char_indices() {
 /// wall-clock) via the total RHS-symbol count of the lowered grammar: for a 4×
 /// bound it grows ≈16× (quadratic). A factored lowering would be near-flat.
 /// Both engines build correct parsers — the divergence is purely build/size cost.
+// FIXED (#279): `compile_repeat` now factors a large `~mn..mx` into shared
+// transparent sub-rules (Python's `small_factors`/`_add_repeat_rule`), so the
+// grammar size is sub-quadratic. The dedicated gate + tree-parity pins live in
+// `tests/test_repeat_factoring.rs`; this asserts the headline bound stays closed.
 #[test]
-#[ignore = "XFAIL (bounty N9): x~n..m above threshold is O(n^2) grammar size, not O(log n)"]
 fn n9_bounded_repeat_grammar_size_subquadratic() {
     let total_rhs = |n: usize| -> usize {
         let g = lark_rs::load_grammar(

@@ -78,6 +78,14 @@ impl GrammarCompiler {
     pub(super) fn compile_rule(&mut self, raw: RawRule) -> Result<(), GrammarError> {
         let keep_all = raw.modifiers.contains('!') || self.global_keep_all;
         let expand1 = raw.modifiers.contains('?');
+        // Build-time placement validation Python Lark performs in
+        // `_make_rule_tuple` and its compile loop (`load_grammar.py`): an inlined
+        // (`_`-prefixed) rule may not use the `?rule` (expand1) modifier, nor carry
+        // an alias on any alternative — both name a subtree that the `_`-prefix is
+        // marked to splice away. A `!` modifier and a `?`/alias on a *normal* rule
+        // stay legal — only the `_`-prefix + `?`/alias combination is rejected
+        // (RC4a/RC4b).
+        Self::validate_inlined_rule_placement(&raw.name, expand1, &raw.expansions)?;
         let origin = NonTerminal::new(&raw.name);
         // Make keep_all visible to placeholder counting while this rule's body
         // (and the anonymous rules it expands into) is compiled.
@@ -90,6 +98,10 @@ impl GrammarCompiler {
         let mut compiled: Vec<(CompiledAlt, Option<String>)> = Vec::new();
         for alt in raw.expansions.into_iter() {
             let alias = alt.alias.clone();
+            // A nested alias (inside a `(...)`/`[...]`) is not a tree label — Python
+            // reads it as a rule reference and rejects (RC4c). The rule-top-level
+            // alias above is the legitimate one and is kept.
+            Self::reject_nested_aliases(&alt.expansion)?;
             for alt_c in self.compile_expansion(alt.expansion, &origin.name, true)? {
                 compiled.push((alt_c, alias.clone()));
             }
@@ -112,6 +124,78 @@ impl GrammarCompiler {
             ));
         }
         Ok(())
+    }
+
+    /// Reject the two inlined-rule placements Python Lark rejects at build
+    /// (`load_grammar.py`): an alias on, or the `?rule` (expand1) modifier on, a
+    /// rule whose name starts with `_` (RC4a/RC4b). The same check guards a
+    /// `_`-prefixed *template* name (e.g. `?_x{a}` / `_x{a}: a -> al`), which
+    /// Python rejects identically. Returns `Ok(())` for every non-`_` rule —
+    /// aliases and `?`/`!` on a normal rule remain legal.
+    pub(super) fn validate_inlined_rule_placement(
+        name: &str,
+        expand1: bool,
+        expansions: &[AliasedExpansion],
+    ) -> Result<(), GrammarError> {
+        if !name.starts_with('_') {
+            return Ok(());
+        }
+        if expand1 {
+            // Python: `_make_rule_tuple` — "Inlined rules (_rule) cannot use the
+            // ?rule modifier." (`load_grammar.py`).
+            return Err(GrammarError::Other {
+                msg: "Inlined rules (_rule) cannot use the ?rule modifier.".to_string(),
+            });
+        }
+        if let Some(alias) = expansions.iter().find_map(|e| e.alias.as_deref()) {
+            // Python: the compile loop — "Rule <name> is marked for expansion (it
+            // starts with an underscore) and isn't allowed to have aliases
+            // (alias=<alias>)" (`load_grammar.py`).
+            return Err(GrammarError::Other {
+                msg: format!(
+                    "Rule {name} is marked for expansion (it starts with an underscore) \
+                     and isn't allowed to have aliases (alias={alias})"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Reject a *nested* alias — one inside a `(...)` / `[...]` group — exactly as
+    /// Python Lark does (RC4c). In Lark's grammar, `-> NAME` is legal only at the
+    /// top level of an alternative; inside a group the `-> NAME` makes `NAME` a
+    /// rule reference, which Python then rejects: "Rule 'NAME' used but not
+    /// defined" when `NAME` is undefined, or an `AssertionError` ("Double alias not
+    /// allowed") when it is. Either way the grammar is rejected, so lark-rs rejects
+    /// a nested alias unconditionally rather than being more permissive than the
+    /// oracle (ADR-0017 corollary). The reported name matches Python's common case
+    /// (`(A -> foo)`, `(A -> foo)?`/`+`, `(A -> foo | B -> bar)`, `[A -> foo]`).
+    /// Recurses through every `Group`/`Maybe`/`Repeat` in a rule body; the
+    /// *rule-top-level* alias on each `AliasedExpansion` is left untouched (it is
+    /// the legitimate alias).
+    pub(super) fn reject_nested_aliases(exprs: &[Expr]) -> Result<(), GrammarError> {
+        for expr in exprs {
+            Self::reject_expr_nested_aliases(expr)?;
+        }
+        Ok(())
+    }
+
+    fn reject_expr_nested_aliases(expr: &Expr) -> Result<(), GrammarError> {
+        match expr {
+            Expr::Value(_) => Ok(()),
+            Expr::Repeat { inner, .. } => Self::reject_expr_nested_aliases(inner),
+            Expr::Group(alts) | Expr::Maybe(alts) => {
+                for alt in alts {
+                    if let Some(alias) = &alt.alias {
+                        return Err(GrammarError::UndefinedRule {
+                            name: alias.clone(),
+                        });
+                    }
+                    Self::reject_nested_aliases(&alt.expansion)?;
+                }
+                Ok(())
+            }
+        }
     }
 
     /// Compile a list of `Expr` nodes into one or more alternative symbol
@@ -179,18 +263,36 @@ impl GrammarCompiler {
         // identical alternatives would reduce/reduce on the same item, so keep the
         // first occurrence of each (Python's grammar dedups identical rules too).
         //
-        // Under `maybe_placeholders=False` an *empty* alternative carries no output
-        // role — its maybe `_EMPTY` markers are stripped before tree build — so two
-        // empty arms that differ only in those markers are duplicate *empty* rules,
-        // which Python tolerates and dedups (`load_grammar.py`: the "Rules defined
-        // twice" check fires only for non-empty `dups[0].expansion`). Collapsing them
-        // here keeps a non-colliding nullable like `([A])?` from minting two empty
-        // productions at one origin — an LALR conflict Python never reports. A
-        // *non-empty* arm keeps its markers so a genuine `[A]~2 C`-style collision
-        // still reaches `dedup_and_check_alts`.
+        // Two *empty* alternatives that differ only in their maybe `_EMPTY` markers
+        // (gaps) are duplicate *empty* rules, which Python tolerates and dedups
+        // (`load_grammar.py`: the "Rules defined twice" check fires only for
+        // non-empty `dups[0].expansion`). Collapsing them here keeps a non-colliding
+        // nullable like `([A])?` (whose inner-`[A]` absent arm and outer-`?` ε are
+        // both empty) from minting two empty productions at one origin — the LALR
+        // reduce/reduce conflict Python never reports (#258). The dedup is keyed on
+        // the *syms only* so it runs in both modes, but the surviving arm differs:
+        //
+        //   - `maybe_placeholders=False`: the markers carry no output role (stripped
+        //     before tree build via `stored_output_gaps`), so canonicalize every
+        //     empty arm to a bare ε — `([A])?` parses `""` to zero children, matching
+        //     Python.
+        //   - `maybe_placeholders=True`: the markers *are* the absent `None`s, so keep
+        //     the first occurrence verbatim. The inner-`[A]` absent arm (1 None) is
+        //     emitted before the outer-`?` ε (0 Nones) in `present_forms` /
+        //     `compile_expansion`, so first-occurrence dedup preserves Python's
+        //     `(True,)` empty arm (`""` → `[None]`) rather than the bare ε.
+        //
+        // A *non-empty* arm always keeps its markers (untouched here), so a genuine
+        // `[A]~2 C` / `([A])? C`-style collision still reaches `dedup_and_check_alts`.
         let canon = |a: &CompiledAlt| -> CompiledAlt {
-            if !self.maybe_placeholders && a.0.is_empty() {
-                (Vec::new(), vec![0])
+            if a.0.is_empty() {
+                if self.maybe_placeholders {
+                    // Key on emptiness alone; keep the first empty arm's gaps so its
+                    // `None` count survives (`retain` keeps the first insert).
+                    (Vec::new(), Vec::new())
+                } else {
+                    (Vec::new(), vec![0])
+                }
             } else {
                 a.clone()
             }
@@ -419,14 +521,16 @@ impl GrammarCompiler {
                 return Ok(slot);
             }
         }
-        // A bounded `~n` / `~n..m` (the `?`/`*`/`+` shapes were consumed by
-        // `try_distribute` / the group check above; only `max: Some(_)` exact/range
-        // counts reach here) inlines into the parent's alternatives rather than
-        // minting a helper rule, matching Python's `_generate_repeats` (#176).
+        // A bounded `~n` / `~n..m` (the `?`/`*`/`+` operators were consumed by
+        // `try_distribute` / the group check above; only `~`-repeats with a finite
+        // `max` reach here — including `~0..1`, which `try_distribute` no longer
+        // intercepts as a `?`) inlines into the parent's alternatives rather than
+        // minting a helper rule, matching Python's `_generate_repeats` (#176/#258).
         if let Expr::Repeat {
             inner,
             min,
             max: Some(max),
+            ..
         } = &expr
         {
             if let Some(arms) = self.inline_repeat(inner, *min, *max, parent)? {
@@ -443,11 +547,17 @@ impl GrammarCompiler {
     /// emitting duplicate helper rules.
     fn try_distribute(&mut self, expr: &Expr, parent: &str) -> Result<Option<Slot>, GrammarError> {
         match expr {
-            // `X?` / `(...)?` → present forms of the inner.
+            // `X?` / `(...)?` → present forms of the inner. The `?` *operator* is
+            // Python's `maybe()`: when the inner is itself a `[Y]`, its absent arm
+            // inherits the inner's `None` placeholder (`([A])?` → `""` is `[None]`).
+            // A `~0..1` repeat shares this `(min: 0, max: Some(1))` shape but is *not*
+            // a `maybe` — its `k == 0` count is a pristine empty (`[A]~0..1` → `""` is
+            // `[]`), so it routes to `inline_repeat` instead (gated on `kind: Op`).
             Expr::Repeat {
                 inner,
                 min: 0,
                 max: Some(1),
+                kind: RepeatKind::Op,
             } => Ok(self
                 .present_forms((**inner).clone(), parent)?
                 .map(|present| Slot::Nullable {
@@ -461,6 +571,7 @@ impl GrammarCompiler {
                 inner,
                 min: 0,
                 max: None,
+                kind: RepeatKind::Op,
             } => {
                 let arms = self.inner_alternatives(inner, parent)?;
                 let plus = self.recurse_helper(arms);
@@ -489,10 +600,8 @@ impl GrammarCompiler {
     }
 
     /// The non-empty ("present") derivations of an expr, used when distributing a
-    /// leading nullable. Returns `None` when the expr cannot be safely distributed
-    /// — a `maybe_placeholders` `[X]` *nested under another nullable wrapper*
-    /// (e.g. `([X])?`), whose absent-with-placeholders middle alternative this
-    /// present/absent split cannot represent — so the caller keeps the helper.
+    /// leading nullable. Returns `None` only when the inner carries an alias (its
+    /// named subtree must survive a helper), so the caller keeps the helper.
     /// (A `[X]` standing directly at a rule position distributes via
     /// `try_distribute`'s own `Maybe` arm, placeholders and all.)
     fn present_forms(
@@ -504,18 +613,21 @@ impl GrammarCompiler {
         match expr {
             Expr::Value(v) => Ok(single(self.compile_value(v, parent)?)),
             Expr::Group(alts) => self.distributable_alternatives(alts, parent),
-            // Under `maybe_placeholders` the absent-with-`None`s middle alternative
-            // of a nested `[X]` cannot ride this present/absent split, so keep the
-            // helper. Without placeholders, the maybe's own absent arm is included
-            // as a present form carrying its positional `_EMPTY` markers (the same
-            // `[_EMPTY] * FindRuleSize` Python's `maybe` always emits), so a colliding
-            // `[A]~0..1 C` / `([A])? C` — where the absent-`[X]` and the outer ε both
-            // reduce to `start -> C` — reaches `dedup_and_check_alts` and is rejected
-            // in both modes (#252). The redundant *empty* arm (when there is no tail
-            // to attach the marker to, e.g. a lone `([A])?`) collapses against the
-            // outer ε in `compile_expansion`'s `maybe_placeholders=False`
-            // empty-arm canonicalization, so a non-colliding nullable still builds.
-            Expr::Maybe(_) if self.maybe_placeholders => Ok(None),
+            // A `[X]` nested under an outer `?` (`([X])?`) distributes the inner
+            // maybe's own present forms *plus* its absent arm carrying the positional
+            // `_EMPTY` markers (the same `[_EMPTY] * FindRuleSize` Python's `maybe`
+            // always emits), then the outer `?` re-adds a bare ε in
+            // `compile_expansion`. This holds in *both* modes (#258/#252):
+            //   - When the inner-absent and outer-ε arms coincide as duplicate
+            //     *empty* productions (a lone `([A])?`), `compile_expansion`'s
+            //     empty-arm dedup collapses them — keeping the first, None-bearing
+            //     arm under `maybe_placeholders` (Python's `(True,)`), or to a bare
+            //     ε without — so a non-colliding nullable builds instead of minting a
+            //     spurious second empty production (the #258 LALR conflict).
+            //   - When a tail follows (`([A])? C`), the inner-absent arm surfaces its
+            //     markers onto the tail (`C` with a leading None) and collides with
+            //     the outer-ε `C` in `dedup_and_check_alts` — the rejection Python
+            //     raises in both modes (#252).
             Expr::Maybe(alts) => {
                 let mut present = match self.distributable_alternatives(alts, parent)? {
                     Some(p) => p,
@@ -525,12 +637,16 @@ impl GrammarCompiler {
                 present.push((Vec::new(), vec![absent_nones]));
                 Ok(Some(present))
             }
-            // A nested `?` collapses: `(X?)?` ≡ `X?`, so drop the inner optionality
-            // and let the outer distribution re-add the single ε.
+            // A nested `?` operator collapses: `(X?)?` ≡ `X?`, so drop the inner
+            // optionality and let the outer distribution re-add the single ε. A
+            // `~0..1` repeat (`kind: Tilde`) is *not* collapsible this way — its
+            // `k == 0` count is a placeholder-free empty — so it falls through to the
+            // `~n..m` arm below and inlines via `inline_repeat`.
             Expr::Repeat {
                 inner,
                 min: 0,
                 max: Some(1),
+                kind: RepeatKind::Op,
             } => self.present_forms(*inner, parent),
             // `X*` / `X+` present form is the shared one-or-more recurse helper
             // (inner arms inlined, Python's `EBNF_to_BNF`).
@@ -538,23 +654,27 @@ impl GrammarCompiler {
                 inner,
                 min: 0,
                 max: None,
+                ..
             }
             | Expr::Repeat {
                 inner,
                 min: 1,
                 max: None,
+                ..
             } => {
                 let arms = self.inner_alternatives(&inner, parent)?;
                 let plus = self.recurse_helper(arms);
                 Ok(single(plus))
             }
-            // Bounded `~n` / `~n..m` nested under a distributed `?` inlines its
-            // counts as present forms too (the directly-positioned case is handled
-            // in `compile_slot`); large/aliased repeats fall back to the helper.
+            // Bounded `~n` / `~n..m` (including `~0..1`) nested under a distributed
+            // `?` inlines its counts as present forms too (the directly-positioned
+            // case is handled in `compile_slot`); large/aliased repeats fall back to
+            // the helper.
             Expr::Repeat {
                 inner,
                 min,
                 max: Some(max),
+                ..
             } => match self.inline_repeat(&inner, min, max, parent)? {
                 Some(arms) => Ok(Some(arms)),
                 None => Ok(single(self.compile_repeat(
@@ -610,7 +730,9 @@ impl GrammarCompiler {
             Expr::Value(v) => self.compile_value(v, parent),
             Expr::Group(alts) => self.compile_group(alts, parent, false),
             Expr::Maybe(alts) => self.compile_maybe(alts, parent),
-            Expr::Repeat { inner, min, max } => self.compile_repeat(*inner, min, max, parent),
+            Expr::Repeat {
+                inner, min, max, ..
+            } => self.compile_repeat(*inner, min, max, parent),
         }
     }
 
@@ -1086,19 +1208,27 @@ impl GrammarCompiler {
                 )
             }
             (n, Some(m)) if n == m => {
-                // exact repetition: inline n copies
+                // Exact `x~n` — Python's `_generate_repeats(rule, n, n)`. For a small
+                // `n` (`n < REPEAT_BREAK_THRESHOLD`) this is one flat `__anon_rep`
+                // rule of `n` copies; for a large `n` it factors into shared sub-rules
+                // (`_add_repeat_rule`) so the grammar stays O(log n), not O(n).
                 let inner_sym = self.compile_expr(inner, parent)?;
-                let name = self.fresh_anon_rule(AnonKind::Rep);
-                let nt = NonTerminal::new(&name);
-                let syms: Vec<Symbol> = std::iter::repeat(inner_sym).take(n).collect();
-                self.rules
-                    .push(Rule::new(nt.clone(), syms, None, self.anon_opts(), 0));
-                Ok(Symbol::NonTerminal(nt))
+                Ok(self.generate_repeats(inner_sym, n, n))
             }
-            (n, max_opt) => {
-                // Range: generate rules for n..m repetitions
+            (n, Some(m)) => {
+                // Bounded range `x~n..m` — Python's `_generate_repeats(rule, n, m)`.
+                // Small ranges stay a flat per-count `__anon_rep_range` rule; large
+                // ones factor the `mn` and `diff = mx-mn` parts into shared sub-rules
+                // (`_add_repeat_rule` / `_add_repeat_opt_rule`) for O(log n) size.
                 let inner_sym = self.compile_expr(inner, parent)?;
-                let max_count = max_opt.unwrap_or(n + 10); // cap at n+10 for unbounded
+                Ok(self.generate_repeats(inner_sym, n, m))
+            }
+            (n, None) => {
+                // Unbounded `x~n..` (no max). Lark's surface grammar never produces
+                // this — `~` always carries a finite max — so it is a lark-rs-only
+                // edge; keep the historical `n+10`-capped flat expansion.
+                let inner_sym = self.compile_expr(inner, parent)?;
+                let max_count = n + 10;
                 let name = self.fresh_anon_rule(AnonKind::RepRange);
                 let nt = NonTerminal::new(&name);
                 for count in n..=max_count {
@@ -1110,5 +1240,173 @@ impl GrammarCompiler {
                 Ok(Symbol::NonTerminal(nt))
             }
         }
+    }
+
+    /// Lower a bounded `inner~mn..mx` into a single non-terminal that derives
+    /// between `mn` and `mx` copies of `inner` — Python Lark's
+    /// `EBNF_to_BNF._generate_repeats`. Below `REPEAT_BREAK_THRESHOLD` (50) the
+    /// naive flat expansion (one alternative/rule per count) is fine; at or above
+    /// it that lowering is O(mx²) in grammar size, so Python — and now lark-rs —
+    /// **factors** the repetition into a logarithmic stack of shared sub-rules
+    /// (#279 / bounty N9). Every sub-rule is a transparent `__anon_*` helper, so
+    /// the produced parse tree is byte-identical to the flat expansion either way;
+    /// only the build/size cost changes.
+    fn generate_repeats(&mut self, rule: Symbol, mn: usize, mx: usize) -> Symbol {
+        // Python's `load_grammar.REPEAT_BREAK_THRESHOLD`.
+        const REPEAT_BREAK_THRESHOLD: usize = 50;
+        // Python's `load_grammar.SMALL_FACTOR_THRESHOLD`.
+        const SMALL_FACTOR_THRESHOLD: usize = 5;
+
+        if mx < REPEAT_BREAK_THRESHOLD {
+            // Small case: the naive per-count expansion. One `__anon_rep` /
+            // `__anon_rep_range` rule, one alternative per count `n` in `mn..=mx`,
+            // each `n` copies of `rule` (Python's `expansions([expansion([rule]*n)])`).
+            let kind = if mn == mx {
+                AnonKind::Rep
+            } else {
+                AnonKind::RepRange
+            };
+            let name = self.fresh_anon_rule(kind);
+            let nt = NonTerminal::new(&name);
+            for (order, count) in (mn..=mx).enumerate() {
+                let syms: Vec<Symbol> = std::iter::repeat(rule.clone()).take(count).collect();
+                self.rules
+                    .push(Rule::new(nt.clone(), syms, None, self.anon_opts(), order));
+            }
+            return Symbol::NonTerminal(nt);
+        }
+
+        // Large case: factor `rule~mn..mx` as `rule~mn rule~0..(mx-mn)`. Split `mn`
+        // and `diff = mx-mn+1` with `small_factors`; build the `mn` part from
+        // `_add_repeat_rule` and the `0..diff` part from `_add_repeat_opt_rule`.
+        let mut mn_target = rule.clone();
+        for (a, b) in Self::small_factors(mn, SMALL_FACTOR_THRESHOLD) {
+            mn_target = self.add_repeat_rule(a, b, &mn_target, &rule);
+        }
+        if mx == mn {
+            return mn_target;
+        }
+
+        // `+1` because `_add_repeat_opt_rule` matches one less than its argument.
+        let diff = mx - mn + 1;
+        let diff_factors = Self::small_factors(diff, SMALL_FACTOR_THRESHOLD);
+        let mut diff_target = rule.clone(); // match `rule` 1 time
+        let mut diff_opt_target: Vec<Symbol> = Vec::new(); // match `rule` 0 times (ε)
+        let last = diff_factors.len() - 1;
+        for &(a, b) in &diff_factors[..last] {
+            diff_opt_target =
+                vec![self.add_repeat_opt_rule(a, b, &diff_target, &diff_opt_target, &rule)];
+            diff_target = self.add_repeat_rule(a, b, &diff_target, &rule);
+        }
+        let (a, b) = diff_factors[last];
+        diff_opt_target =
+            vec![self.add_repeat_opt_rule(a, b, &diff_target, &diff_opt_target, &rule)];
+
+        // Final rule: `mn_target` followed by the `0..diff` opt part.
+        let name = self.fresh_anon_rule(AnonKind::RepRange);
+        let nt = NonTerminal::new(&name);
+        let mut syms = vec![mn_target];
+        syms.extend(diff_opt_target);
+        self.rules
+            .push(Rule::new(nt.clone(), syms, None, self.anon_opts(), 0));
+        Symbol::NonTerminal(nt)
+    }
+
+    /// Python Lark's `utils.small_factors`: split `n` into `[(a, b), …]` such that
+    /// folding `acc = acc * a + b` (from `acc = 1`) reconstructs `n`, with each
+    /// `a + b <= max_factor`. Used to factor a large bounded repeat into a
+    /// logarithmic stack of sub-rules.
+    fn small_factors(n: usize, max_factor: usize) -> Vec<(usize, usize)> {
+        debug_assert!(max_factor > 2);
+        if n <= max_factor {
+            return vec![(n, 0)];
+        }
+        for a in (2..=max_factor).rev() {
+            let (r, b) = (n / a, n % a);
+            if a + b <= max_factor {
+                let mut factors = Self::small_factors(r, max_factor);
+                factors.push((a, b));
+                return factors;
+            }
+        }
+        unreachable!("small_factors failed to factorize {n}");
+    }
+
+    /// Python Lark's `EBNF_to_BNF._add_repeat_rule`: a transparent helper rule that
+    /// matches `target` `a` times then `atom` `b` times — `__anon: target*a atom*b`.
+    /// Cached on `(a, b, target, atom, opt)` (Python's `rules_cache`) so repeated
+    /// chunks are shared, which is what makes the factored lowering O(log n) in
+    /// size. The key omits keep-all to match Python's order-dependent shared cache
+    /// verbatim — see [`repeat_cache`](GrammarCompiler::repeat_cache).
+    fn add_repeat_rule(&mut self, a: usize, b: usize, target: &Symbol, atom: &Symbol) -> Symbol {
+        let key = (
+            a,
+            b,
+            target.name().to_string(),
+            atom.name().to_string(),
+            false,
+        );
+        if let Some(name) = self.repeat_cache.get(&key) {
+            return Symbol::NonTerminal(NonTerminal::new(name));
+        }
+        let name = self.fresh_anon_rule(AnonKind::Rep);
+        let nt = NonTerminal::new(&name);
+        let mut syms: Vec<Symbol> = std::iter::repeat(target.clone()).take(a).collect();
+        syms.extend(std::iter::repeat(atom.clone()).take(b));
+        self.rules
+            .push(Rule::new(nt.clone(), syms, None, self.anon_opts(), 0));
+        self.repeat_cache.insert(key, name);
+        Symbol::NonTerminal(nt)
+    }
+
+    /// Python Lark's `EBNF_to_BNF._add_repeat_opt_rule`: a transparent helper that
+    /// matches `atom` 0..(a*n+b)-1 times, built so it carries no shift/reduce
+    /// conflict (LALR-safe). Arms:
+    ///   - `target*i target_opt` for `i` in `0..a` (0 .. n*a-1 atoms), then
+    ///   - `target*a atom*i`     for `i` in `0..b` (n*a .. n*a+b-1 atoms).
+    /// `target_opt` is an *expansion* (a possibly-empty symbol sequence): the empty
+    /// ε on the first call, a prior opt-rule non-terminal thereafter. Cached on
+    /// `(a, b, target, atom, opt=true)` — Python's `rules_cache`. `target` and
+    /// `target_opt` are distinct generated non-terminals whose names already encode
+    /// the chain, so `(a, b, target, atom)` keys the opt-rule uniquely. Keep-all is
+    /// omitted to match Python's shared cache (see
+    /// [`add_repeat_rule`](Self::add_repeat_rule)).
+    fn add_repeat_opt_rule(
+        &mut self,
+        a: usize,
+        b: usize,
+        target: &Symbol,
+        target_opt: &[Symbol],
+        atom: &Symbol,
+    ) -> Symbol {
+        let key = (
+            a,
+            b,
+            target.name().to_string(),
+            atom.name().to_string(),
+            true,
+        );
+        if let Some(name) = self.repeat_cache.get(&key) {
+            return Symbol::NonTerminal(NonTerminal::new(name));
+        }
+        let name = self.fresh_anon_rule(AnonKind::RepRange);
+        let nt = NonTerminal::new(&name);
+        let mut order = 0;
+        for i in 0..a {
+            let mut syms: Vec<Symbol> = std::iter::repeat(target.clone()).take(i).collect();
+            syms.extend_from_slice(target_opt);
+            self.rules
+                .push(Rule::new(nt.clone(), syms, None, self.anon_opts(), order));
+            order += 1;
+        }
+        for i in 0..b {
+            let mut syms: Vec<Symbol> = std::iter::repeat(target.clone()).take(a).collect();
+            syms.extend(std::iter::repeat(atom.clone()).take(i));
+            self.rules
+                .push(Rule::new(nt.clone(), syms, None, self.anon_opts(), order));
+            order += 1;
+        }
+        self.repeat_cache.insert(key, name);
+        Symbol::NonTerminal(nt)
     }
 }

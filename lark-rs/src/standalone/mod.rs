@@ -62,17 +62,25 @@
 //!     standalone tool too; here they will simply fail to lex at runtime.
 //!   * **No postlex** — `%declare` + an `Indenter` postlex hook is not baked
 //!     (the generator returns an error if one is configured).
-//!   * **No lookaround grammars — the DFA-plan bakeability payoff is not realized yet.**
+//!   * **No lookaround grammars — REJECTED at bake time (#280), not baked.**
 //!     The baked `ScannerPlan` is a *regex* alternation (each terminal's inline pattern
 //!     compiled on the `regex` crate at runtime), so a grammar with **lookaround**
 //!     terminals (the bundled `python`/`lark`) is **not** standalone-able: the regex
 //!     runtime cannot host `(?!…)`/`(?<…)`, and this generator does not bake the
-//!     `regex-automata` DFA scanner bundle or its guard side-tables. Closing this is
-//!     **L5** of the lexer DFA plan (serialize the plain + guarded DFAs, guard/lookbehind
-//!     tables, rank maps, start-byte prefilter, `unless`, and `%ignore`, and replace the
-//!     `ScannerPlan` path with it). L4 (drop runtime `fancy-regex`) has landed, so L5
-//!     is unblocked. See `docs/LEXER_DFA_PLAN.md` (L5) and
-//!     `docs/LEXER_DFA_STATUS.md`.
+//!     `regex-automata` DFA scanner bundle or its guard side-tables. The in-process
+//!     lexer lowers such terminals into the DFA backend, so the core engine builds
+//!     these grammars fine; to prevent the standalone bake from shipping a
+//!     `regex`-rejected pattern that would **panic** the generated parser at
+//!     `Regex::new(...).expect(...)`, [`bake`] now runs every baked terminal through
+//!     [`check_standalone_regex_hostable`](crate::lexer::check_standalone_regex_hostable)
+//!     — the standalone analogue of the engine-build refusal seam — and returns a clear
+//!     compile-time error (RC10), as does any `\Z` anchor (V1) or oversized bounded
+//!     repeat (V2) the pure-`regex` runtime cannot compile. Closing the *capability*
+//!     gap (actually baking lookaround) is **L5** of the lexer DFA plan (serialize the
+//!     plain + guarded DFAs, guard/lookbehind tables, rank maps, start-byte prefilter,
+//!     `unless`, and `%ignore`, and replace the `ScannerPlan` path with it). L4 (drop
+//!     runtime `fancy-regex`) has landed, so L5 is unblocked. See
+//!     `docs/LEXER_DFA_PLAN.md` (L5) and `docs/LEXER_DFA_STATUS.md`.
 
 // Compiled + type-checked here so the embedded driver cannot rot, then `include_str!`d
 // into every generated parser. `dead_code` is expected: nothing in the lib's normal
@@ -84,7 +92,10 @@ use std::fmt::Write as _;
 
 use crate::error::{GrammarError, LarkError};
 use crate::grammar::load_grammar_with_base;
-use crate::lexer::{check_regex_collisions, check_zero_width_terminals, scanner_plan};
+use crate::lexer::{
+    check_regex_collisions, check_standalone_regex_hostable, check_zero_width_terminals,
+    scanner_plan,
+};
 use crate::parsers::basic_lexer_conf;
 use crate::parsers::lalr::{build_lalr_table, Action};
 use crate::{LarkOptions, ParserAlgorithm};
@@ -166,6 +177,16 @@ fn bake(grammar_src: &str, options: &LarkOptions) -> Result<Baked, LarkError> {
         .map(|(id, t)| (*id, t))
         .collect();
     let plan = scanner_plan(&term_refs, lexer_conf.global_flags)?;
+
+    // Run every baked terminal through the standalone refusal seam (issue #280, bounty
+    // RC10 + V1/V2). The in-process lexer lowers lookaround into the DFA backend, so a
+    // lookaround grammar (e.g. `python.STRING`) builds fine in-process; the standalone
+    // runtime compiles each baked group on the *plain* `regex` crate, which cannot host
+    // lookaround (RC10), `\Z` (V1), or an oversized bounded repeat (V2). Without this
+    // check those patterns are baked verbatim and the generated parser panics at
+    // `Regex::new(...).expect("baked scanner regex is valid")`. Reject at bake time with
+    // a clear, categorized compile-time error instead of shipping a panicking artifact.
+    check_standalone_regex_hostable(&plan, &term_refs, lexer_conf.global_flags)?;
 
     let symbol_names = (0..table.symbols.len())
         .map(|i| {

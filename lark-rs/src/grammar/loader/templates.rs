@@ -69,12 +69,21 @@ impl GrammarCompiler {
         let saved_keep_all = self.current_keep_all;
         self.current_keep_all = keep_all;
 
+        // Inlined-rule placement validation against the template's *base* name (the
+        // tree label, e.g. `_x`), exactly as Python Lark checks `?_x{a}` and an
+        // alias on `_x{a}: a -> al` (RC4a/RC4b) — `inst_name` is `base{N}` so the
+        // base name carries the `_` prefix.
+        Self::validate_inlined_rule_placement(name, inst_opts.expand1, &expansions)?;
+
         // Substitute template params in expansions
         let expansions = Self::substitute_template(&expansions, &subst);
         let origin = NonTerminal::new(&inst_name);
         let mut compiled: Vec<(CompiledAlt, Option<String>)> = Vec::new();
         for alt in expansions.into_iter() {
             let alias = alt.alias.clone();
+            // RC4c: a group-internal alias is rejected (a rule reference, not a tree
+            // label).
+            Self::reject_nested_aliases(&alt.expansion)?;
             for alt_c in self.compile_expansion(alt.expansion, &inst_name, true)? {
                 compiled.push((alt_c, alias.clone()));
             }
@@ -112,10 +121,16 @@ impl GrammarCompiler {
     fn subst_expr(expr: &Expr, subst: &HashMap<String, Value>) -> Expr {
         match expr {
             Expr::Value(v) => Expr::Value(Self::subst_value(v, subst)),
-            Expr::Repeat { inner, min, max } => Expr::Repeat {
+            Expr::Repeat {
+                inner,
+                min,
+                max,
+                kind,
+            } => Expr::Repeat {
                 inner: Box::new(Self::subst_expr(inner, subst)),
                 min: *min,
                 max: *max,
+                kind: *kind,
             },
             Expr::Group(alts) => Expr::Group(Self::substitute_template(alts, subst)),
             Expr::Maybe(alts) => Expr::Maybe(Self::substitute_template(alts, subst)),

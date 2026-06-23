@@ -651,7 +651,12 @@ impl ParserStack {
         match self.value_stack.pop() {
             Some(Slot::Tree(t)) => Ok(ParseTree::Tree(t)),
             Some(Slot::Token(tok)) => Ok(ParseTree::Token(tok)),
-            // A start rule is never transparent, so its value is never Inline.
+            // A start rule is never transparent. The one way its value can be
+            // `Inline` is a top-level `?start` collapsing a lone-`None` placeholder
+            // (RC9 fix in tree_builder: lone-`None` expand1 → `Inline([None])`),
+            // which the public `ParseTree` (Tree|Token only) cannot represent as a
+            // bare `None`; that root-`?start` corner is a separate tracked divergence
+            // (#289). Treat it, like an empty stack, as no parse result.
             Some(Slot::Inline(_)) | None => Err(ParseError::unexpected_eof(0, 0, vec![])),
         }
     }
@@ -873,63 +878,20 @@ impl LalrParser {
 
     /// Resolve the start symbol name to its initial state.
     ///
-    /// A default start (`None`) is resolved against the ordered `starts` list,
-    /// never a nondeterministic `start_states` key — mirroring Python Lark's
-    /// `_verify_start` (issue #251):
-    ///   * exactly one configured start → use it;
-    ///   * more than one → reject (Python's `ConfigurationError`); the caller
-    ///     must pick one via `parse_interactive_with_start` / an explicit start;
-    ///   * none configured → reject (no start rule).
-    /// An explicit start not among the configured starts is likewise rejected
-    /// with Python's "Unknown start rule …" message — `start_states.get(&id)`
-    /// already rejects any non-start symbol, since its keys *are* the starts.
+    /// Name resolution (default vs. explicit start, the >1-start and unknown-start
+    /// diagnostics) is delegated to the shared
+    /// [`resolve_start`](super::resolve_start) so LALR, Earley, and CYK reject
+    /// identically — mirroring Python Lark's `_verify_start` (issues #251, #256).
+    /// The resolved start id is then mapped to its LR(0) start state.
     pub(crate) fn initial_state(&self, start: Option<&str>) -> Result<usize, ParseError> {
-        let start_id = match start {
-            // `start_states.get(&id)` below already rejects any non-start symbol
-            // (its keys *are* the configured starts), so no extra filter here.
-            Some(name) => self.table.symbols.id(name),
-            None => match self.table.starts.as_slice() {
-                [only] => Some(*only),
-                [] => None,
-                _ => {
-                    return Err(ParseError::unexpected_eof(
-                        0,
-                        0,
-                        vec!["Lark initialized with more than 1 possible start rule. \
-                              Must specify which start rule to parse"
-                            .to_string()],
-                    ))
-                }
-            },
-        };
-        start_id
-            .and_then(|id| self.table.start_states.get(&id).copied())
-            .ok_or_else(|| {
-                let expected = match start {
-                    // Render the start list Python-`repr`-style (single quotes)
-                    // to match the oracle's `%r` formatting in `_verify_start`.
-                    Some(name) => format!(
-                        "Unknown start rule {}. Must be one of [{}]",
-                        name,
-                        self.start_names()
-                            .iter()
-                            .map(|n| format!("'{}'", n))
-                            .collect::<Vec<_>>()
-                            .join(", ")
-                    ),
-                    None => "no start rule configured".to_string(),
-                };
-                ParseError::unexpected_eof(0, 0, vec![expected])
-            })
-    }
-
-    /// The configured start symbol names, in order — for diagnostics.
-    fn start_names(&self) -> Vec<String> {
+        let start_id = super::resolve_start(&self.table.starts, &self.table.symbols, start)?;
         self.table
-            .starts
-            .iter()
-            .map(|&id| self.table.symbols.name(id).to_string())
-            .collect()
+            .start_states
+            .get(&start_id)
+            .copied()
+            .ok_or_else(|| {
+                ParseError::unexpected_eof(0, 0, vec!["no start rule configured".to_string()])
+            })
     }
 
     /// Valid terminal names for a state — used to build error reports.

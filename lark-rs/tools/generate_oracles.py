@@ -2085,8 +2085,15 @@ def interactive_error_trace(lark_instance, text, manual_tokens=None,
     trace["accepts_after_error"] = sorted(p.accepts())
 
     if reuse and raised_error:
-        # Re-drive the same cursor: Python does NOT refuse reuse — it re-surfaces
-        # the same error (the cursor still sits on the un-consumed bad input).
+        # Re-drive the same cursor. Python never *refuses* reuse, but whether the
+        # re-drive re-raises depends on WHERE the lexer stopped:
+        #   * unlexable char (`[a9]`): the lexer stopped AT the bad char (never
+        #     consumed it), so reuse re-surfaces the SAME error (reuse_raised=True,
+        #     reuse_error_kind recorded).
+        #   * parser-rejected lexed token (`[}`): the bad token was already pulled
+        #     OUT of the (now-exhausted) lexer before the parser rejected it, so the
+        #     reuse drive finds nothing left and returns cleanly (reuse_raised=False;
+        #     no reuse_error_kind). See cases (4) vs (6) (#265).
         try:
             _drive(p)
             trace["reuse_raised"] = False
@@ -2309,15 +2316,38 @@ def generate_interactive():
         ),
     })
 
-    # (4) resume()/exhaust reuse after an exhaust_lexer() error. Python does NOT
-    #     refuse reuse: re-driving the same cursor re-surfaces the same
-    #     UnexpectedCharacter (the cursor still sits on the un-consumed bad char).
+    # (4) resume()/exhaust reuse after an UNLEXABLE-CHAR exhaust_lexer() error.
+    #     Python does NOT refuse reuse: the lexer stopped AT the bad char (it never
+    #     lexed "9"), so the cursor still sits on the un-consumed bad char and
+    #     re-driving the same cursor re-surfaces the same UnexpectedCharacter.
+    #     (`reuse_raised=True`, `reuse_error_kind="UnexpectedCharacter"`.)
     error_cases.append({
         "name": "contextual_reuse_after_exhaust_error",
         "lexer": "contextual",
         "grammar": "recovery_contextual",
         "drive": "exhaust",
         **interactive_error_trace(l_ctx, "[a9]", drive="exhaust", reuse=True),
+    })
+
+    # (6) resume()/exhaust reuse after a PARSER-REJECTED LEXED-TOKEN error (#265).
+    #     The complement of (4): "[}" lexes the root-fallback "}" (RBRACE) cleanly —
+    #     the lexer is FULLY CONSUMED (char_pos == len) before the parser rejects the
+    #     already-pulled token with UnexpectedToken. Because the rejected token was
+    #     pulled OUT of the lexer stream (not left un-consumed like the unlexable
+    #     char in (4)), re-driving exhaust_lexer finds the lexer exhausted and
+    #     returns cleanly — Python does NOT re-surface the UnexpectedToken, does NOT
+    #     advance, does NOT refuse: the reuse is a no-op (`reuse_raised=False`).
+    #     accepts() stays pinned at the post-error set (["AWORD"]) across the reuse.
+    #     Probed against Python Lark 1.3.1: first exhaust_lexer -> UnexpectedToken
+    #     RBRACE (char_pos==2==len); reuse exhaust_lexer -> [] (no raise). This pins
+    #     the parser-rejected-token reuse semantics distinctly from the unlexable
+    #     case, which #250/(4) covered but did not generalize to.
+    error_cases.append({
+        "name": "contextual_reuse_after_parser_rejected_token",
+        "lexer": "contextual",
+        "grammar": "recovery_contextual",
+        "drive": "exhaust",
+        **interactive_error_trace(l_ctx, "[}", drive="exhaust", reuse=True),
     })
 
     # (5) feed_eof() before exhausting the lexer on non-empty text. The caller

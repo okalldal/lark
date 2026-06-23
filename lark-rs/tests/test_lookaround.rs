@@ -632,7 +632,22 @@ mod recovery {
     ) -> Vec<(String, Option<String>, Option<String>)> {
         let g = Lark::new(guarded, LarkOptions::default()).expect("guarded grammar builds");
         let f = Lark::new(guardfree, LarkOptions::default()).expect("guard-free grammar builds");
-        let dump = |r: Result<lark_rs::ParseTree, _>| r.ok().map(|t| format!("{t:?}"));
+        // Compare on the *semantic* tree (token type-name + value + positions),
+        // not the internal `type_id`. The `SymbolId` a token carries is an
+        // interning-order index, which legitimately differs between two *distinct*
+        // grammars whenever their terminal sort order differs — e.g. since #268 a
+        // bounded guard-free `OP: /[+*]|[?]/` (finite max-width) and an unbounded
+        // `RULE` sort differently than the lookaround-guarded `OP` (unbounded, since
+        // the regex parser can't size it), flipping OP's id. That index is not part
+        // of the grammar-recoverability property under test (accept/reject + tree
+        // shape + token type/value), so strip it before comparing.
+        fn strip_type_id(s: &str) -> String {
+            // `type_id: SymbolId(N), ` → removed; the `type_: "..."` name remains.
+            let re = regex::Regex::new(r"type_id: SymbolId\(\d+\), ").unwrap();
+            re.replace_all(s, "").into_owned()
+        }
+        let dump =
+            |r: Result<lark_rs::ParseTree, _>| r.ok().map(|t| strip_type_id(&format!("{t:?}")));
         corpus
             .iter()
             .map(|&s| {

@@ -89,6 +89,15 @@ flag (`global flags not at the start of the expression`, because Lark wraps the
 source and demotes the flag off position 0); lark-rs strips the wrapper into a flag
 bitset and accepts + applies it. Scoped `(?i:…)` is fine on both — only the global
 form diverges. A new more-permissive validation family.
+**Fixed (#274):** the grammar loader now detects a *global* (bodiless) inline flag
+group `(?flags)` / `(?flags-flags)` anywhere in a **user `/…/` literal's** regex
+source and rejects it at build (`InvalidRegex`), the unusable-in-Python parity choice;
+the scoped `(?flags:…)` form is untouched. The gate is deliberately seated on the user
+literal sites in the loader (`grammar/terminal.rs::reject_global_inline_flags`, called
+from `grammar/loader/terminals.rs`), **not** in the shared `PatternRe::new` — that
+constructor is also used for the internal ci-literal bake (`"foo"i` → `(?i)foo`), and
+gating it there would break ci-literal composition (`("foo"i)+`); pinned by
+`pattern_re_new_does_not_gate_the_internal_ci_bake`.
 
 ### N4 — Named backreference mis-categorized (lexer / taxonomy)
 `A: /(?P<x>a)(?P=x)/`. **Expected behavior is a *categorized refusal*, not
@@ -102,6 +111,11 @@ a raw `Invalid regex pattern … regex parse error` instead. The XFAIL
 `\1`), not support — Python's acceptance is irrelevant here because lark-rs
 deliberately diverges on general backrefs. Distinct from RC6 (`\b`, different
 construct).
+**Fixed (#274):** the lookaround front-end now keeps a `(?P=name)` verbatim in a
+`Node::Atom` (instead of erroring on the named-*group* path), so the pattern parses,
+reaches the lexer-build routing seam, and is refused with the same categorized
+`BacktrackingOnlySyntax` (OutOfScope) message `\1`/`\k`/`\g` produce. `has_backref`
+also recognizes the spelling for the assertion-body case.
 
 ### N5 — Parser/lexer pairing legality not enforced (config validation)
 `start:"a"` with `lalr`+`dynamic` (also `cyk`+`contextual`, `earley`+`contextual`,
@@ -147,6 +161,13 @@ purely a build/size cost. Deterministic (RHS-symbol count, no wall-clock).
 - **Ruled out (shared with Python, ineligible):** `(a|b)~1..n` → 2ⁿ rules is
   byte-identical between the engines (Python cartesian-products inline groups the
   same way). Not a lark-rs pathology.
+- **FIXED (#279).** `compile_repeat` now ports Python's `_generate_repeats`
+  factoring (`small_factors` / `_add_repeat_rule` / `_add_repeat_opt_rule`) for the
+  `mx ≥ 50` case, so a large `~mn..mx` lowers to a logarithmic stack of shared
+  transparent `__anon_*` sub-rules — sub-quadratic grammar size, byte-identical
+  parse tree. Pinned by `tests/test_repeat_factoring.rs` (deterministic size gate +
+  tree parity across the threshold + grouped repeat + Earley) and the now-passing
+  `n9_bounded_repeat_grammar_size_subquadratic` regression test.
 
 ### N10 — `\Z` rejected & mis-categorized as lookaround (lexer / taxonomy)
 `A: /x\Z/` on `"x"` → Python accepts and tokenizes; lark-rs build-errors,

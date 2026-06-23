@@ -6,7 +6,9 @@ use super::ast::*;
 use super::compiler::GrammarCompiler;
 use super::imports::common_terminals;
 use crate::error::GrammarError;
-use crate::grammar::terminal::{flags, Pattern, PatternRe, PatternStr, TerminalDef};
+use crate::grammar::terminal::{
+    flags, reject_global_inline_flags, Pattern, PatternRe, PatternStr, TerminalDef,
+};
 use std::collections::HashMap;
 
 impl GrammarCompiler {
@@ -37,6 +39,9 @@ impl GrammarCompiler {
                 (pat, hint, true)
             }
             LiteralVal::Re(pattern, flags) => {
+                // N3: reject a user-authored global inline flag group `(?i)`/`(?ms)`/…
+                // (Python rejects it; scoped `(?flags:…)` is fine).
+                reject_global_inline_flags(pattern.as_str())?;
                 let pat = Pattern::Re(PatternRe::new(pattern.as_str(), *flags)?);
                 (pat, None, false)
             }
@@ -375,7 +380,9 @@ impl GrammarCompiler {
                 }
             }
             Expr::Value(Value::Literal(LiteralVal::Re(pattern, flags))) => {
-                // Validate and apply any flags as a scoped group.
+                // Validate and apply any flags as a scoped group. N3: reject a global
+                // inline flag group in the user's regex source first.
+                reject_global_inline_flags(pattern.as_str())?;
                 Pattern::Re(PatternRe::new(pattern.as_str(), *flags)?).to_inline_regex()
             }
             Expr::Value(Value::Range(from, to)) => {
@@ -390,7 +397,9 @@ impl GrammarCompiler {
                 let inner = Self::resolve_term_regex(referenced, by_name, imported, memo, stack)?;
                 format!("(?:{inner})")
             }
-            Expr::Repeat { inner, min, max } => {
+            Expr::Repeat {
+                inner, min, max, ..
+            } => {
                 let inner_re = Self::term_expr_regex(inner, by_name, imported, memo, stack)?;
                 let quantifier = match (*min, *max) {
                     (0, Some(1)) => "?".to_string(),
@@ -473,6 +482,8 @@ impl GrammarCompiler {
                 }
             }
             Expr::Value(Value::Literal(LiteralVal::Re(p, f))) => {
+                // N3: reject a user-authored global inline flag group first.
+                reject_global_inline_flags(p.as_str())?;
                 Ok(Pattern::Re(PatternRe::new(p.as_str(), *f)?))
             }
             Expr::Value(Value::Range(from, to)) => {
@@ -488,7 +499,9 @@ impl GrammarCompiler {
                     0,
                 )?))
             }
-            Expr::Repeat { inner, min, max } => {
+            Expr::Repeat {
+                inner, min, max, ..
+            } => {
                 let inner_pat = self.expr_to_pattern(inner)?;
                 // Inside a terminal, repetition becomes a regex quantifier.
                 // Bounded forms (`~n`, `~n..m`) must emit `{n}` / `{n,m}` / `{n,}`;

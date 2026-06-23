@@ -137,6 +137,108 @@ pub fn scanner_plan(
     })
 }
 
+/// Verify a [`ScannerPlan`] is hostable by the **pure-`regex` standalone runtime**
+/// (issue #280, bounty RC10 + V1/V2). The in-process lexer routes a regex-rejected
+/// terminal through the DFA-lowering refusal seam, so a lowered-lookaround terminal
+/// (e.g. `python.STRING`) builds fine on the `regex-automata` backend; the standalone
+/// runtime, by contrast, compiles each baked group on the plain `regex` crate
+/// (`Scanner::new` → `Regex::new(...).expect("baked scanner regex is valid")`). A
+/// terminal the plain crate cannot host — lookaround (RC10), an unsupported anchor
+/// like `\Z` (V1), or an oversized bounded repeat past the crate's size limit (V2) —
+/// would therefore be baked verbatim and **panic** the generated parser at first use.
+///
+/// This is the standalone backend's analogue of the engine-build refusal seam: it
+/// compiles **exactly what the runtime compiles** (each group's inline source, then
+/// the combined alternation under the same global prefix), so it rejects exactly the
+/// terminals the runtime would panic on. A per-terminal failure is first routed
+/// through [`route_fancy_only_terminal`] for the categorized lookaround/backtracking
+/// message; anything the seam does not classify (e.g. the size limit) falls back to a
+/// clear "not standalone-able" error. Either way the contract holds: a grammar the
+/// pure-`regex` runtime cannot host is refused at generation time, never baked into a
+/// panicking artifact.
+///
+/// `terminals` is the same id→def map `scanner_plan` was built from, used to recover a
+/// failing group's [`TerminalDef`] for the refusal seam and the error message.
+pub fn check_standalone_regex_hostable(
+    plan: &ScannerPlan,
+    terminals: &[(SymbolId, &TerminalDef)],
+    global_flags: u32,
+) -> Result<(), GrammarError> {
+    let def_of = |id: SymbolId| {
+        terminals
+            .iter()
+            .find(|(tid, _)| *tid == id)
+            .map(|(_, t)| *t)
+    };
+
+    // Per-group: compile each baked inline source on the plain `regex` crate, under the
+    // global prefix — the same `{prefix}{inline}` probe `DfaScanner`'s build uses to
+    // decide whether a terminal needs the refusal seam, so attribution agrees by
+    // construction. A failure here is the precise terminal a generated parser would
+    // panic on. (The runtime wraps each group in a named capture before combining; the
+    // capture cannot change *whether* the source compiles, only the combined size —
+    // which the aggregate pass below checks separately — so the bare source is the
+    // faithful per-terminal probe, and keeps a routed error message free of the
+    // synthetic `(?P<g…>)` wrapper.)
+    for (id, rx) in &plan.groups {
+        let probe = format!("{}{}", plan.global_prefix, rx);
+        let Err(err) = Regex::new(&probe) else {
+            continue;
+        };
+        // Every group id comes from `terminals`, so the def is always present.
+        let def = def_of(*id).expect("scanner-plan group id must have a TerminalDef");
+        // A regex-rejected terminal: route through THE refusal seam so the standalone
+        // backend reports the *same* categorized lookaround/backtracking error the
+        // engine paths do (parity by construction). The seam either returns the
+        // categorized error (lookaround/backtracking), or — for a terminal it lowers
+        // successfully (the DFA can host it but the plain runtime cannot, e.g.
+        // `python.STRING`) — returns `Ok`, in which case we synthesize the
+        // not-standalone-able refusal ourselves.
+        match route_fancy_only_terminal(def, global_flags, &err.to_string()) {
+            Err(scope_err) => return Err(scope_err),
+            Ok(_) => {
+                return Err(GrammarError::Other {
+                    msg: format!(
+                        "standalone generation cannot host terminal {:?}: its pattern \
+                         uses lookaround the in-process DFA lexer lowers but the \
+                         pure-`regex` standalone runtime cannot compile (the regex \
+                         engine said: {err}). Such a grammar is not standalone-able.",
+                        def.name
+                    ),
+                });
+            }
+        }
+    }
+
+    // Combined alternation: the per-group pass above probes each terminal in isolation,
+    // but the runtime ultimately compiles the *joined* scanner. This pass mirrors
+    // `Scanner::new`'s `Regex::new(&pattern)` exactly so any failure that only the
+    // assembled alternation exhibits — e.g. tripping the `regex` crate's compiled-size
+    // limit once all the (already-oversized, e.g. V2 `[a-z]{200000}`, or merely large)
+    // groups are summed — is still caught at bake time rather than panicking the
+    // generated parser. The per-group pass catches the common single-terminal case (and
+    // categorizes it via the seam); this is the aggregate backstop.
+    let parts: Vec<String> = plan
+        .groups
+        .iter()
+        .map(|(id, rx)| format!("(?P<g{}>{})", id.0, rx))
+        .collect();
+    if !parts.is_empty() {
+        let combined = format!("{}{}", plan.global_prefix, parts.join("|"));
+        if let Err(err) = Regex::new(&combined) {
+            return Err(GrammarError::Other {
+                msg: format!(
+                    "standalone generation cannot host this grammar's combined scanner: \
+                     the pure-`regex` standalone runtime fails to compile it (the regex \
+                     engine said: {err}). Such a grammar is not standalone-able."
+                ),
+            });
+        }
+    }
+
+    Ok(())
+}
+
 /// For each regex terminal, find the same-priority string terminals it fully
 /// matches; those become retype candidates, applied after the fact. Mirrors
 /// Python Lark's `_create_unless`, including its two case-insensitivity rules:
@@ -305,9 +407,16 @@ pub(super) fn global_flag_prefix(global_flags: u32) -> String {
     }
 }
 
-/// Python Lark's terminal ordering: `(-priority, -max_width, -len(pattern), id)`.
-/// Regex terminals have unbounded `max_width` and therefore sort ahead of fixed
-/// strings; the leftmost-first alternation then matches them greedily.
+/// Python Lark's terminal ordering: `(-priority, -max_width, -len(value), name)`
+/// (`lark/lexer.py:583`). An *unbounded* regex (`max_width = ∞`, mapped here from
+/// `None → usize::MAX`) sorts ahead of any finite-width terminal, so the
+/// leftmost-first alternation matches it greedily; a *finite* regex sorts by its
+/// real character width, not as unbounded (#268, RC5). The third key is the raw
+/// pattern length — Python's `len(pattern.value)`, the source with flags stored
+/// separately — so a flagged terminal's baked `(?i:…)` wrapper does not leak a
+/// phantom rank boost into the tiebreak (#268, N2). `as_regex_str().len()` would
+/// reintroduce both bugs (byte length of the *wrapped* source), so use
+/// [`Pattern::raw_value_len`].
 fn sort_terminals(terms: &mut [(SymbolId, &TerminalDef)]) {
     terms.sort_by(|(a_id, a), (b_id, b)| {
         let aw = a.pattern.max_width().unwrap_or(usize::MAX);
@@ -315,12 +424,7 @@ fn sort_terminals(terms: &mut [(SymbolId, &TerminalDef)]) {
         b.priority
             .cmp(&a.priority)
             .then_with(|| bw.cmp(&aw))
-            .then_with(|| {
-                b.pattern
-                    .as_regex_str()
-                    .len()
-                    .cmp(&a.pattern.as_regex_str().len())
-            })
+            .then_with(|| b.pattern.raw_value_len().cmp(&a.pattern.raw_value_len()))
             .then_with(|| a.name.cmp(&b.name))
             .then_with(|| a_id.cmp(b_id))
     });

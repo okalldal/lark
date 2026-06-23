@@ -31,7 +31,7 @@ pub(super) fn wrap_flags(flags: u32, src: &str) -> String {
 /// quantifier, a bare `(?:`, a parse failure) the input is returned unchanged, so
 /// the route behaves exactly as before. Loops so a nested `(?i:(?s:…))` (not
 /// produced by the loader, but cheap to honor) fully unwraps.
-pub(super) fn strip_whole_pattern_flag_wrapper(raw: &str, flags: u32) -> (String, u32) {
+pub(crate) fn strip_whole_pattern_flag_wrapper(raw: &str, flags: u32) -> (String, u32) {
     use crate::grammar::terminal::flags as f;
     let mut pattern = raw.to_string();
     let mut flags = flags;

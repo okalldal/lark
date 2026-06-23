@@ -962,10 +962,14 @@ fn max_width(node: &Node) -> Option<usize> {
 }
 
 /// Whether `node` contains a backreference in any atom. Covers the numeric form
-/// (`\1` … `\9`) and the named/indexed forms (`\k<name>`, `\k'name'`, `\g{1}`) — a
-/// backref is not a regular language, so the conservative gate must catch all of
-/// them, not just `\1`. (A *named* backref `(?P=name)` never reaches here: the
-/// front-end errors on it; this covers the escape-spelled variants.)
+/// (`\1` … `\9`), the escape-spelled named/indexed forms (`\k<name>`, `\k'name'`,
+/// `\g{1}`), and the Python `(?P=name)` spelling — a backref is not a regular
+/// language, so the conservative gate must catch all of them, not just `\1`. The
+/// front-end keeps a `(?P=name)` verbatim in a [`Node::Atom`] (N4), so it surfaces
+/// here exactly like the escape-spelled variants — important when one sits inside an
+/// assertion body (a top-level `(?P=name)` has no assertion and is already refused via
+/// the `BacktrackingOnlySyntax` route, but the assertion-body case routes through this
+/// gate).
 fn has_backref(node: &Node) -> bool {
     match node {
         Node::Atom(s) => atom_has_backref(s),
@@ -976,6 +980,15 @@ fn has_backref(node: &Node) -> bool {
 }
 
 fn atom_has_backref(atom: &str) -> bool {
+    // The Python `(?P=name)` named-backref spelling. The front-end (`try_named_backref`)
+    // emits it as its *own* standalone atom equal to exactly `(?P=name)`, so match that
+    // shape — `starts_with("(?P=") && ends_with(')')` — rather than a blind `contains`,
+    // which would false-positive on a `(?P=` that is a run of *literals* inside a
+    // character class (e.g. the body atom `[(?P=]x` of `(?=[(?P=]x)y`, a valid lowerable
+    // assertion that must not be misrejected as a backref).
+    if atom.starts_with("(?P=") && atom.ends_with(')') {
+        return true;
+    }
     let chars: Vec<char> = atom.chars().collect();
     let mut i = 0;
     while i < chars.len() {
@@ -1147,6 +1160,24 @@ mod tests {
         assert_eq!(
             verdicts(r#"(a)(?=\g{1})b"#),
             vec![Verdict::Rejected(Rejection::Backref)]
+        );
+        // N4: the Python `(?P=name)` spelling inside an assertion body must reject too
+        // — the front-end keeps it verbatim, `has_backref` recognizes it.
+        assert_eq!(
+            verdicts(r#"(?P<n>a)(?=(?P=n))b"#),
+            vec![Verdict::Rejected(Rejection::Backref)]
+        );
+    }
+
+    /// The `(?P=` backref detection must match the *standalone* atom shape, not a blind
+    /// substring: a `(?P=` that is a run of literals inside a character class is NOT a
+    /// backref, so the enclosing assertion stays lowerable (here a bounded leading
+    /// boundary), never misrejected as `Backref`.
+    #[test]
+    fn literal_question_p_eq_in_char_class_is_not_a_backref() {
+        assert_eq!(
+            verdicts(r#"(?=[(?P=]x)y"#),
+            vec![Verdict::Supported(ShapeClass::LeadingBoundary)]
         );
     }
 

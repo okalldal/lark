@@ -79,7 +79,41 @@ impl DynamicMatcher {
         let prefix = global_flag_prefix(conf.global_flags);
         let mut res = HashMap::new();
         for (id, term) in &conf.terminals {
-            let src = format!("{}{}", prefix, term.pattern.to_inline_regex());
+            let pat = term.pattern.to_inline_regex();
+            // Reject zero-width terminals on the dynamic path. Python Lark's
+            // `EarleyRegexpMatcher.__init__` rejects any terminal whose regexp can
+            // derive the empty string (`get_regexp_width(t.pattern.to_regexp())[0] ==
+            // 0`) with a *dynamic-lexer-specific* error (`parser_frontends.py:205`) —
+            // distinct from the basic lexer's "Lexer does not allow zero-width
+            // terminals". A nullable terminal would let the dynamic scan make no
+            // progress at a position, so it is forbidden at construction time.
+            //
+            // We use the assertion-aware min-width oracle
+            // (`lookaround::pattern_min_width_is_zero`, `width_range(...).0 == 0`),
+            // the lark-rs equivalent of Python's `get_regexp_width(...)[0]`. It is the
+            // gate for **every** terminal, including the lookaround terminals that
+            // take the `Lowered` branch below: a `Regex::new(..).is_match("")` probe
+            // can't see an assertion the `regex` crate refuses to compile (`/a*(?=b)/`,
+            // min-width 0, would slip through to `Lowered` ungated), and it disagrees
+            // with Python on a bare word boundary (`/\b/` is min-width 0 in Python but
+            // `is_match("")` is false). The oracle matches Python's `min_width == 0`
+            // rule exactly — it rejects on the *minimum*, so a pattern that can derive
+            // empty (`/a?/`, `/x*y*/`, `/a*(?=b)/`, `/\b/`) is rejected even when it can
+            // also match a non-empty string, while a non-nullable terminal (`/a+/`,
+            // `/foo(?!bar)/`) still builds. A pattern the front-end can't parse falls
+            // back to the `is_match("")` probe rather than over-rejecting.
+            let zero_width = match crate::lookaround::pattern_min_width_is_zero(&pat) {
+                Some(z) => z,
+                None => Regex::new(&format!("{prefix}{pat}"))
+                    .map(|re| re.is_match(""))
+                    .unwrap_or(false),
+            };
+            if zero_width {
+                return Err(GrammarError::Other {
+                    msg: "Dynamic Earley doesn't allow zero-width regexps".to_string(),
+                });
+            }
+            let src = format!("{prefix}{pat}");
             let compiled = match Regex::new(&src) {
                 Ok(re) => TermRegex::Plain(re),
                 Err(e) => TermRegex::Lowered(LoweredTerminalMatcher::build(

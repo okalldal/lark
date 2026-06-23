@@ -371,11 +371,13 @@ impl EarleyParser {
         }
     }
 
-    fn start_id(&self, start: Option<&str>) -> Option<SymbolId> {
-        match start {
-            Some(name) => self.grammar.symbols.id(name),
-            None => self.grammar.start.first().copied(),
-        }
+    /// Resolve the start symbol, mirroring Python Lark's `_verify_start` via the
+    /// shared [`resolve_start`](super::resolve_start) — a default (`None`) start
+    /// is the single configured one or a rejection on >1 starts (issue #256),
+    /// and an explicit start must be one of the configured starts. Identical to
+    /// LALR's resolution, so the diagnostics match.
+    fn start_id(&self, start: Option<&str>) -> Result<SymbolId, ParseError> {
+        super::resolve_start(&self.grammar.start, &self.grammar.symbols, start)
     }
 
     /// Recognize `tokens` from `start`: does the grammar derive this token
@@ -384,7 +386,7 @@ impl EarleyParser {
     ///
     /// A trailing `$END` token (the basic lexer appends one) is ignored.
     pub fn recognize(&self, tokens: &[Token], start: Option<&str>) -> bool {
-        let Some(start_id) = self.start_id(start) else {
+        let Ok(start_id) = self.start_id(start) else {
             return false;
         };
         let toks: Vec<&Token> = tokens
@@ -403,9 +405,7 @@ impl EarleyParser {
         start: Option<&str>,
         resolve: bool,
     ) -> Result<ParseTree, ParseError> {
-        let start_id = self
-            .start_id(start)
-            .ok_or_else(|| ParseError::unexpected_eof(0, 0, vec![]))?;
+        let start_id = self.start_id(start)?;
         let toks: Vec<&Token> = tokens
             .iter()
             .filter(|t| t.type_id != SymbolId::END)
@@ -433,9 +433,7 @@ impl EarleyParser {
         complete_lex: bool,
         matcher: &DynamicMatcher,
     ) -> Result<ParseTree, ParseError> {
-        let start_id = self
-            .start_id(start)
-            .ok_or_else(|| ParseError::unexpected_eof(0, 0, vec![]))?;
+        let start_id = self.start_id(start)?;
         let (forest, root) = self.build_chart_dynamic(text, start_id, matcher, complete_lex)?;
         // Dynamic lexer: there is no terminal-ordering tie-break to consume the
         // priorities, so they DO feed the forest priority sum (Lark's
@@ -467,8 +465,12 @@ impl EarleyParser {
         Ok(match value {
             NodeValue::Tree(t) => ParseTree::Tree(t),
             NodeValue::Token(t) => ParseTree::Token(t),
-            // A start rule is never transparent, so its value is never Inline; be
-            // defensive rather than panic.
+            // A start rule is never transparent. Its value can still be `Inline`
+            // when a top-level `?start` collapses a lone-`None` placeholder (RC9 fix
+            // in tree_builder: lone-`None` expand1 → `Inline([None])`). The public
+            // `ParseTree` can't hold a bare `None`, so the single-`None` arm below
+            // falls back to an empty start node — that root-`?start` corner is a
+            // separate tracked divergence (#289). Stay defensive rather than panic.
             NodeValue::Inline(mut cs) if cs.len() == 1 => match cs.pop().unwrap() {
                 Child::Tree(t) => ParseTree::Tree(t),
                 Child::Token(t) => ParseTree::Token(t),
@@ -1247,8 +1249,12 @@ impl EarleyParser {
             column: cols[i],
             end_line: lines[end_step],
             end_column: cols[end_step],
-            start_pos: pos,
-            end_pos: boundaries[end_step],
+            // `start_pos`/`end_pos` are **character** indices (Python parity, #278).
+            // Columns here are indexed by character step, so the step index *is* the
+            // char index — `i` and `end_step`, not the byte offsets
+            // `boundaries[i]`/`boundaries[end_step]`.
+            start_pos: i,
+            end_pos: end_step,
         };
 
         // 1) Match each scan-set item's predicted terminal here. A hit is *delayed*

@@ -64,7 +64,20 @@ fn test_earley_matches_lalr_oracles() {
     // letter run). Earley has no parser state to narrow terminals, so it uses the
     // basic lexer — and Python Lark's own earley+basic rejects this grammar with
     // the identical error, so the exclusion tracks Lark, not a lark-rs gap.
-    for name in ["arithmetic", "json", "terminal_refs", "keywords"] {
+    //
+    // `terminal_refs` is excluded for the same reason (verified against Python Lark
+    // 1.3.1, #268): its only two scanner terminals are `GREETING` (finite max-width
+    // 5) and `WORD: LETTER+` (unbounded). Python's basic-lexer terminal sort —
+    // `(-priority, -max_width, …)` — therefore puts unbounded `WORD` ahead of
+    // `GREETING`, so a leading `"hello"` lexes as `WORD` and `earley+basic` rejects
+    // `start: GREETING WORD` with `Unexpected token Token('WORD', 'hello')`. The
+    // contextual lexer (LALR) narrows to `GREETING` in the start state and parses
+    // it; `earley+dynamic` parses it too. Before #268 lark-rs treated *every* regex
+    // as unbounded, so `GREETING` and `WORD` tied and the name-asc tiebreak put
+    // `GREETING` first — masking this divergence and *accepting* input Python's
+    // earley+basic rejects. Now that finite max-widths are computed, lark-rs matches
+    // the oracle's rejection, so this grammar joins the contextual-only set.
+    for name in ["arithmetic", "json", "keywords"] {
         let lark = make_earley_from_file(name);
         failures.extend(check_oracle(&lark, name, "cases"));
     }
