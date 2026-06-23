@@ -45,5 +45,10 @@ pub struct Grammar {
     /// shadow's own `lalr_audit` is always `None`). Set once by the loader. NB the
     /// derived [`Clone`] deep-copies this `Box` like any other field; `Grammar` is
     /// not cloned on any build path, so the shadow is never duplicated in practice.
-    pub lalr_audit: Option<Box<Grammar>>,
+    ///
+    /// `pub(crate)`: this is internal build machinery (set by the loader, read only by
+    /// the LALR build, the import resolver, and standalone generation — all inside the
+    /// crate), so it is deliberately **not** part of the public API. Keeping it crate-
+    /// private means adding the field is not a public-API break (RC7/#272 follow-up).
+    pub(crate) lalr_audit: Option<Box<Grammar>>,
 }
