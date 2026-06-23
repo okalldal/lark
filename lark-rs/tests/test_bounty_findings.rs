@@ -32,7 +32,8 @@
 //! #210 seed-99, #258, #250, #228/#229, #253, the equal-span lexer tie-break).
 
 use lark_rs::{
-    generate_standalone, Ambiguity, Child, Lark, LarkOptions, LexerType, ParseTree, ParserAlgorithm,
+    generate_standalone, Ambiguity, Child, GrammarError, Lark, LarkError, LarkOptions, LexerType,
+    ParseTree, ParserAlgorithm,
 };
 
 /// Build a parser with the given knobs; returns the `Result` so a test can assert
@@ -73,6 +74,27 @@ fn assert_build_accepted(grammar: &str, parser: ParserAlgorithm, lexer: LexerTyp
         "{why}: Python Lark accepts this grammar at build, but lark-rs rejected it: {:?}",
         r.err()
     );
+}
+
+/// Assert a build result rejected specifically as the **reduce/reduce collision**
+/// the RC7 audit targets — the `GrammarError::Conflict` variant whose report names a
+/// `Reduce/Reduce collision`. Tighter than a bare `is_err()`: it fails if the grammar
+/// rejected for an *unrelated* reason (a duplicate definition, a broken import, a
+/// nullable-`$END` collision), which would let a falsely-passing build slip through
+/// the differential. Mirrors the `Conflict`-variant assertion in
+/// `test_lalr_core.rs::test_conflict_detection_matches_oracle`.
+fn assert_reduce_reduce_conflict<T>(r: &Result<T, LarkError>, why: &str) {
+    match r {
+        Err(LarkError::Grammar(GrammarError::Conflict { report })) => assert!(
+            report.contains("Reduce/Reduce collision"),
+            "{why}: rejected as GrammarError::Conflict, but the report is not a \
+             reduce/reduce collision:\n{report}"
+        ),
+        Err(e) => panic!("{why}: expected a reduce/reduce GrammarError::Conflict, got: {e:?}"),
+        Ok(_) => {
+            panic!("{why}: expected a reduce/reduce GrammarError::Conflict, but build succeeded")
+        }
+    }
 }
 
 /// Build a LALR parser whose `%import .module (...)` directives resolve against an
@@ -201,7 +223,11 @@ fn rc4c_alias_inside_group_rejected() {
 #[test]
 fn rc7_lalr_reduce_reduce_collision_rejected() {
     let g = "start: r0* | (r0)*\nr0: \"a\"\n";
-    assert_build_rejected(g, ParserAlgorithm::Lalr, LexerType::Contextual, "RC7");
+    // Assert the *kind*, not just `is_err()`: a build that failed for an unrelated
+    // reason (duplicate definition, broken import) must not pass this guard. The audit
+    // shadow surfaces the masked reduce/reduce, exactly Python's `Reduce/Reduce collision`.
+    let r = build(g, ParserAlgorithm::Lalr, LexerType::Contextual, false);
+    assert_reduce_reduce_conflict(&r, "RC7");
 }
 
 /// RC7 differential audit (#272): the reduce/reduce collision audit must match
@@ -300,10 +326,14 @@ fn rc7_reduce_reduce_differential_matches_oracle() {
     for (name, g, rejects) in cases {
         let r = build(g, ParserAlgorithm::Lalr, LexerType::Contextual, false);
         if *rejects {
-            assert!(
-                r.is_err(),
-                "RC7 differential: Python rejects `{name}`, but lark-rs accepted it"
-            );
+            // Every reject cell in this direct family was verified against the real
+            // build to reject specifically as a reduce/reduce `Conflict` (grounded
+            // 2026-06-23) — none reject via an unrelated mechanism — so we assert the
+            // *kind*, not just `is_err()`. A future cell that rejects by a different
+            // (still-Python-matching) mechanism must NOT be added here; pin it with a
+            // bare `is_err()` and a comment naming its mechanism instead (see the
+            // import family's `straddle` note for the precedent).
+            assert_reduce_reduce_conflict(&r, &format!("RC7 differential `{name}`"));
         } else {
             assert!(
                 r.is_ok(),
@@ -443,10 +473,16 @@ fn rc7_reduce_reduce_differential_matches_oracle_via_import() {
     for (name, files, rejects) in cases {
         let r = build_with_imports(files);
         if *rejects {
-            assert!(
-                r.is_err(),
-                "RC7 import differential: Python rejects `{name}`, but lark-rs accepted it"
-            );
+            // Each import reject cell was verified against the real build to reject as a
+            // reduce/reduce `Conflict` (grounded 2026-06-23). NB the `straddle` cell
+            // (imported `rr`, local `x: rr*` / `y: (rr)*`) also rejects as a genuine
+            // reduce/reduce — the two split helpers collide on `x ->` / `y ->` at
+            // `$END` (state 0) — NOT a "Rules defined twice"/duplicate-definition
+            // reject, so the reduce/reduce assertion is the faithful one for every cell
+            // here. (If a future import cell rejects by a different but still
+            // Python-matching mechanism — e.g. a nullable-`$END` collision — pin it
+            // with `is_err()` + a comment naming that mechanism, do not force it here.)
+            assert_reduce_reduce_conflict(&r, &format!("RC7 import differential `{name}`"));
         } else {
             assert!(
                 r.is_ok(),

@@ -177,3 +177,26 @@ fn rejects_unsupported_backends() {
         "Earley unsupported"
     );
 }
+
+/// RC7 (#272, ADR-0013) at the standalone-generation boundary. The standalone bake
+/// path now runs the same post-lowering reduce/reduce audit the live LALR build runs
+/// (`bake()` → `audit_lalr_reduce_reduce`), so a grammar whose shared EBNF helpers
+/// mask a reduce/reduce collision Python rejects must be rejected *at generation*,
+/// not baked into a broken parser. This is the RC7 core repro (`r0*` vs `(r0)*`):
+/// the live LALR build rejects it (`rc7_lalr_reduce_reduce_collision_rejected` in
+/// `test_bounty_findings.rs`), and standalone generation must mirror that rejection so
+/// the two LALR build paths can never diverge. Guards against a regression that drops
+/// the audit call from the standalone path.
+#[test]
+fn rc7_standalone_generation_rejects_reduce_reduce_overshare() {
+    let src = "start: r0* | (r0)*\nr0: \"a\"\n";
+    let options = LarkOptions {
+        parser: ParserAlgorithm::Lalr,
+        ..Default::default()
+    };
+    assert!(
+        generate_standalone(src, &options).is_err(),
+        "RC7: standalone generation must reject the masked reduce/reduce over-share \
+         (start: r0* | (r0)*), mirroring the live LALR build's rejection"
+    );
+}
