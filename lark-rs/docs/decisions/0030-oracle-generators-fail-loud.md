@@ -1,7 +1,7 @@
 # ADR-0030: Oracle generators fail loud; the oracle suite is honest by construction
 
-- **Status:** Proposed (pending architect ratification)
-- **Date:** 2026-06-22
+- **Status:** Accepted (2026-06-23; was Proposed — architect ratified)
+- **Date:** 2026-06-22 (accepted 2026-06-23)
 
 ## Context
 
