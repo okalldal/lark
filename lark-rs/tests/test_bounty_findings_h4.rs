@@ -1,4 +1,4 @@
-//! Bug-bounty findings, round 4 (h4) — failing oracle tests (XFAIL).
+//! Bug-bounty findings, round 4 (h4) — oracle tests and remaining XFAILs.
 //!
 //! Rounds 1–3 (`test_bounty_findings.rs` RC, `_h2.rs` N, `_h3.rs` H) harvested the
 //! missing-validation-gate layer, the lexer terminal-ordering bugs, config legality,
@@ -10,10 +10,9 @@
 //! literal** rule unification, a **nullable+recursive Earley** derivation under-count, and
 //! a **DFA-build** determinization blow-up.
 //!
-//! Each test asserts the **Python Lark 1.3.1** (oracle) behavior. This file is an XFAIL
-//! catalog: every test below is `#[ignore]`d and fails today. Drop a test's `#[ignore]`
-//! when its bug is fixed to turn it into a permanent regression guard. Run the still-open
-//! XFAILs with:
+//! Each test asserts the **Python Lark 1.3.1** (oracle) behavior. Tests that still carry
+//! `#[ignore]` are open XFAILs; drop a test's `#[ignore]` when its bug is fixed to turn
+//! it into a permanent regression guard. Run the still-open XFAILs with:
 //!
 //!     cargo test --test test_bounty_findings_h4 -- --ignored
 //!
@@ -123,15 +122,14 @@ fn derivation_count(t: &ParseTree) -> usize {
 /// (`src/grammar/loader/tokenizer.rs`) decodes a *superset* of the escapes Python
 /// Lark's `eval_escaping` (`lark/load_grammar.py`) recognizes. Python decodes only
 /// `\\ \U \u \x \n \f \t \r`; **every other** escape keeps a literal backslash.
-/// lark-rs additionally decodes `\v`→VT, `\0`→NUL, `\'`→`'`, so the `PatternStr` value
-/// (and the input it matches) diverges. Engine-independent (loader bug). Expected fix:
+/// Older lark-rs additionally decoded `\v`→VT, `\0`→NUL, `\'`→`'`, so the `PatternStr`
+/// value (and the input it matched) diverged. Engine-independent (loader bug). Guard:
 /// reject-like-Python at the value level — leave `\v`/`\0`/`\'` as literal backslash+char.
 #[test]
-#[ignore = "XFAIL (bounty H4-1): grammar string-literal escapes \\v \\0 \\' over-decoded vs Python eval_escaping"]
 fn h4_1_string_literal_escape_overdecoded() {
     // Python reads `"\v"` as the 2-char literal backslash+`v`, so it accepts the
-    // 2-byte input `\v` and rejects a bare vertical tab. lark-rs decodes to U+000B
-    // and does the opposite. Assert the Python-accepted literal parses.
+    // 2-byte input `\v` and rejects a bare vertical tab. The bug decoded to U+000B
+    // and did the opposite. Assert the Python-accepted literal parses.
     for (g, accepted_literal) in [
         ("start: \"\\v\"\n", "\\v"),
         ("start: \"\\0\"\n", "\\0"),

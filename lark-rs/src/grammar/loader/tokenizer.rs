@@ -454,7 +454,7 @@ impl<'a> Lexer<'a> {
 /// Decode escape sequences in a string literal, mirroring Python Lark's
 /// `eval_escaping` (which defers to `ast.literal_eval`). The numeric escapes
 /// `\xHH`, `\uHHHH`, and `\UHHHHHHHH` decode to the corresponding `char`;
-/// `\n \t \r \f \v \0` map to their control characters; `\\ \" \'` are literal.
+/// `\n \t \r \f` map to their control characters; `\\ \"` are literal.
 /// An unrecognized escape (e.g. `\w`, `\d`) keeps its backslash so regex
 /// metacharacters embedded in a string survive — matching Lark, which prepends a
 /// backslash for any escape outside `Uuxnftr`.
@@ -471,11 +471,8 @@ fn unescape_string(s: &str) -> String {
             Some('t') => out.push('\t'),
             Some('r') => out.push('\r'),
             Some('f') => out.push('\u{0C}'),
-            Some('v') => out.push('\u{0B}'),
-            Some('0') => out.push('\0'),
             Some('\\') => out.push('\\'),
             Some('"') => out.push('"'),
-            Some('\'') => out.push('\''),
             Some('x') => push_hex_escape(&mut out, &mut chars, 2, "\\x"),
             Some('u') => push_hex_escape(&mut out, &mut chars, 4, "\\u"),
             Some('U') => push_hex_escape(&mut out, &mut chars, 8, "\\U"),
