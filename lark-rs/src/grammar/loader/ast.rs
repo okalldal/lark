@@ -54,6 +54,110 @@ pub(super) enum Expr {
     Maybe(Vec<AliasedExpansion>),
 }
 
+impl Expr {
+    /// A structural string key for the *source* AST subtree, used by the
+    /// post-lowering reduce/reduce audit (ADR-0013, RC7/#272) to reproduce Python
+    /// Lark's `EBNF_to_BNF._add_recurse_rule` sharing decision. Python keys its
+    /// `rules_cache` on the inner `expr` **Tree** — so `r0*` (inner `value(r0)`) and
+    /// `(r0)*` (inner `expansions(expansion(value(r0)))`) get *distinct* star
+    /// helpers, whereas lark-rs's real `recurse_cache` keys on the *compiled* arms
+    /// (which collapse the single-symbol group wrapper) and so shares one helper.
+    /// This key preserves the full group-nesting structure of the source, matching
+    /// Python's verdict that `r0* | ((r0))*` splits but `((r0))* | ((r0))*` shares
+    /// (verified against Python Lark 1.3.1). It is only ever a *cache key* for the
+    /// audit shadow grammar — never a rule name or a parsed value.
+    pub(super) fn python_recurse_key(&self) -> String {
+        let mut s = String::new();
+        self.write_recurse_key(&mut s);
+        s
+    }
+
+    fn write_recurse_key(&self, out: &mut String) {
+        match self {
+            Expr::Value(v) => {
+                out.push_str("V(");
+                v.write_recurse_key(out);
+                out.push(')');
+            }
+            Expr::Repeat {
+                inner,
+                min,
+                max,
+                kind,
+            } => {
+                out.push_str(&format!("R{min}_{max:?}_{kind:?}("));
+                inner.write_recurse_key(out);
+                out.push(')');
+            }
+            Expr::Group(alts) => {
+                out.push_str("G(");
+                Self::write_alts_key(alts, out);
+                out.push(')');
+            }
+            Expr::Maybe(alts) => {
+                out.push_str("M(");
+                Self::write_alts_key(alts, out);
+                out.push(')');
+            }
+        }
+    }
+
+    fn write_alts_key(alts: &[AliasedExpansion], out: &mut String) {
+        for (i, alt) in alts.iter().enumerate() {
+            if i > 0 {
+                out.push('|');
+            }
+            if let Some(a) = &alt.alias {
+                out.push_str("->");
+                out.push_str(a);
+                out.push(':');
+            }
+            for (j, e) in alt.expansion.iter().enumerate() {
+                if j > 0 {
+                    out.push(' ');
+                }
+                e.write_recurse_key(out);
+            }
+        }
+    }
+}
+
+impl Value {
+    fn write_recurse_key(&self, out: &mut String) {
+        match self {
+            Value::Terminal(n) => {
+                out.push_str("T:");
+                out.push_str(n);
+            }
+            Value::Rule(n) => {
+                out.push_str("r:");
+                out.push_str(n);
+            }
+            Value::Literal(LiteralVal::Str(s, ci)) => {
+                out.push_str(&format!("Ls:{ci}:{s:?}"));
+            }
+            Value::Literal(LiteralVal::Re(p, f)) => {
+                out.push_str(&format!("Lr:{f}:{p:?}"));
+            }
+            Value::Range(a, b) => {
+                out.push_str(&format!("Rng:{a:?}..{b:?}"));
+            }
+            Value::TemplateUsage { name, args } => {
+                out.push_str("Tpl:");
+                out.push_str(name);
+                out.push('<');
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        out.push(',');
+                    }
+                    a.write_recurse_key(out);
+                }
+                out.push('>');
+            }
+        }
+    }
+}
+
 /// Which surface operator produced a [`Expr::Repeat`]. The two cases that share a
 /// `(min, max)` — `X?` and `X~0..1` (both `min: 0, max: Some(1)`) — diverge under
 /// `maybe_placeholders`: `?` is Python's `maybe()` (the empty arm inherits the

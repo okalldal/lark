@@ -716,6 +716,11 @@ fn build_lalr(
 ) -> Result<Box<dyn ParserDriver>, LarkError> {
     let (cg, lexer_conf) = lower_with_lexer_conf(grammar, options);
     let table = build_lalr_table(&cg, options.strict)?;
+    // Post-lowering reduce/reduce audit (RC7/#272, ADR-0013) — see
+    // `audit_lalr_reduce_reduce`. Shared with standalone generation so the two LALR
+    // build paths can never diverge on which grammars they reject.
+    lalr::audit_lalr_reduce_reduce(grammar, options.strict)?;
+
     let parser = LalrParser::new(table);
 
     // Lexer-build validation, mirroring Python Lark's `BasicLexer`

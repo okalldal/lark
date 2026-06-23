@@ -521,6 +521,28 @@ added (and this note used to flag as a soft spot) is **removed**. Pinned by
 `test_exact_repeat_one_inlines_no_helper` / `test_template_plus_optional_repeat_one`
 (tests/test_ebnf_sharing.rs, #176).
 
+**The recurse-helper sharing is *coarser* than Python's — a post-lowering audit
+restores reduce/reduce parity (RC7/#272, amends ADR-0013).** `recurse_helper` keys
+its `recurse_cache` on the *compiled arms*, which collapse the single-symbol group
+wrapper, so `r0*` and `(r0)*` share **one** helper. Python keys on the inner `expr`
+**Tree** (`EBNF_to_BNF._add_recurse_rule`), mints **two** distinct helpers, and
+rejects `start: r0* | (r0)*` with a reduce/reduce collision. Un-sharing to match
+regresses the LALR bank 512→482 (the sharing is load-bearing — ADR-0013), so the fix
+is **not** a key change and **not** a detector change: when the loader detects a
+recurse over-share (`recurse_overshare_seen` — a real cache hit fusing two distinct
+inner *source-AST* shapes), it builds a Python-faithful **audit shadow** (the same
+grammar re-lowered with recurse helpers keyed on `Expr::python_recurse_key`, via
+`GrammarCompiler::python_keyed_recurse`) and attaches it as `Grammar::lalr_audit`.
+`parsers/mod.rs::build_lalr` runs the **real** conflict detector over the shadow's
+lowering and surfaces any `Conflict` — the masked rejection — while the real parse
+table keeps the sharing. The shadow only gates the build; it never parses. The audit
+runs the real detector (not a structural "distinct-AST ⇒ reject" shortcut) because
+the latter over-rejects (`A r0* | B (r0)*` splits but the helpers sit behind distinct
+terminals and never collide — Python *accepts* it). Pinned by
+`rc7_lalr_reduce_reduce_collision_rejected` and the differential
+`rc7_reduce_reduce_differential_matches_oracle` (tests/test_bounty_findings.rs); LALR
+bank stays 512/512.
+
 ---
 
 ## Compliance Bank — Regression Net
