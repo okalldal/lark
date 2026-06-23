@@ -52,6 +52,7 @@ Authoring a new ADR as `Accepted` is a Definition-of-Done failure (see
 | [0028](0028-recovery-action-design.md) | `RecoveryAction` enum over direct `&mut InteractiveParser` for `on_error` (insert/delete/stop recovery) | Accepted |
 | [0029](0029-output-builder-public-api-shape.md) | Public `OutputBuilder` API shape — per-call `parse_into`, `is_discard` hook, `ctx` metadata, LALR-only; commit `Tree` + Rust `Custom`, `SpanTree` experimental, `Event`/`Tape` internal | Accepted |
 | [0030](0030-oracle-generators-fail-loud.md) | Oracle generators fail loud on un-allow-listed contradictions; the oracle suite is honest by construction (no silent skips, no self-referential fields) | Accepted |
+| [0031](0031-good-autonomous-fix-site-verification.md) | `good-autonomous` requires a fix-site check against a fast repro before triage applies it; unverified sites carry a "fix site unverified" note (bug-hackathon marks fix sites hypothesised vs verified) | Proposed |
 
 ## ADRs going forward — the governance audit trail
 
