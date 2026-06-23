@@ -1,7 +1,11 @@
 # ADR-0032: Sprint/kaizen/task close-out must file every retro-flagged kaizen item
 
-- **Status:** Proposed (pending architect ratification)
+- **Status:** Accepted (2026-06-23)
 - **Date:** 2026-06-23
+
+> **Decision (architect, 2026-06-23):** Accept as-is. Operationalizes the existing
+> PRINCIPLES §7 "never silently drop" obligation at the close-out enforcement point;
+> no constitution change.
 
 ## Context
 
