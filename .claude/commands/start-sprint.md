@@ -173,6 +173,17 @@ The worker brief:
 > review sub-agent over your branch diff** and address its findings before opening the
 > child PR. Run the fast gate (`lark-rs/scripts/check-fast.sh`).
 >
+> **Review→push→PR→return is ATOMIC — do it all in one turn; never strand validated work
+> (#309).** Run the pre-PR review **inline / foreground in your own turn**: do **NOT**
+> spawn a *background* sub-agent for it and then idle — the harness will end your turn
+> while you wait on the notification, stranding your committed-but-unpushed work in the
+> worktree (this stranded 3 workers in sprint #284, including one that carried an
+> anti-stranding clause yet still spawned a background reviewer). If you launch a review
+> sub-agent, **await it synchronously (foreground)**, and **never end your turn while any
+> of your own sub-agents are still running**. The moment the review is addressed,
+> `push → open the child PR → return` in the **same** turn — the PR open + return must be
+> the **LAST** action of the turn, not deferred to a follow-up turn.
+>
 > **Do NOT run `/finish-task`.** This brief *replaces* it for sprint work. `/finish-task`
 > (and `lark-rs/CLAUDE.md`'s "finishing a task" pointer) targets ordinary single-issue
 > work: it requires `Closes #N`, classifies a merge tier, and invokes `/review-pr` —

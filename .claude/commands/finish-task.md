@@ -11,6 +11,16 @@ pushing — that runs everything twice (once here, once in GitHub Actions).
    findings pre-PR means CI runs once on the final diff instead of twice.
    Note what the review flagged and how it was addressed for the PR description.
 
+   **Review→push→PR→return is ATOMIC — never strand the work (#309).** Run the
+   review **inline / foreground in this turn**: do **NOT** spawn a *background*
+   sub-agent for it and then idle — the harness ends the turn while you wait on
+   the notification, leaving validated-but-unpushed work stranded (this happened
+   3× in sprint #284). If you launch a review sub-agent, **await it synchronously
+   (foreground)** and **never end the turn while your own sub-agents are still
+   running**. Once the findings are addressed, carry straight through to the
+   `push → open-PR` (steps 2–3) in the **same** turn — opening the PR is the last
+   action of the turn, not deferred to a follow-up.
+
    **Differential-audit checkpoint (make it a conscious, recorded decision).**
    Ask: does this change touch a behavior whose *full* input space the standing
    banks do **not** exhaustively cover (nullable / EBNF-expansion edges, ambiguity
