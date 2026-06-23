@@ -52,6 +52,8 @@ Authoring a new ADR as `Accepted` is a Definition-of-Done failure (see
 | [0028](0028-recovery-action-design.md) | `RecoveryAction` enum over direct `&mut InteractiveParser` for `on_error` (insert/delete/stop recovery) | Accepted |
 | [0029](0029-output-builder-public-api-shape.md) | Public `OutputBuilder` API shape — per-call `parse_into`, `is_discard` hook, `ctx` metadata, LALR-only; commit `Tree` + Rust `Custom`, `SpanTree` experimental, `Event`/`Tape` internal | Accepted |
 | [0030](0030-oracle-generators-fail-loud.md) | Oracle generators fail loud on un-allow-listed contradictions; the oracle suite is honest by construction (no silent skips, no self-referential fields) | Accepted |
+| [0031](0031-good-autonomous-fix-site-verification.md) | `good-autonomous` carries a fix-site **verification status** (not a blocking gate): `/triage` checks the stated fix site against a fast repro; verified sites are load-bearing, unverified sites keep the label but carry a "fix site unverified" note (bug-hackathon marks fix sites hypothesised vs verified) | Accepted |
+| [0032](0032-closeout-files-retro-flagged-kaizen-items.md) | Sprint/kaizen/task close-out must file every retro-flagged kaizen item (required, checkable) + a dual-arm follow-ups report — closes the §7 lapse #284 made (dropped kaizen follow-ups; recovered as #309–#314) | Accepted |
 
 ## ADRs going forward — the governance audit trail
 

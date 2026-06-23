@@ -387,6 +387,13 @@ mega-issue (buries criticals, can't be prioritized or claimed in parallel).
      consequences) so `/architect-brief` can read it;
    - provisional (C-level) findings → no `good-autonomous`; done-when is "produce
      an executable repro first".
+4a. **Mark the fix site hypothesised vs verified.** The cluster's fix site is a
+   *fix-touches-here* guess unless a repro confirms it. Mark it **verified** only
+   when a fast repro (the XFAIL or a one-line probe) actually fails in / routes
+   through that module; otherwise mark it **hypothesised**. This is the signal
+   `/triage`'s `good-autonomous` fix-site check reads to decide whether the named
+   site is load-bearing or should carry a "fix site unverified" note — a
+   `hypothesised` site does not, by itself, support an unqualified `good-autonomous`.
 5. **Create one issue per cluster** (template below); prefix the title with the
    cluster's max severity in brackets.
 6. **Create the tracking epic** (template below) with a checklist grouped by
@@ -405,7 +412,7 @@ mega-issue (buries criticals, can't be prioritized or claimed in parallel).
   lark-rs: <result>. XFAIL: `<test name>`.
 - ... (additional surfaces / variants sharing this fix site)
 
-Fix site: `<module/function>`.
+Fix site: `<module/function>` (hypothesised | verified).
 Expected fix contract: support | reject-like-Python | reject-with-divergence | ADR.
 Catalog: `lark-rs/docs/BOUNTY_FINDINGS_<ROUND>.md` (<IDs>).
 Part of the XFAIL burndown epic #<epic>.
@@ -439,7 +446,8 @@ map to issues (e.g. "19 findings → 14 fix-site issues").
 
 - [ ] PR is merged; catalog + tests are on the base branch
 - [ ] No duplicate issues created (matched against existing open issues)
-- [ ] One issue per fix site; variants folded into parents
+- [ ] One issue per fix site; variants folded into parents; each fix site marked
+      hypothesised vs verified
 - [ ] Labels exist and are applied; severity→priority mapping correct
 - [ ] `needs-decision` set on every genuine fix-contract fork (written as a memo)
 - [ ] Provisional findings carry "executable repro first", no `good-autonomous`

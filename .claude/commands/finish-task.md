@@ -11,6 +11,16 @@ pushing — that runs everything twice (once here, once in GitHub Actions).
    findings pre-PR means CI runs once on the final diff instead of twice.
    Note what the review flagged and how it was addressed for the PR description.
 
+   **Review→push→PR→return is ATOMIC — never strand the work (#309).** Run the
+   review **inline / foreground in this turn**: do **NOT** spawn a *background*
+   sub-agent for it and then idle — the harness ends the turn while you wait on
+   the notification, leaving validated-but-unpushed work stranded (this happened
+   3× in sprint #284). If you launch a review sub-agent, **await it synchronously
+   (foreground)** and **never end the turn while your own sub-agents are still
+   running**. Once the findings are addressed, carry straight through to the
+   `push → open-PR` (steps 2–3) in the **same** turn — opening the PR is the last
+   action of the turn, not deferred to a follow-up.
+
    **Differential-audit checkpoint (make it a conscious, recorded decision).**
    Ask: does this change touch a behavior whose *full* input space the standing
    banks do **not** exhaustively cover (nullable / EBNF-expansion edges, ambiguity
@@ -52,6 +62,14 @@ pushing — that runs everything twice (once here, once in GitHub Actions).
      When a follow-up is an unresolved fork or public API/product decision, file
      it with the decision memo skeleton (see `/roadmap`) and label it
      `needs-decision`, not just a generic issue.
+     **Process debt counts too (required, checkable — not implicit).** If the task
+     surfaced a *retro-flagged kaizen item* — a kit/process fix, a "KIT BUG," a
+     "file as follow-up" note about a stale instruction, a misbehaving tool, or
+     missing know-how — file it as a `kaizen`-labelled issue (`lark-rs/docs/LABELS.md`)
+     **before** reporting the task done, and link it in the PR close-out; the task is
+     not done until each such note is filed or explicitly marked already-tracked. This
+     mirrors the sprint/kaizen §9 close-out: the close-out step itself must obey §7's
+     "never silently drop" (the lapse #284 made and #315 fixed).
    - **Write an ADR if you deviated from a §3 default**, or made an
      architecture / public-API call a future reader would have to reverse-engineer
      (`lark-rs/docs/decisions/`, copy `TEMPLATE.md`). Commit it in *this* PR

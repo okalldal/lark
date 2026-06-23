@@ -117,7 +117,9 @@ issues run concurrently. Cap concurrency at **~3** workers to bound CI cost and 
 
 For each issue in the wave, launch one `Task` (general-purpose) sub-agent with
 `isolation: "worktree"`. Send the independent ones **in a single message** so they run
-concurrently. A fresh `Task` inherits **none** of this session's working memory — only
+concurrently. (Tooling note: once a github MCP tool is **already loaded**, call it
+directly — re-running `ToolSearch select:` on an already-loaded tool returns "no matching
+tools" even though the tool is callable (#314).) A fresh `Task` inherits **none** of this session's working memory — only
 the prompt, the checkout, and tool access — so the brief must carry a real context
 packet, not a bare issue number.
 
@@ -152,7 +154,9 @@ The worker brief:
 > **Claim it before coding** (the `/next-task` protocol, not just the label): comment on
 > the issue with your branch/session intent, self-assign if possible, and set
 > `status:in-progress`. If it is already claimed, stop and return `BLOCKED:` — never
-> double-work an issue (parallel workers must not collide).
+> double-work an issue (parallel workers must not collide). When mutating labels via
+> `mcp__github__issue_write`, pass `labels` as a **JSON array** (`["a","b"]`) — a
+> comma-separated string coercion-errors and burns a retry (#314).
 >
 > **Branch from the sprint tip, not `master`.** Create your working branch from
 > `<sprint-branch>` at `<sprint-tip-sha>`. Before opening or updating the child PR, fetch
@@ -168,10 +172,31 @@ The worker brief:
 > sprint tip. And because Edit operates on the worktree copy, **Read the worktree copy of a
 > file before you Edit it** — do not rely on a path you read in the shared checkout.
 >
+> **Keep ALL files inside your worktree — never write any file into the shared checkout.**
+> Every file you create lives under your own `isolation: worktree` path: not just the edits
+> you ship, but **scratch, probe, and temporary files too** (e.g. an `examples/*.rs` probe,
+> a `tests/zz_tmp_*` fixture). A stray file left in the *shared* checkout is invisible to
+> your branch yet still breaks the orchestrator's pre-push hooks — a leaked untracked
+> `examples/n4probe.rs` once tripped `cargo fmt --check` and forced a `--no-verify` push
+> plus a manual cleanup (#311). **Before pushing, sweep `git status`** and confirm there are
+> no stray untracked files: everything you authored is either tracked on your branch (or
+> deliberately git-ignored), with nothing left behind in the shared tree.
+>
 > Follow the repo's oracle-first discipline (`lark-rs/CLAUDE.md`): a failing test before
 > the fix, banks green after. Run `/code-review` **if available; otherwise launch a fresh
 > review sub-agent over your branch diff** and address its findings before opening the
 > child PR. Run the fast gate (`lark-rs/scripts/check-fast.sh`).
+>
+> **Review→push→PR→return is ATOMIC — do it all in one turn; never strand validated work
+> (#309).** Run the pre-PR review **inline / foreground in your own turn**: do **NOT**
+> spawn a *background* sub-agent for it and then idle — the harness will end your turn
+> while you wait on the notification, stranding your committed-but-unpushed work in the
+> worktree (this stranded 3 workers in sprint #284, including one that carried an
+> anti-stranding clause yet still spawned a background reviewer). If you launch a review
+> sub-agent, **await it synchronously (foreground)**, and **never end your turn while any
+> of your own sub-agents are still running**. The moment the review is addressed,
+> `push → open the child PR → return` in the **same** turn — the PR open + return must be
+> the **LAST** action of the turn, not deferred to a follow-up turn.
 >
 > **Do NOT run `/finish-task`.** This brief *replaces* it for sprint work. `/finish-task`
 > (and `lark-rs/CLAUDE.md`'s "finishing a task" pointer) targets ordinary single-issue
@@ -190,6 +215,10 @@ The worker brief:
 > closing keywords (and on a non-default base they would not fire anyway). Putting this
 > evidence *in the PR body* is what lets the independent verdict-only reviewer (§5) judge
 > the child without inferring or failing it for missing evidence.
+>
+> **File a follow-up issue *before* referencing its number** in code comments or PR text —
+> file it first, then cite the returned number; do not guess a number relative to your own
+> PR/issue (a worker once mis-referenced its own PR number this way, #314).
 >
 > **Do NOT run `/review-pr` in any acting/merge mode. Do NOT merge anything.** If you hit
 > a fork only the architect can settle — a genuine `needs-decision` (taste, product
@@ -309,6 +338,13 @@ This is staging onto the sprint branch, **not** landing to `master`:
   workspace scratch file is fine as a live convenience cache, but it is **never** the
   system of record — the container is reclaimed on restart, so anything that must survive a
   roll-over is reconstructable (above) or committed to the residue file.
+- **Always `git commit` a residue-ledger edit *before* re-syncing the sprint branch, and
+  prefer a plain `git pull --ff-only` over `fetch` + `reset --hard`.** The integration
+  branch only moves forward (via GitHub squash-merges), so a fast-forward pull suffices; a
+  `reset --hard` run before committing an uncommitted ledger edit silently discards it and
+  forces a re-apply (#314). (The §7 finalize push-retry already does the inverse
+  commit-then-`pull --ff-only`-then-retry on a rejected push — same discipline, the two do
+  not overlap.)
 - After each child PR is staged:
   - **rebase/update the remaining open child PRs** onto the new sprint-branch tip
     (`mcp__github__update_pull_request_branch`) so any conflict surfaces **now**;
@@ -387,7 +423,33 @@ read the kept integration branch's merge history (each squash names `…(#PR)`) 
 child PR bodies (`Refs #N` + tier) to build the *Staged* rows, cross-check against labels,
 and fold in the residue file's `RETRO:`/synced-SHA entries. **Then** write the full record
 into the omnibus body **once** (this is the one big body write of the sprint) and post the
-Architect Action Memo (§9). Before marking the omnibus **ready for review** (out of draft),
+Architect Action Memo (§9).
+
+**The finalize residue-ledger push must be confirmed landed — retry on a rejected
+fast-forward.** The last residue-ledger commit (final `RETRO:`/synced-SHA bullets +
+reconstruction summary) is the resumability ledger (ADR-0023), so a push the proxy
+*silently rejects* leaves the on-branch ledger one commit short and forces the fallback to
+the PR body — the exact churn ADR-0023 exists to avoid (this happened in sprint #284). The
+proxy will at times reject a **legitimate fast-forward** push to the sprint-branch tip even
+when the local tip is a clean child of the remote tip. So do **not** treat a push as done
+when the command merely returns: on a rejected residue-ledger push, **re-sync and retry
+with backoff** —
+
+```bash
+git fetch origin <sprint-branch>
+git pull --ff-only origin <sprint-branch>   # re-sync onto the current remote tip
+git push origin HEAD:<sprint-branch>        # retry; repeat with backoff if rejected
+```
+
+— and **confirm the commit actually landed on the remote** before moving on: after a push
+that reports success, verify `git rev-parse origin/<sprint-branch>` (post-`fetch`) contains
+the finalize ledger commit; a push is only *done* once the remote tip includes it, not when
+the push command merely returned. This is a **distinct** proxy edge from the `403`-on-ref-
+delete behavior (§9, closed #190): that one blocks branch *deletion*; this one rejects a
+fast-forward *push*. Treat both as known git-proxy quirks to work around, not bugs to
+root-cause here.
+
+Before marking the omnibus **ready for review** (out of draft),
 confirm:
 
 - current `master` is an **ancestor** of the sprint integration branch;
@@ -405,7 +467,9 @@ The finalized omnibus body therefore owns the whole sprint's record:
 - the **included issues as `Closes #N`** (these live on the omnibus *only*);
 - **review + CI evidence** per child;
 - any **`needs-decision` items excluded** from the sprint, with their memos;
-- any **follow-up issues** filed during the sprint.
+- any **follow-up issues** filed during the sprint, in the two enumerated arms — *product
+  follow-ups* and *kaizen follow-ups* — kept separate (§9), so a missing kaizen arm is
+  visible, never silent.
 
 **The architect gives final approval by merging the omnibus PR into `master`.** The
 session does not merge it.
@@ -435,11 +499,26 @@ The sprint is finished only once the omnibus PR is merged by the architect. Afte
   of the sprint (the omnibus diff + the full staging history), and the orchestrator cannot
   delete it here anyway (the git proxy returns `403` on ref-delete and there is no
   delete-ref tool). Leave any branch removal to GitHub's auto-delete-on-merge or the
-  architect (architect decision, 2026-06-19);
+  architect (architect decision, 2026-06-19). (A **second**, distinct git-proxy edge: the
+  proxy can reject a *legitimate fast-forward push* to the branch tip — handled at §7
+  finalize with re-sync + retry-with-backoff and a confirm-landed check; see #312.);
+- **File every retro-flagged kaizen item before reporting done (required, checkable —
+  not implicit).** Walk the aggregated Retrospective and every worker/review/orchestrator
+  `RETRO:` note: for each note tagged "kaizen" / "KIT BUG" / "file as follow-up" (i.e. a
+  kit/process fix, not a product bug), **confirm a tracking issue exists** — labelled
+  `kaizen` per `lark-rs/docs/LABELS.md` — and **link it in the close-out report**. The
+  close-out is **not done** until each such note is either filed as a `kaizen` issue or
+  explicitly marked already-tracked/duplicate (with the existing issue linked). This is
+  the §9 close-out enforcing PRINCIPLES §7 on *itself* — sprint #284 reliably filed its
+  product follow-ups but silently dropped every kaizen follow-up its own retro flagged
+  (recovered late as #309–#314); the same close-out step that demands "never silently
+  drop" must not drop here.
 - post the single batched close-out: what landed, the parked `needs-decision` inbox
-  (each with a recommendation, `/triage`-shaped), any follow-ups filed, and the
-  **aggregated Retrospective** (deduped + grouped, per the Retrospective section) so the
-  architect sees every process quirk the sprint surfaced in one place;
+  (each with a recommendation, `/triage`-shaped), **follow-ups filed in two enumerated
+  arms — *product follow-ups filed* AND *kaizen follow-ups filed* — listed separately**
+  (so a zero-kaizen close-out is conspicuous and must be explicitly justified, never
+  silent), and the **aggregated Retrospective** (deduped + grouped, per the Retrospective
+  section) so the architect sees every process quirk the sprint surfaced in one place;
 - emit the **Architect Action Memo + Durability Warrant** (template below) as a **comment
   on the omnibus PR** (it persists after merge). This is a **required** §9 deliverable.
 
@@ -501,7 +580,12 @@ it's felt and surfaced to the architect at the end — the point is to fix the *
   report: deduped and grouped (instructions / steps / tooling / know-how), each item with
   a concrete suggested fix. Persistent fixes that change the constitution or a command
   ride their **own** governance PR (§9 / PRINCIPLES.md §9) — file them as follow-up
-  issues rather than smuggling them into the omnibus.
+  issues rather than smuggling them into the omnibus. **Filing them is a required §9
+  close-out deliverable, not optional cleanup:** every retro-flagged kaizen/KIT-BUG item
+  is filed as a `kaizen` issue (or marked already-tracked) and counted in the close-out's
+  *kaizen follow-ups filed* arm before the sprint reports done — leaving a flagged item
+  unfiled is the §7 violation #284 committed (dropped them silently; recovered as
+  #309–#314).
 
 ## Guardrails (binding)
 

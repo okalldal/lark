@@ -22,7 +22,7 @@ double as the epic grouping.
 | `prio:` | `now` `next` `later` | Triage priority. `now` = next pick; `later` ≈ the old inline "Priority: low". |
 | `status:` | `triaged` `in-progress` `needs-review` `blocked` | Where the item is in the lifecycle. Absent = untriaged. |
 | `needs-decision` | (flag) | **The architect's inbox.** A fork only the architect can resolve (e.g. #159, #101, #95). `/next-task` never auto-picks these. A `needs-decision` issue should be written as a decision memo: background, decision needed, recommended path, alternatives, consequences, and unblocks — so `/architect-brief` can synthesize reliably. |
-| `good-autonomous` | (flag) | Fully groundable, safe for an unattended `/next-task` pick — a done-when with an oracle and no open fork. |
+| `good-autonomous` | (flag) | Fully groundable, safe for an unattended `/next-task` pick — a done-when with an oracle and no open fork. **Fix-site verification status (ADR-0031):** before applying it `/triage` checks the issue's stated fix site against a fast repro. This is a *verification status*, not a blocking gate — a verified site is load-bearing, and an unverified site still keeps the flag but carries a "fix site unverified" note so the worker treats the named file as exploratory, not load-bearing. |
 | `kaizen` | (flag) | **Process/kit debt**, not product work: a fix to the commands, governance docs, harness, or review discipline (usually surfaced by a sprint retrospective). Drained on a separate low cadence by `/kaizen-sweep`, never folded into feature cadence. Product-affecting retro items (e.g. an oracle/bank gap) stay in the normal backlog *without* this flag. |
 
 ## Lifecycle
