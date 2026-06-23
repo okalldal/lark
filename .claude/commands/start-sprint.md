@@ -408,7 +408,33 @@ read the kept integration branch's merge history (each squash names `…(#PR)`) 
 child PR bodies (`Refs #N` + tier) to build the *Staged* rows, cross-check against labels,
 and fold in the residue file's `RETRO:`/synced-SHA entries. **Then** write the full record
 into the omnibus body **once** (this is the one big body write of the sprint) and post the
-Architect Action Memo (§9). Before marking the omnibus **ready for review** (out of draft),
+Architect Action Memo (§9).
+
+**The finalize residue-ledger push must be confirmed landed — retry on a rejected
+fast-forward.** The last residue-ledger commit (final `RETRO:`/synced-SHA bullets +
+reconstruction summary) is the resumability ledger (ADR-0023), so a push the proxy
+*silently rejects* leaves the on-branch ledger one commit short and forces the fallback to
+the PR body — the exact churn ADR-0023 exists to avoid (this happened in sprint #284). The
+proxy will at times reject a **legitimate fast-forward** push to the sprint-branch tip even
+when the local tip is a clean child of the remote tip. So do **not** treat a push as done
+when the command merely returns: on a rejected residue-ledger push, **re-sync and retry
+with backoff** —
+
+```bash
+git fetch origin <sprint-branch>
+git pull --ff-only origin <sprint-branch>   # re-sync onto the current remote tip
+git push origin HEAD:<sprint-branch>        # retry; repeat with backoff if rejected
+```
+
+— and **confirm the commit actually landed on the remote** before moving on: after a push
+that reports success, verify `git rev-parse origin/<sprint-branch>` (post-`fetch`) contains
+the finalize ledger commit; a push is only *done* once the remote tip includes it, not when
+the push command merely returned. This is a **distinct** proxy edge from the `403`-on-ref-
+delete behavior (§9, closed #190): that one blocks branch *deletion*; this one rejects a
+fast-forward *push*. Treat both as known git-proxy quirks to work around, not bugs to
+root-cause here.
+
+Before marking the omnibus **ready for review** (out of draft),
 confirm:
 
 - current `master` is an **ancestor** of the sprint integration branch;
@@ -456,7 +482,9 @@ The sprint is finished only once the omnibus PR is merged by the architect. Afte
   of the sprint (the omnibus diff + the full staging history), and the orchestrator cannot
   delete it here anyway (the git proxy returns `403` on ref-delete and there is no
   delete-ref tool). Leave any branch removal to GitHub's auto-delete-on-merge or the
-  architect (architect decision, 2026-06-19);
+  architect (architect decision, 2026-06-19). (A **second**, distinct git-proxy edge: the
+  proxy can reject a *legitimate fast-forward push* to the branch tip — handled at §7
+  finalize with re-sync + retry-with-backoff and a confirm-landed check; see #312.);
 - post the single batched close-out: what landed, the parked `needs-decision` inbox
   (each with a recommendation, `/triage`-shaped), any follow-ups filed, and the
   **aggregated Retrospective** (deduped + grouped, per the Retrospective section) so the
