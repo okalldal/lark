@@ -294,7 +294,6 @@ fn h9b_backspace_in_class_supported() {
 /// `empty=false`. The position *spans* are correct (the bug is isolated to the flag);
 /// #307 fixed `Token` char-vs-byte positions but never touched this `Meta` field.
 #[test]
-#[ignore = "XFAIL (bounty H10): Tree.meta.empty is false for a node with only positionless children"]
 fn h10_meta_empty_for_positionless_children() {
     let mut o = opts(ParserAlgorithm::Lalr, LexerType::Contextual);
     o.propagate_positions = true;

@@ -94,9 +94,7 @@ impl Meta {
                 break;
             }
         }
-        if children.is_empty() {
-            meta.empty = true;
-        }
+        meta.empty = meta.line.is_none() && meta.end_line.is_none();
         meta
     }
 }
