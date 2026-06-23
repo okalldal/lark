@@ -538,10 +538,16 @@ lowering and surfaces any `Conflict` — the masked rejection — while the real
 table keeps the sharing. The shadow only gates the build; it never parses. The audit
 runs the real detector (not a structural "distinct-AST ⇒ reject" shortcut) because
 the latter over-rejects (`A r0* | B (r0)*` splits but the helpers sit behind distinct
-terminals and never collide — Python *accepts* it). Pinned by
-`rc7_lalr_reduce_reduce_collision_rejected` and the differential
-`rc7_reduce_reduce_differential_matches_oracle` (tests/test_bounty_findings.rs); LALR
-bank stays 512/512.
+terminals and never collide — Python *accepts* it). The audit also **propagates
+through `%import`** (`imports.rs::copy_imported`): an over-share living inside (or
+reached through nested) imports flips the parent's `recurse_overshare_seen`, and the
+parent's shadow copies the imported rule closure from the imported grammar's *own*
+`lalr_audit` (Python-keyed split helpers) rather than its shared real rules — so an
+imported collision is rejected exactly as Python rejects it, without un-sharing the
+real parse table. Pinned by `rc7_lalr_reduce_reduce_collision_rejected` and the
+differentials `rc7_reduce_reduce_differential_matches_oracle` +
+`rc7_reduce_reduce_differential_matches_oracle_via_import`
+(tests/test_bounty_findings.rs); LALR bank stays 512/512.
 
 ---
 

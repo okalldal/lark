@@ -92,3 +92,50 @@ detector over it). A future change to the recurse-helper sharing key must keep
 audit will drift from the oracle. The audit costs one extra lowering pass **only** for
 grammars that actually over-share a recurse helper (`recurse_overshare_seen`); grammars
 that don't pay nothing.
+
+**Public-API note.** The audit adds a public field `Grammar::lalr_audit:
+Option<Box<Grammar>>` to the surface `Grammar` struct. The crate is `0.1.0`, so this
+is tolerable, but it is a struct-shape change: any downstream code that constructs a
+`Grammar` via a struct literal must now add `lalr_audit: None`. The derived `Clone`
+deep-copies the box like any other field, but `Grammar` is not cloned on any build
+path, so the shadow is never duplicated in practice.
+
+## Amendment 2 (2026-06-23, #272 follow-up — audit propagates through `%import`)
+
+**Problem.** The Amendment-A audit shadow was attached to the `Grammar` returned by
+`load_grammar_with_sources`, but `%import` resolution (`grammar/loader/imports.rs`)
+compiled imported files through the normal loader and copied their rule closure out
+via `copy_requested` **without carrying or rebuilding `lalr_audit`** — and the shadow
+compiler's own import resolution still ran the normal (non-Python-keyed) loader path.
+So an RC7 over-share living **inside an imported file** (`%import .bad (bad)` with
+`bad: r0* | (r0)*`) — or reached through nested imports — was accepted by lark-rs where
+Python rejects it: the same masked collision, one `%import` away. Confirmed against
+Python Lark 1.3.1 (`Lark.open`, parser="lalr"): the imported / nested forms reject
+exactly as the direct form does.
+
+**Decision.** Make import resolution **audit-aware**, in `imports.rs::copy_imported`
+(the new single choke point both import call sites route through):
+
+- **Real (sharing) pass.** If an imported grammar carries `lalr_audit` (it built its
+  own shadow because it over-shares internally), propagate the signal by setting the
+  parent's `recurse_overshare_seen`, so the parent builds an audit shadow at all — but
+  still copy the imported grammar's *shared* rules into the real parse table (ADR-0013
+  sharing untouched).
+- **Audit (shadow) pass.** When the parent's Python-keyed shadow resolves the same
+  import and the imported grammar carries `lalr_audit`, copy the closure from the
+  imported grammar's **shadow** (its split, Python-keyed recurse helpers) instead of
+  its shared real rules — so the masked collision reaches the parent's audit. An
+  imported grammar with no internal over-share has `lalr_audit == None`; its real rules
+  are already Python-faithful for that file. An *import-straddling* over-share (the
+  shared inner rule imported, the colliding `r0*` / `(r0)*` helpers minted locally) is
+  re-lowered Python-keyed by the parent shadow itself and needs no special handling.
+
+The cheap pre-scan that decides whether to clone the AST for a possible shadow
+(`items_need_audit_clone`, was `items_contain_repeat`) now also returns `true` for any
+grammar containing an `%import`, since an imported over-share can flip
+`recurse_overshare_seen` even when the parent body has no repeat operator of its own.
+Verified against Python Lark 1.3.1 across the direct + import families (whole-imported,
+`+` variant, straddling, parent-own-overshare-plus-import, nested) for both reject and
+genuine-accept cells in
+`rc7_reduce_reduce_differential_matches_oracle_via_import`; the **LALR compliance bank
+stays 512/512**.

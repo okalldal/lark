@@ -107,7 +107,7 @@ impl GrammarCompiler {
                     self.maybe_placeholders,
                     self.global_keep_all,
                 )?;
-                return self.copy_requested(&imported, &module_path, &names_to_import);
+                return self.copy_imported(&imported, &module_path, &names_to_import);
             }
         }
 
@@ -202,7 +202,50 @@ impl GrammarCompiler {
             sub_base,
             self.import_sources.clone(),
         )?;
-        self.copy_requested(&imported, module_path, names_to_import)
+        self.copy_imported(&imported, module_path, names_to_import)
+    }
+
+    /// RC7/#272 import propagation. Copy the requested closure out of an imported
+    /// grammar, choosing the **Python-keyed audit shadow** as the source whenever it
+    /// is the faithful one to copy — so a reduce/reduce over-share that lives inside
+    /// (or is reached through) an imported file is detected exactly as Python detects
+    /// it, instead of being masked one `%import` away.
+    ///
+    /// Two things have to happen for the audit to survive an import boundary:
+    ///
+    ///  1. **The real (sharing) pass** must learn that an imported grammar over-shares
+    ///     internally, so the *parent* loader builds an audit shadow at all. An
+    ///     imported grammar carries that signal as `lalr_audit.is_some()` — it built
+    ///     its own shadow because it detected an over-share. Propagate it by flipping
+    ///     [`recurse_overshare_seen`](GrammarCompiler::recurse_overshare_seen); the
+    ///     real parse table still copies the imported grammar's *shared* rules (the
+    ///     load-bearing ADR-0013 sharing is untouched).
+    ///
+    ///  2. **The audit (shadow) pass** must copy the imported rules in their
+    ///     *Python-keyed* form. When the imported grammar carries an `lalr_audit`, its
+    ///     shadow holds the split (un-shared) recurse helpers Python would mint; copy
+    ///     the closure from there. (An imported grammar with no internal over-share
+    ///     has `lalr_audit == None`; its real rules are already Python-faithful for
+    ///     that file, so the shadow copies them as-is — and a *straddling* over-share,
+    ///     where the colliding helpers are minted in the parent from an imported inner
+    ///     rule, is re-lowered Python-keyed by the parent shadow itself.)
+    fn copy_imported(
+        &mut self,
+        imported: &Grammar,
+        module_path: &[String],
+        names_to_import: &[(String, Option<String>)],
+    ) -> Result<(), GrammarError> {
+        if imported.lalr_audit.is_some() {
+            if self.python_keyed_recurse {
+                // Shadow pass: copy the Python-keyed split helpers, not the shared
+                // real rules — so the masked collision reaches the parent's audit.
+                let shadow = imported.lalr_audit.as_deref().unwrap();
+                return self.copy_requested(shadow, module_path, names_to_import);
+            }
+            // Real pass: keep the shared rules, but remember an audit is now needed.
+            self.recurse_overshare_seen = true;
+        }
+        self.copy_requested(imported, module_path, names_to_import)
     }
 
     /// Copy the requested terminals/rules — and, for a rule, its dependency

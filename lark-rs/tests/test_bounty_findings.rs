@@ -75,6 +75,35 @@ fn assert_build_accepted(grammar: &str, parser: ParserAlgorithm, lexer: LexerTyp
     );
 }
 
+/// Build a LALR parser whose `%import .module (...)` directives resolve against an
+/// in-memory `name -> text` map (the WASM no-filesystem loader path, `import_sources`).
+/// `files["main.lark"]` is the entry grammar; the rest are sibling imports. This is
+/// how the RC7 `%import` differential constructs multi-file grammars without writing
+/// into the shared source tree (mirrors `test_imports.rs::make_lalr_in_memory`).
+fn build_with_imports(files: &[(&str, &str)]) -> Result<Lark, lark_rs::LarkError> {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    let mut sources = HashMap::new();
+    let mut main = "";
+    for (name, text) in files {
+        if *name == "main.lark" {
+            main = text;
+        }
+        sources.insert((*name).to_string(), (*text).to_string());
+    }
+    Lark::new(
+        main,
+        LarkOptions {
+            parser: ParserAlgorithm::Lalr,
+            lexer: LexerType::Contextual,
+            ambiguity: Ambiguity::Resolve,
+            start: vec!["start".to_string()],
+            import_sources: Some(Arc::new(sources)),
+            ..Default::default()
+        },
+    )
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Grammar-loader: missing validation gates (lark-rs is more permissive than the
 // oracle — unfalsifiable permissiveness, ADR-0017 corollary → a bug).
@@ -279,6 +308,149 @@ fn rc7_reduce_reduce_differential_matches_oracle() {
             assert!(
                 r.is_ok(),
                 "RC7 differential: Python accepts `{name}`, but lark-rs rejected it: {:?}",
+                r.err()
+            );
+        }
+    }
+}
+
+/// RC7 across `%import` (#272 follow-up). The reduce/reduce over-share audit must
+/// propagate through import resolution: an over-share that lives in (or straddles)
+/// an imported grammar is rejected exactly as Python rejects it, and a legitimately-
+/// sharing import is NOT over-rejected. Every cell is grounded directly on Python
+/// Lark 1.3.1 (`Lark.open`, parser="lalr") over the same multi-file grammar fed
+/// here through the in-memory `import_sources` loader path.
+///
+/// Pre-fix, the audit shadow was attached to the *parent* grammar only, while import
+/// resolution compiled imported files through the normal (non-Python-keyed) loader
+/// and copied their rule closure out without carrying the audit — so an imported
+/// (or import-straddling) over-share built and parsed where Python rejects it. The
+/// fix makes the shadow's own import resolution Python-keyed and carries any imported
+/// `lalr_audit` rule closure into the parent shadow.
+#[test]
+fn rc7_reduce_reduce_differential_matches_oracle_via_import() {
+    // (name, files, python_rejects?)
+    let cases: &[(&str, &[(&str, &str)], bool)] = &[
+        // — Python REJECTS: an RC7 over-share reached through %import. —
+        // (a) the whole over-share lives in the imported file.
+        (
+            "imported bad: r0*|(r0)*",
+            &[
+                ("main.lark", "%import .bad (bad)\nstart: bad\n"),
+                ("bad.lark", "bad: r0* | (r0)*\nr0: \"a\"\n"),
+            ],
+            true,
+        ),
+        // (a+) the `+` variant, imported.
+        (
+            "imported bad: r0+|(r0)+",
+            &[
+                ("main.lark", "%import .bad (bad)\nstart: bad\n"),
+                ("bad.lark", "bad: r0+ | (r0)+\nr0: \"a\"\n"),
+            ],
+            true,
+        ),
+        // (b) the over-share straddles the import boundary: the shared inner rule
+        //     `rr` is imported, and the two distinct-AST helpers (`x: rr*`, `y: (rr)*`)
+        //     are local — so the helpers split across files.
+        (
+            "straddle: imported rr, local rr*|(rr)*",
+            &[
+                (
+                    "main.lark",
+                    "%import .frag (rr)\nstart: x | y\nx: rr*\ny: (rr)*\n",
+                ),
+                ("frag.lark", "rr: \"a\"\n"),
+            ],
+            true,
+        ),
+        // (c) the parent has its OWN over-share *plus* an unrelated import.
+        (
+            "parent overshare + unrelated import",
+            &[
+                (
+                    "main.lark",
+                    "%import .frag (thing)\nstart: bad | use\nbad: r0* | (r0)*\nr0: \"a\"\nuse: thing\n",
+                ),
+                ("frag.lark", "thing: \"t\"\n"),
+            ],
+            true,
+        ),
+        // (d) nested imports: main imports mid, mid re-imports the RC7 pattern.
+        (
+            "nested main->mid->bad",
+            &[
+                ("main.lark", "%import .mid (bad)\nstart: bad\n"),
+                ("mid.lark", "%import .bad (bad)\n"),
+                ("bad.lark", "bad: r0* | (r0)*\nr0: \"a\"\n"),
+            ],
+            true,
+        ),
+        // — Python ACCEPTS: the audit must NOT over-reject a legitimate import. —
+        // (acc1) a single recurse helper — nothing to collide.
+        (
+            "imported p: r0* (single helper)",
+            &[
+                ("main.lark", "%import .frag (p)\nstart: p\n"),
+                ("frag.lark", "p: r0*\nr0: \"a\"\n"),
+            ],
+            false,
+        ),
+        // (acc2) identical inner AST shares one helper in both engines.
+        (
+            "imported bad: r0*|r0* (shared)",
+            &[
+                ("main.lark", "%import .frag (bad)\nstart: bad\n"),
+                ("frag.lark", "bad: r0* | r0*\nr0: \"a\"\n"),
+            ],
+            false,
+        ),
+        // (acc3) the guarded distinct-context case: the two split helpers sit behind
+        //        distinct terminals and never reach a common state — Python accepts.
+        (
+            "imported guarded A r0*|B (r0)*",
+            &[
+                ("main.lark", "%import .frag (bad)\nstart: bad\n"),
+                (
+                    "frag.lark",
+                    "bad: A r0* | B (r0)*\nr0: \"x\"\nA: \"a\"\nB: \"b\"\n",
+                ),
+            ],
+            false,
+        ),
+        // (acc4) two distinct, guarded imported rules — non-colliding.
+        (
+            "import two guarded rules",
+            &[
+                ("main.lark", "%import .frag (p, q)\nstart: p | q\n"),
+                (
+                    "frag.lark",
+                    "p: A r0*\nq: B s0*\nr0: \"a\"\ns0: \"b\"\nA: \"x\"\nB: \"y\"\n",
+                ),
+            ],
+            false,
+        ),
+        // (acc5) legitimate sharing Python accepts, imported.
+        (
+            "imported a+ b | a+",
+            &[
+                ("main.lark", "%import .frag (bad)\nstart: bad\n"),
+                ("frag.lark", "bad: a+ b | a+\na: \"a\"\nb: \"b\"\n"),
+            ],
+            false,
+        ),
+    ];
+    for (name, files, rejects) in cases {
+        let r = build_with_imports(files);
+        if *rejects {
+            assert!(
+                r.is_err(),
+                "RC7 import differential: Python rejects `{name}`, but lark-rs accepted it"
+            );
+        } else {
+            assert!(
+                r.is_ok(),
+                "RC7 import differential: Python accepts `{name}`, but lark-rs rejected it: {:?}",
                 r.err()
             );
         }
