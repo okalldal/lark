@@ -93,12 +93,19 @@ audit will drift from the oracle. The audit costs one extra lowering pass **only
 grammars that actually over-share a recurse helper (`recurse_overshare_seen`); grammars
 that don't pay nothing.
 
-**Public-API note.** The audit adds a public field `Grammar::lalr_audit:
-Option<Box<Grammar>>` to the surface `Grammar` struct. The crate is `0.1.0`, so this
-is tolerable, but it is a struct-shape change: any downstream code that constructs a
-`Grammar` via a struct literal must now add `lalr_audit: None`. The derived `Clone`
-deep-copies the box like any other field, but `Grammar` is not cloned on any build
-path, so the shadow is never duplicated in practice.
+**Public-API note (no break).** The audit adds a field `Grammar::lalr_audit:
+Option<Box<Grammar>>` to the surface `Grammar` struct. It is internal build machinery —
+set by the loader, read only by the LALR build, the import resolver, and standalone
+generation, all inside the crate — so it is declared **`pub(crate)`**, not `pub`. That
+keeps the field out of the public API: it is **not** a public struct-shape change (a
+downstream struct literal cannot name a `pub(crate)` field, and `Grammar` already
+carries private fields, so it cannot be built externally by struct literal regardless).
+A grep of every read/write site confirmed nothing outside the crate (bindings,
+examples, tests) touches the field, and `cargo build --all-targets` is clean. The
+derived `Clone` deep-copies the box like any other field, but `Grammar` is not cloned
+on any build path, so the shadow is never duplicated in practice. (An earlier revision
+of this PR declared the field `pub`; the review-hardening commit narrowed it to
+`pub(crate)`, eliminating the API break.)
 
 ## Amendment 2 (2026-06-23, #272 follow-up — audit propagates through `%import`)
 
