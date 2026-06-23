@@ -3,17 +3,18 @@
 //! Each test below encodes a confirmed divergence between Python Lark 1.3.1 (the
 //! oracle) and lark-rs, found by the differential strike-team sweep driven through
 //! `tools/diffcheck.py` + the `diffcheck` binary. Every test asserts the
-//! **Python-oracle** behavior, so it currently FAILS against lark-rs — it is
-//! therefore marked `#[ignore]` with an `XFAIL` reason (Rust has no native xfail)
-//! so the suite stays green. Run them with:
+//! **Python-oracle** behavior.
+//!
+//! This file began as an XFAIL catalog. As each finding is fixed, its `#[ignore]`
+//! is dropped and the test becomes a permanent **live regression guard**; the
+//! remaining known divergences stay `#[ignore]`d with an `XFAIL` reason (Rust has
+//! no native xfail). So this file is a *mix* of live guards and still-open XFAILs —
+//! consult each test's own attribute, not this header, for its current status. Run
+//! only the still-open XFAILs with:
 //!
 //!     cargo test --test test_bounty_findings -- --ignored
 //!
-//! to watch them go red (each red == a reproduced, minimized bug). When a bug is
-//! fixed, drop its `#[ignore]` and the test becomes a permanent regression guard.
-//! RC1 / RC2 / RC2b (duplicate rule/terminal definitions, #270) and RC4a–c
-//! (alias/`?` on inlined rules) are now fixed, so their tests run by default as
-//! regression guards rather than `#[ignore]`d XFAILs.
+//! (each red == a reproduced, minimized, still-unfixed bug).
 //!
 //! Target SHA (frozen baseline the finds were minimized against):
 //!   a005423  (branch claude/hackathon-baseline-bounty-08oolp)

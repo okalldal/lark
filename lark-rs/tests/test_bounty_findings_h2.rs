@@ -6,9 +6,12 @@
 //! grammar → wrong token/parse, config/backend validation drift, distribution and
 //! binding divergence, regex-dialect taxonomy, and deterministic resource growth.
 //!
-//! Each test asserts the **Python Lark 1.3.1** (oracle) behavior, so it fails
-//! against lark-rs today and is marked `#[ignore]` (XFAIL — Rust has no native
-//! one). Run them with:
+//! Each test asserts the **Python Lark 1.3.1** (oracle) behavior. This file began
+//! as an XFAIL catalog; as each finding is fixed its `#[ignore]` is dropped and the
+//! test becomes a live regression guard, while the remaining known divergences stay
+//! `#[ignore]`d (XFAIL — Rust has no native one). It is therefore a *mix* — consult
+//! each test's own attribute, not this header, for its status. Run only the
+//! still-open XFAILs with:
 //!
 //!     cargo test --test test_bounty_findings_h2 -- --ignored
 //!
