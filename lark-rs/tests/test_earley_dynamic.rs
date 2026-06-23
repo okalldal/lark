@@ -7,8 +7,9 @@
 //! (`dynamic` greedy vs `dynamic_complete` all-segmentations), `%ignore` through
 //! the dynamic scanner, and context-decided keyword/identifier tokenization.
 //!
-//! Self-gates on [`common::earley_unimplemented`] exactly like the basic-lexer
-//! Earley oracle, so it enforces the moment the engine builds.
+//! Earley is fully implemented, so these always run; the stub-era self-gate is now
+//! a hard assertion (`earley_unimplemented()` must be false) — a backend regression
+//! fails loudly here instead of silently skipping.
 
 mod common;
 
@@ -25,10 +26,10 @@ fn ambiguity_from_str(s: &str) -> Ambiguity {
 
 #[test]
 fn test_earley_dynamic_oracle() {
-    if earley_unimplemented() {
-        eprintln!("Earley backend not implemented yet — skipping dynamic-lexer oracle tests");
-        return;
-    }
+    assert!(
+        !earley_unimplemented(),
+        "Earley backend regressed to 'not yet implemented' — dynamic-lexer oracles must run"
+    );
 
     let oracle = load_oracle("earley", "dynamic_cases");
     let groups = oracle
@@ -113,9 +114,10 @@ fn token_pairs(lark: &lark_rs::Lark, input: &str) -> Vec<(String, String)> {
 /// bearing, removing it would flip these to the wrong (shorter-first) segmentation.
 #[test]
 fn dynamic_complete_resolves_longest_segmentation_without_tiebreak() {
-    if earley_unimplemented() {
-        return;
-    }
+    assert!(
+        !earley_unimplemented(),
+        "Earley backend regressed to 'not yet implemented'"
+    );
     // parse:49 — `(A | WORD)+` over "abc": one `A "a"`, then `WORD "bc"` (earliest
     // split first), NOT `A "a"`, `WORD "b"`, `WORD "c"`.
     let g49 = make_earley_dynamic(

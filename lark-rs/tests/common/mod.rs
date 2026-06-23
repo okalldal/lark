@@ -79,12 +79,11 @@ pub fn make_earley_dynamic(
     )
 }
 
-/// True while the Earley backend is still a stub (build returns "not yet
-/// implemented"). The Earley oracle/compliance tests probe this once and skip
-/// themselves while it holds, so Sprint 0 lands green with the harness in place;
-/// the moment Sprint 1 wires up a real Earley frontend, the probe flips and the
-/// same tests start enforcing the oracles. Mirrors the self-activating pattern
-/// the fuzz corpus uses.
+/// True if building a trivial Earley grammar reports "not yet implemented". Earley
+/// is fully implemented (Phase 2 complete), so this is always false today; the
+/// Earley oracle/compliance tests `assert!(!earley_unimplemented())` to turn a
+/// hypothetical backend regression into a loud failure rather than a silent skip
+/// (it used to gate the stub-era self-skips).
 pub fn earley_unimplemented() -> bool {
     match make_earley("start: \"a\"", Ambiguity::Resolve) {
         Err(LarkError::Grammar(e)) => format!("{e}").contains("not yet implemented"),
@@ -160,6 +159,58 @@ pub fn load_oracle(suite: &str, name: &str) -> serde_json::Value {
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| panic!("Cannot read oracle {}: {e}", path.display()));
     serde_json::from_str(&text).unwrap_or_else(|e| panic!("Oracle JSON parse error: {e}"))
+}
+
+/// Replay flat `{input, ok, tree}` oracle cases against `lark`, holding lark-rs to
+/// **Python Lark's recorded behavior** (`ok` + `tree`) — the oracle — rather than to
+/// the case's author annotation (`should_pass`). There are deliberately **no silent
+/// skips**: every case must either agree with Python (both reject, or both accept
+/// with a byte-identical tree) or appear in `more_permissive` as a documented,
+/// deliberately-tolerated divergence where lark-rs accepts input Python rejects.
+///
+/// A case whose author `should_pass` contradicts Python's `ok` is the *generator's*
+/// concern — `tools/generate_oracles.py` fails generation on an un-allow-listed
+/// contradiction (#253), pinned by `tests/test_oracle_honesty.rs` — so this replay
+/// never needs to paper over it with a silent `_ => {}` arm.
+///
+/// Returns the list of failure messages (empty == every case matched the oracle).
+pub fn replay_oracle_cases(
+    lark: &Lark,
+    cases: &[serde_json::Value],
+    label: &str,
+    more_permissive: &[&str],
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    for case in cases {
+        let input = case["input"].as_str().unwrap_or("");
+        let oracle_ok = case["ok"].as_bool().unwrap_or(false);
+        match (oracle_ok, lark.parse(input)) {
+            // Python parsed it: lark-rs must parse it to the identical tree.
+            (true, Ok(tree)) => {
+                if let Err(msg) = tree_matches_oracle(&tree, &case["tree"]) {
+                    failures.push(format!("[{label}] input={input:?}: tree mismatch: {msg}"));
+                }
+            }
+            (true, Err(e)) => failures.push(format!(
+                "[{label}] input={input:?}: Python Lark parsed it but lark-rs errored: {e}"
+            )),
+            // Python rejected it: agreeing (both reject) is correct.
+            (false, Err(_)) => {}
+            // Python rejected it but lark-rs accepted it — more permissive than the
+            // oracle. Unfalsifiable unless documented (ADR-0017): fail unless allow-listed.
+            (false, Ok(_)) => {
+                if !more_permissive.contains(&input) {
+                    failures.push(format!(
+                        "[{label}] input={input:?}: lark-rs accepted it but Python Lark \
+                         rejected it (more permissive than the oracle, and not in the \
+                         documented `more_permissive` allow-list). Match the rejection \
+                         or document the divergence."
+                    ));
+                }
+            }
+        }
+    }
+    failures
 }
 
 /// Compare a parse result against the oracle JSON node produced by

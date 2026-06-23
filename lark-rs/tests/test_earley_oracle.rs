@@ -6,11 +6,10 @@
 //! `ambiguity='resolve'` (one tree) and `ambiguity='explicit'` (an `_ambig`
 //! forest, compared unordered by [`common::tree_matches_oracle`]).
 //!
-//! **Self-gating.** Until the Phase-2 engine lands, building an Earley parser
-//! returns "not yet implemented", so this test skips itself (see
-//! [`common::earley_unimplemented`]). The moment Sprint 1 wires up a real Earley
-//! frontend the probe flips and these oracles start being enforced — no edit to
-//! this file required. This mirrors the fuzz corpus's self-activating carve-out.
+//! **Enforced, not self-gated.** Earley is fully implemented (Phase 2 complete), so
+//! these oracles always run. The stub-era self-gate that used to `return` early is
+//! now a hard assertion (`earley_unimplemented()` must be false): a regression that
+//! broke the Earley build would surface as a loud failure here, never a silent skip.
 
 mod common;
 
@@ -27,14 +26,10 @@ fn ambiguity_from_str(s: &str) -> Ambiguity {
 
 #[test]
 fn test_earley_oracle() {
-    if earley_unimplemented() {
-        eprintln!(
-            "Earley backend not implemented yet — skipping Earley oracle tests \
-             (Phase 2, Sprint 1+). The harness and oracles are in place; this test \
-             will enforce them automatically once Earley builds."
-        );
-        return;
-    }
+    assert!(
+        !earley_unimplemented(),
+        "Earley backend regressed to 'not yet implemented' — these oracles must run, not skip"
+    );
 
     let oracle = load_oracle("earley", "cases");
     let groups = oracle

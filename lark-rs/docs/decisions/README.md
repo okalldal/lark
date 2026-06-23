@@ -51,6 +51,7 @@ Authoring a new ADR as `Accepted` is a Definition-of-Done failure (see
 | [0027](0027-semantic-output-builders-direction.md) | Semantic output backends — `TreeBuilder` becomes the default impl of an internal `OutputBuilder` seam; LALR parity oracle-backed, fast backends relative-oracle-backed | Accepted |
 | [0028](0028-recovery-action-design.md) | `RecoveryAction` enum over direct `&mut InteractiveParser` for `on_error` (insert/delete/stop recovery) | Accepted |
 | [0029](0029-output-builder-public-api-shape.md) | Public `OutputBuilder` API shape — per-call `parse_into`, `is_discard` hook, `ctx` metadata, LALR-only; commit `Tree` + Rust `Custom`, `SpanTree` experimental, `Event`/`Tape` internal | Accepted |
+| [0030](0030-oracle-generators-fail-loud.md) | Oracle generators fail loud on un-allow-listed contradictions; the oracle suite is honest by construction (no silent skips, no self-referential fields) | Accepted |
 
 ## ADRs going forward — the governance audit trail
 

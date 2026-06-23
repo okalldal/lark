@@ -86,6 +86,16 @@ We generate expected parse trees using Python Lark and compare Rust output again
   do (e.g. `NON_SEPARATOR_STRING.2` in `csv.lark`). Both engines honor priority
   first, so the result is principled. (Measured 2026-06-02: 0 of 140 compliance-bank
   divergences are tie-breaks — a discipline for our grammars, not a gap to chase.)
+- **The oracle layer is honest by construction (ADR-0030).** Oracle generators
+  exit non-zero on any *contradiction* — a committed case whose declared
+  expectation disagrees with what Python Lark actually did — unless it is in the
+  reasoned allow-list `tools/oracle_contradictions.json` (which only shrinks, like
+  the XFAIL ledgers); the detected set is frozen to `tests/fixtures/oracles/_meta/`.
+  Replays hold lark-rs to Python's recorded `ok`, never to the author annotation,
+  with **no silent skips** (`common::replay_oracle_cases`) — a *more-permissive*
+  divergence (lark-rs accepts what Python rejects) fails unless explicitly
+  documented. Oracle fields are Python-derived, never hardcoded/self-referential.
+  Enforced by `tests/test_oracle_honesty.rs` plus the generators' own exit codes.
 
 ### Generating Oracles
 

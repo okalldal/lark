@@ -1,0 +1,11 @@
+{
+  "_README": "Allow-list of tolerated oracle-generator contradictions (#253, ADR-0009 xfail discipline). A 'contradiction' is a committed oracle case whose author-declared expectation (should_pass/should_parse/valid) disagrees with what Python Lark — the oracle (ADR-0001) — actually did. By default that is a bug in the case and FAILS generation. List an entry here ONLY with a written reason. The generator also fails on a stale entry (listed but no longer firing). Keyed by 'suite: kind <json-encoded-input>'.",
+  "entries": {
+    "csv: expected-parse \"#h1,h2\\n10,20\\n30,40\\n\"": "csv.lark types a leading '#…' line via NON_SEPARATOR_STRING.2, so Python Lark's lexer sees a bare INT and rejects (documented tie-break grammar — see lark-rs/CLAUDE.md). lark-rs matches Python (also rejects); the case's should_pass=True is author-aspirational. Tolerated: documents that csv.lark has no comment-line support, not an engine divergence.",
+    "python_numbers: expected-valid \"3.14j\"": "IMAG literal: the python-number test grammar lists FLOAT alternatives before IMAG, so Python Lark's maximal-munch lexer consumes the numeric part as FLOAT then rejects the trailing 'j' — a terminal-ordering property of this hand-written test grammar, not of Python-the-language. lark-rs matches Python (also rejects). Tolerated: known test-grammar ordering gap.",
+    "python_numbers: expected-valid \".5j\"": "Same IMAG/FLOAT terminal-ordering gap as '3.14j'. lark-rs matches Python (also rejects).",
+    "python_numbers: expected-valid \"0x_1A\"": "Underscore immediately after the base prefix: the test grammar's HEX terminal requires a hex digit right after 0x, so Python Lark rejects the leading underscore (which real CPython 3.6+ accepts). lark-rs matches Python (also rejects). Tolerated: test-grammar gap vs the Python language, not an engine divergence.",
+    "python_numbers: expected-valid \"0b_1010\"": "Same prefixed-underscore gap as '0x_1A' for the BIN terminal. lark-rs matches Python (also rejects).",
+    "python_numbers: expected-valid \"0o_17\"": "Same prefixed-underscore gap as '0x_1A' for the OCT terminal. lark-rs matches Python (also rejects)."
+  }
+}

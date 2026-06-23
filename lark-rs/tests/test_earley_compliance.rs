@@ -98,8 +98,16 @@ fn test_earley_compliance_bank() {
     };
     let records = records.as_array().expect("bank is an array");
 
-    // Until Earley builds anything, every entry is a uniform XFAIL.
+    // Earley is fully implemented; assert the build probe hasn't regressed so a
+    // hypothetical regression fails loudly instead of silently re-marking the whole
+    // bank XFAIL. The `unimplemented` accommodations below are retained as defensive
+    // no-ops (always false today).
     let unimplemented = earley_unimplemented();
+    assert!(
+        !unimplemented,
+        "Earley backend regressed to 'not yet implemented' — the compliance bank must \
+         run, not pass as uniform XFAIL"
+    );
 
     std::panic::set_hook(Box::new(|_| {}));
 

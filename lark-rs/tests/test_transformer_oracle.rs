@@ -1208,3 +1208,185 @@ fn test_discard_token_under_maybe_placeholders() {
         "the B callback must not fire for an absent optional: {trace:?}"
     );
 }
+
+// ── Content pins (not just schema) ──────────────────────────────────────────
+//
+// The schema tests above check fixture *shape*. These pin fixture *content* — the
+// transformed value and the exact callback trace — so the fixture's semantic
+// claims (arithmetic result, bottom-up callback order, Token-before-str
+// serialization, language-neutral output) cannot silently drift. Until a Rust
+// transformer exists these guard the generator + freshness gate; once it lands the
+// same expectations become the replay target.
+
+/// Recursively visit every JSON string within `v`.
+fn for_each_string(v: &Value, f: &mut impl FnMut(&str)) {
+    match v {
+        Value::String(s) => f(s),
+        Value::Array(a) => a.iter().for_each(|x| for_each_string(x, f)),
+        Value::Object(o) => o.values().for_each(|x| for_each_string(x, f)),
+        _ => {}
+    }
+}
+
+/// Recursively visit every serialized value-node (a JSON object with a `type` tag).
+fn for_each_typed_node(v: &Value, f: &mut impl FnMut(&str, &serde_json::Map<String, Value>)) {
+    match v {
+        Value::Array(a) => a.iter().for_each(|x| for_each_typed_node(x, f)),
+        Value::Object(o) => {
+            if let Some(Value::String(t)) = o.get("type") {
+                f(t, o);
+            }
+            o.values().for_each(|x| for_each_typed_node(x, f));
+        }
+        _ => {}
+    }
+}
+
+/// Assert a trace's ordered `(kind, name)` sequence equals `expected`.
+fn assert_trace_eq(trace: &Value, expected: &[(&str, &str)], label: &str) {
+    let got: Vec<(String, String)> = trace
+        .as_array()
+        .unwrap_or_else(|| panic!("{label}: trace is not an array"))
+        .iter()
+        .map(|e| {
+            (
+                e["kind"].as_str().unwrap_or("?").to_string(),
+                e["name"].as_str().unwrap_or("?").to_string(),
+            )
+        })
+        .collect();
+    let exp: Vec<(String, String)> = expected
+        .iter()
+        .map(|(k, n)| (k.to_string(), n.to_string()))
+        .collect();
+    assert_eq!(got, exp, "{label}: callback trace order mismatch");
+}
+
+#[test]
+fn test_transformer_oracle_pins_canonical_value_and_trace() {
+    let data = load_transformer_cases();
+
+    // arithmetic_eval: the bottom-up evaluator must compute 2 + 3*4 = 14, with the
+    // exact bottom-up callback order. Pins evaluation semantics AND order — result
+    // equality alone would miss a permuted trace (#226's non-negotiable).
+    let arith = case_by_name(&data, "arithmetic_eval");
+    let arith_trace = [
+        ("token", "NUMBER"),
+        ("rule", "factor"),
+        ("rule", "term"),
+        ("token", "NUMBER"),
+        ("rule", "factor"),
+        ("token", "NUMBER"),
+        ("rule", "factor"),
+        ("rule", "term"),
+        ("rule", "expr"),
+        ("rule", "start"),
+    ];
+    for (cfg, v) in arith["configs"].as_object().unwrap() {
+        assert_eq!(
+            v["value"].as_i64(),
+            Some(14),
+            "arithmetic_eval[{cfg}]: value must be 14"
+        );
+        assert_trace_eq(
+            &v["trace"],
+            &arith_trace,
+            &format!("arithmetic_eval[{cfg}]"),
+        );
+    }
+
+    // callback_order_trace: the exact bottom-up (kind, name) order, and Tokens
+    // serialized as tagged `token` nodes (the Token-before-str fix) — never bare
+    // strings. A regression of either is caught here, not just by the freshness diff.
+    let cb = case_by_name(&data, "callback_order_trace");
+    let cb_trace = [
+        ("token", "A"),
+        ("token", "B"),
+        ("rule", "first"),
+        ("token", "C"),
+        ("rule", "second"),
+        ("rule", "start"),
+    ];
+    for (cfg, v) in cb["configs"].as_object().unwrap() {
+        assert_trace_eq(
+            &v["trace"],
+            &cb_trace,
+            &format!("callback_order_trace[{cfg}]"),
+        );
+        let mut token_nodes = 0usize;
+        for_each_typed_node(&v["value"], &mut |t, o| {
+            if t == "token" {
+                token_nodes += 1;
+                assert!(
+                    o.get("token_type").and_then(Value::as_str).is_some(),
+                    "callback_order_trace[{cfg}]: token node missing string token_type"
+                );
+                assert!(
+                    o.get("value").and_then(Value::as_str).is_some(),
+                    "callback_order_trace[{cfg}]: token node missing string value (Token bare-stringified?)"
+                );
+            }
+        });
+        assert!(
+            token_nodes >= 3,
+            "callback_order_trace[{cfg}]: expected ≥3 serialized Token nodes, got {token_nodes}"
+        );
+    }
+}
+
+#[test]
+fn test_transformer_oracle_values_well_formed_and_neutral() {
+    let data = load_transformer_cases();
+    let cases = data["cases"].as_array().unwrap();
+
+    // Python-object-repr signatures that must never appear in serialized output —
+    // these would mean a value/trace leaked a non-portable Python object instead of
+    // a JSON primitive or a tagged node. Extends the language-neutral guarantee from
+    // the action specs (which the generator authored) to the captured output (which
+    // it did not), closing the circularity gap.
+    let leakage = [
+        " object at 0x",
+        "<function",
+        "<lambda",
+        "<bound method",
+        "<lark.",
+    ];
+
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        for (cfg, v) in case["configs"].as_object().unwrap() {
+            if v["status"].as_str() != Some("ok") {
+                continue;
+            }
+            // Every typed node is a well-formed token/tree/unknown; a token node
+            // carries string token_type + value (Token is never bare-stringified).
+            for_each_typed_node(&v["value"], &mut |t, o| {
+                assert!(
+                    matches!(t, "token" | "tree" | "unknown"),
+                    "{name}[{cfg}]: value has unknown type tag {t:?}"
+                );
+                if t == "token" {
+                    assert!(
+                        o.get("token_type").and_then(Value::as_str).is_some(),
+                        "{name}[{cfg}]: token node missing string token_type"
+                    );
+                    assert!(
+                        o.get("value").and_then(Value::as_str).is_some(),
+                        "{name}[{cfg}]: token node missing string value"
+                    );
+                }
+            });
+            for field in ["value", "trace"] {
+                for_each_string(&v[field], &mut |s| {
+                    for sig in leakage {
+                        assert!(
+                            !s.contains(sig),
+                            "{name}[{cfg}].{field}: Python-repr leakage {sig:?} in {s:?} — \
+                             serialized output must be language-neutral"
+                        );
+                    }
+                });
+            }
+        }
+    }
+}
