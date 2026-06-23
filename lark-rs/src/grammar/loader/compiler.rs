@@ -509,19 +509,20 @@ impl GrammarCompiler {
                 }
                 // Prepend the new alternatives to the existing terminal. A
                 // same-grammar terminal is still a `RawTerm` here (terminals
-                // resolve as a whole later), so splice onto its front.
-                //
-                // KNOWN GAP (#286): an *imported* terminal has already been
-                // compiled into `self.terminals` (not `raw_terms`), and
-                // `resolve_terminals` skips a `RawTerm` whose name is already a
-                // resolved terminal — so a staged extend body for an imported
-                // terminal would be silently dropped. Rather than drop it, we leave
-                // the imported terminal unchanged; the divergence is pinned as an
-                // XFAIL (`n1_extend_imported_terminal_*`) and tracked in #286.
+                // resolve as a whole later), so splice onto its front. An imported
+                // or declared terminal already lives in `self.terminals`; stage the
+                // extension body as a `RawTerm` with the same name and let
+                // `resolve_terminals` replace the compiled definition after it has
+                // combined the pending alternatives with the imported original.
                 if let Some(existing) = self.raw_terms.iter_mut().find(|prev| prev.name == t.name) {
                     let mut merged = t.expansions;
                     merged.append(&mut existing.expansions);
                     existing.expansions = merged;
+                } else if self.terminals.iter().any(|td| td.name == t.name) {
+                    self.raw_terms.push(RawTerm {
+                        directive: Directive::Plain,
+                        ..t
+                    });
                 }
             }
         }

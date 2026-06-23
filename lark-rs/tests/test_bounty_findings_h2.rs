@@ -110,13 +110,10 @@ fn n1_template_override_and_extend() {
     assert!(ex.parse("bc").is_ok(), "extend adds the new arm");
 }
 
-/// N1 differential pin (#269 audit), XFAIL — tracked as #286. `%extend` of an
-/// *imported* terminal should add the new alternative (Python: `"z"` parses),
-/// but lark-rs drops it because the imported terminal is already resolved by the
-/// time the directive is staged. Same-grammar terminal extend and imported
-/// terminal *override* both work; only imported-terminal extend diverges.
-#[test]
-#[ignore = "XFAIL (#286): %extend of an imported terminal drops the new alternative"]
+/// N1 differential pin (#286). `%extend` of an *imported* terminal should add
+/// the new alternative (Python: `"z"` parses) while preserving the original
+/// imported body (`"123"` still parses).
+#[test] // FIXED (#286): imported-terminal `%extend` preserves both original and new alternatives.
 fn n1_extend_imported_terminal_keeps_both() {
     let g = "%import common.INT\nstart: INT\n%extend INT: \"z\"\n";
     let lark =

@@ -96,11 +96,14 @@ impl GrammarCompiler {
         let raw_terms = std::mem::take(&mut self.raw_terms);
         let by_name: HashMap<&str, &RawTerm> =
             raw_terms.iter().map(|t| (t.name.as_str(), t)).collect();
-        // Terminals already known (imports, declares) as inline-ready regex — a
-        // terminal body may reference these too.
+        // Terminals already known through imports as inline-ready regex -- a
+        // terminal body may reference these too. `%declare`d terminals have no
+        // pattern to inline, but a later `%extend` of a declared terminal should
+        // still replace the declaration with the staged body.
         let imported: HashMap<String, String> = self
             .terminals
             .iter()
+            .filter(|t| !t.declared)
             .map(|t| (t.name.clone(), t.pattern.to_inline_regex()))
             .collect();
 
@@ -135,33 +138,53 @@ impl GrammarCompiler {
             })
             .collect();
 
-        // Register in source order so terminal ordering stays stable. A terminal
-        // already defined via `%import` is not redefined (import wins).
+        // Register in source order so terminal ordering stays stable. A pending
+        // `%extend` of an imported terminal is represented as a `RawTerm` with the
+        // same name as an already-compiled terminal; replace that compiled
+        // definition after combining the new alternatives with the imported
+        // original.
         //
-        // A terminal that reduces to a single string literal — case-sensitive or
-        // `"..."i` — is compiled to `Pattern::Str`, exactly like an inline
+        // A terminal that reduces to a single string literal -- case-sensitive or
+        // `"..."i` -- is compiled to `Pattern::Str`, exactly like an inline
         // `"literal"` and like Python Lark's `PatternStr` (which keeps the type
         // for case-insensitive literals, only attaching the flag). This is what
         // lets a named keyword terminal (`ASYNC: "async"`) join the keyword
-        // `unless` retyping in the contextual lexer — otherwise it is a
+        // `unless` retyping in the contextual lexer -- otherwise it is a
         // `Pattern::Re` that ties with, and loses to, an overlapping identifier
         // regex (`NAME`), so `async` would lex as `NAME`. Everything else
-        // (regex, concatenation, alternation, range, repetition) stays
-        // `Pattern::Re`.
+        // (regex, concatenation, alternation, range, repetition, and imported
+        // terminal extension) stays `Pattern::Re`.
         let mut strval_memo: HashMap<String, Option<(String, bool)>> = HashMap::new();
         for t in &raw_terms {
-            if self.terminals.iter().any(|td| td.name == t.name) {
-                continue;
-            }
-            let string_type = str_memo.get(&t.name).copied().unwrap_or(false);
+            let existing_idx = self.terminals.iter().position(|td| td.name == t.name);
+            let extends_imported = existing_idx
+                .map(|idx| !self.terminals[idx].declared)
+                .unwrap_or(false);
+            let string_type = if extends_imported {
+                // Once an imported pattern and new alternatives are combined, the
+                // terminal is no longer a single Python `PatternStr`, even if the
+                // new extension body itself is a string literal.
+                false
+            } else {
+                str_memo.get(&t.name).copied().unwrap_or(false)
+            };
             let pat = match Self::term_str_value(&t.name, &by_name, &imported_val, &mut strval_memo)
             {
-                Some((value, false)) => Pattern::Str(PatternStr::new(&value)),
-                Some((value, true)) => Pattern::Str(PatternStr::new_ci(&value)),
-                None => Pattern::Re(PatternRe::new(memo[&t.name].as_str(), 0)?),
+                Some((value, false)) if !extends_imported => Pattern::Str(PatternStr::new(&value)),
+                Some((value, true)) if !extends_imported => {
+                    Pattern::Str(PatternStr::new_ci(&value))
+                }
+                _ => Pattern::Re(PatternRe::new(memo[&t.name].as_str(), 0)?),
             };
-            self.terminals
-                .push(TerminalDef::new(&t.name, pat, t.priority).with_string_type(string_type));
+            let priority = existing_idx
+                .map(|idx| self.terminals[idx].priority)
+                .unwrap_or(t.priority);
+            let compiled = TerminalDef::new(&t.name, pat, priority).with_string_type(string_type);
+            if let Some(idx) = existing_idx {
+                self.terminals[idx] = compiled;
+            } else {
+                self.terminals.push(compiled);
+            }
         }
         Ok(())
     }
@@ -313,11 +336,16 @@ impl GrammarCompiler {
         if let Some(r) = memo.get(name) {
             return Ok(r.clone());
         }
-        // Reference to an imported/declared terminal, or a common-library terminal.
-        if let Some(r) = imported.get(name) {
-            return Ok(r.clone());
-        }
+        // Reference to an imported/common-library terminal, unless a pending
+        // `%extend` body for the same name exists. In that case the raw body is
+        // compiled below and the imported pattern is appended as the original
+        // alternative, matching Python's `%extend` semantics for imported
+        // terminals.
+        let imported_original = imported.get(name).cloned();
         let Some(raw) = by_name.get(name) else {
+            if let Some(r) = imported_original {
+                return Ok(r);
+            }
             if let Some(src) = common_terminals().get(name) {
                 return Ok(src.clone());
             }
@@ -344,6 +372,9 @@ impl GrammarCompiler {
                 )?);
             }
             alts.push(parts);
+        }
+        if let Some(original) = imported_original {
+            alts.push(original);
         }
         stack.pop();
 
