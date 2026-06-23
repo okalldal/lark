@@ -34,9 +34,28 @@ them):
 - **Escalation flag** — `needs-decision` if the body has an unresolved fork only
   the architect can settle ("decision needed", "assess & challenge" — #159, #101,
   #95). Otherwise, if it has an oracle-backed done-when and no open fork,
-  `good-autonomous`.
+  `good-autonomous` — **subject to the fix-site check below**.
 
 Flag (don't act on) likely **duplicates** or **stale** items for the architect.
+
+### 2a. `good-autonomous` fix-site check
+
+`good-autonomous` means "schedulable as-is with an identified fix site," so a
+named-but-wrong site burns a worker cycle (#272 named `parsers/lalr.rs`; the real
+divergence was upstream in `grammar/loader/ebnf.rs` — re-triaged + escalated #285).
+Before adding `good-autonomous`, **confirm the issue's stated fix site is plausible
+against a fast repro** — the failing XFAIL the issue points at, or a one-line probe
+that exercises the named module. The bar is *plausibility*, not a full fix: does the
+repro actually fail in (or route through) the named site?
+
+- Site **confirmed** (or the issue records it as `verified` per the bug-hackathon
+  filer's hypothesised/verified annotation): apply `good-autonomous` as usual.
+- Site **unconfirmed** — no fast repro available, the repro doesn't touch the named
+  module, or the filer marked it `hypothesised`: still apply `good-autonomous` if the
+  done-when is otherwise groundable, but **annotate the issue body / a triage comment
+  "fix site unverified"** so the worker treats the named site as *exploratory* (a
+  starting hypothesis to confirm first) rather than churning that file. In **dry-run**,
+  report the downgrade; in **apply**, add the note.
 
 ### 2b. Decision-label drift check
 
