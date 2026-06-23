@@ -168,6 +168,16 @@ The worker brief:
 > sprint tip. And because Edit operates on the worktree copy, **Read the worktree copy of a
 > file before you Edit it** — do not rely on a path you read in the shared checkout.
 >
+> **Keep ALL files inside your worktree — never write any file into the shared checkout.**
+> Every file you create lives under your own `isolation: worktree` path: not just the edits
+> you ship, but **scratch, probe, and temporary files too** (e.g. an `examples/*.rs` probe,
+> a `tests/zz_tmp_*` fixture). A stray file left in the *shared* checkout is invisible to
+> your branch yet still breaks the orchestrator's pre-push hooks — a leaked untracked
+> `examples/n4probe.rs` once tripped `cargo fmt --check` and forced a `--no-verify` push
+> plus a manual cleanup (#311). **Before pushing, sweep `git status`** and confirm there are
+> no stray untracked files: everything you authored is either tracked on your branch (or
+> deliberately git-ignored), with nothing left behind in the shared tree.
+>
 > Follow the repo's oracle-first discipline (`lark-rs/CLAUDE.md`): a failing test before
 > the fix, banks green after. Run `/code-review` **if available; otherwise launch a fresh
 > review sub-agent over your branch diff** and address its findings before opening the
