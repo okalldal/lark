@@ -117,7 +117,9 @@ issues run concurrently. Cap concurrency at **~3** workers to bound CI cost and 
 
 For each issue in the wave, launch one `Task` (general-purpose) sub-agent with
 `isolation: "worktree"`. Send the independent ones **in a single message** so they run
-concurrently. A fresh `Task` inherits **none** of this session's working memory — only
+concurrently. (Tooling note: once a github MCP tool is **already loaded**, call it
+directly — re-running `ToolSearch select:` on an already-loaded tool returns "no matching
+tools" even though the tool is callable (#314).) A fresh `Task` inherits **none** of this session's working memory — only
 the prompt, the checkout, and tool access — so the brief must carry a real context
 packet, not a bare issue number.
 
@@ -152,7 +154,9 @@ The worker brief:
 > **Claim it before coding** (the `/next-task` protocol, not just the label): comment on
 > the issue with your branch/session intent, self-assign if possible, and set
 > `status:in-progress`. If it is already claimed, stop and return `BLOCKED:` — never
-> double-work an issue (parallel workers must not collide).
+> double-work an issue (parallel workers must not collide). When mutating labels via
+> `mcp__github__issue_write`, pass `labels` as a **JSON array** (`["a","b"]`) — a
+> comma-separated string coercion-errors and burns a retry (#314).
 >
 > **Branch from the sprint tip, not `master`.** Create your working branch from
 > `<sprint-branch>` at `<sprint-tip-sha>`. Before opening or updating the child PR, fetch
@@ -211,6 +215,10 @@ The worker brief:
 > closing keywords (and on a non-default base they would not fire anyway). Putting this
 > evidence *in the PR body* is what lets the independent verdict-only reviewer (§5) judge
 > the child without inferring or failing it for missing evidence.
+>
+> **File a follow-up issue *before* referencing its number** in code comments or PR text —
+> file it first, then cite the returned number; do not guess a number relative to your own
+> PR/issue (a worker once mis-referenced its own PR number this way, #314).
 >
 > **Do NOT run `/review-pr` in any acting/merge mode. Do NOT merge anything.** If you hit
 > a fork only the architect can settle — a genuine `needs-decision` (taste, product
@@ -330,6 +338,13 @@ This is staging onto the sprint branch, **not** landing to `master`:
   workspace scratch file is fine as a live convenience cache, but it is **never** the
   system of record — the container is reclaimed on restart, so anything that must survive a
   roll-over is reconstructable (above) or committed to the residue file.
+- **Always `git commit` a residue-ledger edit *before* re-syncing the sprint branch, and
+  prefer a plain `git pull --ff-only` over `fetch` + `reset --hard`.** The integration
+  branch only moves forward (via GitHub squash-merges), so a fast-forward pull suffices; a
+  `reset --hard` run before committing an uncommitted ledger edit silently discards it and
+  forces a re-apply (#314). (The §7 finalize push-retry already does the inverse
+  commit-then-`pull --ff-only`-then-retry on a rejected push — same discipline, the two do
+  not overlap.)
 - After each child PR is staged:
   - **rebase/update the remaining open child PRs** onto the new sprint-branch tip
     (`mcp__github__update_pull_request_branch`) so any conflict surfaces **now**;
