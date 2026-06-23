@@ -62,6 +62,14 @@ pushing — that runs everything twice (once here, once in GitHub Actions).
      When a follow-up is an unresolved fork or public API/product decision, file
      it with the decision memo skeleton (see `/roadmap`) and label it
      `needs-decision`, not just a generic issue.
+     **Process debt counts too (required, checkable — not implicit).** If the task
+     surfaced a *retro-flagged kaizen item* — a kit/process fix, a "KIT BUG," a
+     "file as follow-up" note about a stale instruction, a misbehaving tool, or
+     missing know-how — file it as a `kaizen`-labelled issue (`lark-rs/docs/LABELS.md`)
+     **before** reporting the task done, and link it in the PR close-out; the task is
+     not done until each such note is filed or explicitly marked already-tracked. This
+     mirrors the sprint/kaizen §9 close-out: the close-out step itself must obey §7's
+     "never silently drop" (the lapse #284 made and #315 fixed).
    - **Write an ADR if you deviated from a §3 default**, or made an
      architecture / public-API call a future reader would have to reverse-engineer
      (`lark-rs/docs/decisions/`, copy `TEMPLATE.md`). Commit it in *this* PR

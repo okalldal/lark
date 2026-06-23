@@ -160,6 +160,17 @@ the close-out (sprint §9): verify the included issues closed, report the **rema
 kaizen queue depth**, the parked inbox, triage-repair items, follow-ups, and the
 aggregated **Retrospective**.
 
+**Inherited (sprint §9), restated because it bites hardest here: filing every
+retro-flagged kaizen item is a required, checkable close-out deliverable.** A sweep
+*generates* process/kit retro notes by the handful, so its close-out is the most likely
+place to silently drop them (the exact §7 violation #284 committed — dropped them,
+recovered late as #309–#314). For every worker/review/orchestrator `RETRO:` note tagged
+"kaizen" / "KIT BUG" / "file as follow-up," confirm a `kaizen`-labelled tracking issue
+exists and link it; the close-out is **not done** until each is filed or explicitly
+marked already-tracked/duplicate. Report follow-ups in the sprint §9 **two enumerated
+arms — *product follow-ups filed* AND *kaizen follow-ups filed* — separately**, so a
+zero-kaizen arm is conspicuous and must be justified, not silent.
+
 ## Guardrails (binding)
 
 - **Off-cadence by design** — never run inside `/start-sprint` or as part of a feature
