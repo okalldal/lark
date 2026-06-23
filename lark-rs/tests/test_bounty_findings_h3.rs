@@ -204,7 +204,7 @@ fn h6_possessive_not_silently_greedy() {
     }
 }
 
-/// H7 (HIGH). A stacked quantifier `/a{2}{3}/` (a repeat applied directly to a repeat).
+/// H7 (MEDIUM). A stacked quantifier `/a{2}{3}/` (a repeat applied directly to a repeat).
 /// Python `re` (via `sre_parse`) raises "multiple repeat", so Lark build-errors
 /// (`Cannot compile token A`). The Rust `regex` crate accepts stacked quantifiers, so
 /// lark-rs builds and lexes the terminal. Per ADR-0017, being more permissive than the
