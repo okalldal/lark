@@ -809,6 +809,45 @@ mod tests {
         catch_unwind(AssertUnwindSafe(|| bake(grammar, opts).is_ok())).unwrap_or(false)
     }
 
+    /// XFAIL (bounty H3 / H12): the baked standalone runtime does not collapse an
+    /// `expand1` (`?rule`) down to a lone placeholder-`None` child the way the
+    /// in-process tree builder does (the RC9 carve-out in
+    /// `parsers/tree_builder.rs`). `runtime::shape`'s expand1 arm carries an extra
+    /// `&& !matches!(children[0], Child::None)` guard, so a lone `None` is wrapped
+    /// as `Tree(w, [None])` instead of being spliced as a bare `None`. Core lark-rs
+    /// AND Python Lark both yield `Tree(start, [None])`; the standalone bake diverges
+    /// from both — falsifying the "byte-faithful to core by construction" standalone
+    /// contract (round-2 `BOUNTY_FINDINGS_H2.md` declared this a clean bucket). Drop
+    /// the `#[ignore]` once `runtime::shape` mirrors the RC9 lone-`None` carve-out.
+    #[test]
+    #[ignore = "XFAIL (bounty H3): standalone expand1 lone-None not collapsed (runtime.rs guard vs tree_builder.rs)"]
+    fn standalone_expand1_lone_none_collapses_like_core() {
+        let opts = LarkOptions {
+            parser: ParserAlgorithm::Lalr,
+            start: vec!["start".to_string()],
+            maybe_placeholders: true,
+            ..Default::default()
+        };
+        let tree = try_standalone("start: w \"x\"\n?w: [A]\nA: \"a\"\n", &opts, "x")
+            .expect("standalone parses \"x\"");
+        // Python/core: Tree(start, [None]) — the lone-None `?w` collapses to a
+        // bare None spliced into the parent.
+        let ParseTree::Tree(t) = &tree else {
+            panic!("H3: expected a tree, got {tree:?}");
+        };
+        assert_eq!(t.data, "start");
+        assert_eq!(
+            t.children.len(),
+            1,
+            "H3: start should have exactly one child (the collapsed None)"
+        );
+        assert!(
+            matches!(t.children[0], super::runtime::Child::None),
+            "H3: expand1 must collapse the lone placeholder to a bare None; \
+             standalone wrapped it as Tree(w, [None]) instead"
+        );
+    }
+
     /// Replays the full strip-mined Python-Lark bank through the shared
     /// standalone `runtime` (#86), under the same XFAIL discipline as the other
     /// banks. The `standalone_xfail.json` entries are **basic-lexer-incompatible**
