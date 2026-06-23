@@ -63,17 +63,26 @@ fn assert_build_rejected(grammar: &str, o: LarkOptions, why: &str) {
 /// returning a clean error — a robustness/DoS hole on attacker- or user-supplied
 /// grammars. Reproduces on lalr (basic+contextual) and earley.
 #[test]
-#[ignore = "XFAIL (bounty H1): undefined start symbol panics in lower() instead of GrammarError"]
 fn h1_undefined_start_rejected_not_panicked() {
-    let g = "foo: \"a\"\n".to_string();
-    let o = opts(ParserAlgorithm::Lalr, LexerType::Contextual);
-    // Must be a clean Err, never a panic.
-    let result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Lark::new(&g, o).is_err()));
-    assert!(
-        matches!(result, Ok(true)),
-        "H1: undefined start must be a clean GrammarError, not a panic (got {result:?})"
-    );
+    // Reproduces on lalr (basic + contextual) and earley — any undefined start,
+    // default (`start`) or custom, must be a clean GrammarError, never a panic.
+    for (parser, lexer) in [
+        (ParserAlgorithm::Lalr, LexerType::Contextual),
+        (ParserAlgorithm::Lalr, LexerType::Basic),
+        (ParserAlgorithm::Earley, LexerType::Basic),
+    ] {
+        let label = format!("{parser:?}/{lexer:?}");
+        let g = "foo: \"a\"\n".to_string();
+        let o = opts(parser, lexer);
+        // Must be a clean Err, never a panic.
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Lark::new(&g, o).is_err()));
+        assert!(
+            matches!(result, Ok(true)),
+            "H1: undefined start must be a clean GrammarError, not a panic on \
+             {label} (got {result:?})"
+        );
+    }
 }
 
 /// H2a (HIGH). A template with a duplicate parameter name. Python:
