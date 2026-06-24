@@ -51,6 +51,19 @@
 //!   (`tests/test_lexer_dfa_build_scaling.rs`) is the deterministic gate, the codegen-
 //!   time analog of the Earley/CYK scaling gates (paid at standalone generation, not
 //!   every runtime load).
+//!
+//! A seventh counter backs the **grammar-build cross-product** gate (#404, H6-7):
+//!
+//! * [`expansion_alts`] — every intermediate alternative the EBNF rule-body
+//!   compiler materializes in `compile_expansion`'s per-position cartesian fold
+//!   (the running `acc` product, summed across fold steps). A chain of `k`
+//!   duplicate-arm inline groups (`(X|X) (X|X) … (X|X)`) that folds *without*
+//!   per-step dedup materializes the full `m^k` product before collapsing — a
+//!   `2^k` build blowup. Folding with `concat_alts_dedup` bounds the running set
+//!   to the *distinct* alternatives at each prefix length, so this count stays
+//!   flat in `k`. Asserting that (`tests/test_grammar_build_scaling.rs`) is the
+//!   deterministic gate — the grammar-build analog of the Earley/CYK/lexer
+//!   scaling gates, paid at load, never wall-clock.
 
 #[cfg(feature = "perf-counters")]
 mod imp {
@@ -63,6 +76,7 @@ mod imp {
     static CYK_TABLE_STEPS: AtomicU64 = AtomicU64::new(0);
     static LEXER_SCAN_STEPS: AtomicU64 = AtomicU64::new(0);
     static DENSE_BUILD_BYTES: AtomicU64 = AtomicU64::new(0);
+    static EXPANSION_ALTS: AtomicU64 = AtomicU64::new(0);
     static LEO_DISABLED: AtomicBool = AtomicBool::new(false);
 
     #[inline]
@@ -126,6 +140,18 @@ mod imp {
         DENSE_BUILD_BYTES.fetch_add(n, Ordering::Relaxed);
     }
 
+    /// Count intermediate alternatives materialized by `compile_expansion`'s
+    /// per-position cartesian fold — the size of the running `acc` product after
+    /// each fold step, summed over the rule body. A duplicate-arm inline-group
+    /// chain (`(X|X) (X|X) …`) folded without per-step dedup makes this `2^k`; the
+    /// deduping fold keeps it flat in `k` (#404, H6-7). The grammar-build analog of
+    /// the Earley/CYK/lexer scaling counters; gated by
+    /// `tests/test_grammar_build_scaling.rs`.
+    #[inline]
+    pub fn add_expansion_alts(n: u64) {
+        EXPANSION_ALTS.fetch_add(n, Ordering::Relaxed);
+    }
+
     /// Zero every counter. Call before the workload you want to measure.
     pub fn reset() {
         COMPLETER_SCAN_STEPS.store(0, Ordering::Relaxed);
@@ -135,6 +161,7 @@ mod imp {
         CYK_TABLE_STEPS.store(0, Ordering::Relaxed);
         LEXER_SCAN_STEPS.store(0, Ordering::Relaxed);
         DENSE_BUILD_BYTES.store(0, Ordering::Relaxed);
+        EXPANSION_ALTS.store(0, Ordering::Relaxed);
     }
 
     pub fn completer_scan_steps() -> u64 {
@@ -163,6 +190,10 @@ mod imp {
 
     pub fn dense_build_bytes() -> u64 {
         DENSE_BUILD_BYTES.load(Ordering::Relaxed)
+    }
+
+    pub fn expansion_alts() -> u64 {
+        EXPANSION_ALTS.load(Ordering::Relaxed)
     }
 
     /// Turn the Joop-Leo optimization off (`true`) or on (`false`). Lets a
@@ -206,6 +237,9 @@ mod imp {
     #[inline]
     pub fn add_dense_build_bytes(_n: u64) {}
 
+    #[inline]
+    pub fn add_expansion_alts(_n: u64) {}
+
     pub fn reset() {}
 
     pub fn completer_scan_steps() -> u64 {
@@ -233,6 +267,10 @@ mod imp {
     }
 
     pub fn dense_build_bytes() -> u64 {
+        0
+    }
+
+    pub fn expansion_alts() -> u64 {
         0
     }
 

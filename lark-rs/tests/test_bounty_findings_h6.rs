@@ -42,8 +42,9 @@
 //! Each test asserts the **Python Lark 1.3.1** (oracle) behavior. This file is an XFAIL
 //! catalog: each test starts `#[ignore]`d and failing. Drop a test's `#[ignore]` when its
 //! bug is fixed to turn it into a permanent regression guard — H6-5 (the
-//! `propagate_positions` filtered-token meta span) is fixed and now runs by default
-//! (#402). Run the still-open XFAILs with:
+//! `propagate_positions` filtered-token meta span, #402) and H6-7 (the duplicate-arm
+//! inline-group cross-product build blowup, #404) are fixed and now run by default.
+//! Run the still-open XFAILs with:
 //!
 //!     cargo test --test test_bounty_findings_h6 -- --ignored
 //!
@@ -329,25 +330,26 @@ fn h6_8_letterless_names_rejected() {
 // Deterministic resource bounds (grammar build).
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// H6-7 (MEDIUM, perf / grammar build). `compile_expansion`'s per-position loop
-/// (`grammar/loader/ebnf.rs`) folds each group into `acc` with the **non-deduping**
-/// `concat_alts`, deduping only once at the end. A chain of `k` inline groups with `m`
-/// duplicate arms (`(X|X) (X|X) … (X|X)`) materializes `m^k` intermediate
-/// alternatives before collapsing to a single rule — a deterministic `2^k`-vs-`O(1)`
-/// blowup (measured: k=12 → 12 ms, k=14 → 65 ms, k=16 → 325 ms, k=18 → 1569 ms; ~2× per
-/// +1 k, final surface rules = 1). Python's `SimplifyRule_Visitor` dedups each group's
-/// arms *before* the product and builds the identical grammar in flat linear time.
-/// Distinct from N9 (`~n..m` O(n²) *size*) and #252 (the `~n` repeat path, which uses
-/// the existing `concat_alts_dedup` and where Python *also* blows up). Expected fix:
-/// use `concat_alts_dedup` (already in the file) at the per-position fold + add a
-/// sub-exponential build-scaling gate. The fix exists in-file; it is just not wired into
-/// the general `compile_expansion` loop.
+/// H6-7 (MEDIUM, perf / grammar build) — **FIXED** (#404). `compile_expansion`'s
+/// per-position loop (`grammar/loader/ebnf.rs`) used to fold each group into `acc`
+/// with the **non-deduping** `concat_alts`, deduping only once at the end. A chain
+/// of `k` inline groups with `m` duplicate arms (`(X|X) (X|X) … (X|X)`) materialized
+/// `m^k` intermediate alternatives before collapsing to a single rule — a
+/// deterministic `2^k`-vs-`O(1)` blowup (measured before the fix: k=12 → 12 ms,
+/// k=14 → 65 ms, k=16 → 325 ms, k=18 → 1569 ms; ~2× per +1 k, final surface rules = 1).
+/// Python's `SimplifyRule_Visitor` dedups each group's arms *before* the product and
+/// builds the identical grammar in flat linear time. Distinct from N9 (`~n..m` O(n²)
+/// *size*) and #252 (the `~n` repeat path, which already used `concat_alts_dedup` and
+/// where Python *also* blows up).
 ///
-/// The XFAIL gate: building `(X|X)^k` at `k=20` (~6 s on the non-deduping path today,
-/// instant once fixed) must finish within a generous budget. The build runs on a worker
-/// thread with a timeout so the ignored test fails fast today rather than hanging.
+/// The fix folds with `concat_alts_dedup` at each position, so the running product is
+/// bounded by the *distinct* alternatives at each prefix length (one, here) — producing
+/// the byte-identical final alternative set with no `2^k` materialization. The
+/// **deterministic** scaling net is `tests/test_grammar_build_scaling.rs` (the
+/// `expansion_alts` perf counter stays flat in `k`); this wall-clock worker-thread pin
+/// is the coarse behavioral backstop — `(X|X)^20` must build well within a generous
+/// budget instead of hanging for seconds.
 #[test]
-#[ignore = "XFAIL (bounty H6-7): O(2^k) grammar-build blowup on duplicate-arm inline-group cross-products"]
 fn h6_7_duplicate_group_cross_product_build_blowup() {
     use std::sync::mpsc;
     use std::time::Duration;

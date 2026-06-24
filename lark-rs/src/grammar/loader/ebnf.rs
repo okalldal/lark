@@ -257,7 +257,24 @@ impl GrammarCompiler {
                 // A distributed plain group: its arms fan out as-is, no ε arm.
                 Slot::Choices(arms) => arms,
             };
-            acc = Self::concat_alts(&acc, &choices);
+            // Dedup the running product at **every** position rather than only at
+            // the end (the trailing `retain` below). Without this, a chain of `k`
+            // duplicate-arm inline groups (`(X|X) (X|X) … (X|X)`) materializes the
+            // full `m^k` cartesian product before the final dedup collapses it to a
+            // single alternative — a deterministic `2^k` build blowup (#404, H6-7).
+            // First-occurrence dedup at each fold step produces the byte-identical
+            // final set (same alternatives, same order, same `dedup_and_check_alts`
+            // verdict), bounding the working set to the distinct alternatives at that
+            // prefix length — exactly as Python Lark's `SimplifyRule_Visitor` dedups
+            // each group's arms *before* the cross-product. This is the same technique
+            // [`repeat_union`](Self::repeat_union) already applies on the `~n` repeat
+            // path (#252); here it is wired into the general per-position loop.
+            acc = Self::concat_alts_dedup(&acc, &choices);
+            // Deterministic build-cost signal: the size of the running product
+            // after each fold step. With the deduping fold this stays flat in the
+            // group-chain length `k`; the old non-deduping fold made it `2^k`
+            // (#404, gated by `tests/test_grammar_build_scaling.rs`).
+            crate::perf::add_expansion_alts(acc.len() as u64);
         }
         // Distributing two optionals can coincide (`X? X?` → `X X | X | X | ε`);
         // identical alternatives would reduce/reduce on the same item, so keep the
