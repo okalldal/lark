@@ -141,7 +141,6 @@ fn h6_1_value_length_tiebreak_uses_raw_source() {
 /// H6–H9/#375 dialect *narrowings* (which reject to match Python's rejection). Expected
 /// fix: normalize `{,n}` → `{0,n}` in `normalize_python_escapes` (class/escape-aware).
 #[test]
-#[ignore = "XFAIL (bounty H6-2): {,m} quantifier rejected and mis-categorized as OutOfScope lookaround"]
 fn h6_2_empty_lower_bound_quantifier_accepted() {
     let g = "start: A\nA: /a{,3}b/\n";
     let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual));

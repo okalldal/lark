@@ -296,6 +296,29 @@ fn normalize_python_escapes(pattern: &str) -> String {
         if c == ']' && in_class {
             in_class = false;
         }
+        // H6-2: normalize `{,n}` → `{0,n}` (Python `re`'s shorthand for `{0,n}`).
+        // The Rust `regex` crate requires a decimal lower bound, so `{,n}` would cause
+        // a build error if passed through unchanged.  An escaped `\{` never reaches here
+        // (the `\` handler above consumed it), so an unescaped `{` is a real quantifier
+        // start.  Inside a character class `{,n}` is literal, not a quantifier.
+        if c == '{' && !in_class {
+            if chars.get(i + 1) == Some(&',') {
+                let mut j = i + 2;
+                while j < chars.len() && chars[j].is_ascii_digit() {
+                    j += 1;
+                }
+                if j > i + 2 && chars.get(j) == Some(&'}') {
+                    // Valid `{,digits}` — rewrite to `{0,digits}`
+                    out.push_str("{0,");
+                    for k in (i + 2)..j {
+                        out.push(chars[k]);
+                    }
+                    out.push('}');
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
         out.push(c);
         i += 1;
     }
@@ -1007,6 +1030,11 @@ mod tests {
         // The existing \< \> normalization still applies; other escapes byte-exact.
         assert_eq!(normalize_python_escapes("\\<\\>"), "<>");
         assert_eq!(normalize_python_escapes("[^\\/]"), "[^\\/]");
+        // H6-2: `{,n}` → `{0,n}` normalization (Python `re` shorthand).
+        assert_eq!(normalize_python_escapes("a{,3}b"), "a{0,3}b");
+        assert_eq!(normalize_python_escapes("a{,10}b"), "a{0,10}b");
+        assert_eq!(normalize_python_escapes("a{3,5}b"), "a{3,5}b"); // normal bound unchanged
+        assert_eq!(normalize_python_escapes("[a{,3}]"), "[a{,3}]"); // in class → literal, unchanged
     }
 
     /// H6/H7 (#333): the quantifier-shape dialect screen refuses possessive (`a++`) and
