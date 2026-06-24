@@ -148,7 +148,6 @@ fn h5_2_double_underscore_name_rejected() {
 /// Expected fix: canonicalize empty alternatives that differ only in gap markers in
 /// `dedup_and_check_alts` (reusing `ebnf.rs`'s MP-vs-non-MP None-count rule).
 #[test]
-#[ignore = "XFAIL (bounty H5-3): [A] optional alternative beside an explicit empty | arm spuriously rejected as reduce/reduce; Python accepts"]
 fn h5_3_optional_plus_empty_alt_accepted() {
     let g = "start: x\nx: [A]\n  |\nA: \"a\"\n";
     let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual))
