@@ -278,7 +278,10 @@ impl CykParser {
         // parse-tree depth, O(n) in the worst case — but CYK's O(n³) table fill
         // already keeps any feasible input (and so the depth) small, unlike the
         // Earley perf path that needs a dedicated large stack.
-        let builder = TreeOutputBuilder::new(&self.grammar.rules);
+        let builder = TreeOutputBuilder::with_propagate_positions(
+            &self.grammar.rules,
+            self.grammar.propagate_positions,
+        );
         let rev = revert(&root, &self.cnf.rules);
         let value = assemble_rev(rev, &builder, &self.cnf, &self.grammar);
         let start_name = self.grammar.symbols.name(start_id).to_string();
@@ -411,7 +414,13 @@ fn compute_epsilon_values(
     grammar: &CompiledGrammar,
     nullable: &HashSet<Nt>,
 ) -> HashMap<SymbolId, NodeValue> {
-    let builder = TreeOutputBuilder::new(&grammar.rules);
+    // Thread `propagate_positions` for consistency with the parse-time builder
+    // (#402). Epsilon values assemble only all-nullable (zero-token) productions,
+    // so the container is always empty and `widen_meta` no-ops today — but keeping
+    // the flag uniform avoids a latent divergence if an eps value ever carried a
+    // position.
+    let builder =
+        TreeOutputBuilder::with_propagate_positions(&grammar.rules, grammar.propagate_positions);
     let mut memo: HashMap<SymbolId, NodeValue> = HashMap::new();
     let mut visiting: HashSet<SymbolId> = HashSet::new();
     for nt in nullable {

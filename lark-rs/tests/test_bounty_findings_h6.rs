@@ -40,9 +40,10 @@
 //!     H5-2/#361's `__foo`, which *has* a letter).
 //!
 //! Each test asserts the **Python Lark 1.3.1** (oracle) behavior. This file is an XFAIL
-//! catalog: every test below is `#[ignore]`d and fails today. Drop a test's `#[ignore]`
-//! when its bug is fixed to turn it into a permanent regression guard. Run the still-open
-//! XFAILs with:
+//! catalog: each test starts `#[ignore]`d and failing. Drop a test's `#[ignore]` when its
+//! bug is fixed to turn it into a permanent regression guard — H6-5 (the
+//! `propagate_positions` filtered-token meta span) is fixed and now runs by default
+//! (#402). Run the still-open XFAILs with:
 //!
 //!     cargo test --test test_bounty_findings_h6 -- --ignored
 //!
@@ -279,7 +280,6 @@ fn h6_4_nested_optional_under_repetition_builds() {
 /// H10/#337 (positionless-empty `meta.empty` flag). Expected fix: compute meta from the
 /// production's pre-filter child span (a filtered token contributes its own start/end).
 #[test]
-#[ignore = "XFAIL (bounty H6-5): Tree.meta span excludes filtered tokens under propagate_positions"]
 fn h6_5_meta_span_includes_filtered_tokens() {
     let mut o = opts(ParserAlgorithm::Lalr, LexerType::Contextual);
     o.propagate_positions = true;
