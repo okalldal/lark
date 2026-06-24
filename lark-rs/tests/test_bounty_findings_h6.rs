@@ -113,10 +113,10 @@ fn token_count(t: &ParseTree) -> usize {
 /// ranks `B` first, and emits `B`. Distinct from N2/#268 (the *flag-wrapper* leak,
 /// fixed by `strip_whole_pattern_flag_wrapper`) and RC5/#268 (`max_width`, the 2nd key);
 /// this is the 3rd key (`raw_value_len`) and a different lost-length source (body-escape
-/// normalization). Expected fix: retain the pre-normalization source on `PatternRe` and
-/// measure that, so `raw_value_len() == len(pattern.value)`.
-#[test]
-#[ignore = "XFAIL (bounty H6-1): terminal value-length tiebreak measures the normalized pattern, not the raw source"]
+/// normalization). Fix (#399): `PatternRe` retains the pre-normalization `raw` source and
+/// `raw_value_len` measures that, so `raw_value_len() == len(pattern.value)`.
+#[test] // FIXED (#399): the value-length tiebreak measures the verbatim source, not the
+        // normalized pattern.
 fn h6_1_value_length_tiebreak_uses_raw_source() {
     let g = "start: A | B\nA: /\\<\\<\\</\nB: /<<<|q/\n";
     let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Basic)).expect("H6-1: builds");
@@ -126,6 +126,30 @@ fn h6_1_value_length_tiebreak_uses_raw_source() {
         Some("A"),
         "H6-1: Python's value-length tiebreak (source len 6 > 5) selects terminal A; \
          lark-rs measured the normalized pattern (len 3) and selected B"
+    );
+}
+
+/// H6-1, second trigger (the `(?#…)` comment-strip length-loss source). The issue calls
+/// for the comment-strip case to reproduce/pass identically to the `\<\<\<` body-escape
+/// case: `normalize_python_escapes` drops a `(?#…)` comment span before storage, so
+/// `ZZ: /ab(?#cccc)/` (verbatim source len 10) normalizes to `ab` (len 2) with the same
+/// `max_width` 2 as `B: /ab/` (len 2). Python ranks by `(-priority, -max_width,
+/// -len(pattern.value), name)`: equal priority and width, ZZ's *longer raw value* wins
+/// the 3rd key *before* the name sort, so Python emits `ZZ` on `"ab"`. A `raw_value_len`
+/// that measured the normalized pattern would tie both at 2 and fall through to the name
+/// sort (`B` < `ZZ` → wrong `B`). Names chosen so the name tiebreak disagrees with the
+/// value-length tiebreak, isolating the 3rd key.
+#[test] // FIXED (#399): comment-strip body normalization no longer changes a terminal's rank.
+fn h6_1_value_length_tiebreak_uses_raw_source_comment_strip() {
+    let g = "start: ZZ | B\nZZ: /ab(?#cccc)/\nB: /ab/\n";
+    let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Basic)).expect("H6-1c: builds");
+    let tree = lark.parse("ab").expect("H6-1c: parses");
+    assert_eq!(
+        first_token_type(&tree).as_deref(),
+        Some("ZZ"),
+        "H6-1c: ZZ's verbatim source (len 10, comment stripped to `ab`) outranks B (len 2) on \
+         the value-length tiebreak before the name sort; a normalized-length measure would \
+         tie both at 2 and wrongly pick B by name"
     );
 }
 
