@@ -350,7 +350,8 @@ fn h4_4_priority_small_and_boundary_still_order() {
 /// must do the same without overflowing, saturating the `hh` sum to `i64::MAX`.
 #[test]
 fn h4_4_earley_priority_accumulation_saturates_no_overflow() {
-    // 4611686018427387904 == i64::MAX / 2; two of them sum to i64::MAX + 1.
+    // 4611686018427387904 == 2^62 == (i64::MAX + 1) / 2; two of them sum to
+    // exactly i64::MAX + 1 — the minimal overflow point for the plain `+`.
     let g = "start: hh | ll\n\
              hh: high high\n\
              ll: low low\n\
@@ -364,23 +365,19 @@ fn h4_4_earley_priority_accumulation_saturates_no_overflow() {
             .parse("xx")
             .unwrap_or_else(|e| panic!("H4-4 earley ({lexer:?}): parses: {e:?}"));
         // The summed-priority winner is `hh` (≈i64::MAX, saturating) over `ll` (2).
-        let names: Vec<&str> = match &tree {
-            ParseTree::Tree(t) => t
-                .children
-                .iter()
-                .filter_map(|c| match c {
-                    Child::Tree(ct) => Some(ct.data.as_str()),
-                    _ => None,
-                })
-                .collect(),
-            _ => vec![],
-        };
+        let names: Vec<&str> = tree
+            .as_tree()
+            .unwrap_or_else(|| panic!("H4-4 earley ({lexer:?}): root is a tree"))
+            .children
+            .iter()
+            .filter_map(|c| c.as_tree().map(|ct| ct.data.as_str()))
+            .collect();
         assert_eq!(
             names,
             vec!["hh"],
-            "H4-4 earley ({lexer:?}): the saturating priority sum of `hh` (i64::MAX/2 + \
-             i64::MAX/2, pinned at i64::MAX) must outrank `ll` (2); a wrapping `+` would \
-             flip `hh` negative and pick `ll` (got {names:?})"
+            "H4-4 earley ({lexer:?}): the saturating priority sum of `hh` (2^62 + 2^62 \
+             == i64::MAX + 1, pinned at i64::MAX) must outrank `ll` (2); a wrapping `+` \
+             would flip `hh` negative and pick `ll` (got {names:?})"
         );
     }
 }
