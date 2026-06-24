@@ -20,7 +20,7 @@ use crate::error::{GrammarError, ParseError, RecoveryAction};
 use crate::grammar::analysis::GrammarAnalysis;
 use crate::grammar::intern::{CompiledGrammar, CompiledRule, SymbolId, SymbolTable};
 use crate::lexer::{BasicLexer, ContextualLexer};
-use crate::tree::{ParseTree, Token};
+use crate::tree::{Child, ParseTree, Token};
 
 use super::token_source::{
     postlex_basic_recovering_source, postlex_contextual_recovering_source,
@@ -682,17 +682,22 @@ impl ParserStack {
     }
 
     /// ACCEPT: the final value on the stack is the parse result (a `?start` rule can
-    /// collapse to a bare token, hence [`ParseTree`]).
+    /// collapse to a bare token or a bare `None`, hence [`ParseTree`]).
     fn accept(&mut self) -> Result<ParseTree, ParseError> {
         match self.value_stack.pop() {
             Some(Slot::Tree(t)) => Ok(ParseTree::Tree(t)),
             Some(Slot::Token(tok)) => Ok(ParseTree::Token(tok)),
             // A start rule is never transparent. The one way its value can be
             // `Inline` is a top-level `?start` collapsing a lone-`None` placeholder
-            // (RC9 fix in tree_builder: lone-`None` expand1 → `Inline([None])`),
-            // which the public `ParseTree` (Tree|Token only) cannot represent as a
-            // bare `None`; that root-`?start` corner is a separate tracked divergence
-            // (#289). Treat it, like an empty stack, as no parse result.
+            // (RC9 in tree_builder: lone-`None` expand1 → `Inline([None])`). Python
+            // Lark returns a bare `None` there (`?start: [A]` on `""`), so emit
+            // `ParseTree::None` to match the oracle on every backend (#289).
+            Some(Slot::Inline(cs)) if cs.len() == 1 && matches!(cs[0], Child::None) => {
+                Ok(ParseTree::None)
+            }
+            // Any other `Inline` shape on a start rule is structurally impossible
+            // (a start rule never inlines); treat it, like an empty stack, as no
+            // parse result rather than panicking.
             Some(Slot::Inline(_)) | None => Err(ParseError::unexpected_eof(0, 0, vec![])),
         }
     }

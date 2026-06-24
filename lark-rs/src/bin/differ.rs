@@ -139,11 +139,13 @@ fn main() -> ExitCode {
 }
 
 /// Serialize a [`ParseTree`] root in `tree_to_dict` shape. The root is normally a
-/// `Tree`, but a `?start` expand1 collapse can yield a bare `Token`.
+/// `Tree`, but a `?start` expand1 collapse can yield a bare `Token` or a bare
+/// `None` (`?start: [A]` on `""`, #289 — Python's `tree_to_dict(None)` is `null`).
 fn write_parse_tree(out: &mut String, tree: &ParseTree) {
     match tree {
         ParseTree::Tree(t) => write_tree(out, t),
         ParseTree::Token(tok) => write_token(out, &tok.type_, &tok.value),
+        ParseTree::None => out.push_str("null"),
     }
 }
 
