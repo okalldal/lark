@@ -842,18 +842,36 @@ impl GrammarCompiler {
     /// `_define(name, is_term, None)`): declaring a name already defined — by an
     /// import, a prior `%declare`, or a local terminal — is rejected as a
     /// duplicate (#270).
+    ///
+    /// A `%declare` target must be a terminal (UPPERCASE) name. A rule-cased
+    /// (lowercase) target — which the grammar parser surfaces as a
+    /// [`Symbol::NonTerminal`] — is rejected (#353, H4-11): Python Lark only ever
+    /// builds a `TerminalDef` from a declared symbol, so `%declare foo` blows up
+    /// internally (an `AttributeError`) rather than succeeding. We pin the
+    /// reject/accept verdict, not Python's accidental message, with a clean
+    /// `GrammarError`.
     fn declare_terminals(
         &mut self,
         syms: Vec<Symbol>,
         defined: &mut HashSet<String>,
     ) -> Result<(), GrammarError> {
         for sym in syms {
-            if let Symbol::Terminal(t) = sym {
-                if !defined.insert(t.name.clone()) {
-                    return Err(Self::duplicate_definition_error(true, &t.name));
+            match sym {
+                Symbol::Terminal(t) => {
+                    if !defined.insert(t.name.clone()) {
+                        return Err(Self::duplicate_definition_error(true, &t.name));
+                    }
+                    if !self.terminals.iter().any(|td| td.name == t.name) {
+                        self.terminals.push(TerminalDef::declared(&t.name));
+                    }
                 }
-                if !self.terminals.iter().any(|td| td.name == t.name) {
-                    self.terminals.push(TerminalDef::declared(&t.name));
+                Symbol::NonTerminal(nt) => {
+                    return Err(GrammarError::Other {
+                        msg: format!(
+                            "Cannot %declare a rule-cased name '{}': %declare targets must be UPPERCASE terminal names",
+                            nt.name
+                        ),
+                    });
                 }
             }
         }

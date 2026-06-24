@@ -289,7 +289,7 @@ import mangling, forest enumeration, eager determinization) untouched by the pri
   grammar shape evades them. Adjacent to the #208 fuzzer epic but minimized to a specific root.
 - **Test:** `h4_10_nullable_recursive_earley_enumerates_all_derivations`.
 
-### H4-11 — `%declare` of a lowercase name accepted (Low, grammar-loader)
+### H4-11 — `%declare` of a lowercase name accepted (Low, grammar-loader) — FIXED (#353)
 - **Grammar:** `%declare foo` / `start: "a"` · **Input:** `a`.
 - **Python:** rejects at build (a declared symbol must be an UPPERCASE terminal;
   `%declare FOO` builds fine).
