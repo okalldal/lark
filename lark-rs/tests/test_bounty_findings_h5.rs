@@ -260,7 +260,6 @@ fn h5_7_turkish_i_casefold() {
 /// in the tree under `keep_all_tokens` and in error messages. One root cause, two
 /// surfaces. Expected fix: add the two missing rows to `TERMINAL_NAMES`.
 #[test]
-#[ignore = "XFAIL (bounty H5-8): anonymous \"\\\\\" / \"\\r\\n\" literals named __ANON_n, not BACKSLASH / CRLF as Python does"]
 fn h5_8_anon_terminal_naming_table() {
     for (g, input, expected) in [
         (
