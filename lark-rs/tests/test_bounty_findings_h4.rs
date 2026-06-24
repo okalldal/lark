@@ -674,12 +674,19 @@ fn h4_10_nullable_recursive_earley_enumerates_all_derivations() {
 /// a clean `GrammarError`, so only the accept/reject verdict is asserted, not the message.
 /// Expected fix: reject `%declare` of a non-terminal-cased name with a `GrammarError`.
 #[test]
-#[ignore = "XFAIL (bounty H4-11): %declare of a lowercase name accepted; Python rejects (terminal-case convention)"]
 fn h4_11_declare_lowercase_name_rejected() {
     let g = "%declare foo\nstart: \"a\"\n";
     assert!(
         Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).is_err(),
         "H4-11: Python rejects `%declare foo` (lowercase); lark-rs accepted it"
+    );
+    // Negative control: a normal UPPERCASE `%declare` must still build (Python
+    // accepts `%declare FOO`) — the fix gates only on the case convention, it
+    // must not over-reject a legitimate declared terminal.
+    let ok = "%declare FOO\nstart: \"a\"\n";
+    assert!(
+        Lark::new(ok, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).is_ok(),
+        "H4-11 negative control: Python accepts `%declare FOO` (uppercase); lark-rs must too"
     );
 }
 
