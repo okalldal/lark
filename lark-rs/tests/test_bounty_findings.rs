@@ -961,3 +961,64 @@ fn standalone_still_bakes_plain_grammar() {
          bake — the refusal seam must reject only what the runtime cannot host"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #372 — `%import` overlapping interior closures duplicate a shared origin.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// #372. Two rules independently imported from the *same* bundled module whose
+/// dependency closures overlap (`decorators: decorator+` shares the interior
+/// `python__name`/`python__dotted_name` closure with `decorator`). Before the fix,
+/// `import_rule_closure` copied the shared interior origin once *per* requested
+/// rule with no cross-call dedup — the duplicated `python__name` origin became a
+/// spurious reduce/reduce the build rejected in the sibling-before-owner /
+/// cross-directive orders (the owner-first order already built after #343, because
+/// the interior `decorator` was left unmangled and hit the requested-name guard).
+///
+/// Python Lark 1.3.1 builds the repro in **every** order and yields a tree-identical
+/// parse (verified with `maybe_placeholders=False`). The fix dedups the interior
+/// rule-copy loop (mirroring the terminal-copy guard), so lark-rs must now build and
+/// parse identically in all three orders. The expected tree below is the
+/// Python-oracle shape (in lark-rs's `Display` rendering) for input `@foo\n@bar\n`.
+#[test]
+fn rc_import_overlapping_interior_closure_builds_all_orders() {
+    // Three directives that all import the same overlapping closures from `python`.
+    let grammars = [
+        // sibling-before-owner (the regressing order before the fix)
+        "start: decorators\n%import python (decorator, decorators)\n%ignore \" \"\n",
+        // owner-first (already built after #343 — kept as a negative control)
+        "start: decorators\n%import python (decorators, decorator)\n%ignore \" \"\n",
+        // cross-directive (same root cause across two separate %import lines)
+        "start: decorators\n%import python (decorator)\n%import python (decorators)\n%ignore \" \"\n",
+    ];
+    // Python-oracle tree (maybe_placeholders=False) for `@foo\n@bar\n`, rendered in
+    // lark-rs's Display form. Identical across all three orders.
+    let expected = "Tree(start, [Tree(decorators, [\
+        Tree(decorator, [Tree(python__dotted_name, [Tree(python__name, [Token(python__NAME, \"foo\")])])]), \
+        Tree(decorator, [Tree(python__dotted_name, [Tree(python__name, [Token(python__NAME, \"bar\")])])])])])";
+
+    for g in grammars {
+        let lark = Lark::new(
+            g,
+            LarkOptions {
+                parser: ParserAlgorithm::Lalr,
+                lexer: LexerType::Contextual,
+                ambiguity: Ambiguity::Resolve,
+                start: vec!["start".to_string()],
+                maybe_placeholders: false,
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| {
+            panic!("#372: Python builds this grammar in every order; lark-rs rejected:\n{g}\n -> {e:?}")
+        });
+        let tree = lark
+            .parse("@foo\n@bar\n")
+            .unwrap_or_else(|e| panic!("#372: parse failed for grammar:\n{g}\n -> {e:?}"));
+        assert_eq!(
+            tree.to_string(),
+            expected,
+            "#372: tree mismatch vs Python oracle for grammar:\n{g}"
+        );
+    }
+}
