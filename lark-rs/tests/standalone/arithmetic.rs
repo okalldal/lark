@@ -208,11 +208,16 @@ impl Clone for Tree {
 }
 
 /// The result of a parse — usually a `Tree`, but a `?start` rule that collapses
-/// via expand1 to a single token yields that bare `Token`.
+/// via expand1 to a single token yields that bare `Token`, and a `?start` whose
+/// sole alternative is an absent `[...]` placeholder collapses to a bare `None`
+/// (Python's literal `None` result for `?start: [A]` on `""` with
+/// `maybe_placeholders`, #289/#382). Mirrors the public API's `ParseTree::None`
+/// (ADR-0033) so the bake stays byte-faithful to core.
 #[derive(Clone, Debug)]
 pub enum ParseTree {
     Tree(Tree),
     Token(Token),
+    None,
 }
 
 enum NodeValue {
@@ -241,6 +246,7 @@ impl fmt::Display for ParseTree {
         match self {
             ParseTree::Tree(t) => write!(f, "{}", t),
             ParseTree::Token(tok) => write!(f, "Token({}, {:?})", tok.type_, tok.value),
+            ParseTree::None => write!(f, "None"),
         }
     }
 }
@@ -466,6 +472,16 @@ fn run(data: &GrammarData, tokens: &[Token], start_state: usize) -> Result<Parse
                 return match value_stack.pop() {
                     Some(NodeValue::Tree(t)) => Ok(ParseTree::Tree(t)),
                     Some(NodeValue::Token(t)) => Ok(ParseTree::Token(t)),
+                    // A top-level `?start` collapsing a lone-`None` placeholder
+                    // (`?start: [A]` on `""`) reaches accept as `Inline([None])`
+                    // (the RC9 collapse in `shape`). Python Lark and every in-process
+                    // backend return a bare `None` here, so emit `ParseTree::None`
+                    // to match the oracle (#289/#382, ADR-0033; mirrors `lalr.rs`).
+                    Some(NodeValue::Inline(cs))
+                        if cs.len() == 1 && matches!(cs[0], Child::None) =>
+                    {
+                        Ok(ParseTree::None)
+                    }
                     _ => Err("accept with empty value stack".to_string()),
                 };
             }
