@@ -207,12 +207,12 @@ pub fn check_regex_collisions(
         res.sort_by(|(_, x), (_, y)| x.name.cmp(&y.name));
 
         // Group by priority; compare only within a group (Lark's `classify`).
-        let mut by_priority: HashMap<i32, Vec<(SymbolId, &TerminalDef)>> = HashMap::new();
+        let mut by_priority: HashMap<i64, Vec<(SymbolId, &TerminalDef)>> = HashMap::new();
         for (id, t) in res {
             by_priority.entry(t.priority).or_default().push((id, t));
         }
 
-        let mut priorities: Vec<i32> = by_priority.keys().copied().collect();
+        let mut priorities: Vec<i64> = by_priority.keys().copied().collect();
         priorities.sort_unstable();
         for p in priorities {
             let group = &by_priority[&p];

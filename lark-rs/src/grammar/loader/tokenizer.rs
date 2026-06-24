@@ -9,7 +9,7 @@ pub(super) enum Tok {
     Terminal(String),
     String(String, bool), // value, case_insensitive
     Regexp(String, u32),  // pattern, flags
-    Number(i32),
+    Number(i64),
     LPar,
     RPar,
     LBra,
@@ -409,16 +409,20 @@ impl<'a> Lexer<'a> {
                 .take_while(|b| b.is_ascii_digit())
                 .count();
         let digits = &rest[..len];
-        // Python Lark priorities are arbitrary-precision ints; we store i32 and
-        // saturate, so a huge (negative) priority like `A.-99999999999999999999999`
-        // clamps to the extreme rather than failing to lex.
-        let n: i32 = match digits.parse::<i128>() {
-            Ok(v) => v.clamp(i32::MIN as i128, i32::MAX as i128) as i32,
+        // Python Lark priorities are arbitrary-precision ints; we store i64 and
+        // saturate at the i64 bounds, so a huge (negative) priority like
+        // `A.-99999999999999999999999` clamps to the extreme rather than failing to
+        // lex. i64 is wide enough that two *distinct* declared priorities no longer
+        // collide at any realistic magnitude (#352: 5e9 vs 9e9 used to both saturate
+        // to i32::MAX and tie); only a pair past ±9.2e18 would re-collide, which no
+        // hand-authored grammar reaches.
+        let n: i64 = match digits.parse::<i128>() {
+            Ok(v) => v.clamp(i64::MIN as i128, i64::MAX as i128) as i64,
             Err(_) => {
                 if digits.starts_with('-') {
-                    i32::MIN
+                    i64::MIN
                 } else {
-                    i32::MAX
+                    i64::MAX
                 }
             }
         };

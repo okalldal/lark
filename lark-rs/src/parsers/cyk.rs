@@ -77,8 +77,10 @@ enum Sym {
 struct CnfRule {
     lhs: Nt,
     rhs: Vec<Sym>,
-    /// Disambiguation weight (sum of priorities); the DP keeps the minimum.
-    weight: i32,
+    /// Disambiguation weight (sum of priorities); the DP keeps the minimum. `i64`
+    /// (not `i32`) to match the widened priority storage (#352) and so summed
+    /// large priorities do not truncate.
+    weight: i64,
     /// Index into the [`EffRule`] table of the original rule (and ε-variant) this
     /// came from, or `None` for a synthetic TERM/BIN helper (never used to build a
     /// tree node).
@@ -138,7 +140,7 @@ enum PNode {
 #[derive(Clone)]
 struct Cell {
     node: Rc<PNode>,
-    weight: i32,
+    weight: i64,
 }
 
 /// The reverted (original-grammar) parse tree, ready for [`TreeOutputBuilder`].

@@ -291,8 +291,12 @@ fn h4_3_inline_ignore_still_synthesizes_terminal() {
 /// Narrow (needs priorities > 2.1e9) but an honest, explicit-priority-determined
 /// divergence. Expected fix: store priorities wide enough to not collide (or reject
 /// out-of-range). Control: both ≤ `i32::MAX` agree.
+// Fixed (#352): priority storage widened `i32` → `i64` (loader clamp + `RuleOptions`/
+// `TerminalDef` fields + the Earley/CYK priority accumulators), so 5e9 and 9e9 no
+// longer both saturate to `i32::MAX` and tie — `B` (9e9) outranks `A` (5e9), matching
+// Python (which uses unbounded ints). Python accepts arbitrarily large priorities (no
+// rejection even at 9e20), so the contract is store-wide-not-reject.
 #[test]
-#[ignore = "XFAIL (bounty H4-4): terminal priority clamped to i32 ties two distinct >i32::MAX priorities"]
 fn h4_4_priority_i32_saturation_tie() {
     let g = "start: A | B\nA.5000000000: \"x\"\nB.9000000000: \"x\"\n";
     let lark =
@@ -306,6 +310,28 @@ fn h4_4_priority_i32_saturation_tie() {
         "H4-4: B (priority 9e9) outranks A (5e9); Python picks B, lark-rs saturated both to \
          i32::MAX and picked A by name order (got {types:?})"
     );
+}
+
+/// H4-4 negative control: priorities at and *below* `i32::MAX` (where there was never
+/// any saturation) must still order correctly — the widening is not allowed to perturb
+/// the ordinary case. Two small distinct priorities and a pair straddling the old
+/// `i32::MAX` boundary both pick the higher one, matching Python.
+#[test]
+fn h4_4_priority_small_and_boundary_still_order() {
+    for (a_prio, b_prio) in [("5", "9"), ("2000000000", "2100000000")] {
+        let g = format!("start: A | B\nA.{a_prio}: \"x\"\nB.{b_prio}: \"x\"\n");
+        let lark = Lark::new(&g, opts(ParserAlgorithm::Lalr, LexerType::Contextual))
+            .expect("H4-4 control: builds");
+        let tree = lark.parse("x").expect("H4-4 control: parses");
+        let mut types = Vec::new();
+        collect_token_types(&tree, &mut types);
+        assert_eq!(
+            types,
+            vec!["B"],
+            "H4-4 control: B (priority {b_prio}) outranks A ({a_prio}); the i32→i64 widening \
+             must not regress ordinary (non-saturating) priority ordering (got {types:?})"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
