@@ -452,12 +452,15 @@ impl<'a> Lexer<'a> {
 }
 
 /// Decode escape sequences in a string literal, mirroring Python Lark's
-/// `eval_escaping` (which defers to `ast.literal_eval`). The numeric escapes
-/// `\xHH`, `\uHHHH`, and `\UHHHHHHHH` decode to the corresponding `char`;
-/// `\n \t \r \f \v \0` map to their control characters; `\\ \" \'` are literal.
-/// An unrecognized escape (e.g. `\w`, `\d`) keeps its backslash so regex
-/// metacharacters embedded in a string survive — matching Lark, which prepends a
-/// backslash for any escape outside `Uuxnftr`.
+/// `eval_escaping` (which defers to `ast.literal_eval`). Python decodes **only**
+/// the `Uuxnftr` set plus `\\` and `\"`: the numeric escapes `\xHH`, `\uHHHH`,
+/// and `\UHHHHHHHH` decode to the corresponding `char`; `\n \t \r \f` map to
+/// their control characters; `\\` is a literal backslash and `\"` is a literal
+/// quote. **Every other** escape — including `\v`, `\0`, `\'`, and regex
+/// metacharacters like `\w`/`\d` — keeps its backslash, because `eval_escaping`
+/// prepends a backslash for any escape outside `Uuxnftr` (so `\v` is the literal
+/// two chars backslash+`v`, not U+000B; `\0` is not NUL; `\'` is not `'`). This
+/// keeps the `PatternStr` value byte-identical to Python's (#344).
 fn unescape_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -471,11 +474,8 @@ fn unescape_string(s: &str) -> String {
             Some('t') => out.push('\t'),
             Some('r') => out.push('\r'),
             Some('f') => out.push('\u{0C}'),
-            Some('v') => out.push('\u{0B}'),
-            Some('0') => out.push('\0'),
             Some('\\') => out.push('\\'),
             Some('"') => out.push('"'),
-            Some('\'') => out.push('\''),
             Some('x') => push_hex_escape(&mut out, &mut chars, 2, "\\x"),
             Some('u') => push_hex_escape(&mut out, &mut chars, 4, "\\u"),
             Some('U') => push_hex_escape(&mut out, &mut chars, 8, "\\U"),
