@@ -301,12 +301,12 @@ fn rc2d_neg_extend_concrete_terminal_accepted() {
 /// (colliding expansion of optionals)`. lark-rs accepts. This is the
 /// `maybe_placeholders=false` colliding-optional parity gap of **#252**, already
 /// fixed by the merged **PR #259** (which oracle-checks `[A] [A]` explicitly, test
-/// `test_literal_optional_pair_collides`). It still reproduces on this target SHA
-/// only because #259 landed on the sprint branch, not `master`. Kept as a guard;
-/// it will pass once #255 lands. Counted as a known-issue duplicate, not a fresh
-/// find. (Distinct from #258, which is the mp=true case where both engines agree.)
+/// `test_literal_optional_pair_collides`). Counted as a known-issue duplicate, not
+/// a fresh find. (Distinct from #258, which is the mp=true case where both engines
+/// agree.) Live guard since #385 (RC XFAIL burndown #282): the #252/#259
+/// sibling-optional collision fix is on the baseline, so lark-rs now correctly
+/// rejects this grammar and the test runs by default.
 #[test]
-#[ignore = "XFAIL (bounty RC3): KNOWN #252/#259 colliding-optional parity gap (guard only)"]
 fn rc3_colliding_optional_expansion_rejected() {
     let g = "start: [A] [A] \"c\"\nA: \"a\"\n";
     assert_build_rejected(g, ParserAlgorithm::Lalr, LexerType::Contextual, "RC3");
