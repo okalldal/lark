@@ -943,6 +943,50 @@ mod tests {
         );
     }
 
+    /// XFAIL (bounty V-H7-1, round h7): the standalone runtime's private `ParseTree`
+    /// enum (`runtime.rs`) has only `Tree`/`Token` — it never grew the `None` variant
+    /// ADR-0033/#382 added to the public API + the in-process backends + the bindings
+    /// (its consumer list omits `src/standalone/runtime.rs`). So a `?start` rule that
+    /// collapses to a lone placeholder-`None` (`?start: [A]` on empty input,
+    /// `maybe_placeholders=true`) reaches `run()`'s `Action::Accept` arm as an
+    /// `Inline([None])` and falls into its `_ => Err("accept with empty value stack")`
+    /// fallback. Python Lark (basic lexer **and** its own `standalone` tool) and every
+    /// in-process lark-rs backend return a bare `None` here — so the bake errors on
+    /// input the oracle accepts, falsifying the "byte-faithful to core" standalone
+    /// contract. This is the #289/#382 lone-`None` root cause surfacing on the unfixed
+    /// standalone surface (the H6 "standalone clean" verdict missed the None-root path,
+    /// whose H12 pin only exercised a None-as-*child*). Today this test fails because
+    /// the parse returns `Err`; the fix adds a `ParseTree::None` variant to the runtime
+    /// and an `Inline([None]) => Ok(None)` Accept arm, after which the parse returns
+    /// `Ok(ParseTree::None)`. Drop the `#[ignore]` then to make it a regression guard.
+    #[test]
+    #[ignore = "XFAIL (bounty V-H7-1): standalone runtime lacks ParseTree::None; ?start:[A] on empty input errors instead of None"]
+    fn standalone_none_root_returns_none_like_core() {
+        let opts = LarkOptions {
+            parser: ParserAlgorithm::Lalr,
+            start: vec!["start".to_string()],
+            maybe_placeholders: true,
+            ..Default::default()
+        };
+        let baked = bake("?start: [A]\nA: \"a\"\n", &opts).expect("V-H7-1: bakes");
+        let data = leak_grammar_data(&baked);
+        let result = catch_unwind(AssertUnwindSafe(|| Parser::from_data(data).parse("")));
+        // Python (basic) and in-process lark-rs both return a bare None for the
+        // lone-placeholder `?start:[A]` on empty input. The standalone runtime cannot
+        // represent a None root, so today the parse returns Err; once the runtime grows
+        // a ParseTree::None variant the parse returns Ok(ParseTree::None). (We assert
+        // Ok rather than match the variant because the variant does not yet exist to
+        // name in this test.)
+        match result {
+            Ok(Ok(_tree)) => { /* fixed: returns Ok (the bare-None root) */ }
+            Ok(Err(e)) => panic!(
+                "V-H7-1: standalone errored on a None-root parse Python/core accept as \
+                 None (expected Ok(ParseTree::None)): {e}"
+            ),
+            Err(_) => panic!("V-H7-1: standalone panicked on a None-root parse"),
+        }
+    }
+
     /// Replays the full strip-mined Python-Lark bank through the shared
     /// standalone `runtime` (#86), under the same XFAIL discipline as the other
     /// banks. The `standalone_xfail.json` entries are **basic-lexer-incompatible**
