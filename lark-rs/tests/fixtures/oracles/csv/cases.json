@@ -89,7 +89,7 @@
   },
   {
     "input": "#h1,h2\n10,20\n30,40\n",
-    "should_pass": true,
+    "should_pass": false,
     "ok": false,
     "tree": null,
     "error": "Unexpected token Token('INT', '1') at line 1, column 3.\nExpected one of: \n\t* WORD\n\t* _NL\n\t* _SEPARATOR\nPrevious tokens: [Token('WORD', 'h')]\n"

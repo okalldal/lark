@@ -142,6 +142,22 @@ ARITHMETIC_CASES = [
 
 # From test_python_grammar.py — number literals
 # Format: (input, parser_grammar, should_parse)
+#
+# This hand-written test grammar deliberately covers only a SUBSET of CPython's
+# numeric syntax — it is a lexer-ordering / maximal-munch fixture, not a faithful
+# Python number lexer. Two known gaps vs. the Python *language* (both honestly
+# carried in PYTHON_NUMBER_INVALID below, since Python Lark also rejects them under
+# this grammar and lark-rs matches that rejection — #293):
+#   * `3.14j` / `.5j` — IMAG follows FLOAT, so a maximal-munch lexer consumes the
+#     numeric part as FLOAT and orphans the trailing `j` (a terminal-ordering
+#     property of this grammar). A bare-INT imaginary like `3j` IS covered.
+#   * `0x_1A` / `0b_1010` / `0o_17` — the HEX/OCT/BIN terminals require a digit right
+#     after the base prefix, so a prefixed underscore (which CPython 3.6+ accepts) is
+#     rejected here.
+# These are NOT fixed by reordering IMAG / adding `_?`: doing so makes Python accept
+# them but surfaces real lark-rs lexer divergences (IMAG `.2` priority not honored
+# over FLOAT; the prefixed-underscore HEX/OCT/BIN not matched) — engine gaps tracked
+# separately, out of scope for this oracle-honesty housekeeping.
 PYTHON_NUMBER_GRAMMAR = r"""
 start: number+
 number: INT | FLOAT | HEX | OCT | BIN | IMAG
@@ -165,8 +181,8 @@ PYTHON_NUMBER_VALID = [
     "0o0", "0o777", "0O123",
     "0b0", "0b101010", "0B1111",
     "3.14", "3.", ".14", "3.14e10", "3.14e+10", "3.14e-10",
-    "3j", "3.14j", ".5j",
-    "1_000_000", "1_0", "0x_1A", "0b_1010", "0o_17",
+    "3j",
+    "1_000_000", "1_0",
 ]
 
 PYTHON_NUMBER_INVALID = [
@@ -175,6 +191,13 @@ PYTHON_NUMBER_INVALID = [
     "0b2",   # invalid binary digit
     "._4",   # leading dot needs digit
     "3e",    # exponent with no digits
+    # ── Outside this test grammar's scope (Python Lark rejects under this grammar;
+    #    lark-rs matches the rejection). See the grammar comment above (#293).
+    "3.14j",   # IMAG after FLOAT → numeric part munched as FLOAT, trailing 'j' orphaned
+    ".5j",     # same FLOAT-before-IMAG ordering gap
+    "0x_1A",   # prefixed underscore: HEX requires a hex digit right after 0x
+    "0b_1010", # prefixed underscore: BIN requires a bit right after 0b
+    "0o_17",   # prefixed underscore: OCT requires an octal digit right after 0o
 ]
 
 # CSV cases. These exercise transparent `_rule` inlining: `_anything` is a
@@ -186,10 +209,17 @@ PYTHON_NUMBER_INVALID = [
 # NON_SEPARATOR_STRING); csv.lark gives NON_SEPARATOR_STRING an explicit priority so
 # the choice is principled — both Python Lark and lark-rs honor priority first — and
 # letter cells lex deterministically as NON_SEPARATOR_STRING in both.
+#
+# The `header` rule (`"#" " "? (WORD _SEPARATOR?)+`) takes letter-only WORD cells, so
+# an alphanumeric header cell (`#h1,h2`) is genuinely outside this grammar's scope:
+# `h1` can't be one WORD, and there is no separator between `h`/`1` to split it into
+# two cells, so Python Lark rejects it at the bare `INT`. lark-rs matches that
+# rejection. The case's `should_pass` is therefore False — an honest statement of the
+# header rule's letter-only scope, not an aspirational label (#293).
 CSV_CASES = [
     ("#a,b,c\n1,2,3\n",        True),
     ("#x\n1\n",                True),
-    ("#h1,h2\n10,20\n30,40\n", True),
+    ("#h1,h2\n10,20\n30,40\n", False),  # alphanumeric header cell → outside header scope
     ("#name,age\nfoo,42\n",    True),  # letter cell → NON_SEPARATOR_STRING (priority)
     ("",                       False),
     ("1,2,3\n",                False),  # missing header
