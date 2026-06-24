@@ -123,11 +123,12 @@ fn derivation_count(t: &ParseTree) -> usize {
 /// (`src/grammar/loader/tokenizer.rs`) decodes a *superset* of the escapes Python
 /// Lark's `eval_escaping` (`lark/load_grammar.py`) recognizes. Python decodes only
 /// `\\ \U \u \x \n \f \t \r`; **every other** escape keeps a literal backslash.
-/// lark-rs additionally decodes `\v`→VT, `\0`→NUL, `\'`→`'`, so the `PatternStr` value
-/// (and the input it matches) diverges. Engine-independent (loader bug). Expected fix:
-/// reject-like-Python at the value level — leave `\v`/`\0`/`\'` as literal backslash+char.
+/// lark-rs additionally decoded `\v`→VT, `\0`→NUL, `\'`→`'`, so the `PatternStr` value
+/// (and the input it matched) diverged. Engine-independent (loader bug). FIXED (#344):
+/// `unescape_string` now drops those three arms so they fall through to the keep-backslash
+/// arm, leaving `\v`/`\0`/`\'` as literal backslash+char — matching `eval_escaping`. Live
+/// regression guard.
 #[test]
-#[ignore = "XFAIL (bounty H4-1): grammar string-literal escapes \\v \\0 \\' over-decoded vs Python eval_escaping"]
 fn h4_1_string_literal_escape_overdecoded() {
     // Python reads `"\v"` as the 2-char literal backslash+`v`, so it accepts the
     // 2-byte input `\v` and rejects a bare vertical tab. lark-rs decodes to U+000B
@@ -143,6 +144,32 @@ fn h4_1_string_literal_escape_overdecoded() {
             lark.parse(accepted_literal).is_ok(),
             "H4-1: Python treats the escape as a literal backslash+char and accepts {accepted_literal:?}, \
              but lark-rs over-decoded it and rejects"
+        );
+    }
+
+    // Negative control — escapes inside the `Uuxnftr` set (plus `\\`/`\"`) must STILL
+    // decode after the fix. `\n`→LF, `\t`→TAB, `\x41`/`A`/`\U00000041`→'A',
+    // `\\`→one backslash, `\"`→'"', and a bare literal char are unchanged. Each grammar
+    // accepts the *decoded* byte(s) and rejects the literal escape source, exactly opposite
+    // to the over-decoded set above.
+    for (g, decoded, literal_src) in [
+        ("start: \"\\n\"\n", "\n", "\\n"),
+        ("start: \"\\t\"\n", "\t", "\\t"),
+        ("start: \"\\x41\"\n", "A", "\\x41"),
+        ("start: \"\\u0041\"\n", "A", "\\u0041"),
+        ("start: \"\\\\\"\n", "\\", "\\\\"),
+        ("start: \"A\"\n", "A", "AA"),
+    ] {
+        let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual))
+            .expect("H4-1 negative control: grammar builds");
+        assert!(
+            lark.parse(decoded).is_ok(),
+            "H4-1 negative control: {g:?} must still decode and accept {decoded:?}"
+        );
+        assert!(
+            lark.parse(literal_src).is_err(),
+            "H4-1 negative control: {g:?} decodes its escape, so the literal source \
+             {literal_src:?} must NOT match"
         );
     }
 }
