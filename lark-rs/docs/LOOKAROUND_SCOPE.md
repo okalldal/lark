@@ -70,6 +70,18 @@ here first.
 | Nested assertions | `(?=(?!a)b)c` | `Rejection::Nested` | Audit cost out of proportion to demand; flatten the assertion instead. |
 | Quantified assertions | `a(?=b)?` | `Rejection::QuantifiedAssertion` (+ defensive `QuantifiedLookbehind`) | Degenerate and priority-entangled; almost always a bug in the grammar. |
 | Zero-width degenerates | `(?!a)` alone, `a(?<=())b` | `DeclineReason::ZeroWidthBranch`, `ZeroWidthLookbehindBody` | A zero-width terminal/window; the lexer forbids zero-width matches. |
+| Possessive quantifiers | `a++`, `a*+`, `a?+`, `a{2}+`, `(a)*+` | `GrammarError::InvalidRegex` (front-end screen, `grammar/terminal.rs::reject_quantifier_dialect_divergence`) | Backtracking-only (no give-back). **A documented narrowing, not parity:** Python 3.11 `re` *accepts* a possessive build (no-give-back semantics), but the Rust `regex` crate has no possessive and would silently re-read `a++` as greedy nested repetition `(a+)+` — a *different match*. lark-rs refuses it at build (diverge-and-document, ADR-0017) rather than out-permit-with-a-different-meaning. The regex-crate-accepts-with-different-meaning shape means this never reaches the `route_fancy_only_terminal` seam, so the screen lives in the terminal front-end (#333, bounty H6). |
+
+**Adjacent dialect screens (not lookaround, same front-end seam, #333).** Two more
+Python-`re` dialect divergences are screened in `grammar/terminal.rs` because the Rust
+`regex` crate accepts-with-a-different-meaning (or accepts where Python errors), so they
+likewise never reach `route_fancy_only_terminal`: a **stacked quantifier** `a{2}{3}` /
+`a**` (Python `sre_parse` "multiple repeat" build error — `reject_quantifier_dialect_divergence`)
+and an **out-of-range octal** `\401` (Python "octal escape value outside of range 0-0o377"
+— `reject_out_of_range_octal`). Both are oracle *parity* (Python rejects too), unlike the
+possessive narrowing above. The Python-accepted dialect escapes — octal `\101`, in-class
+backspace `[\b]`, the `(?#…)` comment — are *translated* (not refused) by
+`normalize_python_escapes` so the terminal builds and matches Python.
 
 ## Category 2 — NotYetImplemented (conservative rejections)
 
