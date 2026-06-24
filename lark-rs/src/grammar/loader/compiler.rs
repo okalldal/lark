@@ -338,6 +338,42 @@ impl GrammarCompiler {
         self.anon_terminal_name_free(name)
     }
 
+    /// Whether `(module, original) -> final_name` is the **surviving** alias for
+    /// that import source under last-alias-wins (#388).
+    ///
+    /// Python merges every `%import` of one dotted path into a single `aliases`
+    /// dict via `import_aliases.update(aliases)` (`load_grammar.py`), which keeps
+    /// only the **last** `original -> final` binding. So `%import common.INT -> X`
+    /// followed by `%import common.INT -> Y` defines **only** `Y`; the earlier `X`
+    /// is dropped and never registered (verified against Python Lark 1.3.1, where
+    /// `start: X` then rejects `Rule 'X' used but not defined`). This is *not* a
+    /// "defined more than once" collision (that error is for two **different**
+    /// sources landing on one final name — #299, which still rejects).
+    ///
+    /// The per-module merged `import_alias_map` is already keyed by `original` and
+    /// already keeps the last final name (its first pass `insert`s in document
+    /// order), so it *is* the surviving-alias map: a directive's `final_name`
+    /// survives iff it equals the merged map's entry for `(module, original)`.
+    ///
+    /// Name-list imports (`%import common (INT, FLOAT)`) register `original ==
+    /// final`, so they are always their own survivors. A module absent from the
+    /// map (no recorded alias) cannot have a dropped alias, so it survives too.
+    pub(super) fn alias_survives(
+        &self,
+        module: &[String],
+        original: &str,
+        final_name: &str,
+    ) -> bool {
+        match self
+            .import_alias_map
+            .get(module)
+            .and_then(|m| m.get(original))
+        {
+            Some(surviving) => surviving == final_name,
+            None => true,
+        }
+    }
+
     pub(super) fn process_items(&mut self, items: Vec<Item>) -> Result<(), GrammarError> {
         // First pass: register templates, and reserve every user-authored name so
         // generated `__anon_*` / `__ANON_*` names can never shadow one. An import's
@@ -425,16 +461,34 @@ impl GrammarCompiler {
         // same final name from a *different* source is a duplicate; re-registering
         // the same source is benign. `final_source` maps a final name to the source
         // that first claimed it.
+        //
+        // **Last-alias-wins (#388).** When the *same* source is imported under
+        // *different* aliases (`%import common.INT -> X` then `-> Y`), Python's
+        // `import_aliases.update` keeps only the **last** binding: only `Y` is
+        // defined, `X` is dropped. So the collision pre-pass considers only the
+        // **surviving** alias per source (`alias_survives`, backed by the merged
+        // `import_alias_map`): an earlier, shadowed alias is neither registered as a
+        // final name nor checked for collision — it simply never exists. (This is
+        // distinct from #299's *different*-source/same-final-name collision, which
+        // still rejects below, and from idempotent same-source/*same*-alias
+        // re-import, which stays benign because its single surviving alias is
+        // registered exactly once.)
         let mut final_source: HashMap<(Vec<String>, String), String> = HashMap::new();
         for item in &items {
             if let Item::ImportItem(spec) = item {
                 if let Some((module, pairs)) = split_import_directive(spec) {
                     for (original, final_name) in pairs {
+                        // Shadowed (non-last) alias for this source: dropped, never
+                        // defined — skip without registering or colliding.
+                        if !self.alias_survives(&module, &original, &final_name) {
+                            continue;
+                        }
                         let source = (module.clone(), original);
                         if final_source.contains_key(&source) {
-                            // Same `(module, original)` source already imported: an
-                            // identical re-import is idempotent (Python's per-module
-                            // alias dict dedups it), so skip without colliding.
+                            // Same `(module, original)` source already imported under
+                            // its surviving alias: an identical re-import is
+                            // idempotent (Python's per-module alias dict dedups it),
+                            // so skip without colliding.
                             continue;
                         }
                         // A *different* source already claimed this final name →
@@ -450,11 +504,20 @@ impl GrammarCompiler {
                         final_source.insert(source, final_name);
                     }
                 }
-                for name in spec_final_names(spec) {
-                    if Self::name_is_terminal(&name) {
-                        defined_term_names.insert(name);
-                    } else {
-                        defined_rule_names.insert(name);
+                // Seed the running definition ledger with only the surviving final
+                // names: a shadowed last-alias-wins binding (#388) is never defined,
+                // so it must not pre-seed `defined_*_names` (else a later statement
+                // colliding with the *dropped* name would wrongly reject).
+                if let Some((module, pairs)) = split_import_directive(spec) {
+                    for (original, final_name) in pairs {
+                        if !self.alias_survives(&module, &original, &final_name) {
+                            continue;
+                        }
+                        if Self::name_is_terminal(&final_name) {
+                            defined_term_names.insert(final_name);
+                        } else {
+                            defined_rule_names.insert(final_name);
+                        }
                     }
                 }
             }
