@@ -28,9 +28,10 @@
 //!     backreference) and from #275/#400/#332 (those reject in *both* engines).
 //!
 //! Each test asserts the **Python Lark 1.3.1** (oracle) behavior. This file is an XFAIL
-//! catalog: every test below is `#[ignore]`d and fails today. Drop a test's `#[ignore]`
-//! when its bug is fixed to turn it into a permanent regression guard. Run the still-open
-//! XFAILs with:
+//! catalog: a test is `#[ignore]`d while its bug is open and fails. Drop a test's
+//! `#[ignore]` when its bug is fixed to turn it into a permanent regression guard.
+//! H7-1 and H7-2a/H7-2b are **fixed** (#414, the loader reject-gates) and are now active
+//! guards; H7-3 remains an open XFAIL. Run the still-open XFAILs with:
 //!
 //!     cargo test --test test_bounty_findings_h7 -- --ignored
 //!
@@ -88,7 +89,6 @@ fn first_token_type(t: &ParseTree) -> Option<String> {
 /// when the resolved terminal is pattern-less (`declared`). Distinct from RC1/RC2/#299
 /// (duplicate *definition*) and the `%ignore <rule>` gate lark-rs already has.
 #[test]
-#[ignore = "XFAIL (bounty H7-1): %ignore of a %declare'd pattern-less terminal accepted; Python rejects at build"]
 fn h7_1_ignore_of_declared_terminal_rejected() {
     let g = "%declare Z\nstart: \"a\"\n%ignore Z\n";
     assert!(
@@ -107,7 +107,6 @@ fn h7_1_ignore_of_declared_terminal_rejected() {
 /// regex-engine dialect screen in `terminal.rs`. Expected fix: reject-like-Python (a
 /// newline in a `/…/` literal without the `x` flag).
 #[test]
-#[ignore = "XFAIL (bounty H7-2a): literal newline in a /regex/ literal accepted; Python rejects at build"]
 fn h7_2a_newline_in_regex_literal_rejected() {
     let g = "start: A\nA: /a\nb/\n";
     assert!(
@@ -125,13 +124,62 @@ fn h7_2a_newline_in_regex_literal_rejected() {
 /// raise "You cannot put newlines in string literals"). Folded under H7-2 as the
 /// string-literal surface of the missing no-embedded-newline gate.
 #[test]
-#[ignore = "XFAIL (bounty H7-2b): literal newline in a \"string\" literal terminal accepted; Python rejects at build"]
 fn h7_2b_newline_in_string_literal_rejected() {
     let g = "start: A\nA: \"a\nb\"\n";
     assert!(
         Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).is_err(),
         "H7-2b: Python rejects a literal newline inside a \"string\" literal terminal; \
          lark-rs accepted it as string value text"
+    );
+}
+
+// ── H7-2 fix-boundary pins (#414) ────────────────────────────────────────────
+// The newline gates must reject a real `\n` *byte* even when a backslash precedes
+// it (Python's grammar tokenizer's `\\.` escape cannot match `\n`), must still
+// *accept* the `\n` escape *sequence* (backslash+`n`), and must accept a real
+// newline in a `/…/` literal once the `x` (verbose) flag is set — all verified
+// against Python Lark 1.3.1.
+
+/// A backslash immediately before a real newline does **not** escape it: Python
+/// rejects `/a\<LF>b/` and `"a\<LF>b"` exactly like the bare-newline forms.
+#[test]
+fn h7_2_backslash_before_newline_still_rejected() {
+    let regex_g = "start: A\nA: /a\\\nb/\n";
+    assert!(
+        Lark::new(regex_g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).is_err(),
+        "a backslash before a real newline in a /regex/ literal is still rejected by Python"
+    );
+    let string_g = "start: A\nA: \"a\\\nb\"\n";
+    assert!(
+        Lark::new(string_g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).is_err(),
+        "a backslash before a real newline in a \"string\" literal is still rejected by Python"
+    );
+}
+
+/// The `\n` *escape sequence* (backslash+`n`, not a real newline byte) stays
+/// accepted in both literal kinds — Python decodes it to U+000A and builds fine.
+#[test]
+fn h7_2_newline_escape_sequence_still_accepted() {
+    let regex_g = "start: A\nA: /a\\nb/\n";
+    assert!(
+        Lark::new(regex_g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).is_ok(),
+        "the \\n escape sequence in a /regex/ literal must still build (Python accepts it)"
+    );
+    let string_g = "start: A\nA: \"a\\nb\"\n";
+    assert!(
+        Lark::new(string_g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).is_ok(),
+        "the \\n escape sequence in a \"string\" literal must still build (Python accepts it)"
+    );
+}
+
+/// A real newline inside a `/…/` literal is accepted once the `x` (verbose) flag
+/// is present — Python builds it (verbose mode ignores unescaped whitespace).
+#[test]
+fn h7_2a_newline_in_regex_literal_accepted_with_verbose_flag() {
+    let g = "start: A\nA: /a\nb/x\n";
+    assert!(
+        Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).is_ok(),
+        "a newline in a /regex/ literal with the `x` flag must build, matching Python"
     );
 }
 

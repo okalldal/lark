@@ -1035,8 +1035,21 @@ impl GrammarCompiler {
                 // terminal, mirroring Python's "Terminals %s were marked to ignore
                 // but were not defined!" (a bare `%ignore WS` does not auto-import).
                 IgnoreEntry::Named(name) => {
-                    if !self.terminals.iter().any(|t| t.name == name) {
-                        return Err(GrammarError::UndefinedTerminal { name });
+                    // A `%ignore NAME` whose terminal is absent, **or** present only
+                    // as a pattern-less `%declare`d terminal, is rejected — matching
+                    // Python's `LexError: Ignore terminals are not defined: {…}`. A
+                    // declared terminal carries no pattern and is absent from the
+                    // lexer's terminal list, so Python's ignore-set difference is
+                    // non-empty even though the name *is* defined as a symbol; our
+                    // existing presence check passed for it (bounty H7-1, #414). Per
+                    // ADR-0017, being more permissive than the oracle is unfalsifiable,
+                    // so we reject it at build.
+                    match self.terminals.iter().find(|t| t.name == name) {
+                        None => return Err(GrammarError::UndefinedTerminal { name }),
+                        Some(t) if t.declared => {
+                            return Err(GrammarError::UndefinedTerminal { name })
+                        }
+                        Some(_) => {}
                     }
                     ignore_names.push(name);
                 }
