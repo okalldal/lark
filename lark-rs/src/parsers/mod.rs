@@ -567,7 +567,10 @@ impl ParsingFrontend {
 /// Lower the surface grammar to the interned IR and assemble the shared
 /// basic-lexer configuration — the common preamble of every backend builder.
 fn lower_with_lexer_conf(grammar: &Grammar, options: &LarkOptions) -> (CompiledGrammar, LexerConf) {
-    let cg = crate::grammar::lower(grammar);
+    let mut cg = crate::grammar::lower(grammar);
+    // `propagate_positions` is a parse-global; `lower` has no options, so set it
+    // here from `LarkOptions` for every backend to thread to its tree builder (#402).
+    cg.propagate_positions = options.propagate_positions;
     let lexer_conf =
         basic_lexer_conf(&cg, options.g_regex_flags).with_backend(options.lexer_backend);
     (cg, lexer_conf)

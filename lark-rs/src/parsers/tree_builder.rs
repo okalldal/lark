@@ -27,7 +27,7 @@
 //! issue #231.
 
 use crate::grammar::intern::CompiledRule;
-use crate::tree::{Child, Token, Tree};
+use crate::tree::{Child, Meta, Token, Tree};
 
 // ─── Slot: the engine's internal stack currency ─────────────────────────────
 
@@ -87,6 +87,15 @@ pub(crate) trait OutputBuilder {
 /// rule carries its own keep mask), not per terminal — see [`CompiledRule::filter_pos`].
 pub(crate) struct TreeOutputBuilder<'g> {
     rules: &'g [CompiledRule],
+    /// When true (Python Lark's `propagate_positions=True`), a node's `meta` span
+    /// is derived from its rule's **pre-filter** children, so filtered punctuation
+    /// (`"(" A ")"`) contributes to the container span. Mirrors Python's
+    /// `PropagatePositions`, which wraps the node builder *outside* the child
+    /// filter and so sees the unfiltered children (bug-bounty H6-5, #402). When
+    /// false the span is computed from the already-filtered children, exactly as
+    /// before (lark-rs always populates `meta`; the flag only changes *which*
+    /// children feed the span).
+    propagate_positions: bool,
 }
 
 impl<'g> OutputBuilder for TreeOutputBuilder<'g> {
@@ -103,7 +112,18 @@ impl<'g> OutputBuilder for TreeOutputBuilder<'g> {
 
 impl<'g> TreeOutputBuilder<'g> {
     pub fn new(rules: &'g [CompiledRule]) -> Self {
-        TreeOutputBuilder { rules }
+        TreeOutputBuilder {
+            rules,
+            propagate_positions: false,
+        }
+    }
+
+    /// As [`new`](Self::new), with Python Lark's `propagate_positions` flag.
+    pub fn with_propagate_positions(rules: &'g [CompiledRule], propagate_positions: bool) -> Self {
+        TreeOutputBuilder {
+            rules,
+            propagate_positions,
+        }
     }
 
     /// Build the value the parent sees when `rule_idx` reduces over `child_values`
@@ -116,22 +136,43 @@ impl<'g> TreeOutputBuilder<'g> {
         // children of an inlined (transparent) sub-rule in place. Inlined children
         // were already filtered when their own rule reduced. The child at index `i`
         // corresponds to expansion symbol `i`, so its keep/drop is `filter_pos[i]`.
+        //
+        // Under `propagate_positions`, the node's span must come from the *pre*-
+        // filter children (so a filtered `"("`/`")"` still bounds the span — #402),
+        // so accumulate the container Meta over every value as it streams by, kept
+        // or dropped, before the kept list is shaped into a node.
         let mut children: Vec<Child> = Vec::new();
+        let mut container = ContainerSpan::new();
         for (i, value) in child_values.into_iter().enumerate() {
             for _ in 0..self.nones_at(rule_idx, i) {
                 children.push(Child::None);
             }
             match value {
                 Slot::Token(t) => {
+                    if self.propagate_positions {
+                        container.observe_token(&t);
+                    }
                     if self.keep_token(rule_idx, i) {
                         children.push(Child::Token(t));
                     }
                 }
-                Slot::Tree(t) => children.push(Child::Tree(t)),
-                Slot::Inline(cs) => children.extend(cs),
+                Slot::Tree(t) => {
+                    if self.propagate_positions {
+                        container.observe_meta(&t.meta);
+                    }
+                    children.push(Child::Tree(t));
+                }
+                Slot::Inline(cs) => {
+                    if self.propagate_positions {
+                        for c in &cs {
+                            container.observe_child(c);
+                        }
+                    }
+                    children.extend(cs);
+                }
             }
         }
-        self.shape(rule_idx, children)
+        self.shape_with_container(rule_idx, children, container)
     }
 
     /// Number of `None` placeholders a distributed absent `[...]` left before
@@ -159,7 +200,27 @@ impl<'g> TreeOutputBuilder<'g> {
     /// append `maybe_placeholders`, then splice (transparent), unwrap (`expand1`),
     /// or wrap in a [`Tree`]. The tail half of [`assemble`], shared with the Earley
     /// streaming walk so both produce identical shaping.
-    pub fn shape(&self, rule_idx: usize, mut children: Vec<Child>) -> Slot {
+    ///
+    /// The streaming Earley walk filters tokens *before* `shape`, so the dropped
+    /// punctuation is gone here — under `propagate_positions` that caller threads
+    /// the pre-filter container span through
+    /// [`shape_with_container`](Self::shape_with_container) instead. With the flag
+    /// off (the common case), the two are identical.
+    pub fn shape(&self, rule_idx: usize, children: Vec<Child>) -> Slot {
+        self.shape_with_container(rule_idx, children, ContainerSpan::new())
+    }
+
+    /// As [`shape`](Self::shape), but with the rule's pre-filter container span
+    /// (the span over *all* children including filtered punctuation). Under
+    /// `propagate_positions`, a non-transparent node's `meta` span is widened to
+    /// this container so a filtered `"("`/`")"` bounds the parent (#402). An empty
+    /// container (or the flag off) leaves the post-filter span untouched.
+    pub fn shape_with_container(
+        &self,
+        rule_idx: usize,
+        mut children: Vec<Child>,
+        container: ContainerSpan,
+    ) -> Slot {
         let rule = &self.rules[rule_idx];
 
         // maybe_placeholders: an empty `[...]` production emits one `None` per
@@ -173,7 +234,9 @@ impl<'g> TreeOutputBuilder<'g> {
         }
 
         if rule.transparent {
-            // `_rule` / `__anon_*`: splice children into the parent.
+            // `_rule` / `__anon_*`: splice children into the parent. No node is
+            // built, so there is no `meta` to widen — the spliced children carry
+            // their own positions up, exactly as Python's `_pp_get_meta` reads them.
             Slot::Inline(children)
         } else if rule.options.expand1 && rule.alias.is_none() && children.len() == 1 {
             // `?rule` with a single child: return that child directly. A lone `None`
@@ -182,6 +245,11 @@ impl<'g> TreeOutputBuilder<'g> {
             // (bounty RC9; the `?` collapse is purely arity-1, never value-typed).
             // An empty `?` rule (`?w: A?` with zero children) is *not* len==1 and so
             // correctly keeps its wrapper (`start[w[]]`).
+            //
+            // No container widening here: Python's `PropagatePositions` only sets
+            // meta when its node builder returns a `Tree` (`isinstance(res, Tree)`);
+            // an `ExpandSingleChild` collapse to a bare token/tree skips it, so the
+            // collapsed value keeps its own span.
             match children.pop().unwrap() {
                 Child::Tree(t) => Slot::Tree(t),
                 Child::Token(t) => Slot::Token(t),
@@ -190,7 +258,90 @@ impl<'g> TreeOutputBuilder<'g> {
                 Child::None => Slot::Inline(vec![Child::None]),
             }
         } else {
-            Slot::Tree(Tree::new(rule.tree_name.clone(), children))
+            let mut tree = Tree::new(rule.tree_name.clone(), children);
+            if self.propagate_positions {
+                container.widen_meta(&mut tree.meta);
+            }
+            Slot::Tree(tree)
+        }
+    }
+}
+
+/// The container span of a rule's **pre-filter** children — the first/last
+/// positioned child's start/end, including filtered punctuation tokens that the
+/// tree drops. Mirrors Python Lark's `PropagatePositions._pp_get_meta` (which runs
+/// outside the child filter), the regression net for bug-bounty H6-5 / #402.
+///
+/// Built by streaming every child value past [`observe_token`](Self::observe_token)
+/// / [`observe_meta`](Self::observe_meta) / [`observe_child`](Self::observe_child)
+/// in left-to-right order, then applied with [`widen_meta`](Self::widen_meta).
+#[derive(Default, Clone)]
+pub(crate) struct ContainerSpan {
+    first: Option<Meta>,
+    last: Option<Meta>,
+}
+
+impl ContainerSpan {
+    pub fn new() -> Self {
+        ContainerSpan::default()
+    }
+
+    /// Record a positioned child's `meta`. The first positioned child fixes the
+    /// start fields; every positioned child updates the (so-far) last, so the final
+    /// `last` fixes the end fields — matching Python's first/`reversed`-first scan.
+    fn observe(&mut self, meta: Meta) {
+        if self.first.is_none() {
+            self.first = Some(meta.clone());
+        }
+        self.last = Some(meta);
+    }
+
+    /// Observe a (pre-filter) token — it contributes its own start/end.
+    pub fn observe_token(&mut self, t: &Token) {
+        self.observe(Meta {
+            line: Some(t.line),
+            column: Some(t.column),
+            end_line: Some(t.end_line),
+            end_column: Some(t.end_column),
+            start_pos: Some(t.start_pos),
+            end_pos: Some(t.end_pos),
+            empty: false,
+        });
+    }
+
+    /// Observe a (pre-filter) subtree's `meta`. A positionless empty subtree
+    /// contributes nothing (Python skips `c.meta.empty` children in `_pp_get_meta`).
+    pub fn observe_meta(&mut self, meta: &Meta) {
+        if !meta.empty && meta.line.is_some() {
+            self.observe(meta.clone());
+        }
+    }
+
+    /// Observe a spliced (transparent-rule) child — token or subtree.
+    pub fn observe_child(&mut self, c: &Child) {
+        match c {
+            Child::Token(t) => self.observe_token(t),
+            Child::Tree(t) => self.observe_meta(&t.meta),
+            Child::None => {}
+        }
+    }
+
+    /// Widen `meta`'s span to the container: set its start fields from the first
+    /// positioned child and its end fields from the last, when the container saw
+    /// any positioned child. A node with no positioned pre-filter child (an empty
+    /// production) is left untouched.
+    fn widen_meta(&self, meta: &mut Meta) {
+        if let Some(first) = &self.first {
+            meta.line = first.line;
+            meta.column = first.column;
+            meta.start_pos = first.start_pos;
+            meta.empty = false;
+        }
+        if let Some(last) = &self.last {
+            meta.end_line = last.end_line;
+            meta.end_column = last.end_column;
+            meta.end_pos = last.end_pos;
+            meta.empty = false;
         }
     }
 }

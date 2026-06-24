@@ -95,14 +95,23 @@ def finalize_contradictions():
         sys.exit(1)
 
 
-def tree_to_dict(node):
-    """Recursively convert a Lark parse tree to a serialisable dict."""
+def tree_to_dict(node, with_meta=False):
+    """Recursively convert a Lark parse tree to a serialisable dict.
+
+    `with_meta=True` additionally records each `Tree` node's source-span `meta`
+    (`propagate_positions`), so a fixture can pin the position-propagation surface
+    the default diffcheck strips (bug-bounty H6-5 / #402). Default off → byte-
+    identical to the historical output, so every existing fixture is untouched.
+    """
     if isinstance(node, Tree):
-        return {
+        d = {
             "type": "tree",
             "data": node.data,
-            "children": [tree_to_dict(c) for c in node.children],
+            "children": [tree_to_dict(c, with_meta) for c in node.children],
         }
+        if with_meta:
+            d["meta"] = meta_to_dict(node.meta)
+        return d
     elif isinstance(node, Token):
         return {
             "type": "token",
@@ -111,6 +120,25 @@ def tree_to_dict(node):
         }
     else:
         return {"type": "unknown", "repr": repr(node)}
+
+
+def meta_to_dict(meta):
+    """Serialise a `Tree.meta` to a stable dict for the meta-aware oracle (#402).
+
+    A positionless (`empty`) meta serialises as `{"empty": true}`; otherwise the
+    full span is captured. `getattr` guards the rare attribute-not-set shape Python
+    leaves under `propagate_positions=False` (it sets no positions at all there)."""
+    if getattr(meta, "empty", False) or not hasattr(meta, "start_pos"):
+        return {"empty": True}
+    return {
+        "empty": False,
+        "start_pos": meta.start_pos,
+        "end_pos": meta.end_pos,
+        "line": meta.line,
+        "column": meta.column,
+        "end_line": meta.end_line,
+        "end_column": meta.end_column,
+    }
 
 
 def make_parser(grammar_text, parser="lalr", lexer="contextual", start="start"):
@@ -2486,6 +2514,88 @@ def generate_interactive():
     save_oracle("interactive", "error_cases", error_cases)
 
 
+# ─── propagate_positions / Tree.meta span (bug-bounty H6-5, #402) ────────────
+#
+# With `propagate_positions`, Python derives a tree's `meta` from its rule's
+# UNFILTERED children (`PropagatePositions` wraps the node builder *outside* the
+# child filter), so filtered punctuation (`"(" A ")"`) contributes to the span.
+# The default diffcheck (`tree_to_dict`) strips `meta`, so this surface had never
+# been exercised — these cases pin it with `with_meta=True`, across every legal
+# (parser, lexer) pairing, as the regression net the issue calls for.
+#
+# Each grammar is engine-agnostic (LALR/Earley/CYK all parse it the same), so each
+# case records every legal pairing's tree+meta; the Rust replay holds lark-rs to
+# Python's recorded span per pairing.
+PROPAGATE_POSITIONS_CASES = [
+    # name, grammar, input
+    ("paren_filtered",
+     'start: "(" A ")"\nA: /caf./\n%import common.WS\n%ignore WS\n', "( cafX )"),
+    ("nested_inner_own_span",
+     'start: "(" inner ")"\ninner: A\nA: /caf./\n%import common.WS\n%ignore WS\n', "( cafX )"),
+    ("transparent_inline",
+     'start: "(" _inner ")"\n_inner: A\nA: /caf./\n%import common.WS\n%ignore WS\n', "( cafX )"),
+    ("expand1_collapse",
+     'start: "(" b ")"\n?b: A\nA: /caf./\n%import common.WS\n%ignore WS\n', "( cafX )"),
+    ("expand1_keeps_wrapper",
+     'start: "(" b ")"\n?b: A C\nA: /caf./\nC: /c/\n%import common.WS\n%ignore WS\n', "( cafX c )"),
+    ("ignored_ws_does_not_widen",
+     'start: A\nA: /caf./\n%import common.WS\n%ignore WS\n', "  cafX  "),
+    ("two_kept_kids",
+     'start: "(" A B ")"\nA: /a/\nB: /b/\n%import common.WS\n%ignore WS\n', "( a b )"),
+    ("trailing_filtered_punct",
+     'start: A ";"\nA: /a/\n%import common.WS\n%ignore WS\n', "a ;"),
+    ("leading_filtered_punct",
+     'start: ";" A\nA: /a/\n%import common.WS\n%ignore WS\n', "; a"),
+    ("optional_absent_between_punct",
+     'start: "(" A? ")"\nA: /a/\n%import common.WS\n%ignore WS\n', "(  )"),
+    ("star_items_in_brackets",
+     'start: "[" item* "]"\nitem: A\nA: /a/\n%import common.WS\n%ignore WS\n', "[ a a ]"),
+    ("keep_all_tokens",
+     '!start: "(" A ")"\nA: /a/\n%import common.WS\n%ignore WS\n', "( a )"),
+    ("multiline_span",
+     'start: "(" A ")"\nA: /a/\n%import common.WS\n%ignore WS\n', "(\n  a\n)"),
+    # All children filtered: the node has no *kept* child, but the span must still
+    # widen to the filtered punctuation (Python: `start` spans `0..3`), not collapse
+    # to a positionless empty node.
+    ("all_children_filtered",
+     'start: "(" ")"\n%import common.WS\n%ignore WS\n', "( )"),
+]
+
+# Every legal (parser, lexer) pairing — propagate_positions is engine-agnostic, so
+# the same grammar+input must yield the same meta on all of them.
+PROPAGATE_POSITIONS_ENGINES = [
+    ("lalr", "contextual"),
+    ("lalr", "basic"),
+    ("earley", "basic"),
+    ("earley", "dynamic"),
+    ("cyk", "basic"),
+]
+
+
+def generate_propagate_positions():
+    print("Generating propagate_positions / Tree.meta oracles (#402)...")
+    results = []
+    for name, grammar, inp in PROPAGATE_POSITIONS_CASES:
+        engines = {}
+        for parser, lexer in PROPAGATE_POSITIONS_ENGINES:
+            try:
+                lark = Lark(grammar, parser=parser, lexer=lexer, start="start",
+                            propagate_positions=True)
+                tree = lark.parse(inp)
+                engines[f"{parser}/{lexer}"] = tree_to_dict(tree, with_meta=True)
+            except Exception as e:
+                # Record the refusal so the replay can skip the pairing honestly
+                # rather than silently dropping it.
+                engines[f"{parser}/{lexer}"] = {"error": type(e).__name__}
+        results.append({
+            "name": name,
+            "grammar": grammar,
+            "input": inp,
+            "engines": engines,
+        })
+    save_oracle("propagate_positions", "cases", results)
+
+
 if __name__ == "__main__":
     ORACLES_DIR.mkdir(parents=True, exist_ok=True)
     generate_arithmetic()
@@ -2507,6 +2617,7 @@ if __name__ == "__main__":
     generate_earley()
     generate_earley_dynamic()
     generate_cyk()
+    generate_propagate_positions()
     generate_fuzz_corpus()
     generate_json_corpus_manifest()
     print("\nDone. Commit tests/fixtures/oracles/ to track expected outputs.")

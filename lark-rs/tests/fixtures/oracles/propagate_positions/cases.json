@@ -1,0 +1,1865 @@
+[
+  {
+    "name": "paren_filtered",
+    "grammar": "start: \"(\" A \")\"\nA: /caf./\n%import common.WS\n%ignore WS\n",
+    "input": "( cafX )",
+    "engines": {
+      "lalr/contextual": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "cafX"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 8,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 9
+        }
+      },
+      "lalr/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "cafX"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 8,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 9
+        }
+      },
+      "earley/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "cafX"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 8,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 9
+        }
+      },
+      "earley/dynamic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "cafX"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 8,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 9
+        }
+      },
+      "cyk/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "cafX"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 8,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 9
+        }
+      }
+    }
+  },
+  {
+    "name": "nested_inner_own_span",
+    "grammar": "start: \"(\" inner \")\"\ninner: A\nA: /caf./\n%import common.WS\n%ignore WS\n",
+    "input": "( cafX )",
+    "engines": {
+      "lalr/contextual": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "inner",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "A",
+                "value": "cafX"
+              }
+            ],
+            "meta": {
+              "empty": false,
+              "start_pos": 2,
+              "end_pos": 6,
+              "line": 1,
+              "column": 3,
+              "end_line": 1,
+              "end_column": 7
+            }
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 8,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 9
+        }
+      },
+      "lalr/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "inner",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "A",
+                "value": "cafX"
+              }
+            ],
+            "meta": {
+              "empty": false,
+              "start_pos": 2,
+              "end_pos": 6,
+              "line": 1,
+              "column": 3,
+              "end_line": 1,
+              "end_column": 7
+            }
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 8,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 9
+        }
+      },
+      "earley/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "inner",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "A",
+                "value": "cafX"
+              }
+            ],
+            "meta": {
+              "empty": false,
+              "start_pos": 2,
+              "end_pos": 6,
+              "line": 1,
+              "column": 3,
+              "end_line": 1,
+              "end_column": 7
+            }
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 8,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 9
+        }
+      },
+      "earley/dynamic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "inner",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "A",
+                "value": "cafX"
+              }
+            ],
+            "meta": {
+              "empty": false,
+              "start_pos": 2,
+              "end_pos": 6,
+              "line": 1,
+              "column": 3,
+              "end_line": 1,
+              "end_column": 7
+            }
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 8,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 9
+        }
+      },
+      "cyk/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "inner",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "A",
+                "value": "cafX"
+              }
+            ],
+            "meta": {
+              "empty": false,
+              "start_pos": 2,
+              "end_pos": 6,
+              "line": 1,
+              "column": 3,
+              "end_line": 1,
+              "end_column": 7
+            }
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 8,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 9
+        }
+      }
+    }
+  },
+  {
+    "name": "transparent_inline",
+    "grammar": "start: \"(\" _inner \")\"\n_inner: A\nA: /caf./\n%import common.WS\n%ignore WS\n",
+    "input": "( cafX )",
+    "engines": {
+      "lalr/contextual": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "cafX"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 8,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 9
+        }
+      },
+      "lalr/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "cafX"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 8,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 9
+        }
+      },
+      "earley/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "cafX"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 8,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 9
+        }
+      },
+      "earley/dynamic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "cafX"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 8,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 9
+        }
+      },
+      "cyk/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "cafX"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 8,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 9
+        }
+      }
+    }
+  },
+  {
+    "name": "expand1_collapse",
+    "grammar": "start: \"(\" b \")\"\n?b: A\nA: /caf./\n%import common.WS\n%ignore WS\n",
+    "input": "( cafX )",
+    "engines": {
+      "lalr/contextual": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "cafX"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 8,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 9
+        }
+      },
+      "lalr/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "cafX"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 8,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 9
+        }
+      },
+      "earley/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "cafX"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 8,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 9
+        }
+      },
+      "earley/dynamic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "cafX"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 8,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 9
+        }
+      },
+      "cyk/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "cafX"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 8,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 9
+        }
+      }
+    }
+  },
+  {
+    "name": "expand1_keeps_wrapper",
+    "grammar": "start: \"(\" b \")\"\n?b: A C\nA: /caf./\nC: /c/\n%import common.WS\n%ignore WS\n",
+    "input": "( cafX c )",
+    "engines": {
+      "lalr/contextual": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "b",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "A",
+                "value": "cafX"
+              },
+              {
+                "type": "token",
+                "token_type": "C",
+                "value": "c"
+              }
+            ],
+            "meta": {
+              "empty": false,
+              "start_pos": 2,
+              "end_pos": 8,
+              "line": 1,
+              "column": 3,
+              "end_line": 1,
+              "end_column": 9
+            }
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 10,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 11
+        }
+      },
+      "lalr/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "b",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "A",
+                "value": "cafX"
+              },
+              {
+                "type": "token",
+                "token_type": "C",
+                "value": "c"
+              }
+            ],
+            "meta": {
+              "empty": false,
+              "start_pos": 2,
+              "end_pos": 8,
+              "line": 1,
+              "column": 3,
+              "end_line": 1,
+              "end_column": 9
+            }
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 10,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 11
+        }
+      },
+      "earley/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "b",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "A",
+                "value": "cafX"
+              },
+              {
+                "type": "token",
+                "token_type": "C",
+                "value": "c"
+              }
+            ],
+            "meta": {
+              "empty": false,
+              "start_pos": 2,
+              "end_pos": 8,
+              "line": 1,
+              "column": 3,
+              "end_line": 1,
+              "end_column": 9
+            }
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 10,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 11
+        }
+      },
+      "earley/dynamic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "b",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "A",
+                "value": "cafX"
+              },
+              {
+                "type": "token",
+                "token_type": "C",
+                "value": "c"
+              }
+            ],
+            "meta": {
+              "empty": false,
+              "start_pos": 2,
+              "end_pos": 8,
+              "line": 1,
+              "column": 3,
+              "end_line": 1,
+              "end_column": 9
+            }
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 10,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 11
+        }
+      },
+      "cyk/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "b",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "A",
+                "value": "cafX"
+              },
+              {
+                "type": "token",
+                "token_type": "C",
+                "value": "c"
+              }
+            ],
+            "meta": {
+              "empty": false,
+              "start_pos": 2,
+              "end_pos": 8,
+              "line": 1,
+              "column": 3,
+              "end_line": 1,
+              "end_column": 9
+            }
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 10,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 11
+        }
+      }
+    }
+  },
+  {
+    "name": "ignored_ws_does_not_widen",
+    "grammar": "start: A\nA: /caf./\n%import common.WS\n%ignore WS\n",
+    "input": "  cafX  ",
+    "engines": {
+      "lalr/contextual": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "cafX"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 2,
+          "end_pos": 6,
+          "line": 1,
+          "column": 3,
+          "end_line": 1,
+          "end_column": 7
+        }
+      },
+      "lalr/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "cafX"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 2,
+          "end_pos": 6,
+          "line": 1,
+          "column": 3,
+          "end_line": 1,
+          "end_column": 7
+        }
+      },
+      "earley/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "cafX"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 2,
+          "end_pos": 6,
+          "line": 1,
+          "column": 3,
+          "end_line": 1,
+          "end_column": 7
+        }
+      },
+      "earley/dynamic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "cafX"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 2,
+          "end_pos": 6,
+          "line": 1,
+          "column": 3,
+          "end_line": 1,
+          "end_column": 7
+        }
+      },
+      "cyk/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "cafX"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 2,
+          "end_pos": 6,
+          "line": 1,
+          "column": 3,
+          "end_line": 1,
+          "end_column": 7
+        }
+      }
+    }
+  },
+  {
+    "name": "two_kept_kids",
+    "grammar": "start: \"(\" A B \")\"\nA: /a/\nB: /b/\n%import common.WS\n%ignore WS\n",
+    "input": "( a b )",
+    "engines": {
+      "lalr/contextual": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          },
+          {
+            "type": "token",
+            "token_type": "B",
+            "value": "b"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8
+        }
+      },
+      "lalr/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          },
+          {
+            "type": "token",
+            "token_type": "B",
+            "value": "b"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8
+        }
+      },
+      "earley/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          },
+          {
+            "type": "token",
+            "token_type": "B",
+            "value": "b"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8
+        }
+      },
+      "earley/dynamic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          },
+          {
+            "type": "token",
+            "token_type": "B",
+            "value": "b"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8
+        }
+      },
+      "cyk/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          },
+          {
+            "type": "token",
+            "token_type": "B",
+            "value": "b"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8
+        }
+      }
+    }
+  },
+  {
+    "name": "trailing_filtered_punct",
+    "grammar": "start: A \";\"\nA: /a/\n%import common.WS\n%ignore WS\n",
+    "input": "a ;",
+    "engines": {
+      "lalr/contextual": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 4
+        }
+      },
+      "lalr/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 4
+        }
+      },
+      "earley/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 4
+        }
+      },
+      "earley/dynamic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 4
+        }
+      },
+      "cyk/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 4
+        }
+      }
+    }
+  },
+  {
+    "name": "leading_filtered_punct",
+    "grammar": "start: \";\" A\nA: /a/\n%import common.WS\n%ignore WS\n",
+    "input": "; a",
+    "engines": {
+      "lalr/contextual": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 4
+        }
+      },
+      "lalr/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 4
+        }
+      },
+      "earley/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 4
+        }
+      },
+      "earley/dynamic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 4
+        }
+      },
+      "cyk/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 4
+        }
+      }
+    }
+  },
+  {
+    "name": "optional_absent_between_punct",
+    "grammar": "start: \"(\" A? \")\"\nA: /a/\n%import common.WS\n%ignore WS\n",
+    "input": "(  )",
+    "engines": {
+      "lalr/contextual": {
+        "type": "tree",
+        "data": "start",
+        "children": [],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 4,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 5
+        }
+      },
+      "lalr/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 4,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 5
+        }
+      },
+      "earley/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 4,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 5
+        }
+      },
+      "earley/dynamic": {
+        "type": "tree",
+        "data": "start",
+        "children": [],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 4,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 5
+        }
+      },
+      "cyk/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 4,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 5
+        }
+      }
+    }
+  },
+  {
+    "name": "star_items_in_brackets",
+    "grammar": "start: \"[\" item* \"]\"\nitem: A\nA: /a/\n%import common.WS\n%ignore WS\n",
+    "input": "[ a a ]",
+    "engines": {
+      "lalr/contextual": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "item",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "A",
+                "value": "a"
+              }
+            ],
+            "meta": {
+              "empty": false,
+              "start_pos": 2,
+              "end_pos": 3,
+              "line": 1,
+              "column": 3,
+              "end_line": 1,
+              "end_column": 4
+            }
+          },
+          {
+            "type": "tree",
+            "data": "item",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "A",
+                "value": "a"
+              }
+            ],
+            "meta": {
+              "empty": false,
+              "start_pos": 4,
+              "end_pos": 5,
+              "line": 1,
+              "column": 5,
+              "end_line": 1,
+              "end_column": 6
+            }
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8
+        }
+      },
+      "lalr/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "item",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "A",
+                "value": "a"
+              }
+            ],
+            "meta": {
+              "empty": false,
+              "start_pos": 2,
+              "end_pos": 3,
+              "line": 1,
+              "column": 3,
+              "end_line": 1,
+              "end_column": 4
+            }
+          },
+          {
+            "type": "tree",
+            "data": "item",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "A",
+                "value": "a"
+              }
+            ],
+            "meta": {
+              "empty": false,
+              "start_pos": 4,
+              "end_pos": 5,
+              "line": 1,
+              "column": 5,
+              "end_line": 1,
+              "end_column": 6
+            }
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8
+        }
+      },
+      "earley/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "item",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "A",
+                "value": "a"
+              }
+            ],
+            "meta": {
+              "empty": false,
+              "start_pos": 2,
+              "end_pos": 3,
+              "line": 1,
+              "column": 3,
+              "end_line": 1,
+              "end_column": 4
+            }
+          },
+          {
+            "type": "tree",
+            "data": "item",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "A",
+                "value": "a"
+              }
+            ],
+            "meta": {
+              "empty": false,
+              "start_pos": 4,
+              "end_pos": 5,
+              "line": 1,
+              "column": 5,
+              "end_line": 1,
+              "end_column": 6
+            }
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8
+        }
+      },
+      "earley/dynamic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "item",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "A",
+                "value": "a"
+              }
+            ],
+            "meta": {
+              "empty": false,
+              "start_pos": 2,
+              "end_pos": 3,
+              "line": 1,
+              "column": 3,
+              "end_line": 1,
+              "end_column": 4
+            }
+          },
+          {
+            "type": "tree",
+            "data": "item",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "A",
+                "value": "a"
+              }
+            ],
+            "meta": {
+              "empty": false,
+              "start_pos": 4,
+              "end_pos": 5,
+              "line": 1,
+              "column": 5,
+              "end_line": 1,
+              "end_column": 6
+            }
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8
+        }
+      },
+      "cyk/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "item",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "A",
+                "value": "a"
+              }
+            ],
+            "meta": {
+              "empty": false,
+              "start_pos": 2,
+              "end_pos": 3,
+              "line": 1,
+              "column": 3,
+              "end_line": 1,
+              "end_column": 4
+            }
+          },
+          {
+            "type": "tree",
+            "data": "item",
+            "children": [
+              {
+                "type": "token",
+                "token_type": "A",
+                "value": "a"
+              }
+            ],
+            "meta": {
+              "empty": false,
+              "start_pos": 4,
+              "end_pos": 5,
+              "line": 1,
+              "column": 5,
+              "end_line": 1,
+              "end_column": 6
+            }
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 8
+        }
+      }
+    }
+  },
+  {
+    "name": "keep_all_tokens",
+    "grammar": "!start: \"(\" A \")\"\nA: /a/\n%import common.WS\n%ignore WS\n",
+    "input": "( a )",
+    "engines": {
+      "lalr/contextual": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "LPAR",
+            "value": "("
+          },
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          },
+          {
+            "type": "token",
+            "token_type": "RPAR",
+            "value": ")"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 5,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 6
+        }
+      },
+      "lalr/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "LPAR",
+            "value": "("
+          },
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          },
+          {
+            "type": "token",
+            "token_type": "RPAR",
+            "value": ")"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 5,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 6
+        }
+      },
+      "earley/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "LPAR",
+            "value": "("
+          },
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          },
+          {
+            "type": "token",
+            "token_type": "RPAR",
+            "value": ")"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 5,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 6
+        }
+      },
+      "earley/dynamic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "LPAR",
+            "value": "("
+          },
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          },
+          {
+            "type": "token",
+            "token_type": "RPAR",
+            "value": ")"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 5,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 6
+        }
+      },
+      "cyk/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "LPAR",
+            "value": "("
+          },
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          },
+          {
+            "type": "token",
+            "token_type": "RPAR",
+            "value": ")"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 5,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 6
+        }
+      }
+    }
+  },
+  {
+    "name": "multiline_span",
+    "grammar": "start: \"(\" A \")\"\nA: /a/\n%import common.WS\n%ignore WS\n",
+    "input": "(\n  a\n)",
+    "engines": {
+      "lalr/contextual": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 3,
+          "end_column": 2
+        }
+      },
+      "lalr/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 3,
+          "end_column": 2
+        }
+      },
+      "earley/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 3,
+          "end_column": 2
+        }
+      },
+      "earley/dynamic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 3,
+          "end_column": 2
+        }
+      },
+      "cyk/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "token",
+            "token_type": "A",
+            "value": "a"
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 7,
+          "line": 1,
+          "column": 1,
+          "end_line": 3,
+          "end_column": 2
+        }
+      }
+    }
+  },
+  {
+    "name": "all_children_filtered",
+    "grammar": "start: \"(\" \")\"\n%import common.WS\n%ignore WS\n",
+    "input": "( )",
+    "engines": {
+      "lalr/contextual": {
+        "type": "tree",
+        "data": "start",
+        "children": [],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 4
+        }
+      },
+      "lalr/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 4
+        }
+      },
+      "earley/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 4
+        }
+      },
+      "earley/dynamic": {
+        "type": "tree",
+        "data": "start",
+        "children": [],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 4
+        }
+      },
+      "cyk/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 1,
+          "end_column": 4
+        }
+      }
+    }
+  }
+]
