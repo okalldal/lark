@@ -10,7 +10,7 @@
 
 use super::ast::*;
 use super::ebnf::{CompiledAlt, HelperKey};
-use super::imports::spec_final_names;
+use super::imports::{spec_final_names, split_import_directive};
 use crate::error::GrammarError;
 use crate::grammar::rule::{Rule, RuleOptions};
 use crate::grammar::symbol::Symbol;
@@ -202,6 +202,17 @@ pub(super) struct GrammarCompiler {
     /// literal `"__anon_5"` interns under the hint `__ANON_5` (its uppercase
     /// form), which no up-front scan can see.
     reserved_term_names: HashSet<String>,
+    /// Per-module merged import-alias map, keyed by the resolved module path
+    /// (e.g. `["python"]`), mapping each *independently imported* original name
+    /// to its registered (aliased) final name. Mirrors Python Lark's per-dotted-
+    /// path `aliases` dict (`load_grammar.py`: imports of the same path are merged
+    /// before `_get_mangle(prefix, aliases)` runs, #343). When `import_rule_closure`
+    /// copies a rule's dependency closure, any closure symbol that is *also* an
+    /// independent import of the same module is left **unmangled** under its final
+    /// name instead of prefix-mangled — matching Python's `if s in aliases`.
+    /// Built up front (first pass) so a later `%import` directive's targets are
+    /// already known when an earlier directive's closure is copied.
+    pub(super) import_alias_map: HashMap<Vec<String>, HashMap<String, String>>,
 }
 
 impl GrammarCompiler {
@@ -240,6 +251,7 @@ impl GrammarCompiler {
             reserved_rule_names: HashSet::new(),
             anon_kinds: HashMap::new(),
             reserved_term_names: HashSet::new(),
+            import_alias_map: HashMap::new(),
         }
     }
 
@@ -347,6 +359,18 @@ impl GrammarCompiler {
                     for name in spec_final_names(spec) {
                         self.reserved_rule_names.insert(name.clone());
                         self.reserved_term_names.insert(name);
+                    }
+                    // Pre-build the per-module merged alias map (#343). Python
+                    // merges every `%import` of one dotted path into a single
+                    // `aliases` dict *before* any closure is copied, so an
+                    // imported rule's dependency that is independently imported
+                    // from the same module stays unmangled. Collect it up front,
+                    // across all directives, so directive order does not matter.
+                    if let Some((module_path, pairs)) = split_import_directive(spec) {
+                        let entry = self.import_alias_map.entry(module_path).or_default();
+                        for (original, final_name) in pairs {
+                            entry.insert(original, final_name);
+                        }
                     }
                 }
                 Item::IgnoreItem(_) => {}
