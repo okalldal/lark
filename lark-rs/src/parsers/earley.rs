@@ -466,18 +466,14 @@ impl EarleyParser {
             NodeValue::Tree(t) => ParseTree::Tree(t),
             NodeValue::Token(t) => ParseTree::Token(t),
             // A start rule is never transparent. Its value can still be `Inline`
-            // when a top-level `?start` collapses a lone-`None` placeholder (RC9 fix
-            // in tree_builder: lone-`None` expand1 → `Inline([None])`). The public
-            // `ParseTree` can't hold a bare `None`, so the single-`None` arm below
-            // falls back to an empty start node — that root-`?start` corner is a
-            // separate tracked divergence (#289). Stay defensive rather than panic.
+            // when a top-level `?start` collapses a lone-`None` placeholder (RC9 in
+            // tree_builder: lone-`None` expand1 → `Inline([None])`). Python Lark
+            // returns a bare `None` there (`?start: [A]` on `""`), so emit
+            // `ParseTree::None` to match the oracle (#289).
             NodeValue::Inline(mut cs) if cs.len() == 1 => match cs.pop().unwrap() {
                 Child::Tree(t) => ParseTree::Tree(t),
                 Child::Token(t) => ParseTree::Token(t),
-                Child::None => ParseTree::Tree(Tree::new(
-                    self.grammar.symbols.name(start_id).to_string(),
-                    vec![],
-                )),
+                Child::None => ParseTree::None,
             },
             NodeValue::Inline(cs) => ParseTree::Tree(Tree::new(
                 self.grammar.symbols.name(start_id).to_string(),

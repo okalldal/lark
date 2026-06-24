@@ -284,12 +284,19 @@ impl CykParser {
         Ok(match value {
             NodeValue::Tree(t) => ParseTree::Tree(t),
             NodeValue::Token(t) => ParseTree::Token(t),
-            // A start rule is never transparent, so its value is never Inline; be
-            // defensive rather than panic (mirrors Earley's forest_to_tree).
+            // A start rule is never transparent, so its value is never Inline. The
+            // lone-`None` root collapse (`?start: [A]` on `""`, #289) also cannot
+            // reach here: both lark-rs and Python's CYK reject a nullable start at
+            // *build* time ("CYK doesn't support empty rules", verified byte-identical
+            // by the CYK compliance bank), so this arm is unreachable for that case.
+            // Mapping `Child::None` to `ParseTree::None` is therefore not a
+            // more-permissive divergence (ADR-0017) — the grammar was already
+            // rejected before any parse — and keeps the three root-assembly sites
+            // symmetric rather than panicking.
             NodeValue::Inline(mut cs) if cs.len() == 1 => match cs.pop().unwrap() {
                 Child::Tree(t) => ParseTree::Tree(t),
                 Child::Token(t) => ParseTree::Token(t),
-                Child::None => ParseTree::Tree(Tree::new(start_name, vec![])),
+                Child::None => ParseTree::None,
             },
             NodeValue::Inline(cs) => ParseTree::Tree(Tree::new(start_name, cs)),
         })

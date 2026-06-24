@@ -139,11 +139,17 @@ fn main() -> ExitCode {
 }
 
 /// Serialize a [`ParseTree`] root in `tree_to_dict` shape. The root is normally a
-/// `Tree`, but a `?start` expand1 collapse can yield a bare `Token`.
+/// `Tree`, but a `?start` expand1 collapse can yield a bare `Token` or a bare
+/// `None` (`?start: [A]` on `""`, #289). This binary mirrors
+/// `fuzz_differential.py::tree_to_dict`, which has *no* `None` branch and so emits
+/// `{"type":"unknown","repr":"None"}` for a bare `None` — the same shape its own
+/// [`Child::None`] arm uses. (Contrast `diffcheck.rs`, which mirrors
+/// `diffcheck.py`'s explicit `node is None -> null`.)
 fn write_parse_tree(out: &mut String, tree: &ParseTree) {
     match tree {
         ParseTree::Tree(t) => write_tree(out, t),
         ParseTree::Token(tok) => write_token(out, &tok.type_, &tok.value),
+        ParseTree::None => out.push_str("{\"type\": \"unknown\", \"repr\": \"None\"}"),
     }
 }
 
