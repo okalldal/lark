@@ -44,6 +44,11 @@
 //! bug is fixed to turn it into a permanent regression guard — H6-5 (the
 //! `propagate_positions` filtered-token meta span, #402) and H6-7 (the duplicate-arm
 //! inline-group cross-product build blowup, #404) are fixed and now run by default.
+//! H6-3 + H6-4 (the spurious LALR reduce/reduce on nullable arms) are fixed and run by
+//! default (#401), with a differential-audit block pinning the adversarial
+//! nullable/alias/nested-optional cases. (The H6-3 Earley `al1`-vs-`al2` resolution
+//! divergence — a distinct forest-construction root, the SPPF `(left,right)` family
+//! dedup collapsing two ε rules — is tracked as #432, NOT fixed here.)
 //! Run the still-open XFAILs with:
 //!
 //!     cargo test --test test_bounty_findings_h6 -- --ignored
@@ -97,6 +102,46 @@ fn token_count(t: &ParseTree) -> usize {
         ParseTree::Token(_) => 1,
         ParseTree::Tree(tr) => tr.children.iter().map(walk).sum(),
         ParseTree::None => 0,
+    }
+}
+
+/// The `data` name of the first child *tree* of `start` — for `start: p` over an
+/// aliased `p`, this is the surviving alias (`al1`/`al2`), the tree-naming metadata
+/// Python keeps outside the LALR reduce/reduce comparison. Returns `start`'s own
+/// `data` if it has no tree child (e.g. an aliased rule directly on `start`).
+fn child_tree_name(t: &ParseTree) -> Option<String> {
+    match t {
+        ParseTree::Tree(tr) => {
+            for c in &tr.children {
+                if let Child::Tree(inner) = c {
+                    return Some(inner.data.clone());
+                }
+            }
+            Some(tr.data.clone())
+        }
+        _ => None,
+    }
+}
+
+/// A flat `data:[child …]` rendering of a tree (token type for tokens, `None` for
+/// placeholders) — enough to compare a small parse tree against the Python oracle's
+/// `pretty()` shape without a full structural matcher.
+fn flat(t: &ParseTree) -> String {
+    fn child(c: &Child) -> String {
+        match c {
+            Child::Token(tok) => tok.type_.clone(),
+            Child::None => "None".to_string(),
+            Child::Tree(tr) => tree(tr),
+        }
+    }
+    fn tree(tr: &lark_rs::Tree) -> String {
+        let kids: Vec<String> = tr.children.iter().map(child).collect();
+        format!("{}[{}]", tr.data, kids.join(","))
+    }
+    match t {
+        ParseTree::Tree(tr) => tree(tr),
+        ParseTree::Token(tok) => tok.type_.clone(),
+        ParseTree::None => "None".to_string(),
     }
 }
 
@@ -225,16 +270,28 @@ fn h6_6_string_literal_not_unified_with_regex_terminal() {
 /// legal). Opposite direction to RC7/#272 (recurse-helper over-share, which *under*-
 /// reports). Expected fix: in the R/R resolution, reduce (not error) candidates that
 /// share `origin`+`expansion` and differ only by alias, picking the lowest `rule.order`.
-#[test]
-#[ignore = "XFAIL (bounty H6-3): aliased nullable alternatives produce a spurious LALR reduce/reduce rejection"]
+#[test] // FIXED (#401): aliased nullable alternatives resolve by lowest rule.order.
 fn h6_3_aliased_nullable_alternatives_build() {
     let g = "p: \"a\"? -> al1 | \"b\"? -> al2\nstart: p\n";
-    let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual));
-    assert!(
-        lark.is_ok(),
-        "H6-3: Python's LALR (and lark-rs's own Earley) accept aliased nullable alternatives; \
-         lark-rs's LALR reported a spurious reduce/reduce collision"
-    );
+    // Both LALR lexers: builds, and the resolved tree-name matches Python exactly —
+    // `''→al1` (first-arm-wins, NOT al2), `'a'→al1`, `'b'→al2`.
+    for lexer in [LexerType::Basic, LexerType::Contextual] {
+        let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, lexer.clone())).unwrap_or_else(|e| {
+            panic!(
+                "H6-3 ({lexer:?}): Python's LALR accepts aliased nullable alternatives; \
+                 lark-rs reported a spurious reduce/reduce collision: {e:?}"
+            )
+        });
+        for (inp, want) in [("", "al1"), ("a", "al1"), ("b", "al2")] {
+            let t = lark.parse(inp).expect("H6-3: parses");
+            assert_eq!(
+                child_tree_name(&t).as_deref(),
+                Some(want),
+                "H6-3 ({lexer:?}): on {inp:?} Python resolves the same-origin nullable tie to \
+                 {want} (lowest rule.order, first-arm-wins); lark-rs picked the wrong arm"
+            );
+        }
+    }
 }
 
 /// H6-4 (MEDIUM, ebnf-loader). A bare nested optional under repetition (`[[A]]* C`)
@@ -248,21 +305,138 @@ fn h6_3_aliased_nullable_alternatives_build() {
 /// `EBNF_to_BNF`/`SimplifyRule_Visitor` collapses the twin empties and accepts.
 /// Expected fix: collapse the helper's duplicate empty arms (or distribute the nested
 /// maybe's arms) so a single ε base arm is emitted.
-#[test]
-#[ignore = "XFAIL (bounty H6-4): nested bare optional under repetition [[A]]* spuriously rejected (twin empty arms)"]
+#[test] // FIXED (#401): the recurse helper's twin empty arms are collapsed.
 fn h6_4_nested_optional_under_repetition_builds() {
     let g = "start: [[A]]* C\nA: \"a\"\nC: \"c\"\n";
-    let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual));
-    let lark = lark.expect(
-        "H6-4: Python accepts [[A]]* C; lark-rs minted a recurse helper with twin empty arms \
-         and reported a spurious LALR reduce/reduce",
-    );
-    // Python parses 'c' to start[C].
-    assert_eq!(
-        first_token_type(&lark.parse("c").expect("H6-4: parses 'c'")).as_deref(),
-        Some("C"),
-        "H6-4: [[A]]* C on 'c' must yield token C, matching Python"
-    );
+    for lexer in [LexerType::Basic, LexerType::Contextual] {
+        let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, lexer.clone())).unwrap_or_else(|e| {
+            panic!(
+                "H6-4 ({lexer:?}): Python accepts [[A]]* C; lark-rs minted a recurse helper with \
+                 twin empty arms and reported a spurious LALR reduce/reduce: {e:?}"
+            )
+        });
+        // Python parses 'c' to start[C], 'aac' to start[A,A,C].
+        assert_eq!(
+            first_token_type(&lark.parse("c").expect("H6-4: parses 'c'")).as_deref(),
+            Some("C"),
+            "H6-4 ({lexer:?}): [[A]]* C on 'c' must yield token C, matching Python"
+        );
+        assert_eq!(
+            flat(&lark.parse("aac").expect("H6-4: parses 'aac'")),
+            "start[A,A,C]",
+            "H6-4 ({lexer:?}): [[A]]* C on 'aac' must be start[A,A,C], matching Python"
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Differential audit (#401): nullable-arm / R/R-resolution cases the banks
+// under-sample. Each expectation is the Python Lark 1.3.1 tree (verified live);
+// these pin the LALR R/R-resolution fix against the adversarial inputs the bounty
+// catalog and issue #401 name (distinct-alias arms, the H6-4 controls, nested
+// optionals under `*`/`+`), so a future regression is caught structurally rather
+// than relying on banks-green alone.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Three nullable alternatives differing only by alias resolve to the first arm
+/// (lowest `rule.order`) per matching present token — Python's first-arm-wins. A
+/// three-way variant of H6-3, exercising the (origin, expansion)-group collapse over
+/// more than two candidates.
+#[test]
+fn h6_3_three_aliased_nullable_alternatives_resolve_first_arm() {
+    let g = "p: \"a\"? -> al1 | \"b\"? -> al2 | \"c\"? -> al3\nstart: p\n";
+    for lexer in [LexerType::Basic, LexerType::Contextual] {
+        let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, lexer.clone()))
+            .unwrap_or_else(|e| panic!("H6-3/3 ({lexer:?}): builds: {e:?}"));
+        for (inp, want) in [("", "al1"), ("a", "al1"), ("b", "al2"), ("c", "al3")] {
+            assert_eq!(
+                child_tree_name(&lark.parse(inp).expect("parses")).as_deref(),
+                Some(want),
+                "H6-3/3 ({lexer:?}): {inp:?} → {want} (first-arm-wins)"
+            );
+        }
+    }
+}
+
+/// Aliased nullable alternatives directly on `start` (no wrapping rule) resolve the
+/// same way — confirming the R/R collapse is keyed on (origin, expansion), not on the
+/// presence of an enclosing rule.
+#[test]
+fn h6_3_aliased_nullable_on_start_resolves_first_arm() {
+    let g = "start: \"a\"? -> s1 | \"b\"? -> s2\n";
+    for lexer in [LexerType::Basic, LexerType::Contextual] {
+        let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, lexer.clone()))
+            .unwrap_or_else(|e| panic!("H6-3/start ({lexer:?}): builds: {e:?}"));
+        for (inp, want) in [("", "s1"), ("a", "s1"), ("b", "s2")] {
+            // The aliased arm *is* `start`, so the tree's own `data` is the alias.
+            let t = lark.parse(inp).expect("parses");
+            let ParseTree::Tree(tr) = &t else {
+                panic!("expected tree")
+            };
+            assert_eq!(
+                tr.data, want,
+                "H6-3/start ({lexer:?}): {inp:?} → {want} (first-arm-wins)"
+            );
+        }
+    }
+}
+
+/// The H6-4 controls (`[A]* C`, `([A])* C`, `[[A] B]* C`) all build and parse
+/// tree-identical to Python on both LALR lexers — they built before the fix too, and
+/// must keep doing so (the fix must not perturb the single-empty-arm cases).
+#[test]
+fn h6_4_controls_build_and_match() {
+    let cases: &[(&str, &[(&str, &str)])] = &[
+        (
+            "start: [A]* C\nA: \"a\"\nC: \"c\"\n",
+            &[("c", "start[C]"), ("ac", "start[A,C]")],
+        ),
+        (
+            "start: ([A])* C\nA: \"a\"\nC: \"c\"\n",
+            &[("c", "start[C]"), ("ac", "start[A,C]")],
+        ),
+        (
+            "start: [[A] B]* C\nA: \"a\"\nB: \"b\"\nC: \"c\"\n",
+            &[("c", "start[C]"), ("abc", "start[A,B,C]")],
+        ),
+    ];
+    for (g, ios) in cases {
+        for lexer in [LexerType::Basic, LexerType::Contextual] {
+            let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, lexer.clone()))
+                .unwrap_or_else(|e| panic!("H6-4 control ({lexer:?}) {g:?}: builds: {e:?}"));
+            for (inp, want) in *ios {
+                assert_eq!(
+                    &flat(&lark.parse(inp).expect("parses")),
+                    want,
+                    "H6-4 control ({lexer:?}) {g:?}: {inp:?} → {want}"
+                );
+            }
+        }
+    }
+}
+
+/// The `+` sibling of H6-4: `[[A]]+ C` under `maybe_placeholders` builds and emits a
+/// `None` placeholder for the absent inner `[A]` of the mandatory first copy on `'c'`
+/// (Python: `start[None, C]`), and `start[A, C]` on `'ac'`. Pins that collapsing the
+/// twin empty arms does not disturb the placeholder count Python emits.
+#[test]
+fn h6_4_plus_sibling_with_placeholders() {
+    let g = "start: [[A]]+ C\nA: \"a\"\nC: \"c\"\n";
+    for lexer in [LexerType::Basic, LexerType::Contextual] {
+        let mut o = opts(ParserAlgorithm::Lalr, lexer.clone());
+        o.maybe_placeholders = true;
+        let lark = Lark::new(g, o).unwrap_or_else(|e| panic!("H6-4+ ({lexer:?}): builds: {e:?}"));
+        assert_eq!(
+            flat(&lark.parse("c").expect("parses 'c'")),
+            "start[None,C]",
+            "H6-4+ ({lexer:?}): [[A]]+ C on 'c' → start[None, C] (Python's placeholder)"
+        );
+        assert_eq!(
+            flat(&lark.parse("ac").expect("parses 'ac'")),
+            "start[A,C]",
+            "H6-4+ ({lexer:?}): [[A]]+ C on 'ac' → start[A, C]"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
