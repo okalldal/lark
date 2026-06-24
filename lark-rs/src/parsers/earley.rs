@@ -54,7 +54,7 @@ use crate::grammar::intern::{CompiledGrammar, SymbolId};
 use crate::lexer::DynamicMatcher;
 use crate::tree::{Child, ParseTree, Token, Tree};
 
-use super::tree_builder::{Slot, TreeOutputBuilder};
+use super::tree_builder::{ContainerSpan, Slot, TreeOutputBuilder};
 
 // Backward-compat alias within earley — keeps diff minimal for this refactor.
 type NodeValue = Slot;
@@ -1435,6 +1435,13 @@ struct Transformer<'a> {
     /// Earley SPPF over-shares nodes even for unambiguous grammars, so a static
     /// reference count over-counts; this tracks *actual* reuse (issue #54).
     seen: HashSet<usize>,
+    /// Python Lark's `propagate_positions` (#402). When set, the resolve walk
+    /// accumulates each node's pre-filter container span — including the
+    /// punctuation tokens it filters out of the buffer — so the shaped node's
+    /// `meta` spans the filtered children, matching `TreeOutputBuilder::assemble`'s
+    /// non-streaming path (and Python's `PropagatePositions`, which runs outside
+    /// the child filter).
+    pp: bool,
 }
 
 impl<'a> Transformer<'a> {
@@ -1460,7 +1467,10 @@ impl<'a> Transformer<'a> {
         Transformer {
             grammar,
             forest,
-            builder: TreeOutputBuilder::new(&grammar.rules),
+            builder: TreeOutputBuilder::with_propagate_positions(
+                &grammar.rules,
+                grammar.propagate_positions,
+            ),
             resolve,
             term_priority,
             memo: HashMap::new(),
@@ -1469,6 +1479,7 @@ impl<'a> Transformer<'a> {
             prio: HashMap::new(),
             prio_visiting: HashSet::new(),
             seen: HashSet::new(),
+            pp: grammar.propagate_positions,
         }
     }
 
@@ -1736,6 +1747,7 @@ impl<'a> Transformer<'a> {
         let mut walk = Walk {
             frames: vec![Frame::Eval { node: root }],
             bufs: Vec::new(),
+            containers: Vec::new(),
             visiting: HashSet::new(),
             ret: None,
         };
@@ -1770,6 +1782,9 @@ impl<'a> Transformer<'a> {
                     // `keep_token` / `shape`) so resolve trees stay
                     // byte-for-byte identical to the explicit path and to LALR.
                     w.bufs.push(Vec::new());
+                    if self.pp {
+                        w.containers.push(ContainerSpan::new());
+                    }
                     w.frames.push(Frame::EvalShape { node });
                     w.frames.push(Frame::AppendRule { node });
                 } else {
@@ -1783,7 +1798,15 @@ impl<'a> Transformer<'a> {
                 match w.take_ret() {
                     Ret::Rule(None) => w.ret = Some(Ret::Value(None)),
                     Ret::Rule(Some(rule)) => {
-                        let v = self.builder.shape(rule, children);
+                        // With `propagate_positions`, widen the node's span to its
+                        // pre-filter container (the punctuation the buffer dropped);
+                        // otherwise the plain `shape` path (post-filter span) — #402.
+                        let v = if self.pp {
+                            let container = w.containers.pop().expect("Eval pushed a container");
+                            self.builder.shape_with_container(rule, children, container)
+                        } else {
+                            self.builder.shape(rule, children)
+                        };
                         // Memoize only on the second visit: a single-use node is
                         // returned by move (no clone). `insert` returns false
                         // when the node was already present, i.e. this is its
@@ -1818,6 +1841,7 @@ impl<'a> Transformer<'a> {
                 fams,
                 idx,
                 mark,
+                container_mark,
                 rule,
             } => {
                 let Ret::Packed(ok) = w.take_ret() else {
@@ -1827,8 +1851,13 @@ impl<'a> Transformer<'a> {
                     w.visiting.remove(&node);
                     w.ret = Some(Ret::Rule(Some(rule)));
                 } else {
-                    // Discarded part-way: roll back, try the next family.
+                    // Discarded part-way: roll back the buffer (and, under
+                    // propagate_positions, the container span observed during this
+                    // family), then try the next family.
                     w.buf().truncate(mark);
+                    if let Some(snapshot) = container_mark {
+                        *w.container() = snapshot;
+                    }
                     self.rule_try_family(w, node, fams, idx + 1);
                 }
             }
@@ -1848,6 +1877,9 @@ impl<'a> Transformer<'a> {
                 // the explicit path.
                 ForestRef::Tok(t) => {
                     let tok = self.forest.tokens[t].clone();
+                    if self.pp {
+                        w.container().observe_token(&tok);
+                    }
                     w.buf().push(Child::Token(tok));
                     self.packed_right(w, packed);
                 }
@@ -1873,16 +1905,29 @@ impl<'a> Transformer<'a> {
                 match v {
                     None => w.ret = Some(Ret::Packed(false)),
                     Some(NodeValue::Token(tk)) => {
+                        // Observe before the per-position filter so a dropped
+                        // punctuation token still bounds the container span (#402).
+                        if self.pp {
+                            w.container().observe_token(&tk);
+                        }
                         if self.builder.keep_token(rule, right_pos) {
                             w.buf().push(Child::Token(tk));
                         }
                         w.ret = Some(Ret::Packed(true));
                     }
                     Some(NodeValue::Tree(tr)) => {
+                        if self.pp {
+                            w.container().observe_meta(&tr.meta);
+                        }
                         w.buf().push(Child::Tree(tr));
                         w.ret = Some(Ret::Packed(true));
                     }
                     Some(NodeValue::Inline(cs)) => {
+                        if self.pp {
+                            for c in &cs {
+                                w.container().observe_child(c);
+                            }
+                        }
                         w.buf().extend(cs);
                         w.ret = Some(Ret::Packed(true));
                     }
@@ -1951,11 +1996,23 @@ impl<'a> Transformer<'a> {
             //    guaranteed exactly one derivation (no ambiguity to fan out).
             Frame::StreamDistribute { node } => {
                 w.bufs.push(Vec::new());
+                // Keep `containers` aligned with `bufs` so the filter sites' top-of-
+                // stack `container()` never desyncs. A transparent node builds no
+                // wrapper, so this span is discarded — its spliced children carry
+                // their own positions up to the parent's container (#402).
+                if self.pp {
+                    w.containers.push(ContainerSpan::new());
+                }
                 w.frames.push(Frame::StreamDistributeDone);
                 w.frames.push(Frame::Splice { node });
             }
             Frame::StreamDistributeDone => {
                 let children = w.bufs.pop().expect("StreamDistribute pushed a buffer");
+                if self.pp {
+                    w.containers
+                        .pop()
+                        .expect("StreamDistribute pushed a container");
+                }
                 let derivs = match w.take_ret() {
                     // A discarded family would mean a cycle, which `single_deriv`
                     // already excludes — but stay defensive: no derivation, no
@@ -2109,11 +2166,13 @@ impl<'a> Transformer<'a> {
             Some(&fi) => {
                 let packed = self.forest.nodes[node].families[fi];
                 let mark = w.buf().len();
+                let container_mark = self.pp.then(|| w.container().clone());
                 w.frames.push(Frame::RuleNext {
                     node,
                     fams,
                     idx,
                     mark,
+                    container_mark,
                     rule: packed.rule,
                 });
                 w.frames.push(Frame::AppendPacked { packed });
@@ -2129,8 +2188,13 @@ impl<'a> Transformer<'a> {
             ForestRef::None => w.ret = Some(Ret::Packed(true)),
             ForestRef::Tok(t) => {
                 self.push_nones_before(packed.rule, packed.right_pos, w.buf());
+                let tok = self.forest.tokens[t].clone();
+                // Observe before filtering so a dropped punctuation token still
+                // bounds the container span (#402).
+                if self.pp {
+                    w.container().observe_token(&tok);
+                }
                 if self.builder.keep_token(packed.rule, packed.right_pos) {
-                    let tok = self.forest.tokens[t].clone();
                     w.buf().push(Child::Token(tok));
                 }
                 w.ret = Some(Ret::Packed(true));
@@ -2360,6 +2424,9 @@ enum Frame {
         fams: Vec<usize>,
         idx: usize,
         mark: usize,
+        /// Container snapshot at `mark`, to restore on rollback when this family is
+        /// discarded part-way (`propagate_positions` only; `None` otherwise — #402).
+        container_mark: Option<ContainerSpan>,
         rule: usize,
     },
     AppendPacked {
@@ -2457,6 +2524,11 @@ enum Ret {
 struct Walk {
     frames: Vec<Frame>,
     bufs: Vec<Vec<Child>>,
+    /// Pre-filter container span per open buffer (parallel to `bufs`), tracked only
+    /// under `propagate_positions`. Each filtered/kept child is `observe`d into the
+    /// top span as it streams by, so a node's `meta` can span the punctuation the
+    /// buffer drops (#402). Empty (never pushed) when the flag is off.
+    containers: Vec<ContainerSpan>,
     visiting: HashSet<usize>,
     ret: Option<Ret>,
 }
@@ -2474,6 +2546,13 @@ impl Walk {
         self.bufs
             .last_mut()
             .expect("a resolve Eval frame pushed a buffer")
+    }
+
+    /// The pre-filter container span for the buffer currently being streamed into.
+    fn container(&mut self) -> &mut ContainerSpan {
+        self.containers
+            .last_mut()
+            .expect("a resolve Eval frame pushed a container (propagate_positions)")
     }
 }
 
