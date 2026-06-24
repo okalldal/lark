@@ -710,6 +710,52 @@ fn reject_regex_crate_only_dialect(pattern: &str) -> Result<(), GrammarError> {
     Ok(())
 }
 
+/// Reject the Rust `regex` crate's angle-bracket named capture spelling
+/// `(?<name>...)`. Python `re` only supports `(?P<name>...)`; `(?<name>...)` is an
+/// unknown extension. Lookbehind assertions `(?<=...)` and `(?<!...)` must stay valid.
+fn reject_angle_named_group_dialect(pattern: &str) -> Result<(), GrammarError> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0usize;
+    let mut in_class = false;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '\\' {
+            i += 2;
+            continue;
+        }
+        if in_class {
+            if c == ']' {
+                in_class = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '[' {
+            in_class = true;
+            i += 1;
+            if chars.get(i) == Some(&'^') {
+                i += 1;
+            }
+            if chars.get(i) == Some(&']') {
+                i += 1;
+            }
+            continue;
+        }
+        if c == '('
+            && chars.get(i + 1) == Some(&'?')
+            && chars.get(i + 2) == Some(&'<')
+            && !matches!(chars.get(i + 3), Some('=') | Some('!'))
+        {
+            return Err(GrammarError::InvalidRegex {
+                pattern: pattern.to_string(),
+                reason: "angle-bracket named capture `(?<name>...)` is a Rust `regex`-crate-only spelling; Python `re` rejects it as an unknown extension. Use Python's `(?P<name>...)` spelling instead."
+                    .to_string(),
+            });
+        }
+        i += 1;
+    }
+    Ok(())
+}
 /// If `chars[i]` opens a **base quantifier** — `*`, `+`, `?`, or a well-formed
 /// `{m}`/`{m,}`/`{,n}`/`{m,n}` — return its length in chars; else `None`. A `{` that is
 /// not a well-formed bound is a literal brace in Python `re` (so it is not a quantifier).
@@ -764,6 +810,7 @@ impl PatternRe {
         // (`\p`/`\P` unicode-property, `\x{…}` braced hex, `\z` end-of-text) — the crate
         // accepts each, so `Regex::new` below would let them through (#342, H4-2).
         reject_regex_crate_only_dialect(&raw)?;
+        reject_angle_named_group_dialect(&raw)?;
         let pattern = normalize_python_escapes(&raw);
         let flag_prefix = build_flag_prefix(flags);
         let full = format!("{}{}", flag_prefix, pattern);
@@ -1152,6 +1199,19 @@ mod tests {
             assert!(
                 reject_regex_crate_only_dialect(p).is_ok(),
                 "{p:?} is Python-accepted — must NOT be refused"
+            );
+        }
+    }
+    #[test]
+    fn angle_named_group_dialect_is_rejected() {
+        assert!(
+            reject_angle_named_group_dialect("(?<x>a)").is_err(),
+            "Rust regex angle named groups must be rejected like Python re"
+        );
+        for p in ["(?<=a)b", "(?<!a)b", "[(?<x>)]", "\\(?<x>a"] {
+            assert!(
+                reject_angle_named_group_dialect(p).is_ok(),
+                "{p:?} is not a Rust-only angle named group"
             );
         }
     }

@@ -218,7 +218,6 @@ fn h5_5_named_unicode_escape_supported() {
 /// Expected fix: reject-like-Python (a categorized build error, alongside
 /// `reject_global_inline_flags` in `PatternRe::new`).
 #[test]
-#[ignore = "XFAIL (bounty H5-6): regex-crate angle named-group (?<name>...) accepted; Python re rejects at build"]
 fn h5_6_angle_named_group_rejected() {
     let g = "start: A\nA: /(?<x>a)/\n";
     assert!(
