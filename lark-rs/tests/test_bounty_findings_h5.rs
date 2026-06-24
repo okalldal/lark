@@ -63,6 +63,9 @@ fn collect_token_types<'a>(t: &'a ParseTree, out: &mut Vec<&'a str>) {
                 walk(ch, out);
             }
         }
+        // A bare `None` parse result (root `?start: [A]` collapse, #289/ADR-0033)
+        // carries no tokens.
+        ParseTree::None => {}
     }
 }
 
