@@ -291,6 +291,12 @@ pub struct CompiledGrammar {
     pub ignore: Vec<SymbolId>,
     /// User start non-terminal ids (not the augmented `$root_` symbols).
     pub start: Vec<SymbolId>,
+    /// Python Lark's `propagate_positions`: when set, a node's `meta` span is
+    /// derived from its rule's pre-filter children (so filtered punctuation
+    /// contributes — #402). A parse-global, set after lowering from `LarkOptions`
+    /// (`lower` itself defaults it `false`); the engines thread it to the
+    /// [`TreeOutputBuilder`](crate::parsers::tree_builder).
+    pub propagate_positions: bool,
 }
 
 impl CompiledGrammar {
@@ -441,6 +447,9 @@ pub fn lower(grammar: &Grammar) -> CompiledGrammar {
         terminals: grammar.terminals.clone(),
         ignore,
         start: start_ids,
+        // A parse-global, set after lowering from `LarkOptions`; `lower` itself
+        // has no options, so it defaults `false`.
+        propagate_positions: false,
     }
 }
 

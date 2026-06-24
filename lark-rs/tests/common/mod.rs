@@ -249,6 +249,76 @@ pub fn tree_matches_oracle(result: &ParseTree, oracle: &serde_json::Value) -> Re
     }
 }
 
+/// As [`tree_matches_oracle`], but also asserts every `Tree` node's `meta` span
+/// against the oracle's serialized `meta` (the `propagate_positions` regression net
+/// for bug-bounty H6-5 / #402). The oracle must have been generated with
+/// `tree_to_dict(tree, with_meta=True)`. Token leaves carry no `meta`, so only
+/// `Tree` nodes are checked; their structure is validated by the shared matcher
+/// first, so this only adds the position assertions.
+pub fn tree_matches_oracle_with_meta(
+    result: &ParseTree,
+    oracle: &serde_json::Value,
+) -> Result<(), String> {
+    tree_matches_oracle(result, oracle)?;
+    if let ParseTree::Tree(tree) = result {
+        match_meta_recursive(tree, oracle)?;
+    }
+    Ok(())
+}
+
+/// Walk a `Tree` and its oracle in lockstep, asserting each node's `meta` span.
+/// The structural shape is already validated by [`tree_matches_oracle`], so the
+/// child counts line up; an `_ambig` node is not meta-pinned (its alternatives are
+/// unordered) and is skipped.
+fn match_meta_recursive(tree: &Tree, oracle: &serde_json::Value) -> Result<(), String> {
+    if tree.data == "_ambig" {
+        return Ok(());
+    }
+    match_meta(tree, &oracle["meta"]).map_err(|e| format!("In '{}' meta: {e}", tree.data))?;
+    let oracle_children = oracle["children"]
+        .as_array()
+        .map(|a| a.as_slice())
+        .unwrap_or(&[]);
+    for (child, oc) in tree.children.iter().zip(oracle_children.iter()) {
+        if let Child::Tree(sub) = child {
+            match_meta_recursive(sub, oc)?;
+        }
+    }
+    Ok(())
+}
+
+/// Assert one `Tree`'s `meta` against the oracle's serialized `meta` object.
+fn match_meta(tree: &Tree, oracle_meta: &serde_json::Value) -> Result<(), String> {
+    let m = &tree.meta;
+    let exp_empty = oracle_meta["empty"].as_bool().unwrap_or(false);
+    if exp_empty {
+        if !m.empty {
+            return Err(format!(
+                "expected positionless (empty) meta, got start_pos={:?} end_pos={:?}",
+                m.start_pos, m.end_pos
+            ));
+        }
+        return Ok(());
+    }
+    if m.empty {
+        return Err("got positionless (empty) meta, oracle has a span".to_string());
+    }
+    let chk = |field: &str, got: Option<usize>| -> Result<(), String> {
+        let exp = oracle_meta[field].as_u64().map(|v| v as usize);
+        if got != exp {
+            return Err(format!("{field}: got {got:?}, expected {exp:?}"));
+        }
+        Ok(())
+    };
+    chk("start_pos", m.start_pos)?;
+    chk("end_pos", m.end_pos)?;
+    chk("line", m.line)?;
+    chk("column", m.column)?;
+    chk("end_line", m.end_line)?;
+    chk("end_column", m.end_column)?;
+    Ok(())
+}
+
 /// Compare a leaf `Token` against an oracle `token` node (type + value).
 fn match_token(tok: &Token, oracle: &serde_json::Value) -> Result<(), String> {
     let expected_type = oracle["token_type"].as_str().unwrap_or("?");
