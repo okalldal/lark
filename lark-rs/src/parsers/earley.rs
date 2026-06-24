@@ -1573,7 +1573,11 @@ impl<'a> Transformer<'a> {
                 .unwrap_or(0),
             ForestRef::None => 0,
         };
-        base + child(packed.left) + child(packed.right)
+        // Saturating accumulation: priorities are a bounded i64 domain (ADR-0034),
+        // so a derivation summing priorities near the i64 boundary saturates rather
+        // than wrapping/panicking — mirrors CYK's `weight.saturating_add` chains.
+        base.saturating_add(child(packed.left))
+            .saturating_add(child(packed.right))
     }
 
     /// Family indices of `node_id` in Lark's `sort_key` order: non-empty

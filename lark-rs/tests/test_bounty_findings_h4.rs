@@ -334,6 +334,97 @@ fn h4_4_priority_small_and_boundary_still_order() {
     }
 }
 
+/// H4-4 follow-up (#384 / omnibus #354 blocking finding): the Earley forest priority
+/// **accumulator** must saturate, not wrap/panic. `packed_priority_value` sums a rule's
+/// own priority with its children's priorities along a derivation; with the `i32`→`i64`
+/// widening (#352) the *storage* no longer collides, but a derivation that sums two
+/// priorities each near `i64::MAX` would overflow the plain `+`. Pre-fix this panicked
+/// (debug `attempt to add with overflow`) / wrapped (release: the high-priority sum
+/// wraps negative and *loses*, picking the wrong derivation). Post-fix the sum uses
+/// `saturating_add` (mirroring CYK's `weight.saturating_add`), so it pins at `i64::MAX`
+/// and the high-priority alternative still wins, deterministically.
+///
+/// Grammar: `"xx"` is ambiguous between `hh` (two `high` rules, each priority
+/// `i64::MAX/2`, so their sum is `i64::MAX + 1` — the overflow point) and `ll` (two
+/// `low` rules, total priority 2). Python (unbounded ints) resolves to `hh`; lark-rs
+/// must do the same without overflowing, saturating the `hh` sum to `i64::MAX`.
+#[test]
+fn h4_4_earley_priority_accumulation_saturates_no_overflow() {
+    // 4611686018427387904 == 2^62 == (i64::MAX + 1) / 2; two of them sum to
+    // exactly i64::MAX + 1 — the minimal overflow point for the plain `+`.
+    let g = "start: hh | ll\n\
+             hh: high high\n\
+             ll: low low\n\
+             high.4611686018427387904: \"x\"\n\
+             low.1: \"x\"\n";
+    for lexer in [LexerType::Dynamic, LexerType::Basic] {
+        let lark = Lark::new(g, opts(ParserAlgorithm::Earley, lexer.clone()))
+            .unwrap_or_else(|e| panic!("H4-4 earley ({lexer:?}): builds: {e:?}"));
+        // Must not panic on overflow during forest priority resolution.
+        let tree = lark
+            .parse("xx")
+            .unwrap_or_else(|e| panic!("H4-4 earley ({lexer:?}): parses: {e:?}"));
+        // The summed-priority winner is `hh` (≈i64::MAX, saturating) over `ll` (2).
+        let names: Vec<&str> = tree
+            .as_tree()
+            .unwrap_or_else(|| panic!("H4-4 earley ({lexer:?}): root is a tree"))
+            .children
+            .iter()
+            .filter_map(|c| c.as_tree().map(|ct| ct.data.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            vec!["hh"],
+            "H4-4 earley ({lexer:?}): the saturating priority sum of `hh` (2^62 + 2^62 \
+             == i64::MAX + 1, pinned at i64::MAX) must outrank `ll` (2); a wrapping `+` \
+             would flip `hh` negative and pick `ll` (got {names:?})"
+        );
+    }
+}
+
+/// H4-4 boundary policy (ADR-0034): lark-rs intentionally supports a **bounded i64**
+/// priority domain — values beyond ±i64::MAX *saturate*, a deliberate narrowing from
+/// Python's unbounded ints. This pins that policy as tested, not accidental:
+///   (a) two *distinct* priorities both beyond i64::MAX both clamp to i64::MAX and
+///       **tie** (the documented bounded behavior — there is no Python oracle here
+///       since Python is unbounded), so the tie breaks by rule order (first wins); and
+///   (b) two *distinct in-range* large priorities still order correctly (the higher
+///       wins), so saturation only bites past the boundary.
+#[test]
+fn h4_4_priority_beyond_i64_saturates_to_bounded_domain() {
+    // (a) Both priorities are > i64::MAX (≈9.22e18); both clamp to i64::MAX and tie.
+    //     With a tie, Earley breaks by rule order, so the first alternative (`A`) wins.
+    let g_tie = "start: A | B\n\
+                 A.99999999999999999999: \"x\"\n\
+                 B.88888888888888888888: \"x\"\n";
+    let lark = Lark::new(g_tie, opts(ParserAlgorithm::Earley, LexerType::Dynamic))
+        .expect("H4-4 boundary: builds");
+    let tree = lark.parse("x").expect("H4-4 boundary: parses");
+    let mut types = Vec::new();
+    collect_token_types(&tree, &mut types);
+    assert_eq!(
+        types,
+        vec!["A"],
+        "H4-4 boundary (a): two priorities beyond i64::MAX both saturate to i64::MAX and \
+         tie (bounded-i64 policy, ADR-0034); the tie breaks by rule order so `A` wins \
+         (got {types:?})"
+    );
+
+    // (b) Two distinct *in-range* large priorities still order: B (9e9) > A (5e9).
+    let g_order = "start: A | B\nA.5000000000: \"x\"\nB.9000000000: \"x\"\n";
+    let lark = Lark::new(g_order, opts(ParserAlgorithm::Earley, LexerType::Dynamic))
+        .expect("H4-4 boundary: in-range builds");
+    let tree = lark.parse("x").expect("H4-4 boundary: in-range parses");
+    let mut types = Vec::new();
+    collect_token_types(&tree, &mut types);
+    assert_eq!(
+        types,
+        vec!["B"],
+        "H4-4 boundary (b): distinct in-range priorities still order (B 9e9 > A 5e9); \
+         saturation must only bite beyond the i64 boundary (got {types:?})"
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // %import closure mangling.
 // ─────────────────────────────────────────────────────────────────────────────
