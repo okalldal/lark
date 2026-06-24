@@ -199,7 +199,6 @@ fn h5_4_w_class_unicode_membership() {
 /// so the oracle-faithful contract is **support** (translate `\N{NAME}` to its
 /// codepoint), or at minimum re-bucket the error as `InvalidRegex`, not `LookaroundScope`.
 #[test]
-#[ignore = "XFAIL (bounty H5-5): \\N{NAME} named-Unicode escape rejected (and mis-categorized as backtracking); Python accepts"]
 fn h5_5_named_unicode_escape_supported() {
     let g = "start: A\nA: /\\N{BULLET}/\n";
     let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Basic))
@@ -218,7 +217,6 @@ fn h5_5_named_unicode_escape_supported() {
 /// Expected fix: reject-like-Python (a categorized build error, alongside
 /// `reject_global_inline_flags` in `PatternRe::new`).
 #[test]
-#[ignore = "XFAIL (bounty H5-6): regex-crate angle named-group (?<name>...) accepted; Python re rejects at build"]
 fn h5_6_angle_named_group_rejected() {
     let g = "start: A\nA: /(?<x>a)/\n";
     assert!(

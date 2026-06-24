@@ -208,6 +208,9 @@ pub struct PatternRe {
 /// * **`\b` inside a character class** (H9b) — Python reads `[\b]` as the backspace char
 ///   `\x08` (only *outside* a class is `\b` a word boundary); the regex crate rejects
 ///   `\b` in a class. We rewrite the in-class `\b` to `\x08`.
+/// * **`\N{NAME}` named Unicode escapes** (H5-5) — Python resolves Unicode character
+///   names before matching. The regex crate has no `\N{…}` escape, so translate valid
+///   names to a literal escaped for the regex crate.
 ///
 /// Every other escape — class-special ones like `\]`, idiom-pinned ones like `[^\/]`
 /// (the bundled `lark.REGEXP` shape), and `\b`/`\B` *outside* a class (the parked
@@ -247,6 +250,27 @@ fn normalize_python_escapes(pattern: &str) -> String {
                 Some('b') if in_class => {
                     out.push_str("\\x08");
                     i += 2;
+                }
+                Some('N') if chars.get(i + 2) == Some(&'{') => {
+                    let mut j = i + 3;
+                    while j < chars.len() && chars[j] != '}' {
+                        j += 1;
+                    }
+                    if chars.get(j) == Some(&'}') {
+                        let name: String = chars[i + 3..j].iter().collect();
+                        if let Some(ch) = unicode_names2::character(&name) {
+                            out.push_str(&regex::escape(&ch.to_string()));
+                            i = j + 1;
+                        } else {
+                            out.push('\\');
+                            out.push('N');
+                            i += 2;
+                        }
+                    } else {
+                        out.push('\\');
+                        out.push('N');
+                        i += 2;
+                    }
                 }
                 // Octal escape. Outside a class `\0…` is always octal; `\1`–`\7` is
                 // octal only as a full 3-octal-digit run (else a backreference, left
@@ -745,6 +769,60 @@ fn base_quantifier_len(chars: &[char], i: usize) -> Option<usize> {
     }
 }
 
+/// Reject the Rust `regex` crate's angle-bracket named capture spelling
+/// `(?<name>...)`, which Python `re` does not support (it only accepts
+/// `(?P<name>...)`). Keep lookbehind assertions `(?<=...)` and `(?<!...)` accepted.
+fn reject_angle_named_capture_groups(pattern: &str) -> Result<(), GrammarError> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => i += 2,
+            '[' => {
+                i += 1;
+                if chars.get(i) == Some(&'^') {
+                    i += 1;
+                }
+                if chars.get(i) == Some(&']') {
+                    i += 1;
+                }
+                while i < chars.len() && chars[i] != ']' {
+                    i += if chars[i] == '\\' { 2 } else { 1 };
+                }
+                i += 1;
+            }
+            '(' if chars.get(i + 1) == Some(&'?') && chars.get(i + 2) == Some(&'<') => {
+                match chars.get(i + 3).copied() {
+                    Some('=' | '!') => i += 3,
+                    Some(c) if c == '_' || c.is_ascii_alphabetic() => {
+                        let mut j = i + 4;
+                        while chars
+                            .get(j)
+                            .is_some_and(|c| *c == '_' || c.is_ascii_alphanumeric())
+                        {
+                            j += 1;
+                        }
+                        if chars.get(j) == Some(&'>') {
+                            let group: String = chars[i..=j].iter().collect();
+                            return Err(GrammarError::InvalidRegex {
+                                pattern: pattern.to_string(),
+                                reason: format!(
+                                    "angle named capture group `{group}` is a Rust `regex`-crate-only \
+                                     spelling — Python `re` only accepts `(?P<name>...)` and rejects \
+                                     `(?<name>...)` at build. Use `(?P<name>...)` instead."
+                                ),
+                            });
+                        }
+                        i += 1;
+                    }
+                    _ => i += 1,
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(())
+}
 impl PatternRe {
     pub fn new(pattern: impl Into<String>, flags: u32) -> Result<Self, GrammarError> {
         let raw = pattern.into();
@@ -764,6 +842,7 @@ impl PatternRe {
         // (`\p`/`\P` unicode-property, `\x{…}` braced hex, `\z` end-of-text) — the crate
         // accepts each, so `Regex::new` below would let them through (#342, H4-2).
         reject_regex_crate_only_dialect(&raw)?;
+        reject_angle_named_capture_groups(&raw)?;
         let pattern = normalize_python_escapes(&raw);
         let flag_prefix = build_flag_prefix(flags);
         let full = format!("{}{}", flag_prefix, pattern);
@@ -1002,6 +1081,8 @@ mod tests {
         assert_eq!(normalize_python_escapes("[\\b]"), "[\\x08]");
         assert_eq!(normalize_python_escapes("[\\101]"), "[\\x41]");
         assert_eq!(normalize_python_escapes("[\\1]"), "[\\x01]");
+        // Named Unicode escape → a literal escaped for the regex crate (H5-5).
+        assert_eq!(normalize_python_escapes("\\N{BULLET}"), "•");
         // Out of a class, \b is the (parked) word-boundary anchor — left untouched.
         assert_eq!(normalize_python_escapes("a\\bc"), "a\\bc");
         // The existing \< \> normalization still applies; other escapes byte-exact.
@@ -1152,6 +1233,24 @@ mod tests {
             assert!(
                 reject_regex_crate_only_dialect(p).is_ok(),
                 "{p:?} is Python-accepted — must NOT be refused"
+            );
+        }
+    }
+    /// H5-6 (#364): Rust regex accepts `(?<name>...)`, but Python `re` rejects that
+    /// spelling. The screen must reject named captures while preserving lookbehind
+    /// assertions, escaped text, and character classes.
+    #[test]
+    fn angle_named_capture_groups_are_rejected() {
+        for p in ["(?<x>a)", "a(?<_name>a)", "(?<name123>a)"] {
+            assert!(
+                reject_angle_named_capture_groups(p).is_err(),
+                "{p:?} is a regex-crate-only named-capture spelling — must be refused"
+            );
+        }
+        for p in ["(?<=a)b", "(?<!a)b", "(?P<x>a)", r"\(?<x>a", "[(?<x>a)]"] {
+            assert!(
+                reject_angle_named_capture_groups(p).is_ok(),
+                "{p:?} must not be rejected by the angle-named-capture screen"
             );
         }
     }

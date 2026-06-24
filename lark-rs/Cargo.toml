@@ -66,6 +66,7 @@ regex-syntax = "0.8"
 indexmap = "2"
 thiserror = "1"
 smallvec = "1"
+unicode_names2 = "3.1"
 
 [dev-dependencies]
 pretty_assertions = "1"
