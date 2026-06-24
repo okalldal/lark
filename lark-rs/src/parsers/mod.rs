@@ -596,7 +596,7 @@ fn lower_with_lexer_conf(grammar: &Grammar, options: &LarkOptions) -> (CompiledG
 ///    accepted everywhere (it is the default path, and Python accepts `earley`/`cyk`
 ///    explicit/forest too). CYK's `cyk_ignores_ambiguity_option` test pins that
 ///    `cyk + Explicit` still builds, matching the oracle.
-fn validate_config(options: &LarkOptions) -> Result<(), LarkError> {
+pub(crate) fn validate_config(options: &LarkOptions) -> Result<(), LarkError> {
     let cfg_err = |msg: String| LarkError::Grammar(GrammarError::Other { msg });
 
     // Parser → allowed-lexer matrix. `Auto` is resolved per-parser downstream and

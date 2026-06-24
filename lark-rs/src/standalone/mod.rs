@@ -154,6 +154,17 @@ fn bake(grammar_src: &str, options: &LarkOptions) -> Result<Baked, LarkError> {
         }));
     }
 
+    // Run the same front-door config-legality gate the in-process build runs
+    // (`build_frontend` → `validate_config`, bug-bounty N5/N6, #273) so the two
+    // front doors reject identical illegal configs (#298). The standalone backend
+    // is LALR + basic-lexer only, but a caller can still *set* an illegal
+    // `lexer`/`ambiguity` (e.g. `lexer=dynamic` or `ambiguity=explicit` on the
+    // LALR-only standalone path); without this gate they were silently accepted
+    // where the in-process API rejects them — an unfalsifiable, more-permissive
+    // asymmetry (ADR-0017). The parser==Lalr guard above already fired for non-LALR
+    // parsers, so what this adds for standalone is the lexer matrix + ambiguity legality.
+    crate::parsers::validate_config(options)?;
+
     let grammar = load_grammar_with_base(
         grammar_src,
         &options.start,
@@ -811,6 +822,87 @@ mod tests {
 
     fn can_bake(grammar: &str, opts: &LarkOptions) -> bool {
         catch_unwind(AssertUnwindSafe(|| bake(grammar, opts).is_ok())).unwrap_or(false)
+    }
+
+    // ─── #298: standalone runs the in-process config-legality gate ─────────────
+    //
+    // The standalone front door (`bake`) is LALR + basic-lexer only, but a caller
+    // can still *set* an illegal `lexer`/`ambiguity` on the LALR-only path. The
+    // in-process API rejects those via `validate_config` (#273 / N5/N6); standalone
+    // used to silently accept them — a more-permissive, unfalsifiable asymmetry
+    // (ADR-0017). Oracle here is the EXISTING in-process gate: the same illegal
+    // config must be rejected at standalone bake the same way `build_frontend`
+    // rejects it. Negative control: a LEGAL config must still bake (no over-reject).
+
+    /// A trivial, fully bakeable LALR grammar for the gate tests.
+    fn gate_grammar() -> &'static str {
+        "start: \"a\"\n"
+    }
+
+    /// In-process oracle: does the in-process front door accept this config for
+    /// `gate_grammar`? (We compare standalone's bake verdict to this.)
+    fn in_process_accepts(opts: &LarkOptions) -> bool {
+        crate::Lark::new(gate_grammar(), opts.clone()).is_ok()
+    }
+
+    #[test]
+    fn standalone_rejects_illegal_lexer_like_in_process() {
+        // `{parser: lalr, lexer: dynamic}` — the dynamic lexer is not in lalr's
+        // allowed set, so the in-process gate rejects it. Standalone must too.
+        let opts = LarkOptions {
+            parser: ParserAlgorithm::Lalr,
+            lexer: crate::LexerType::Dynamic,
+            start: vec!["start".to_string()],
+            ..Default::default()
+        };
+        assert!(
+            !in_process_accepts(&opts),
+            "oracle precondition: in-process API must reject lalr+dynamic"
+        );
+        assert!(
+            bake(gate_grammar(), &opts).is_err(),
+            "#298: standalone bake must reject lalr+dynamic to match the in-process gate"
+        );
+    }
+
+    #[test]
+    fn standalone_rejects_explicit_ambiguity_like_in_process() {
+        // `ambiguity: Explicit` on lalr — Python (and our in-process gate) rejects
+        // disambiguation on lalr. Standalone must too.
+        let opts = LarkOptions {
+            parser: ParserAlgorithm::Lalr,
+            ambiguity: crate::Ambiguity::Explicit,
+            start: vec!["start".to_string()],
+            ..Default::default()
+        };
+        assert!(
+            !in_process_accepts(&opts),
+            "oracle precondition: in-process API must reject lalr+ambiguity=explicit"
+        );
+        assert!(
+            bake(gate_grammar(), &opts).is_err(),
+            "#298: standalone bake must reject lalr+ambiguity=explicit to match the in-process gate"
+        );
+    }
+
+    #[test]
+    fn standalone_accepts_legal_config_negative_control() {
+        // Negative control: a LEGAL standalone config (lalr + contextual lexer,
+        // resolve ambiguity) must still bake — the gate must not over-reject.
+        let opts = LarkOptions {
+            parser: ParserAlgorithm::Lalr,
+            lexer: crate::LexerType::Contextual,
+            start: vec!["start".to_string()],
+            ..Default::default()
+        };
+        assert!(
+            in_process_accepts(&opts),
+            "oracle precondition: in-process API accepts lalr+contextual"
+        );
+        assert!(
+            bake(gate_grammar(), &opts).is_ok(),
+            "#298: a legal standalone config must still bake (no over-reject)"
+        );
     }
 
     /// Regression pin (bounty H12, fixed): the baked standalone runtime collapses an
