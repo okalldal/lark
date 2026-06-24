@@ -135,7 +135,7 @@ import mangling, forest enumeration, eager determinization) untouched by the pri
 - **Affected:** every engine. **Unaffected:** scoped flags, named groups, `\A`, `{,n}`
   bounds, empty alternations (all agree).
 
-### H4-3 — `%ignore NAME` mints a duplicate terminal (Medium, lexer / loader)
+### H4-3 — `%ignore NAME` mints a duplicate terminal (Medium, lexer / loader) — FIXED (#345)
 - **Grammar (a, priority):** `start: A+` / `A: /[a-z]/` / `SKIP.5: /[a-z]/` / `%ignore SKIP`
   · **Input:** `ab`. **(b, filter):** `start: item+` / `item: "a" | WS` / `WS: /\s+/` /
   `%ignore WS` · **Input:** `a a`.
@@ -154,7 +154,13 @@ import mangling, forest enumeration, eager determinization) untouched by the pri
   priority).
 - **Nearest known:** RC5 (`%ignore` width), H11/#335 (dynamic scan cost), N5 (illegal
   pairing) — different code paths; this is the `__IGNORE_n` duplication in the loader.
-- **Test:** `h4_3_ignore_named_terminal_priority_and_filter`.
+- **Test:** `h4_3_ignore_named_terminal_priority_and_filter` (now passing); negative control
+  `h4_3_inline_ignore_still_synthesizes_terminal` pins the inline form unchanged.
+- **Fix (#345):** `grammar/loader/compiler.rs` — a `%ignore` directive that is a single
+  reference to a named terminal records `IgnoreEntry::Named(name)` and adds that terminal to
+  the ignore set with its declared priority intact (an undefined name is rejected, as Python
+  does); only inline directives mint a fresh `__IGNORE_n` (`IgnoreEntry::Pattern`), with the
+  number seeded from the running ignore count to match Python's `len(self._ignore_names)`.
 
 ### H4-4 — Priority clamped to `i32` ties distinct large priorities (Low, loader)
 - **Grammar:** `start: A | B` / `A.5000000000: "x"` / `B.9000000000: "x"` · **Input:** `x`.

@@ -57,6 +57,17 @@ impl AnonKind {
 }
 
 /// Converts the parsed AST into flat BNF rules and terminal definitions.
+/// One resolved `%ignore` directive (see [`GrammarCompiler::ignore_patterns`]).
+pub(super) enum IgnoreEntry {
+    /// `%ignore NAME` — a single reference to an already-named terminal. The
+    /// terminal is added to the ignore set as-is, **preserving its declared
+    /// priority**; no new terminal is synthesized (Python `_ignore`).
+    Named(String),
+    /// `%ignore <inline pattern>` — synthesizes a fresh `__IGNORE_n` terminal
+    /// (priority 0) from the pattern, as both engines do for the inline form.
+    Pattern(Pattern),
+}
+
 pub(super) struct GrammarCompiler {
     pub(super) start: Vec<String>,
     pub(super) rules: Vec<Rule>,
@@ -64,7 +75,14 @@ pub(super) struct GrammarCompiler {
     /// Raw terminal definitions, collected before any are compiled so a terminal
     /// body may reference another terminal defined later (`C: "C" | D`).
     pub(super) raw_terms: Vec<RawTerm>,
-    pub(super) ignore_patterns: Vec<Pattern>,
+    /// `%ignore` directives, in document order. A directive that is a single
+    /// reference to a named terminal records that terminal's name
+    /// ([`IgnoreEntry::Named`]) so it is marked ignored with its **declared
+    /// priority** preserved, exactly as Python's `_ignore` short-circuits
+    /// (`load_grammar.py`, "Keep terminal name, no need to create a new
+    /// definition"); any other (inline) directive carries a synthesized
+    /// [`IgnoreEntry::Pattern`] that mints a fresh `__IGNORE_n` terminal.
+    pub(super) ignore_patterns: Vec<IgnoreEntry>,
     /// Counter for generating unique anonymous rule names.
     pub(super) anon_counter: usize,
     /// Counter for generating unique terminal names for literals.
@@ -460,9 +478,21 @@ impl GrammarCompiler {
             self.compile_rule(r)?;
         }
         for expansions in ignore_items {
+            // Mirror Python's `_ignore` (`load_grammar.py`): a directive that is a
+            // single expansion containing a single value which is a reference to a
+            // named terminal marks *that* terminal ignored (keeping its declared
+            // priority) — "no need to create a new definition". Anything else
+            // (multiple alternatives, a sequence, or an inline literal/regex)
+            // synthesizes a fresh `__IGNORE_n` terminal, as before.
+            if let [single_expansion] = expansions.as_slice() {
+                if let [Expr::Value(Value::Terminal(name))] = single_expansion.as_slice() {
+                    self.ignore_patterns.push(IgnoreEntry::Named(name.clone()));
+                    continue;
+                }
+            }
             for expansion in expansions {
                 let pat = self.expansion_to_pattern(&expansion)?;
-                self.ignore_patterns.push(pat);
+                self.ignore_patterns.push(IgnoreEntry::Pattern(pat));
             }
         }
         Ok(())
@@ -866,17 +896,39 @@ impl GrammarCompiler {
         // per-occurrence filter — they appear in no rule body.
         let ignore_patterns = std::mem::take(&mut self.ignore_patterns);
         let mut ignore_names: Vec<String> = Vec::with_capacity(ignore_patterns.len());
-        let mut ignore_counter = 0usize;
-        for pat in ignore_patterns {
-            let name = loop {
-                let candidate = format!("__IGNORE_{}", ignore_counter);
-                ignore_counter += 1;
-                if self.anon_terminal_name_free(&candidate) {
-                    break candidate;
+        for entry in ignore_patterns {
+            match entry {
+                // `%ignore NAME`: add the existing terminal to the ignore set with
+                // its declared priority intact — no clone (Python's `_ignore`
+                // short-circuit). Reject a name that resolves to no defined
+                // terminal, mirroring Python's "Terminals %s were marked to ignore
+                // but were not defined!" (a bare `%ignore WS` does not auto-import).
+                IgnoreEntry::Named(name) => {
+                    if !self.terminals.iter().any(|t| t.name == name) {
+                        return Err(GrammarError::UndefinedTerminal { name });
+                    }
+                    ignore_names.push(name);
                 }
-            };
-            self.terminals.push(TerminalDef::new(&name, pat, 0));
-            ignore_names.push(name);
+                // Inline pattern: synthesize a fresh `__IGNORE_n` terminal at the
+                // default priority, exactly as both engines do for the inline form.
+                // The base index is the count of ignore entries seen so far
+                // (Python's `'__IGNORE_%d' % len(self._ignore_names)`), so a named
+                // entry preceding an inline one bumps the inline name's number; the
+                // availability skip is lark-rs's extra collision guard (#326 import
+                // alias) layered on top of that base.
+                IgnoreEntry::Pattern(pat) => {
+                    let mut ignore_counter = ignore_names.len();
+                    let name = loop {
+                        let candidate = format!("__IGNORE_{}", ignore_counter);
+                        ignore_counter += 1;
+                        if self.anon_terminal_name_free(&candidate) {
+                            break candidate;
+                        }
+                    };
+                    self.terminals.push(TerminalDef::new(&name, pat, 0));
+                    ignore_names.push(name);
+                }
+            }
         }
 
         // Reject use-before-definition: a rule body that references a symbol which
