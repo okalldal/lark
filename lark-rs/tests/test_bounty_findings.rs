@@ -196,6 +196,29 @@ fn rc2c_neg_same_import_noalias_twice_accepted() {
     );
 }
 
+/// RC2c-388 (XFAIL #388, architect ask on omnibus #354). The risky edge of the
+/// RC2c source/alias dedup: the **same** original terminal imported **twice under
+/// two *different* aliases**, then only one alias used. Python keeps only the *last*
+/// alias binding (`X` is never defined) and rejects at build:
+/// `Rule 'X' used but not defined (in rule start)` (verified against Python Lark
+/// 1.3.1). lark-rs currently imports *both* `X` and `Y` and over-accepts `start: X`
+/// — a *more-permissive* divergence (ADR-0017 corollary: unfalsifiable
+/// permissiveness ⇒ a bug). Filed as **#388**.
+///
+/// Pinned as an XFAIL (ignored) asserting Python's correct **rejection**: it FAILS
+/// on the current SHA (lark-rs accepts), so it must stay `#[ignore]`d to document the
+/// known divergence in the burndown net without a false-green or a CI-blocking red.
+/// Drop the `#[ignore]` when #388 is fixed (lark-rs keeps only the last alias and
+/// rejects `start: X`). Run with `cargo test --test test_bounty_findings -- --ignored`.
+#[test]
+#[ignore = "XFAIL #388: same-source two-alias import over-accept"]
+fn rc2c_388_same_source_two_aliases_unused_alias_rejected() {
+    // common.INT imported as both X and Y; start uses only X. Python: last alias
+    // (Y) wins, X is undefined → "Rule 'X' used but not defined".
+    let g = "%import common.INT -> X\n%import common.INT -> Y\nstart: X\n";
+    assert_build_rejected(g, ParserAlgorithm::Lalr, LexerType::Contextual, "RC2c-388");
+}
+
 /// RC2d (#299, spun out of #270). `%extend` of an abstract (`%declare`d,
 /// pattern-less) terminal. After `%declare FOO`, FOO lives in `self.terminals`, not
 /// `raw_terms`; the Extend arm passed the pre-existence gate, found no `RawTerm` to

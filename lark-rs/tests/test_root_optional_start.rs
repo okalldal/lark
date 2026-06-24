@@ -61,6 +61,65 @@ fn root_optional_start_empty_input_is_bare_none() {
     }
 }
 
+/// `maybe_placeholders=false` negative control (#382, architect ask on omnibus #354).
+/// With `maybe_placeholders=false` the absent `[A]` does *not* inject a `None`
+/// placeholder, so `?start: [A]` on `""` must NOT collapse to `ParseTree::None`.
+/// Oracle (Python Lark 1.3.1, all three backends) returns an **empty `start` tree**
+/// `Tree('start', [])`, not `None`:
+///
+///   * `lalr`             → Tree('start', [])
+///   * `earley` (basic)   → Tree('start', [])
+///   * `earley` (dynamic) → Tree('start', [])
+///
+/// This pins that the #289 bare-`None` root mapping is gated on the placeholder
+/// `None` actually being produced (mp=true) and never fires for mp=false — guarding
+/// against an accidental `ParseTree::None` when no placeholder exists.
+#[test]
+fn root_optional_start_empty_input_mp_false_is_empty_tree_not_none() {
+    let grammar = "?start: [A]\nA: \"a\"";
+    let configs = [
+        (ParserAlgorithm::Lalr, LexerType::Contextual, "lalr"),
+        (ParserAlgorithm::Earley, LexerType::Basic, "earley/basic"),
+        (
+            ParserAlgorithm::Earley,
+            LexerType::Dynamic,
+            "earley/dynamic",
+        ),
+    ];
+    for (parser, lexer, label) in configs {
+        // maybe_placeholders=false (the default differs from the other tests here).
+        let lark = Lark::new(
+            grammar,
+            LarkOptions {
+                parser: parser.clone(),
+                lexer: lexer.clone(),
+                start: vec!["start".to_string()],
+                maybe_placeholders: false,
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| panic!("{label}: grammar failed to load: {e}"));
+        let result = lark.parse("").unwrap_or_else(|e| {
+            panic!(
+                "{label}: `?start: [A]` on \"\" (mp=false) must parse (Python → empty tree): {e}"
+            )
+        });
+        assert!(
+            !result.is_none(),
+            "{label}: mp=false must NOT yield ParseTree::None (Python → Tree('start', [])), got {result:?}"
+        );
+        let tree = result.as_tree().unwrap_or_else(|| {
+            panic!("{label}: mp=false expected a Tree('start', []), got {result:?}")
+        });
+        assert_eq!(tree.data, "start", "{label}: expected root data `start`");
+        assert!(
+            tree.children.is_empty(),
+            "{label}: expected empty children (Python → Tree('start', [])), got {:?}",
+            tree.children
+        );
+    }
+}
+
 /// Present-branch sibling: `?start: [A]` on `"a"` collapses to the bare `A` token
 /// (expand1 with a single real child), on every backend — the non-empty arm.
 #[test]
