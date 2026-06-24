@@ -472,7 +472,6 @@ fn h4_7_eof_error_borrows_last_token_position() {
 /// slips past it. Expected fix: reject-like-Python (keep enough provenance that the two
 /// arms collide at stage 2). Distinct from #289/RC9 (lone-None expand1 parse divergence).
 #[test]
-#[ignore = "XFAIL (bounty H4-8): nested optional-of-optional ([A]?) B silently accepted; Python rejects 'Rules defined twice'"]
 fn h4_8_nested_optional_of_optional_collision_rejected() {
     for g in [
         "start: ([A]?) B\nA: \"a\"\nB: \"b\"\n",
