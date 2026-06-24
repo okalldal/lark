@@ -10,8 +10,9 @@
 //! Earley dynamic-lexer scan pathology.
 //!
 //! Each test asserts the **Python Lark 1.3.1** (oracle) behavior. This file is an XFAIL
-//! catalog: every test below is `#[ignore]`d and fails today. Drop a test's `#[ignore]`
-//! when its bug is fixed to turn it into a permanent regression guard. Run the still-open
+//! catalog being burned down: a test loses its `#[ignore]` once its bug is fixed, turning
+//! it into a permanent regression guard (H1, H2a, H2b, H3, H4 are fixed and now run by
+//! default). The remaining `#[ignore]`d tests still fail today. Run the still-open
 //! XFAILs with:
 //!
 //!     cargo test --test test_bounty_findings_h3 -- --ignored
@@ -90,7 +91,6 @@ fn h1_undefined_start_rejected_not_panicked() {
 /// analogue of Python's `GrammarDefinition.validate()` template-parameter pass, so it
 /// builds the malformed template silently.
 #[test]
-#[ignore = "XFAIL (bounty H2): duplicate template parameter not rejected"]
 fn h2a_duplicate_template_param_rejected() {
     let g = "foo{x,x}: x\nstart: foo{\"a\",\"b\"}\n";
     assert_build_rejected(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual), "H2a");
@@ -102,7 +102,6 @@ fn h2a_duplicate_template_param_rejected() {
 /// literal arg substitutes for the param, shadowing rule `x`) where Python rejects the
 /// grammar outright. Same missing-`validate()` root cause as H2a, second surface.
 #[test]
-#[ignore = "XFAIL (bounty H2): template parameter shadowing a rule not rejected"]
 fn h2b_template_param_shadows_rule_rejected() {
     let g = "x: \"z\"\nfoo{x}: x\nstart: foo{\"a\"}\n";
     assert_build_rejected(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual), "H2b");
@@ -114,7 +113,6 @@ fn h2b_template_param_shadows_rule_rejected() {
 /// `start(Token(A,"a"))`). Distinct from RC4a/b/c (aliases on *rules* / inside groups);
 /// this is the terminal-definition surface with its own Python check.
 #[test]
-#[ignore = "XFAIL (bounty H3): alias inside a terminal definition not rejected"]
 fn h3_alias_in_terminal_rejected() {
     let g = "A: \"a\" -> foo\nstart: A\n";
     assert_build_rejected(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual), "H3");

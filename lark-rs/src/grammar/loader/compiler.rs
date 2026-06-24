@@ -442,6 +442,16 @@ impl GrammarCompiler {
             }
         }
 
+        // H2 (#331): template parameter-list well-formedness, mirroring Python
+        // Lark's `GrammarDefinition.validate()` (`load_grammar.py`). For each
+        // template, every parameter name is checked, in order, against (a) the
+        // full set of *defined* names — a param that shadows a rule/terminal/
+        // template/import is rejected, exactly as Python's `p in self._definitions`
+        // — and (b) the parameters seen earlier in the same list (`p in
+        // params[:i]`), rejecting a duplicate. The conflict check runs *before* the
+        // duplicate check at each index, matching Python's error precedence.
+        self.validate_template_params(&defined_rule_names, &defined_term_names)?;
+
         // Resolve all terminals (inlining terminal-to-terminal references).
         self.resolve_terminals()?;
 
@@ -632,6 +642,41 @@ impl GrammarCompiler {
                     let mut merged = r.expansions;
                     merged.append(&mut entry.1);
                     entry.1 = merged;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// H2 (#331): validate every template's parameter list, mirroring Python
+    /// Lark's `GrammarDefinition.validate()` (`load_grammar.py`):
+    /// for each parameter `p` at index `i`, reject it if it shadows a defined
+    /// name (rule/terminal/template/import — Python's `p in self._definitions`,
+    /// the "conflicts with rule" error) *before* checking whether it duplicates an
+    /// earlier parameter (`p in params[:i]`, the "Duplicate Template Parameter"
+    /// error). Template names are visited in a deterministic (sorted) order so the
+    /// reported error is stable; the oracle only pins single-template grammars.
+    fn validate_template_params(
+        &self,
+        defined_rules: &HashSet<String>,
+        defined_terms: &HashSet<String>,
+    ) -> Result<(), GrammarError> {
+        let mut names: Vec<&String> = self.templates.keys().collect();
+        names.sort();
+        for name in names {
+            let params = &self.templates[name].0;
+            for (i, p) in params.iter().enumerate() {
+                if defined_rules.contains(p) || defined_terms.contains(p) {
+                    return Err(GrammarError::Other {
+                        msg: format!(
+                            "Template Parameter conflicts with rule {p} (in template {name})"
+                        ),
+                    });
+                }
+                if params[..i].contains(p) {
+                    return Err(GrammarError::Other {
+                        msg: format!("Duplicate Template Parameter {p} (in template {name})"),
+                    });
                 }
             }
         }
@@ -1292,6 +1337,63 @@ mod tests {
                 .contains("Rule 'foo' defined more than once"),
             "got: {err}"
         );
+    }
+
+    /// H2a (#331): a template with a duplicate parameter name is rejected with
+    /// Python Lark's verbatim message (`GrammarDefinition.validate()`).
+    #[test]
+    fn duplicate_template_param_rejected() {
+        let err = load("foo{x,x}: x\nstart: foo{\"a\",\"b\"}\n").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Duplicate Template Parameter x (in template foo)"),
+            "got: {err}"
+        );
+    }
+
+    /// H2b (#331): a template parameter whose name shadows a defined rule is
+    /// rejected — the "conflicts with rule" check, run *before* the duplicate check.
+    #[test]
+    fn template_param_shadows_rule_rejected() {
+        let err = load("x: \"z\"\nfoo{x}: x\nstart: foo{\"a\"}\n").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Template Parameter conflicts with rule x (in template foo)"),
+            "got: {err}"
+        );
+    }
+
+    /// No over-rejection: a well-formed template whose parameter names are distinct
+    /// and don't shadow any definition still builds (guards the H2 validation pass
+    /// against false positives).
+    #[test]
+    fn well_formed_template_params_accepted() {
+        load("foo{a,b}: a b\nstart: foo{\"x\",\"y\"}\n").unwrap();
+        load("_sep{item, sep}: item (sep item)*\nstart: _sep{NAME, \",\"}\nNAME: /[a-z]+/\n")
+            .unwrap();
+    }
+
+    /// H3 (#331): a top-level alias (`->`) in a terminal definition is rejected
+    /// with Python's verbatim message. A *group-nested* alias is also rejected (our
+    /// walk catches it); Python rejects it too, though via a later "used but not
+    /// defined" path — both reject, which is the contract.
+    #[test]
+    fn alias_in_terminal_rejected() {
+        let top = load("A: \"a\" -> foo\nstart: A\n").unwrap_err();
+        assert!(
+            top.to_string()
+                .contains("Aliasing not allowed in terminals (You used -> in the wrong place)"),
+            "got: {top}"
+        );
+        // Both engines reject the nested case; we report it precisely as an
+        // aliasing error rather than letting it leak downstream.
+        assert!(load("A: (\"a\" -> foo)\nstart: A\n").is_err());
+    }
+
+    /// No over-rejection: an alias on a *rule* (not a terminal) is still legal.
+    #[test]
+    fn alias_on_rule_still_accepted() {
+        load("start: \"a\" -> foo\n").unwrap();
     }
 
     /// Not a duplicate: one definition split across `|` arms is a single origin
