@@ -217,8 +217,12 @@ pub fn replay_oracle_cases(
 /// generate_oracles.py.
 ///
 /// The oracle root is normally a `tree`, but a `?start` rule that collapses via
-/// expand1 to a single token gives a bare `token` root — and lark-rs's
-/// [`ParseTree`] now mirrors that, so both shapes are compared here uniformly.
+/// expand1 to a single token gives a bare `token` root — or, when its sole
+/// alternative is an absent `[...]` placeholder, a bare `None` (`?start: [A]` on
+/// `""`, #289). lark-rs's [`ParseTree`] mirrors all three, so they are compared
+/// here uniformly. Python serializes a bare `None` result as the `unknown`/`None`
+/// node (`generate_oracles.py`'s `tree_to_dict` fallthrough), or as JSON `null`
+/// (`diffcheck.py`'s `tree_to_dict`).
 ///
 /// Returns `Ok(())` on match, `Err(String)` describing the first mismatch.
 pub fn tree_matches_oracle(result: &ParseTree, oracle: &serde_json::Value) -> Result<(), String> {
@@ -226,6 +230,14 @@ pub fn tree_matches_oracle(result: &ParseTree, oracle: &serde_json::Value) -> Re
     match (result, node_type) {
         (ParseTree::Tree(tree), "tree") => match_node_tree(tree, oracle),
         (ParseTree::Token(tok), "token") => match_token(tok, oracle),
+        // A bare `None` root (#289): the oracle is either JSON `null` or the
+        // `{"type":"unknown","repr":"None"}` fallthrough Python emits for `None`.
+        (ParseTree::None, _) if oracle.is_null() || oracle["repr"].as_str() == Some("None") => {
+            Ok(())
+        }
+        (ParseTree::None, other) => Err(format!(
+            "root is a bare None but oracle node type is '{other}'"
+        )),
         (ParseTree::Tree(tree), other) => Err(format!(
             "root is Tree('{}') but oracle node type is '{other}'",
             tree.data

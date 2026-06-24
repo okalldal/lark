@@ -411,6 +411,14 @@ fn node_from_parse_tree(pt: &ParseTree) -> Box<lark_tree_t> {
     match pt {
         ParseTree::Tree(t) => node_from_tree(t),
         ParseTree::Token(t) => node_from_token(t),
+        // A bare `None` root (`?start: [A]` on `""`, #289). Surface it the same way
+        // a maybe_placeholders `None` child is: a valueless leaf labelled "None".
+        ParseTree::None => Box::new(lark_tree_t {
+            data: cstring_lossy("None"),
+            value: None,
+            is_token: false,
+            children: Vec::new(),
+        }),
     }
 }
 

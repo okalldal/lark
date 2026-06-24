@@ -325,6 +325,9 @@ fn parse_tree_to_json(pt: &ParseTree) -> String {
     let mut stack: Vec<Emit> = vec![match pt {
         ParseTree::Tree(t) => Emit::Tree(t),
         ParseTree::Token(t) => Emit::Token(t),
+        // A bare `None` root (`?start: [A]` on `""`, #289). Emit the same
+        // `unknown`/`None` node Python's `tree_to_dict(None)` produces.
+        ParseTree::None => Emit::Hole,
     }];
     while let Some(item) = stack.pop() {
         match item {

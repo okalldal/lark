@@ -69,6 +69,7 @@ fn collect_token_types<'a>(t: &'a ParseTree, out: &mut Vec<&'a str>) {
                 walk(ch, out);
             }
         }
+        ParseTree::None => {}
     }
 }
 
@@ -113,6 +114,7 @@ fn derivation_count(t: &ParseTree) -> usize {
     let root = match t {
         ParseTree::Tree(tr) => Child::Tree(tr.clone()),
         ParseTree::Token(tok) => Child::Token(tok.clone()),
+        ParseTree::None => Child::None,
     };
     enum_derivations(&root).len()
 }
