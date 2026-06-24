@@ -25,13 +25,35 @@ they tied, and it picked `A`. Confirmed against Python: it picks `B`, and it
 **accepts** arbitrarily large priorities (no rejection even at 9e20) because Python
 ints are unbounded.
 
-The contract (issue #352): *support-and-match* — store priorities wide enough not
-to collide, **or** reject out-of-range like Python. Python does not reject, so the
-match is "store wide".
+The contract (issue #352): resolve the realistic-magnitude collisions of #352. The
+honest framing is **not** unbounded "support-and-match" with Python's
+arbitrary-precision ints — lark-rs deliberately narrows to a **bounded `i64`
+priority domain** (below). Within that domain it matches Python; beyond it,
+lark-rs saturates where Python would keep growing.
 
 ## Decision
 
-Widen the priority storage type from `i32` to **`i64`** throughout:
+lark-rs intentionally supports a **bounded `i64` priority domain**, saturating
+beyond ±`i64::MAX`. This is a deliberate bounded narrowing of Python's
+arbitrary-precision priority semantics, **not** unbounded parity. The bound applies
+end to end:
+
+- **Storage** is `i64` (was `i32`). The loader (`tokenizer.rs::try_lex_number`)
+  parses to `i128` and **clamps to the `i64` bounds** — two distinct declared
+  priorities that both exceed `i64::MAX` therefore both saturate to `i64::MAX` and
+  **tie** (the tie then breaks by the engine's normal rule/name order). This is the
+  documented bounded behavior, pinned by
+  `h4_4_priority_beyond_i64_saturates_to_bounded_domain`.
+- **Accumulation** is **saturating**. Both backends sum priorities along a
+  derivation, and both saturate at the `i64` boundary rather than wrap or panic: CYK
+  uses `weight.saturating_add` (table fill + unit-rule folding) and Earley's forest
+  accumulator (`packed_priority_value`) uses `saturating_add` for the
+  rule-priority-plus-children sum — they are consistent. A derivation whose summed
+  priorities exceed `i64::MAX` pins at `i64::MAX` and still wins deterministically,
+  pinned by `h4_4_earley_priority_accumulation_saturates_no_overflow`.
+
+Within the bounded domain (any realistic hand-authored magnitude), ordering matches
+Python exactly. The widening from `i32` resolves every realistic collision of #352:
 
 - the loader clamp (`tokenizer.rs`): `Tok::Number(i64)`, clamp to the `i64` bounds
   instead of the `i32` bounds (saturation is kept as the graceful out-of-range
@@ -42,7 +64,12 @@ Widen the priority storage type from `i32` to **`i64`** throughout:
 - the priority **accumulators** that sum priorities along a derivation: the Earley
   `node_priority`/`packed_priority` machinery (`prio`/`term_priority` maps and the
   `i32::MIN` sentinel) and the CYK `weight` (`saturating_add` chains) — these must
-  widen too, or a summed pair of large priorities would re-truncate.
+  widen too, or a summed pair of large priorities would re-truncate. The accumulator
+  sums are **saturating, not plain `+`**: Earley's `packed_priority_value` uses
+  `saturating_add` for `base + child.left + child.right`, mirroring CYK's existing
+  `weight.saturating_add` — so a derivation summing priorities past `i64::MAX`
+  saturates instead of wrapping or panicking, the bounded-domain policy applied to
+  accumulation as well as storage.
 
 `i64` (not `i128`) is chosen as the minimal widening that resolves every realistic
 collision: it covers the full range of any plausibly hand-authored priority,
@@ -71,8 +98,20 @@ replaced outright, not kept alongside.
   correctly — the widening does not perturb the non-saturating case.
 - Out-of-range is still saturated, not rejected — symmetric with the prior
   behaviour and consistent with the existing "don't fail to lex a huge priority"
-  comment, now at the `i64` boundary. Python never reaches this boundary, so it is
-  unobservable against the oracle; if a future grammar ever needs > `i64`, revisit.
+  comment, now at the `i64` boundary. **This is the bounded-`i64` policy, not a
+  Python match:** Python's unbounded ints never saturate, so beyond ±`i64::MAX`
+  lark-rs *diverges by design* — two distinct beyond-boundary priorities tie where
+  Python would order them, and a summed derivation pins at `i64::MAX` where Python
+  would keep growing. **The tradeoff:** we trade exactness at extreme (>9.2e18,
+  unreachable by any hand-authored grammar) magnitudes for a single-word,
+  panic-free, deterministic accumulator. No Python oracle exists past the boundary
+  (Python is unbounded), so the bounded behavior is pinned to *our stated policy*
+  (no panic + deterministic + saturating), not to the oracle — by
+  `h4_4_priority_beyond_i64_saturates_to_bounded_domain` and
+  `h4_4_earley_priority_accumulation_saturates_no_overflow`. If a future grammar
+  ever needs > `i64`, revisit.
 - **Tripwire:** if a new priority-consuming site is added with an `i32` type, a
-  large-priority case will silently truncate again. Keep priority types `i64` end
-  to end (loader → storage → accumulators).
+  large-priority case will silently truncate again; and if an accumulator sums
+  priorities with a plain `+` instead of `saturating_add`, a large summed derivation
+  will wrap/panic. Keep priority types `i64` and accumulator sums *saturating* end to
+  end (loader → storage → accumulators).
