@@ -168,7 +168,6 @@ fn h6_2_empty_lower_bound_quantifier_accepted() {
 /// `sym_key`); this is the Re-vs-Str *interning* merge. Expected fix: gate
 /// `patterns_equivalent` on matching `Pattern` kind (never `Str` ≡ `Re`).
 #[test]
-#[ignore = "XFAIL (bounty H6-6): string literal unified onto a same-source regex terminal, kept instead of filtered"]
 fn h6_6_string_literal_not_unified_with_regex_terminal() {
     let g = "start: AB | \"ab\"\nAB: /ab/\n";
     let lark =

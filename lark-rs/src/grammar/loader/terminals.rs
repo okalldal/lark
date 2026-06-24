@@ -599,7 +599,18 @@ fn terminal_name_hint(s: &str) -> Option<String> {
 /// `term_reverse` map on `Pattern` equality (and raises on a flag mismatch for the
 /// same source); we treat differing flags as simply distinct, so unification never
 /// merges, say, `"a"` with `"a"i`.
+///
+/// **Variant gate:** a `PatternStr` and a `PatternRe` with the same source are
+/// *never* equivalent — Python's `Pattern.__eq__` requires `type(self) == type(other)`,
+/// and `term_reverse` is consulted only for `PatternStr`, so a string literal inline in
+/// a rule never unifies with a named regex terminal (H6-6).
 fn patterns_equivalent(a: &Pattern, b: &Pattern) -> bool {
+    // A string literal (`PatternStr`) and a regex (`PatternRe`) are never the same,
+    // even when their regex sources coincide — Python keeps them distinct.
+    match (a, b) {
+        (Pattern::Str(_), Pattern::Str(_)) | (Pattern::Re(_), Pattern::Re(_)) => {}
+        _ => return false,
+    }
     fn flags_of(p: &Pattern) -> u32 {
         match p {
             Pattern::Str(s) if s.ci => flags::IGNORECASE,
