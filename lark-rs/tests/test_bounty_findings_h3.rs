@@ -12,8 +12,9 @@
 //! Each test asserts the **Python Lark 1.3.1** (oracle) behavior. This file is an XFAIL
 //! catalog being burned down: a test loses its `#[ignore]` once its bug is fixed, turning
 //! it into a permanent regression guard (H1, H2a, H2b, H3, H4 are fixed and now run by
-//! default). The remaining `#[ignore]`d tests still fail today. Run the still-open
-//! XFAILs with:
+//! default, as is the Python-`re` dialect set H6–H9 — possessive/stacked quantifiers,
+//! `(?#)` comment, octal/`[\b]` escapes, #333). The remaining `#[ignore]`d tests still
+//! fail today. Run the still-open XFAILs with:
 //!
 //!     cargo test --test test_bounty_findings_h3 -- --ignored
 //!
@@ -196,7 +197,6 @@ fn h5b_class_setop_python_re_dialect() {
 /// mis-match. Acceptable fixes: refuse (categorized) or match Python — never silently
 /// accept the greedy reading.
 #[test]
-#[ignore = "XFAIL (bounty H6): possessive quantifier a++ silently reinterpreted as greedy (a+)+"]
 fn h6_possessive_not_silently_greedy() {
     let g = "start: A\nA: /a++a/\n";
     match Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)) {
@@ -216,7 +216,6 @@ fn h6_possessive_not_silently_greedy() {
 /// lark-rs builds and lexes the terminal. Per ADR-0017, being more permissive than the
 /// oracle is a bug. Distinct dialect axis from H5 (quantifier shape, not char class).
 #[test]
-#[ignore = "XFAIL (bounty H7): stacked quantifier /a{2}{3}/ accepted; Python rejects 'multiple repeat'"]
 fn h7_stacked_quantifier_rejected() {
     let g = "start: A\nA: /a{2}{3}/\n";
     assert_build_rejected(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual), "H7");
@@ -229,7 +228,6 @@ fn h7_stacked_quantifier_rejected() {
 /// construct. The minimum fix is to stop leaking a raw error; the oracle default is to
 /// support it (strip the comment) and match Python. Distinct from RC6 (`\b`).
 #[test]
-#[ignore = "XFAIL (bounty H8): (?#comment) leaks a raw uncategorized regex error; Python accepts it"]
 fn h8_inline_comment_group_supported() {
     let g = "start: A\nA: /a(?#c)b/\n";
     let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual));
@@ -253,7 +251,6 @@ fn h8_inline_comment_group_supported() {
 /// are the `\b`/`\B`/`\Z` *anchor* policy fork; these are Python-accepted regular
 /// escapes that should simply be translated and matched).
 #[test]
-#[ignore = "XFAIL (bounty H9): octal escape \\101 rejected + mis-categorized as backtracking lookaround"]
 fn h9a_octal_escape_supported() {
     let g = "start: A\nA: /\\101/\n";
     let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual));
@@ -273,7 +270,6 @@ fn h9a_octal_escape_supported() {
 /// class, and lark-rs mis-categorizes it as `LookaroundScope` "backtracking-only".
 /// Same route over-claim as H9a; `[\b]` is a regular, Python-accepted construct.
 #[test]
-#[ignore = "XFAIL (bounty H9): [\\b] (backspace-in-class) rejected + mis-categorized as lookaround"]
 fn h9b_backspace_in_class_supported() {
     let g = "start: A\nA: /[\\b]/\n";
     let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual));
