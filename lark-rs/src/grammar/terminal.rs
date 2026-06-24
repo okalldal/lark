@@ -38,20 +38,31 @@ impl Pattern {
     }
 
     /// The raw pattern length Python's terminal-ordering tiebreak uses
-    /// (`len(pattern.value)` — the source *without* any flag wrapper, since Python
-    /// stores flags separately on the `Pattern`). lark-rs's loader bakes a terminal's
-    /// flags into the stored regex string as a scoped group (`(?i:aa)`), so a naive
-    /// `pattern.len()` would count the wrapper and give a flagged terminal a phantom
-    /// rank boost (#268, N2). Stripping the whole-pattern flag wrapper first restores
-    /// parity: `/aa/` and `/aa/i` both report a raw length of 2 and the tiebreak falls
-    /// through to the name sort, exactly as in Python.
+    /// (`len(pattern.value)` — the *verbatim* source, since Python stores flags
+    /// separately on the `Pattern` and never rewrites the body). Two distinct
+    /// length-loss sources have to be undone to match Python here:
+    ///
+    /// * **Flag wrapper (#268, N2).** lark-rs's loader bakes a terminal's flags into
+    ///   the regex string as a scoped group (`(?i:aa)`), so a naive `len()` would count
+    ///   the wrapper and give a flagged terminal a phantom rank boost. Stripping the
+    ///   whole-pattern flag wrapper restores parity: `/aa/` and `/aa/i` both report 2.
+    /// * **Body normalization (#399, H6-1).** `PatternRe::new` runs
+    ///   `normalize_python_escapes`, which rewrites `\<\<\<` → `<<<` (6→3) and strips
+    ///   `(?#…)` comments *before* storage. Measuring the normalized `pattern` would
+    ///   undercount; Python measures the verbatim `/…/` source. So we measure the
+    ///   **pre-normalization** `raw` source `PatternRe` retains, not `pattern`.
+    ///
+    /// The flag-wrapper strip still runs (on the raw source): when flags are baked as a
+    /// `(?i:…)` group they sit *outside* the body the normalizer would touch, so the
+    /// strip behaves identically on raw and normalized — but raw is what keeps the
+    /// body verbatim. `raw_value_len() == len(pattern.value)`.
     pub fn raw_value_len(&self) -> usize {
         match self {
             // A `PatternStr`'s value is the literal text; its `i` flag is stored on
             // the struct, never in `value` — so `chars().count()` is `len(value)`.
             Pattern::Str(p) => p.value.chars().count(),
             Pattern::Re(p) => {
-                let (raw, _) = crate::lexer::strip_whole_pattern_flag_wrapper(&p.pattern, p.flags);
+                let (raw, _) = crate::lexer::strip_whole_pattern_flag_wrapper(&p.raw, p.flags);
                 raw.chars().count()
             }
         }
@@ -174,7 +185,24 @@ pub mod flags {
 
 #[derive(Debug, Clone)]
 pub struct PatternRe {
+    /// The pattern as the lexer compiles it: Python-`re`-dialect constructs the
+    /// `regex` crate spells differently are normalized away (`normalize_python_escapes`
+    /// rewrites `\<\<\<` → `<<<`, strips `(?#…)` comments, translates octals). This is
+    /// what `max_width` (the 2nd sort key) and every scanner read.
     pub pattern: String,
+    /// The **pre-normalization** spelling of the pattern: by default the source handed
+    /// to [`PatternRe::new`] (`raw = input` before `normalize_python_escapes` rewrites
+    /// it). Python's terminal-ordering tiebreak is `len(pattern.value)` over the verbatim
+    /// `/…/` source (#399, H6-1), and body normalization (`\<\<\<` → `<<<`, `(?#…)` strip)
+    /// must not change a terminal's rank, so `raw_value_len` measures `raw`, not the
+    /// normalized `pattern`. For a terminal whose body is a single `/…/` literal the loader
+    /// **overrides** `raw` with the verbatim literal source (the normalized combined regex
+    /// it builds `pattern`+`flags` from has already de-escaped the body); a composite
+    /// terminal keeps `raw == pattern` — the unchanged, pre-existing measure for that path.
+    /// `pattern`/`flags` are independent of `raw`, so the scanner build, `unless` retype,
+    /// collision check, and eq/hash are untouched. A `(?i:…)` flag wrapper baked into `raw`
+    /// (the composite path) is still stripped by `raw_value_len` (#268, N2).
+    pub raw: String,
     pub flags: u32,
 }
 
@@ -796,7 +824,11 @@ impl PatternRe {
                 });
             }
         }
-        Ok(PatternRe { pattern, flags })
+        Ok(PatternRe {
+            pattern,
+            raw,
+            flags,
+        })
     }
 }
 

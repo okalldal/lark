@@ -776,6 +776,9 @@ mod tests {
             ParseTree::Token(tok) => {
                 oracle["type"].as_str() == Some("token") && rt_token(tok, oracle)
             }
+            // A bare-`None` root (`?start: [A]` lone-placeholder collapse, #289/#382):
+            // mirrors the `Child::None` oracle shape (Python's `None` result).
+            ParseTree::None => oracle["type"].as_str() == Some("unknown"),
         }
     }
     fn rt_tree(t: &super::runtime::Tree, oracle: &Value) -> bool {
@@ -960,7 +963,6 @@ mod tests {
     /// and an `Inline([None]) => Ok(None)` Accept arm, after which the parse returns
     /// `Ok(ParseTree::None)`. Drop the `#[ignore]` then to make it a regression guard.
     #[test]
-    #[ignore = "XFAIL (bounty V-H7-1): standalone runtime lacks ParseTree::None; ?start:[A] on empty input errors instead of None"]
     fn standalone_none_root_returns_none_like_core() {
         let opts = LarkOptions {
             parser: ParserAlgorithm::Lalr,
