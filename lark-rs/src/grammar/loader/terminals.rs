@@ -646,4 +646,6 @@ static TERMINAL_NAMES: &[(&str, &str)] = &[
     ("\n", "NEWLINE"),
     ("\t", "TAB"),
     (" ", "SPACE"),
+    ("\\", "BACKSLASH"),
+    ("\r\n", "CRLF"),
 ];
