@@ -24,16 +24,17 @@ impl Pattern {
     /// *behind* a genuinely-unbounded one, so a maximal greedy match wins (#268, RC5).
     ///
     /// For a regex we parse its source to a `regex-syntax` HIR and walk it counting
-    /// characters; a pattern the parser rejects (lookaround/backref idioms — Python
-    /// `re` constructs the linear engine doesn't model) falls back to `None`
-    /// (unbounded), the conservative "sort first" default and the same outcome
-    /// Python's own `MAXWIDTH` fallback produces for a pattern `sre_parse` can't size.
+    /// characters. If `regex-syntax` rejects a Python-accepted lookaround pattern, fall
+    /// back to the lookaround AST's width routine so zero-width assertions do not make a
+    /// finite terminal look unbounded. Patterns neither parser can size still return
+    /// `None` (unbounded), the conservative "sort first" default.
     pub fn max_width(&self) -> Option<usize> {
         match self {
             Pattern::Str(p) => Some(p.value.chars().count()),
             Pattern::Re(p) => regex_syntax::parse(&p.pattern)
                 .ok()
-                .and_then(|hir| hir_max_width_chars(&hir)),
+                .and_then(|hir| hir_max_width_chars(&hir))
+                .or_else(|| lookaround_max_width_chars(&p.pattern)),
         }
     }
 
@@ -85,6 +86,12 @@ impl Pattern {
 /// reports bytes, which would diverge from Python on non-ASCII); a class is one char;
 /// concatenation sums, alternation takes the max, and a lookaround assertion is
 /// zero-width.
+fn lookaround_max_width_chars(pattern: &str) -> Option<usize> {
+    crate::lookaround::parse(pattern)
+        .ok()
+        .and_then(|node| crate::lookaround::lower::width_range(&node).1)
+}
+
 fn hir_max_width_chars(hir: &regex_syntax::hir::Hir) -> Option<usize> {
     use regex_syntax::hir::HirKind;
     match hir.kind() {
@@ -1009,6 +1016,17 @@ mod tests {
         assert_eq!(normalize_python_escapes("[^\\/]"), "[^\\/]");
     }
 
+    #[test]
+    fn lookaround_max_width_uses_consumed_width() {
+        for (pattern, expected) in [("a(?=b)", 1), ("(?<=x)a", 1), ("a(?=b)|zz", 2)] {
+            let p = Pattern::Re(PatternRe::new(pattern, 0).expect("lookaround pattern builds"));
+            assert_eq!(
+                p.max_width(),
+                Some(expected),
+                "{pattern:?} should be sized by consumed width, with assertions zero-width"
+            );
+        }
+    }
     /// H6/H7 (#333): the quantifier-shape dialect screen refuses possessive (`a++`) and
     /// stacked (`a{2}{3}`) quantifiers — both constructs the regex crate accepts with a
     /// meaning that diverges from Python — while leaving lazy quantifiers, normal

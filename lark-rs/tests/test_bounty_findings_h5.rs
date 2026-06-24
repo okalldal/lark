@@ -89,7 +89,6 @@ fn collect_token_types<'a>(t: &'a ParseTree, out: &mut Vec<&'a str>) {
 /// Expected fix: size lowerable-lookaround terminals to their finite `sre_parse` width
 /// (assertions zero-width) instead of `None`; the sort key itself is already correct.
 #[test]
-#[ignore = "XFAIL (bounty H5-1): lowerable-lookaround terminal gets max_width=None (unbounded), mis-ranking it ahead of a wider finite terminal"]
 fn h5_1_lookaround_terminal_width_misrank() {
     // Both LA=/a(?=b)/ (max_width 1) and REG=/a|zz/ (max_width 2) match the span "a".
     // Python's -max_width key puts REG (wider) first → token type REG. lark-rs sizes
