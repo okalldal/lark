@@ -708,21 +708,72 @@ impl GrammarCompiler {
     /// is rejected *at load*, on every parser backend, instead of surfacing as an
     /// LALR-only conflict or being silently resolved by Earley. Duplicate *empty*
     /// expansions are tolerated, as in Python.
+    ///
+    /// Both stages compare symbols by the **filter-out-agnostic** key
+    /// [`sym_key`](Self::sym_key) — `(is_terminal, name)` — exactly mirroring
+    /// Python's `Symbol.__eq__`/`__hash__`, which ignore the per-occurrence
+    /// `filter_out` flag (and so does `Rule.__eq__`, keyed on `origin` +
+    /// `expansion` of those symbols). This is what collapses an alternative that
+    /// is a string literal equal to a named terminal — `start: A | "a"` with
+    /// `A: "a"`, where the literal unifies onto `A` for lexing but carries
+    /// `filter_out=true` while the `A` reference carries `filter_out=false` — to a
+    /// single arm (#347, H4-9). Without it the two arms survive as two byte-
+    /// identical `CompiledRule`s differing only in `filter_pos`, a spurious LALR
+    /// reduce/reduce and an Earley `explicit` phantom empty derivation Python never
+    /// produces. Stage 1 keeps the **first** occurrence, so its `filter_out` (hence
+    /// the kept/dropped fate of the token) wins exactly as Python's `dedup_list`
+    /// keeps the first tree — `A | "a"` keeps `A` (token kept), `"a" | A` keeps
+    /// `"a"` (token dropped). An alias-differing pair (`X -> p | X -> q`) still
+    /// survives stage 1 (alias is part of the key) to collide in stage 2.
     pub(super) fn dedup_and_check_alts(
         origin: &str,
         alts: Vec<(CompiledAlt, Option<String>)>,
     ) -> Result<Vec<(CompiledAlt, Option<String>)>, GrammarError> {
-        let mut seen: std::collections::HashSet<(CompiledAlt, Option<String>)> =
-            std::collections::HashSet::new();
+        // Stage-1 dedup key: filter-out-agnostic symbols + gaps + alias, so a
+        // literal-vs-named pair collapses but an alias-differing pair survives to
+        // collide in stage 2 (as Python's "Rules defined twice").
+        //
+        // An *empty* expansion keys on emptiness + alias **alone** — its gaps (the
+        // distributed-absent `None`/`_EMPTY` placeholder counts) are dropped from
+        // the key. Python tolerates and dedups duplicate empty rules regardless of
+        // their `empty_indices` (the line-780 "Rules defined twice" check fires only
+        // for non-empty `dups[0].expansion`), keeping the first. Two distributed
+        // optionals whose absent arms differ only in placeholder count — e.g.
+        // `[A] | ["a"]`, where `["a"]`'s filtered literal contributes a 0-size
+        // absent arm while `[A]`'s contributes a 1-size one (`FindRuleSize` /
+        // `_will_not_get_removed`) — would otherwise survive as two empty `start ->`
+        // productions, a spurious reduce/reduce Python never reports (#347, adjacent
+        // to H4-9: same `filter_out`-leak root, surfaced by the differential audit).
+        // The surviving arm in `out` keeps its real gaps (first occurrence), so the
+        // `maybe_placeholders` `None` count is preserved exactly as Python keeps the
+        // first absent arm's `empty_indices`.
+        type AltKey = (Vec<(bool, String)>, Vec<usize>, Option<String>);
+        let alt_key = |alt: &(CompiledAlt, Option<String>)| -> AltKey {
+            let ((syms, gaps), alias) = alt;
+            let gap_key = if syms.is_empty() {
+                Vec::new() // empty arm: dedup on emptiness alone, ignore placeholder count
+            } else {
+                gaps.clone()
+            };
+            (
+                syms.iter().map(Self::sym_key).collect(),
+                gap_key,
+                alias.clone(),
+            )
+        };
+        let mut seen: std::collections::HashSet<AltKey> = std::collections::HashSet::new();
         let mut out: Vec<(CompiledAlt, Option<String>)> = Vec::with_capacity(alts.len());
-        let mut seen_syms: std::collections::HashSet<Vec<Symbol>> =
+        let mut seen_syms: std::collections::HashSet<Vec<(bool, String)>> =
             std::collections::HashSet::new();
         for alt in alts {
-            if !seen.insert(alt.clone()) {
+            if !seen.insert(alt_key(&alt)) {
                 continue; // exact duplicate — Python's AST-level dedup_list
             }
             let syms = &alt.0 .0;
-            if !syms.is_empty() && !seen_syms.insert(syms.clone()) {
+            // Stage-2 collision key mirrors Python's `Rule.__eq__` (origin +
+            // expansion only): filter-out-agnostic symbols, no gaps/alias.
+            let syms_key: Vec<(bool, String)> = syms.iter().map(Self::sym_key).collect();
+            if !syms.is_empty() && !seen_syms.insert(syms_key) {
                 let rhs: Vec<&str> = syms.iter().map(|s| s.name()).collect();
                 return Err(GrammarError::Other {
                     msg: format!(
@@ -735,6 +786,22 @@ impl GrammarCompiler {
             out.push(alt);
         }
         Ok(out)
+    }
+
+    /// A symbol's identity for cross-alternative dedup/collision, mirroring Python
+    /// Lark's `Symbol.__eq__`/`__hash__`: `(is_terminal, name)`. The per-occurrence
+    /// `Terminal::filter_out` flag is *deliberately* excluded so a literal unified
+    /// onto a named terminal (`"a"` → `A`, `filter_out` differing) compares equal to
+    /// a direct reference to that terminal (#347). lark-rs's derived `Eq`/`Hash` on
+    /// `Symbol` *do* include `filter_out`, so this is the one place that must
+    /// canonicalize it away. Also used by the recurse-helper arm dedup
+    /// (`ebnf::recurse_helper_keyed`), where Python likewise builds the one-or-more
+    /// rule from the filter-out-agnostic *set* of inner expansions.
+    pub(super) fn sym_key(sym: &Symbol) -> (bool, String) {
+        match sym {
+            Symbol::Terminal(t) => (true, t.name.clone()),
+            Symbol::NonTerminal(nt) => (false, nt.name.clone()),
+        }
     }
 
     /// Register each `%declare`d name as a pattern-less terminal. A declared
