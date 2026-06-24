@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use regex::Regex;
+use regex_automata::{meta::Regex as MetaRegex, Anchored, Input};
 
 use super::dfa::LoweredTerminalMatcher;
 use super::plan::global_flag_prefix;
@@ -17,8 +18,15 @@ use crate::grammar::intern::SymbolId;
 /// alternation left-to-right and hands the parser a fixed token stream, the dynamic
 /// lexer matches a *specific* terminal — the one an Earley item predicts — at a
 /// given position, integrating scanning into the parse loop. Each terminal
-/// therefore gets its own compiled regex, anchored at the query position via
-/// [`Regex::find_at`] (a match is accepted only if it begins exactly at `pos`).
+/// therefore gets its own compiled regex, matched with a search *anchored* at the
+/// query position ([`Anchored::Yes`] over `pos..len`), so a terminal that does not
+/// match exactly at `pos` fails immediately instead of forward-scanning toward its
+/// next match further down the input. That anchoring is what keeps the dynamic scan
+/// O(n): an unanchored leftmost search (`regex::Regex::find_at`) would, at every
+/// position where a *sparse* terminal misses, scan the rest of the input before
+/// reporting a far-ahead match it then rejects — Python's `re.Pattern.match(text,
+/// pos)` is anchored, so this is the per-terminal analog of the basic/contextual
+/// `\G` fix (#104, ported here for #335).
 ///
 /// There is **no `unless` keyword retyping** here: the parser context (which items
 /// sit in the scan set) already decides which terminals to try, so `if`-vs-`iffy`
@@ -33,7 +41,7 @@ pub struct DynamicMatcher {
 /// One terminal's per-terminal matcher for the dynamic lexer: the `regex` crate for
 /// the plain common case, the lowered single-terminal DFA for a lookaround terminal.
 enum TermRegex {
-    Plain(Regex),
+    Plain(MetaRegex),
     Lowered(LoweredTerminalMatcher),
 }
 
@@ -42,13 +50,26 @@ impl TermRegex {
     /// contract `AnyRegex::match_end_at` had. The full `text` (not a suffix) is
     /// passed so a lookbehind can see the bytes before `pos`, exactly as the
     /// historical fancy probe could.
+    ///
+    /// The search is **anchored** at `pos` ([`Anchored::Yes`] over `pos..len`), so a
+    /// miss at `pos` returns `None` immediately rather than forward-scanning toward a
+    /// distant match — the per-terminal analog of the basic/contextual scanner's `\G`
+    /// anchoring (#104). An unanchored `find_at` here made a sparse terminal in the
+    /// per-position scan set O(n) per byte ⇒ O(n²) total (#335); Python's
+    /// `re.Pattern.match(text, pos)` is anchored and stays O(n).
     fn match_end_at(&self, text: &str, pos: usize) -> Option<usize> {
         match self {
             TermRegex::Plain(re) => {
-                let m = re.find_at(text, pos);
-                record_scan_skip(pos, m.as_ref().map(|m| m.start()));
+                let input = Input::new(text)
+                    .span(pos..text.len())
+                    .anchored(Anchored::Yes);
+                let m = re.find(input);
+                // Anchored: a hit (if any) starts exactly at `pos`, so the recorded
+                // skip is 0 (flat per attempt) and a miss is charged a flat 1 —
+                // never the forward-scan distance the unanchored search reported.
+                record_scan_skip(pos, m.map(|_| pos));
                 let m = m?;
-                (m.start() == pos && m.end() > pos).then_some(m.end())
+                (m.end() > pos).then_some(m.end())
             }
             TermRegex::Lowered(m) => m.match_end_at(text, pos),
         }
@@ -60,8 +81,9 @@ impl TermRegex {
     fn match_end_in(&self, sub: &str) -> Option<usize> {
         match self {
             TermRegex::Plain(re) => {
-                let m = re.find(sub)?;
-                (m.start() == 0 && m.end() > 0).then_some(m.end())
+                let input = Input::new(sub).span(0..sub.len()).anchored(Anchored::Yes);
+                let m = re.find(input)?;
+                (m.end() > 0).then_some(m.end())
             }
             TermRegex::Lowered(m) => m.match_end_in(sub),
         }
@@ -114,8 +136,22 @@ impl DynamicMatcher {
                 });
             }
             let src = format!("{prefix}{pat}");
+            // `regex::Regex::new` is the routing oracle (same seam as `scanner.rs`):
+            // a pattern the linear `regex` crate accepts is a *plain* terminal, one it
+            // rejects (lookaround/backref) lowers into its own single-terminal DFA.
+            // The plain terminal is then matched through `regex_automata`'s meta engine
+            // so the per-position search can be **anchored** at `pos` (`Anchored::Yes`)
+            // — `regex::Regex` has no anchored-at-position search, only the unanchored
+            // `find_at` that caused the #335 O(n²) forward-scan. The meta engine is the
+            // same one `regex::Regex` wraps and parses identical syntax, so a pattern
+            // the probe accepted compiles here too.
             let compiled = match Regex::new(&src) {
-                Ok(re) => TermRegex::Plain(re),
+                Ok(_) => TermRegex::Plain(MetaRegex::new(&src).map_err(|e| {
+                    GrammarError::InvalidRegex {
+                        pattern: src.clone(),
+                        reason: e.to_string(),
+                    }
+                })?),
                 Err(e) => TermRegex::Lowered(LoweredTerminalMatcher::build(
                     *id,
                     term,
