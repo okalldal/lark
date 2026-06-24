@@ -39,6 +39,7 @@ fn generated_struct_parses_a_json_object() {
     match tree {
         ParseTree::Tree(t) => assert_eq!(t.data, "object"),
         ParseTree::Token(_) => panic!("expected an `object` tree, got a bare token"),
+        ParseTree::None => panic!("expected an `object` tree, got a bare None"),
     }
 }
 
@@ -54,6 +55,7 @@ fn generated_struct_parses_a_scalar() {
             assert!(matches!(t.children.first(), Some(Child::Token(_))));
         }
         ParseTree::Token(_) => panic!("expected a `number` tree"),
+        ParseTree::None => panic!("expected a `number` tree, got a bare None"),
     }
 }
 
