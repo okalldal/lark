@@ -97,6 +97,22 @@ impl GrammarCompiler {
                 return Ok(()); // nothing to import
             };
 
+        // Last-alias-wins (#388). When one source `(module, original)` is imported
+        // under several aliases, Python's per-module `import_aliases.update` keeps
+        // only the **last** binding; the earlier aliases are dropped and never
+        // copied. Filter them out here, at the single point every import path
+        // (common terminal table, bundled closure, file closure) funnels through,
+        // so a shadowed alias is never registered under any of them. The surviving
+        // alias is taken from the merged `import_alias_map` (`alias_survives`); a
+        // name-list import registers `original == final`, always its own survivor.
+        let names_to_import: Vec<(String, Option<String>)> = names_to_import
+            .into_iter()
+            .filter(|(name, alias)| {
+                let final_name = alias.clone().unwrap_or_else(|| name.clone());
+                self.alias_survives(&module_path, name, &final_name)
+            })
+            .collect();
+
         // Bundled grammar libraries (shipped with lark-rs, mirroring the grammars
         // Python Lark ships under `lark/grammars/`) are resolved from embedded
         // sources, not the filesystem. Everything else is a file import resolved

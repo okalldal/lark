@@ -196,27 +196,85 @@ fn rc2c_neg_same_import_noalias_twice_accepted() {
     );
 }
 
-/// RC2c-388 (XFAIL #388, architect ask on omnibus #354). The risky edge of the
+/// RC2c-388 (#388, FIXED — architect ask on omnibus #354). The risky edge of the
 /// RC2c source/alias dedup: the **same** original terminal imported **twice under
-/// two *different* aliases**, then only one alias used. Python keeps only the *last*
-/// alias binding (`X` is never defined) and rejects at build:
-/// `Rule 'X' used but not defined (in rule start)` (verified against Python Lark
-/// 1.3.1). lark-rs currently imports *both* `X` and `Y` and over-accepts `start: X`
-/// — a *more-permissive* divergence (ADR-0017 corollary: unfalsifiable
-/// permissiveness ⇒ a bug). Filed as **#388**.
+/// two *different* aliases**, then only the *shadowed* (earlier) alias used. Python's
+/// per-module `import_aliases.update` keeps only the *last* alias binding (`X` is
+/// never defined) and rejects at build: `Rule 'X' used but not defined (in rule
+/// start)` (verified against Python Lark 1.3.1). lark-rs used to import *both* `X`
+/// and `Y` and over-accept `start: X` — a *more-permissive* divergence (ADR-0017
+/// corollary: unfalsifiable permissiveness ⇒ a bug). Filed as **#388**.
 ///
-/// Pinned as an XFAIL (ignored) asserting Python's correct **rejection**: it FAILS
-/// on the current SHA (lark-rs accepts), so it must stay `#[ignore]`d to document the
-/// known divergence in the burndown net without a false-green or a CI-blocking red.
-/// Drop the `#[ignore]` when #388 is fixed (lark-rs keeps only the last alias and
-/// rejects `start: X`). Run with `cargo test --test test_bounty_findings -- --ignored`.
+/// Fixed by **last-alias-wins**: the loader drops every non-last alias for a given
+/// `(module, original)` source so it is never defined (`alias_survives` /
+/// `import_alias_map`), and the #299 collision pre-pass only considers surviving
+/// aliases. Now lark-rs rejects `start: X` like Python. (No longer `#[ignore]`d.)
 #[test]
-#[ignore = "XFAIL #388: same-source two-alias import over-accept"]
 fn rc2c_388_same_source_two_aliases_unused_alias_rejected() {
     // common.INT imported as both X and Y; start uses only X. Python: last alias
     // (Y) wins, X is undefined → "Rule 'X' used but not defined".
     let g = "%import common.INT -> X\n%import common.INT -> Y\nstart: X\n";
     assert_build_rejected(g, ParserAlgorithm::Lalr, LexerType::Contextual, "RC2c-388");
+}
+
+/// RC2c-388-last (#388, last-alias-wins ACCEPT). The mirror of the case above: the
+/// **surviving** (last) alias `Y` *is* defined and usable, so `start: Y` builds.
+/// Python Lark 1.3.1 accepts (only the last binding of `(common, INT)` survives).
+#[test]
+fn rc2c_388_same_source_two_aliases_last_alias_accepted() {
+    let g = "%import common.INT -> X\n%import common.INT -> Y\nstart: Y\n";
+    assert_build_accepted(
+        g,
+        ParserAlgorithm::Lalr,
+        LexerType::Contextual,
+        "RC2c-388-last",
+    );
+}
+
+/// RC2c-388-both (#388, last-alias-wins REJECT-on-dropped). Using *both* aliases in
+/// one rule still rejects: `X` was dropped (only `Y` survives), so `start: X | Y`
+/// references an undefined `X`. Python Lark 1.3.1 rejects `Rule 'X' used but not
+/// defined (in rule start)`.
+#[test]
+fn rc2c_388_same_source_two_aliases_both_used_rejected() {
+    let g = "%import common.INT -> X\n%import common.INT -> Y\nstart: X | Y\n";
+    assert_build_rejected(
+        g,
+        ParserAlgorithm::Lalr,
+        LexerType::Contextual,
+        "RC2c-388-both",
+    );
+}
+
+/// RC2c-388-rule (#388, bundled rule-closure variant — architect ask). Last-alias-wins
+/// must also hold where the imported symbol is a *rule* whose dependency closure is
+/// copied (not a `common` terminal). `%import python.name -> a` then `-> b` keeps
+/// only the last alias `b`: Python Lark 1.3.1 rejects `start: a` (`Rule 'a' used but
+/// not defined`) and accepts `start: b`. Exercises the closure-copy path
+/// (`import_rule_closure`), not just the `common` terminal-table fast path.
+#[test]
+fn rc2c_388_bundled_rule_two_aliases_dropped_alias_rejected() {
+    let g = "%import python.name -> a\n%import python.name -> b\nstart: a\n";
+    assert_build_rejected(
+        g,
+        ParserAlgorithm::Lalr,
+        LexerType::Contextual,
+        "RC2c-388-rule-a",
+    );
+}
+
+/// RC2c-388-rule-b (#388, bundled rule-closure variant — surviving alias ACCEPT).
+/// The mirror: the surviving rule alias `b` is defined, so `start: b` builds. Python
+/// Lark 1.3.1 accepts.
+#[test]
+fn rc2c_388_bundled_rule_two_aliases_last_alias_accepted() {
+    let g = "%import python.name -> a\n%import python.name -> b\nstart: b\n";
+    assert_build_accepted(
+        g,
+        ParserAlgorithm::Lalr,
+        LexerType::Contextual,
+        "RC2c-388-rule-b",
+    );
 }
 
 /// RC2d (#299, spun out of #270). `%extend` of an abstract (`%declare`d,

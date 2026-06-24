@@ -67,8 +67,11 @@ impl Lark {
     /// Parse `text` from the default start symbol.
     ///
     /// Returns a [`ParseTree`] — normally a [`Tree`], but a `?start` rule that
-    /// collapses via expand1 to a single token yields that bare [`Token`], exactly
-    /// as Python Lark does.
+    /// collapses via expand1 to a single token yields that bare [`Token`], and a
+    /// `?start` whose sole alternative is an absent `[...]` placeholder under
+    /// `maybe_placeholders=true` (e.g. `?start: [A]` on empty input) collapses to
+    /// [`ParseTree::None`] — Python Lark's literal bare-`None` result (#289). All
+    /// three cases mirror Python Lark.
     pub fn parse(&self, text: &str) -> Result<ParseTree, ParseError> {
         self.frontend.parse(text, None)
     }
