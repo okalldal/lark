@@ -17,7 +17,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 /// Synthetic start rule appended to an imported file so the requested terminals
 /// survive dead-terminal pruning while the file is compiled. Never copied out.
-const IMPORT_PROBE_RULE: &str = "__lark_import_probe";
+const IMPORT_PROBE_RULE: &str = "_lark_import_probe";
 
 /// Canonical key for a virtual path in the in-memory `import_sources` map:
 /// components joined with `/`, regardless of the host's path separator, so map
@@ -599,8 +599,8 @@ pub(super) fn common_terminals() -> &'static HashMap<String, String> {
                 is_term_name.then_some(name)
             })
             .collect();
-        let probe = format!("{COMMON_LARK}\n__common_probe: {}\n", names.join(" "));
-        let grammar = load_grammar(&probe, &["__common_probe".to_string()], false, false)
+        let probe = format!("{COMMON_LARK}\n_common_probe: {}\n", names.join(" "));
+        let grammar = load_grammar(&probe, &["_common_probe".to_string()], false, false)
             .expect("bundled common.lark must compile");
         grammar
             .terminals

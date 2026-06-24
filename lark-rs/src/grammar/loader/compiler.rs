@@ -193,23 +193,20 @@ pub(super) struct GrammarCompiler {
     /// — the filesystem is never consulted — with `base_path` acting as a virtual
     /// prefix (default: the map root). Shared down nested imports via `Arc`.
     pub(super) import_sources: Option<Arc<HashMap<String, String>>>,
-    /// User-authored rule names (rules, templates, import targets), collected up
-    /// front so [`fresh_anon_rule`](Self::fresh_anon_rule) never hands out a name
-    /// the grammar already claims — `__anon_group_0` is a *valid* user rule name,
-    /// and a generated duplicate would silently merge two unrelated origins.
-    /// Generated names never collide with each other (one monotonic counter), and
-    /// import-mangled dependencies (`mod__name` / `_mod__name`) cannot take the
-    /// `__anon_{tag}_{n}` shape, so user-authored names are the only hazard.
+    /// Rule names known before generated helpers are minted (rules, templates,
+    /// import targets), collected up front so [`fresh_anon_rule`](Self::fresh_anon_rule)
+    /// never hands out a name the grammar already claims. User grammar text can no
+    /// longer claim the internal `__anon_*` spelling, but imported/generated names
+    /// and future internals still share the same namespace, so the reservation guard
+    /// remains the single collision check.
     reserved_rule_names: HashSet<String>,
     /// Provenance of every generated anonymous EBNF helper rule, keyed by the name
     /// [`fresh_anon_rule`](Self::fresh_anon_rule) minted for it. This is the
     /// *source-provenance* discriminator the engine needs (#101): a nullable
-    /// `Nt::Orig` that is a generated helper (`(B*)~2`'s `__anon_rep_*`) is
-    /// accepted by CYK, but a user-written nullable rule (`_a: B?`, or a user rule
-    /// the author *named* `__anon_star_0`) is rejected — exactly Python Lark's CYK
-    /// behavior. The discriminator is whether the name was generated here, never
-    /// the `__anon_` spelling (a user can author that exact name, #144), so it is
-    /// recorded at mint time rather than sniffed downstream.
+    /// `Nt::Orig` that is a generated helper (`__anon_*`) is accepted by CYK, but a
+    /// user-written nullable rule (`_a: B?`) is rejected, exactly like Python Lark.
+    /// The discriminator is whether the name was generated here (or carried across
+    /// import as generated provenance), not the spelling alone.
     ///
     /// `pub(super)` so the sibling `imports` module can carry an imported helper's
     /// provenance across `import_rule_closure`'s rename (#101 import path).
@@ -302,13 +299,9 @@ impl GrammarCompiler {
     /// Whether `name` is free to assign to an anonymous (generated or
     /// hint-named) terminal. Checks **both** namespaces, not just terminals:
     /// the lowerer interns every symbol into one `by_name` table, so a terminal
-    /// that shadows a *rule* name corrupts the id space — `intern_nonterminal`
-    /// would hand back the terminal's id (guarded only by a `debug_assert` in
-    /// release builds). `__ANON_0` is a valid user *rule* name (a leading `__`
-    /// lexes as a rule token), so the rule namespace is reachable. Reservations
-    /// cover user-authored names known up front; the live lists are the
-    /// defensive backstop for names minted mid-compile (uppercase literal
-    /// hints) and anything reservation cannot see.
+    /// that shadows a rule name corrupts the id space. Reservations cover names
+    /// known up front; the live lists are the defensive backstop for names minted
+    /// mid-compile, imported generated names, and uppercase literal hints.
     fn anon_terminal_name_free(&self, name: &str) -> bool {
         !self.reserved_term_names.contains(name)
             && !self.reserved_rule_names.contains(name)
@@ -375,10 +368,10 @@ impl GrammarCompiler {
     }
 
     pub(super) fn process_items(&mut self, items: Vec<Item>) -> Result<(), GrammarError> {
-        // First pass: register templates, and reserve every user-authored name so
-        // generated `__anon_*` / `__ANON_*` names can never shadow one. An import's
-        // target may be a rule or a terminal — unknowable before resolution — so it
-        // reserves in both namespaces (harmless: the namespaces cannot overlap).
+        // First pass: register templates, and reserve every parsed name so generated
+        // `__anon_*` / `__ANON_*` names can never shadow one. An import's target may
+        // be a rule or a terminal — unknowable before resolution — so it reserves in
+        // both namespaces (harmless: the namespaces cannot overlap).
         for item in &items {
             match item {
                 Item::RuleItem(r) => {
@@ -1019,12 +1012,11 @@ impl GrammarCompiler {
             // $END is synthetic and handled by the parser, not the lexer.
         }
 
-        // Add ignore terminals (one terminal per ignore pattern). `__IGNORE_{n}`
-        // is the third generated-name family, and the import-alias route reaches
-        // it like the others (`%import common.WS -> __IGNORE_0`), so it skips
-        // user-claimed names via the same availability check. `%ignore` tokens
-        // never reach the tree (the parse loop skips them), so they need no
-        // per-occurrence filter — they appear in no rule body.
+        // Add ignore terminals (one terminal per ignore pattern). `__IGNORE_{n}` is
+        // the third generated-name family, so it uses the same availability check as
+        // the other generated terminals. `%ignore` tokens never reach the tree (the
+        // parse loop skips them), so they need no per-occurrence filter — they appear
+        // in no rule body.
         let ignore_patterns = std::mem::take(&mut self.ignore_patterns);
         let mut ignore_names: Vec<String> = Vec::with_capacity(ignore_patterns.len());
         for entry in ignore_patterns {
@@ -1154,139 +1146,39 @@ impl GrammarCompiler {
 
 #[cfg(test)]
 mod tests {
-    use crate::grammar::{load_grammar, lower, SymbolKind};
+    use crate::grammar::load_grammar;
 
-    /// The review blocker: `__ANON_0` lexes as a *rule* name (a leading `__` is
-    /// a rule token), and the counter-generated terminal for `/x/` used to take
-    /// that same name. The lowerer interns both namespaces into one `by_name`
-    /// table, so the shadow corrupted the id space — the rule resolved to the
-    /// terminal's id in release builds (`intern.rs` guards it only with a
-    /// `debug_assert`). The generated name must dodge rule names too.
+    /// Generated-name spellings (`__ANON_*`, `__IGNORE_*`, `__anon_*`) remain internal
+    /// loader names. User-authored grammar text cannot claim them anymore: Python's
+    /// name tokens allow at most one leading underscore before the first letter.
     #[test]
-    fn generated_terminal_skips_user_rule_name() {
-        let g = load_grammar(
+    fn double_underscore_generated_like_user_names_are_rejected() {
+        for g in [
             "start: /x/ __ANON_0\n__ANON_0: \"y\"\n",
-            &["start".to_string()],
-            false,
-            false,
-        )
-        .unwrap();
-        // The literal skipped the rule-claimed name…
-        assert!(!g.terminals.iter().any(|t| t.name == "__ANON_0"));
-        assert!(g
-            .terminals
-            .iter()
-            .any(|t| t.name == "__ANON_1" && t.pattern.as_regex_str() == "x"));
-        // …so lowering interns `__ANON_0` as the rule it is.
-        let compiled = lower(&g);
-        let id = compiled.symbols.id("__ANON_0").unwrap();
-        assert_eq!(compiled.symbols.kind(id), SymbolKind::NonTerminal);
-    }
-
-    /// The hint variant of the same route: the uppercase hint of a literal
-    /// `"__anon_5"` is `__ANON_5`, which a user *rule* may already claim; the
-    /// hint must be rejected (falling back to `__ANON_0`), not shadow the rule.
-    #[test]
-    fn hint_minted_terminal_skips_user_rule_name() {
-        let g = load_grammar(
             "start: \"__anon_5\" __ANON_5\n__ANON_5: \"y\"\n",
-            &["start".to_string()],
-            false,
-            false,
-        )
-        .unwrap();
-        let lit = g
-            .terminals
-            .iter()
-            .find(|t| t.pattern.as_regex_str() == "__anon_5")
-            .unwrap();
-        assert_ne!(lit.name, "__ANON_5", "hint must not shadow the user's rule");
-        let compiled = lower(&g);
-        let id = compiled.symbols.id("__ANON_5").unwrap();
-        assert_eq!(compiled.symbols.kind(id), SymbolKind::NonTerminal);
-    }
-
-    /// `__anon_plus_0` is a valid *user* rule name; the `thing+` helper must not
-    /// reuse it (pre-fix, both origins were named `__anon_plus_0`, silently
-    /// merging two unrelated rules).
-    #[test]
-    fn generated_helper_rule_skips_user_taken_name() {
-        let g = load_grammar(
             "start: thing+ __anon_plus_0\n__anon_plus_0: \"b\"\nthing: \"a\"\n",
-            &["start".to_string()],
-            false,
-            false,
-        )
-        .unwrap();
-        let user_named: Vec<_> = g
-            .rules
-            .iter()
-            .filter(|r| r.origin.name == "__anon_plus_0")
-            .collect();
-        assert_eq!(
-            user_named.len(),
-            1,
-            "only the user's rule may carry the user's name"
-        );
-        // The `+` helper exists under a fresh (skipped-forward) name.
-        assert!(
-            g.rules
-                .iter()
-                .any(|r| r.origin.name.starts_with("__anon_plus_")
-                    && r.origin.name != "__anon_plus_0")
-        );
+        ] {
+            assert!(
+                load_grammar(g, &["start".to_string()], false, false).is_err(),
+                "double-leading-underscore generated-name lookalike must be rejected: {g:?}"
+            );
+        }
     }
 
-    /// A user cannot *define* a terminal named `__ANON_0` (a leading `__` lexes
-    /// as a rule name), but an import alias can register one: `%import
-    /// common.INT -> __ANON_0`. The inline `/x/` literal must not be interned
-    /// under that taken name (pre-fix, two TerminalDefs shared it).
+    /// The same token-shape rule applies to alias targets: an import alias cannot
+    /// register a user-visible `__ANON_*` / `__IGNORE_*` name through grammar text.
     #[test]
-    fn generated_terminal_skips_import_alias_taken_name() {
-        let g = load_grammar(
+    fn double_underscore_import_alias_targets_are_rejected() {
+        for g in [
             "start: /x/\n%import common.INT -> __ANON_0\n",
-            &["start".to_string()],
-            false,
-            false,
-        )
-        .unwrap();
-        // The literal skipped to the next free generated name…
-        assert!(g
-            .terminals
-            .iter()
-            .any(|t| t.name == "__ANON_1" && t.pattern.as_regex_str() == "x"));
-        // …so the unreferenced imported terminal prunes away cleanly instead of
-        // surviving as a duplicate of the literal's definition.
-        assert_eq!(
-            g.terminals.iter().filter(|t| t.name == "__ANON_0").count(),
-            0
-        );
-    }
-
-    /// `__IGNORE_{n}` is the third generated-name family, reachable by the same
-    /// import-alias route as `__ANON_{n}`: pre-fix, `%import common.WS ->
-    /// __IGNORE_0` plus any `%ignore` left two TerminalDefs named `__IGNORE_0`,
-    /// both surviving pruning (the ignore-name set keeps the name alive).
-    #[test]
-    fn generated_ignore_terminal_skips_import_alias_taken_name() {
-        let g = load_grammar(
             "start: \"a\"\n%ignore \" \"\n%import common.WS -> __IGNORE_0\n",
-            &["start".to_string()],
-            false,
-            false,
-        )
-        .unwrap();
-        assert_eq!(g.ignore, vec!["__IGNORE_1".to_string()]);
-        // The unreferenced imported terminal prunes away; no duplicate survives.
-        assert_eq!(
-            g.terminals
-                .iter()
-                .filter(|t| t.name == "__IGNORE_0")
-                .count(),
-            0
-        );
+        ] {
+            assert!(
+                load_grammar(g, &["start".to_string()], false, false).is_err(),
+                "double-leading-underscore alias target must be rejected: {g:?}"
+            );
+        }
     }
-
     /// A literal whose uppercase *hint* mints an `__ANON_n` lookalike must not
     /// collide with a later counter-generated name: `"__anon_5"` interns under
     /// the hint `__ANON_5`, so the counter has to skip 5 when it gets there.

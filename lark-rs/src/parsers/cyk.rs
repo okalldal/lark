@@ -363,19 +363,12 @@ fn to_cnf(grammar: &CompiledGrammar) -> Result<CnfResult, GrammarError> {
 
     // CYK cannot represent a node that derives ε. Match Python Lark's CYK by
     // *source provenance*, not transparency (#101, ADR-0024): reject a nullable
-    // `Nt::Orig` iff it is a **user-written** rule — including transparent ones
-    // (`a: B?`, `_a: B?`) and even a user rule the author happened to *name*
-    // `__anon_star_0`. A nullable rule the loader *generated* as an anonymous EBNF
+    // `Nt::Orig` iff it is a user-written rule, including transparent ones
+    // (`a: B?`, `_a: B?`). A nullable rule the loader generated as an anonymous EBNF
     // helper (e.g. the `__anon_plus_*` recurse helper a `*`/`?` folds into under
-    // `(B*)+`, whose `… | ε | … P ε` arm is nullable) is accepted, exactly as
-    // Python's CYK keeps it: those splice away when empty without producing an
-    // observable empty node. The discriminator is `anon_kind`, set at
-    // `fresh_anon_rule` time — never the `__anon_` name spelling, which a user can
-    // author (#144). A blunt "reject every nullable origin" over-rejects those
-    // generated helpers (an oracle regression). NB since #176 a bounded `~n`/`~n..m`
-    // *inlines* into its parent exactly like Python (no `__anon_rep`/`__anon_group`
-    // helper), so `(B*)~2`/`(B?)~2` lower to non-nullable `_star`/literal arms and
-    // no longer reach this carve-out at all — matching Python on every engine.
+    // `(B*)+`) is accepted, exactly as Python's CYK keeps it: those splice away when
+    // empty without producing an observable empty node. The discriminator is
+    // `anon_kind`, set at `fresh_anon_rule` time or carried across imports.
     let nullable = compute_nullable(&rules);
     for nt in &nullable {
         if let Nt::Orig(id) = nt {
@@ -1118,14 +1111,9 @@ WORD: /[a-z]+/
         );
     }
 
-    /// Provenance, not prefix (#101, ADR-0024). The empty-rule rejection keys on
-    /// whether the loader *generated* the nullable origin as an anonymous EBNF
-    /// helper — never on the `__anon_` name spelling, which a user grammar may
-    /// itself author (#144). A user rule the author *named* `__anon_star_0` is
-    /// still a user rule, so a wholly-nullable one (`__anon_star_0: B?`) must be
-    /// rejected exactly like `a: B?` / `_a: B?`. If this regressed to a
-    /// `name.starts_with("__anon_")` check, this rule would slip through and the
-    /// build would (wrongly) succeed.
+    /// Python-style name-token validation now rejects user-authored `__anon_*`
+    /// spellings before CYK provenance is consulted. Keep this pin so the generated
+    /// helper prefix cannot become user-addressable grammar syntax again.
     #[test]
     fn cyk_rejects_user_authored_anon_looking_nullable_rule() {
         let built = Lark::new(

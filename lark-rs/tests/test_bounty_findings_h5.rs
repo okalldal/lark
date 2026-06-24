@@ -121,18 +121,22 @@ fn h5_1_lookaround_terminal_width_misrank() {
 /// rule defs, terminal defs, references, alias targets, and template parameters.
 /// Expected fix: reject-like-Python — mirror Lark's name-token shape in the tokenizer.
 #[test]
-#[ignore = "XFAIL (bounty H5-2): double-leading-underscore names (__x / __X) accepted; Python rejects at grammar-parse"]
 fn h5_2_double_underscore_name_rejected() {
-    // `_x`/`_X` (single leading underscore + letter) are accepted by both — this asserts
-    // only the `__`-leading shape is a build error, matching Python.
-    for g in ["start: __x\n__x: \"a\"\n", "start: __X\n__X: \"a\"\n"] {
+    // `_x`/`_X` (single leading underscore + letter) are accepted by both. These assert
+    // that Python-invalid name-token starts fail before they can become rule/terminal names.
+    for g in [
+        "start: __x\n__x: \"a\"\n",
+        "start: __X\n__X: \"a\"\n",
+        "start: _1x\n_1x: \"a\"\n",
+        "start: _1X\n_1X: \"a\"\n",
+        "start: \"a\" -> __alias\n",
+    ] {
         assert!(
             Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).is_err(),
-            "H5-2: Python rejects a `__`-leading name token at grammar-parse; lark-rs accepted it. grammar={g:?}"
+            "H5-2: Python rejects this name token at grammar-parse; lark-rs accepted it. grammar={g:?}"
         );
     }
 }
-
 // ─────────────────────────────────────────────────────────────────────────────
 // EBNF loader: cross-alternative empty-arm dedup.
 // ─────────────────────────────────────────────────────────────────────────────

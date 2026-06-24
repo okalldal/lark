@@ -70,14 +70,12 @@ pub struct SymbolInfo {
     pub is_start: bool,
     /// Non-terminal only: `Some(kind)` iff this origin is a *generated* anonymous
     /// EBNF helper the loader minted via `fresh_anon_rule` (a `*`/`?`/`~n`/group/
-    /// `[…]` helper); `None` for every user-written rule. This is **source
-    /// provenance**, distinct from [`inline`](Self::inline): a transparent user
-    /// rule (`_a`) and a user rule the author *named* `__anon_star_0` are both
-    /// `inline` yet have `anon_kind == None`, while a generated `__anon_rep_*`
-    /// helper is `Some(..)`. CYK keys empty-rule rejection on this (#101, ADR-0024):
-    /// a nullable user rule is rejected (matching Python), a nullable generated
-    /// helper is accepted — never sniffing the `__anon_` spelling, which a user can
-    /// author (#144).
+    /// `[...]` helper); `None` for every user-written rule. This is **source
+    /// provenance**, distinct from [`inline`](Self::inline): a transparent user rule
+    /// (`_a`) has `anon_kind == None`, while a generated `__anon_rep_*` helper is
+    /// `Some(..)`. CYK keys empty-rule rejection on this (#101, ADR-0024): a
+    /// nullable user rule is rejected (matching Python), a nullable generated helper
+    /// is accepted.
     pub anon_kind: Option<AnonKind>,
 }
 
@@ -343,9 +341,8 @@ pub fn lower(grammar: &Grammar) -> CompiledGrammar {
 
     // ── Non-terminals: augmented starts, then origins, then referenced. ──────
     // Generated-helper provenance is carried by `grammar.anon_kinds` (keyed by
-    // origin name, populated by the loader's `fresh_anon_rule`), *not* inferred
-    // from the `__anon_` spelling — a user grammar may author that exact name
-    // (#144), and the discriminator must stay source-based (#101).
+    // origin name, populated by the loader's `fresh_anon_rule`), not inferred from
+    // the `__anon_` spelling alone. The discriminator must stay source-based (#101).
     let anon_kind = |name: &str| -> Option<AnonKind> { grammar.anon_kinds.get(name).copied() };
     for start in &grammar.start {
         symbols.intern_nonterminal(&format!("$root_{}", start), false, true, None);
@@ -491,18 +488,14 @@ mod tests {
     }
 
     /// Provenance plumbing (#101, ADR-0024): a *generated* anonymous EBNF helper
-    /// carries `Some(AnonKind)`, while a user-written rule — even one transparent
-    /// (`_a`) or spelled like a helper (`__anon_star_0`) — carries `None`. This is
-    /// the discriminator CYK keys empty-rule rejection on, and it must be source
-    /// provenance, not the `__anon_` name spelling (#144).
+    /// carries `Some(AnonKind)`, while a user-written transparent rule (`_a`)
+    /// carries `None`. This is the discriminator CYK keys empty-rule rejection on,
+    /// and it must be source provenance, not helper-name spelling.
     #[test]
     fn anon_kind_marks_generated_helpers_not_user_rules() {
-        // `(B*)~2` forces a standalone nullable helper; `_a` is a transparent user
-        // rule; `__anon_star_0` is a user rule the author happened to name like a
-        // helper.
-        let cg = compile("start: _a (B*)~2 __anon_star_0\n_a: B\n__anon_star_0: B\nB: \"b\"\n");
-        // The transparent user rule and the helper-looking user rule are user-written.
-        for user in ["_a", "__anon_star_0", "start"] {
+        // `(B*)+` emits a nullable generated helper; `_a` is a transparent user rule.
+        let cg = compile("start: _a (B*)+\n_a: B\nB: \"b\"\n");
+        for user in ["_a", "start"] {
             let id = cg.symbols.id(user).unwrap();
             assert!(
                 cg.symbols.info(id).anon_kind.is_none(),
@@ -516,10 +509,8 @@ mod tests {
             .collect();
         assert!(
             !generated.is_empty(),
-            "`(B*)~2` must emit at least one generated nullable helper marked with an AnonKind"
+            "`(B*)+` must emit at least one generated nullable helper marked with an AnonKind"
         );
-        // Every marked symbol is a generated `__anon_*` helper (the loader's only
-        // minting path), confirming the marker is set at generation, not by spelling.
         for info in generated {
             assert!(
                 info.name.starts_with("__anon_"),
@@ -528,7 +519,6 @@ mod tests {
             );
         }
     }
-
     #[test]
     fn alias_on_inlined_rule_is_rejected() {
         // An alias on an inlined (`_`-prefixed) rule is rejected at load, exactly

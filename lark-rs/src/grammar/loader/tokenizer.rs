@@ -191,16 +191,12 @@ impl<'a> Lexer<'a> {
                 } else if rest.starts_with('.') {
                     Dispatch::Dot
                 } else if (rest.starts_with("!?") || rest.starts_with("?!"))
-                    && rest[2..].starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+                    && rule_name_start_len(&rest[2..]).is_some()
                 {
                     Dispatch::RuleModifier(rest[..2].to_string(), 2)
-                } else if rest.starts_with('!')
-                    && rest[1..].starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-                {
+                } else if rest.starts_with('!') && rule_name_start_len(&rest[1..]).is_some() {
                     Dispatch::RuleModifier("!".to_string(), 1)
-                } else if rest.starts_with('?')
-                    && rest[1..].starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-                {
+                } else if rest.starts_with('?') && rule_name_start_len(&rest[1..]).is_some() {
                     Dispatch::RuleModifier("?".to_string(), 1)
                 } else if rest.starts_with('"') {
                     Dispatch::Str
@@ -208,12 +204,9 @@ impl<'a> Lexer<'a> {
                     Dispatch::Re
                 } else if rest.starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == '+') {
                     Dispatch::NumberCandidate
-                } else if rest.starts_with(|c: char| c.is_ascii_uppercase())
-                    || (rest.starts_with('_')
-                        && rest[1..].starts_with(|c: char| c.is_ascii_uppercase()))
-                {
+                } else if terminal_name_start_len(rest).is_some() {
                     Dispatch::Terminal
-                } else if rest.starts_with(|c: char| c.is_ascii_lowercase() || c == '_') {
+                } else if rule_name_start_len(rest).is_some() {
                     Dispatch::Rule
                 } else {
                     let ch = rest.chars().next().unwrap();
@@ -432,12 +425,21 @@ impl<'a> Lexer<'a> {
 
     fn lex_rule(&mut self) -> Result<Option<Tok>, GrammarError> {
         let rest = self.rest();
-        let len = rest
-            .bytes()
-            .take_while(|&b| {
-                b.is_ascii_lowercase() || b.is_ascii_uppercase() || b == b'_' || b.is_ascii_digit()
-            })
-            .count();
+        let start_len = rule_name_start_len(rest).ok_or_else(|| GrammarError::SyntaxError {
+            line: self.line,
+            col: self.col,
+            msg: "Invalid rule name".to_string(),
+        })?;
+        let len = start_len
+            + rest[start_len..]
+                .bytes()
+                .take_while(|&b| {
+                    b.is_ascii_lowercase()
+                        || b.is_ascii_uppercase()
+                        || b == b'_'
+                        || b.is_ascii_digit()
+                })
+                .count();
         let name = rest[..len].to_string();
         self.advance(len);
         Ok(Some(Tok::Rule(name)))
@@ -445,13 +447,37 @@ impl<'a> Lexer<'a> {
 
     fn lex_terminal(&mut self) -> Result<Option<Tok>, GrammarError> {
         let rest = self.rest();
-        let len = rest
-            .bytes()
-            .take_while(|&b| b.is_ascii_uppercase() || b == b'_' || b.is_ascii_digit())
-            .count();
+        let start_len = terminal_name_start_len(rest).ok_or_else(|| GrammarError::SyntaxError {
+            line: self.line,
+            col: self.col,
+            msg: "Invalid terminal name".to_string(),
+        })?;
+        let len = start_len
+            + rest[start_len..]
+                .bytes()
+                .take_while(|&b| b.is_ascii_uppercase() || b == b'_' || b.is_ascii_digit())
+                .count();
         let name = rest[..len].to_string();
         self.advance(len);
         Ok(Some(Tok::Terminal(name)))
+    }
+}
+
+fn rule_name_start_len(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    match bytes.first().copied() {
+        Some(b'_') if bytes.get(1).is_some_and(u8::is_ascii_lowercase) => Some(2),
+        Some(b) if b.is_ascii_lowercase() => Some(1),
+        _ => None,
+    }
+}
+
+fn terminal_name_start_len(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    match bytes.first().copied() {
+        Some(b'_') if bytes.get(1).is_some_and(u8::is_ascii_uppercase) => Some(2),
+        Some(b) if b.is_ascii_uppercase() => Some(1),
+        _ => None,
     }
 }
 
