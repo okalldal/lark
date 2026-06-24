@@ -853,8 +853,10 @@ fn build_flag_prefix(flags: u32) -> String {
 pub struct TerminalDef {
     pub name: String,
     pub pattern: Pattern,
-    /// Higher priority terminals are tried first in the lexer.
-    pub priority: i32,
+    /// Higher priority terminals are tried first in the lexer. Stored `i64` (not
+    /// `i32`) so two distinct very-large declared priorities do not saturate to the
+    /// same value and tie (#352); Python uses unbounded ints.
+    pub priority: i64,
     /// A `%declare`d terminal: it has *no* pattern of its own and is never lexed.
     /// It is interned as a terminal (so rules can reference it and the parse table
     /// reserves a column) but excluded from every scanner; a postlex hook (e.g. an
@@ -872,7 +874,7 @@ pub struct TerminalDef {
 }
 
 impl TerminalDef {
-    pub fn new(name: impl Into<String>, pattern: Pattern, priority: i32) -> Self {
+    pub fn new(name: impl Into<String>, pattern: Pattern, priority: i64) -> Self {
         TerminalDef {
             name: name.into(),
             pattern,

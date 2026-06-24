@@ -54,6 +54,7 @@ Authoring a new ADR as `Accepted` is a Definition-of-Done failure (see
 | [0030](0030-oracle-generators-fail-loud.md) | Oracle generators fail loud on un-allow-listed contradictions; the oracle suite is honest by construction (no silent skips, no self-referential fields) | Accepted |
 | [0031](0031-good-autonomous-fix-site-verification.md) | `good-autonomous` carries a fix-site **verification status** (not a blocking gate): `/triage` checks the stated fix site against a fast repro; verified sites are load-bearing, unverified sites keep the label but carry a "fix site unverified" note (bug-hackathon marks fix sites hypothesised vs verified) | Accepted |
 | [0032](0032-closeout-files-retro-flagged-kaizen-items.md) | Sprint/kaizen/task close-out must file every retro-flagged kaizen item (required, checkable) + a dual-arm follow-ups report — closes the §7 lapse #284 made (dropped kaizen follow-ups; recovered as #309–#314) | Accepted |
+| [0034](0034-priority-width-i64.md) | Terminal/rule priority storage widened `i32` → `i64` (loader clamp + public `RuleOptions`/`TerminalDef` fields + Earley/CYK accumulators) so two distinct very-large priorities no longer saturate and tie (#352); public-API change → escalate-tier | Proposed |
 
 ## ADRs going forward — the governance audit trail
 

@@ -93,7 +93,7 @@ pub(super) struct GrammarCompiler {
     /// The modifiers (`!` keep-all, `?` expand1) and priority are kept so each
     /// instantiation inherits the template's rule options, exactly as Python Lark
     /// deep-copies the template's `RuleOptions` onto every instance.
-    pub(super) templates: HashMap<String, (Vec<String>, Vec<AliasedExpansion>, String, i32)>,
+    pub(super) templates: HashMap<String, (Vec<String>, Vec<AliasedExpansion>, String, i64)>,
     /// Memo of template instantiations: canonical `name<args>` key → instance rule
     /// name. Lets a self-recursive template (`_sep{x,d}: x | _sep{x,d} d x`) resolve
     /// its own reference to the rule already being built instead of recursing
