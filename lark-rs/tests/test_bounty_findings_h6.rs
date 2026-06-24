@@ -287,7 +287,6 @@ fn h6_5_meta_span_includes_filtered_tokens() {
 /// different validation predicate. Per ADR-0017 (being more permissive than the oracle
 /// is unfalsifiable), expected fix: reject-like-Python.
 #[test]
-#[ignore = "XFAIL (bounty H6-8): rule/terminal names with no alphabetic char accepted; Python rejects"]
 fn h6_8_letterless_names_rejected() {
     for g in [
         "_: \"a\"\nstart: _\n",

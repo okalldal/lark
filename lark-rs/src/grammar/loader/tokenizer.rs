@@ -440,6 +440,12 @@ impl<'a> Lexer<'a> {
             .count();
         let name = rest[..len].to_string();
         self.advance(len);
+        // H6-8: Python's lexer regex requires at least one [a-z] in rule names.
+        if !name.bytes().any(|b| b.is_ascii_lowercase()) {
+            return Err(GrammarError::Other {
+                msg: format!("Invalid rule name {name:?}: must contain at least one lowercase letter"),
+            });
+        }
         Ok(Some(Tok::Rule(name)))
     }
 
@@ -451,6 +457,12 @@ impl<'a> Lexer<'a> {
             .count();
         let name = rest[..len].to_string();
         self.advance(len);
+        // H6-8: Python's lexer regex requires at least one [A-Z] in terminal names.
+        if !name.bytes().any(|b| b.is_ascii_uppercase()) {
+            return Err(GrammarError::Other {
+                msg: format!("Invalid terminal name {name:?}: must contain at least one uppercase letter"),
+            });
+        }
         Ok(Some(Tok::Terminal(name)))
     }
 }
