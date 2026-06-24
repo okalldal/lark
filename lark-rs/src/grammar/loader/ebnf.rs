@@ -261,44 +261,35 @@ impl GrammarCompiler {
         }
         // Distributing two optionals can coincide (`X? X?` → `X X | X | X | ε`);
         // identical alternatives would reduce/reduce on the same item, so keep the
-        // first occurrence of each (Python's grammar dedups identical rules too).
+        // first occurrence of each (Python's grammar dedups identical rules too). The
+        // dedup is keyed on the **full** `(syms, gaps)` — including empty arms' maybe
+        // `_EMPTY`-marker counts (gaps) — so it collapses only *byte-identical*
+        // alternatives, exactly as Python's `SimplifyRule_Visitor.expansions` dedups
+        // identical expansion **trees** (the `_EMPTY` markers are tree children there,
+        // hence part of the key).
         //
-        // Two *empty* alternatives that differ only in their maybe `_EMPTY` markers
-        // (gaps) are duplicate *empty* rules, which Python tolerates and dedups
-        // (`load_grammar.py`: the "Rules defined twice" check fires only for
-        // non-empty `dups[0].expansion`). Collapsing them here keeps a non-colliding
-        // nullable like `([A])?` (whose inner-`[A]` absent arm and outer-`?` ε are
-        // both empty) from minting two empty productions at one origin — the LALR
-        // reduce/reduce conflict Python never reports (#258). The dedup is keyed on
-        // the *syms only* so it runs in both modes, but the surviving arm differs:
+        // Crucially, two empty arms that differ in their `_EMPTY` count are **kept
+        // distinct** here — that provenance is what Python preserves through dedup so a
+        // nested optional collides at the final rule build (H4-8, #351). The two
+        // empty-producing operators carry different counts: `?` (Python's `EBNF_to_BNF.expr`)
+        // distributes a **bare** ε (`[],[0]`), while `[...]` (Python's `EBNF_to_BNF.maybe`)
+        // distributes `[_EMPTY] * FindRuleSize` (`[],[n]`). For `([A]?) B` / `[[A]?] B`
+        // the inner `[A]`'s absent arm (1 `_EMPTY`) and the outer `?`'s bare ε (0) thus
+        // stay as two distinct empties; once the tail `B` is concatenated they become
+        // two distinct `start -> B` arms (gaps `[1,0]` vs `[0,0]`) that collide in
+        // [`dedup_and_check_alts`](GrammarCompiler::dedup_and_check_alts) — Python's
+        // "Rules defined twice", on every backend. Collapsing them on emptiness alone
+        // (as before) destroyed the bare-vs-marker distinction *inside the group*,
+        // before the tail could surface it, so the collision was silently lost.
         //
-        //   - `maybe_placeholders=False`: the markers carry no output role (stripped
-        //     before tree build via `stored_output_gaps`), so canonicalize every
-        //     empty arm to a bare ε — `([A])?` parses `""` to zero children, matching
-        //     Python.
-        //   - `maybe_placeholders=True`: the markers *are* the absent `None`s, so keep
-        //     the first occurrence verbatim. The inner-`[A]` absent arm (1 None) is
-        //     emitted before the outer-`?` ε (0 Nones) in `present_forms` /
-        //     `compile_expansion`, so first-occurrence dedup preserves Python's
-        //     `(True,)` empty arm (`""` → `[None]`) rather than the bare ε.
-        //
-        // A *non-empty* arm always keeps its markers (untouched here), so a genuine
-        // `[A]~2 C` / `([A])? C`-style collision still reaches `dedup_and_check_alts`.
-        let canon = |a: &CompiledAlt| -> CompiledAlt {
-            if a.0.is_empty() {
-                if self.maybe_placeholders {
-                    // Key on emptiness alone; keep the first empty arm's gaps so its
-                    // `None` count survives (`retain` keeps the first insert).
-                    (Vec::new(), Vec::new())
-                } else {
-                    (Vec::new(), vec![0])
-                }
-            } else {
-                a.clone()
-            }
-        };
+        // A *lone* nested optional (`([A]?)`, no tail) stays accepted: its two distinct
+        // empties survive this dedup but reach `dedup_and_check_alts` still empty, where
+        // duplicate **empty** rules are tolerated and collapsed on emptiness alone
+        // (Python's "Rules defined twice" fires only for non-empty `dups[0].expansion`).
+        // The first occurrence wins there, so under `maybe_placeholders` the kept arm is
+        // the inner `[A]`'s `(True,)` None-bearing one (`""` → `[None]`), matching Python.
         let mut seen = std::collections::HashSet::new();
-        acc.retain(|a| seen.insert(canon(a)));
+        acc.retain(|a| seen.insert(a.clone()));
         Ok(acc)
     }
 
