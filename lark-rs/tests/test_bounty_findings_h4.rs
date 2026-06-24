@@ -291,7 +291,6 @@ fn h4_5_import_closure_mangle_exemption() {
 /// mis-routes. Expected fix: build `ParseError::UnexpectedCharacter` from the lex
 /// failure, mirroring the recovering path. (Distinct from N8/#307, token positions.)
 #[test]
-#[ignore = "XFAIL (bounty H4-6): contextual lexer reports UnexpectedToken for an unlexable char; Python+basic say UnexpectedCharacter"]
 fn h4_6_contextual_unlexable_char_is_unexpected_character() {
     let lark = Lark::new(
         "start: \"a\" \"b\"\n",
@@ -299,10 +298,71 @@ fn h4_6_contextual_unlexable_char_is_unexpected_character() {
     )
     .expect("H4-6: builds");
     let err = lark.parse("ax").expect_err("H4-6: 'ax' rejects");
+    match err {
+        ParseError::UnexpectedCharacter {
+            ch,
+            line,
+            col,
+            ref expected,
+            ..
+        } => {
+            // Python: UnexpectedCharacters, line 1, col 2, char 'x', allowed {'B'}.
+            assert_eq!(ch, 'x', "H4-6: offending char");
+            assert_eq!((line, col), (1, 2), "H4-6: position (line 1, col 2)");
+            // The `allowed`/expected set is the lexable terminals at the state
+            // — here just `B` — and must NOT include the `$END` sentinel.
+            assert!(
+                !expected.contains("$END"),
+                "H4-6: `$END` must be excluded from the allowed set, got {expected:?}"
+            );
+            assert!(
+                expected.contains('B'),
+                "H4-6: expected set should name the lexable terminal `B`, got {expected:?}"
+            );
+        }
+        other => panic!(
+            "H4-6: 'x' matches no terminal → Python raises UnexpectedCharacters; \
+             lark-rs's contextual path raised {other:?}"
+        ),
+    }
+}
+
+/// H4-6 companion (regression guard). The H4-6 fix builds `UnexpectedCharacter` from a
+/// contextual `LexFailure`, but a non-recovering contextual `LexFailure` must mean
+/// *genuinely un-lexable* — NOT merely *invalid in this parser state*. A globally-valid
+/// but state-invalid token (`}` while the parser is inside `a_part`, where the per-state
+/// scanner only offers `AWORD`/`]`) is matched by the contextual lexer's root fallback,
+/// fed to the parser, and rejected as `UnexpectedToken` — byte-for-byte what Python's
+/// batch contextual parse raises (`l_ctx.parse("[}")` → `UnexpectedToken(RBRACE)`,
+/// Python Lark 1.3.1). If the H4-6 fix ever converts *every* `LexFailure` to
+/// `UnexpectedCharacter` (dropping the root fallback), this case regresses to the wrong
+/// variant. Pinned alongside `tests/test_interactive.rs::contextual_state_invalid_token_rbrace`
+/// (the interactive-cursor sibling).
+#[test]
+fn h4_6_contextual_state_invalid_token_is_unexpected_token() {
+    let lark = Lark::new(
+        "start: a_part b_part\n\
+         a_part: \"[\" AWORD \"]\"\n\
+         b_part: \"{\" BWORD \"}\"\n\
+         AWORD: /[a-z]+/\n\
+         BWORD: /[A-Z]+/\n\
+         %ignore \" \"\n",
+        opts(ParserAlgorithm::Lalr, LexerType::Contextual),
+    )
+    .expect("companion: builds");
+    // `}` after `[` is globally lexable (it is the `b_part` closer) but invalid in the
+    // `a_part` state → Python: UnexpectedToken(RBRACE), NOT UnexpectedCharacters.
+    let err = lark.parse("[}").expect_err("companion: '[}' rejects");
     assert!(
-        matches!(err, ParseError::UnexpectedCharacter { ch: 'x', .. }),
-        "H4-6: 'x' matches no terminal → Python raises UnexpectedCharacters; \
-         lark-rs's contextual path raised {err:?}"
+        matches!(err, ParseError::UnexpectedToken { .. }),
+        "companion: a state-invalid-but-globally-valid token must raise UnexpectedToken \
+         (Python parity via the contextual root fallback), got {err:?}"
+    );
+    // And a genuinely un-lexable char on the same grammar is still UnexpectedCharacter.
+    let unlexable = lark.parse("[x]@").expect_err("companion: '[x]@' rejects");
+    assert!(
+        matches!(unlexable, ParseError::UnexpectedCharacter { ch: '@', .. }),
+        "companion: a truly un-lexable char must raise UnexpectedCharacter, got {unlexable:?}"
     );
 }
 

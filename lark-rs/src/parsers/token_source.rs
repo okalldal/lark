@@ -141,6 +141,19 @@ impl<'a> Contextual<'a> {
 
     /// Lex the next non-ignored token for `parser_state`, or the `$END` token at
     /// end of input.
+    ///
+    /// On a per-state scanner miss this falls back to the **root** (full-terminal)
+    /// scanner — Python Lark's `ContextualLexer.lex` exception branch — exactly as
+    /// [`ContextualRecovering`] does, and for the same reason: it is what tells a
+    /// *state-invalid-but-globally-valid* token apart from a *genuinely un-lexable*
+    /// character (issue #346). A root match is an out-of-context token; we yield it
+    /// so the parser surfaces it as an `UnexpectedToken` (matching Python's batch
+    /// `l_ctx.parse` — e.g. `}` in an `a_part` state raises `UnexpectedToken`,
+    /// pinned by `tests/test_interactive.rs::contextual_state_invalid_token_rbrace`).
+    /// Only when the root scanner *also* misses is it a real `LexFailure`, which the
+    /// non-recovering driver renders as `UnexpectedCharacter`
+    /// ([`lex_failure`](super::lalr::LalrParser)). Without this fallback the driver
+    /// could not distinguish the two cases and mis-classified every state miss.
     fn lex_next(&mut self, parser_state: usize) -> Result<Token, LexFailure> {
         loop {
             if self.state.is_done() {
@@ -165,9 +178,26 @@ impl<'a> Contextual<'a> {
                     self.state.advance_by(tok.value.len());
                 }
                 Ok(Some(tok)) => return Ok(tok),
-                // No scanner for this state, or no terminal matched here — a lex
-                // failure the parser will enrich with its expected-terminal set.
+                // No scanner for this state, or no terminal valid here: fall back to
+                // the root (full-terminal) scanner. A root match is an
+                // out-of-context-but-valid token — yield it so the parser raises
+                // `UnexpectedToken`; a root miss is a genuinely un-lexable character,
+                // surfaced as `LexFailure` → `UnexpectedCharacter`. The root token is
+                // returned without an `is_ignored` check for the same reason as
+                // `ContextualRecovering::lex_next`: every state's scanner already
+                // includes the `%ignore` terminals (`always_accept`), so an ignored
+                // terminal always matches in the per-state branch above and control
+                // never reaches here for one.
                 Ok(None) | Err(_) => {
+                    if let Some(tok) = self.lexer.next_root_token(
+                        self.state.text,
+                        self.state.pos,
+                        self.state.char_pos,
+                        self.state.line,
+                        self.state.col,
+                    ) {
+                        return Ok(tok);
+                    }
                     let ch = self.state.text[self.state.pos..].chars().next().unwrap();
                     return Err(LexFailure {
                         ch,

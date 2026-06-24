@@ -991,16 +991,51 @@ impl LalrParser {
         }
     }
 
-    /// Turn a lexer-level failure (no valid terminal at the position) into a
-    /// parse error, enriched with the terminals expected in `state` — which only
-    /// the parser knows.
+    /// Turn a lexer-level failure into a parse error. By the time the
+    /// non-recovering driver reaches here the contextual source has already tried
+    /// the **root** (full-terminal) scanner and it too missed (see
+    /// [`Contextual::lex_next`](super::token_source::Contextual)), so the character
+    /// is *genuinely* un-lexable — a *character* error, not a token error: no token
+    /// was ever produced. So this builds [`UnexpectedCharacter`] (matching Python's
+    /// `UnexpectedCharacters`, and lark-rs's own basic-lexer and recovering paths —
+    /// issue #346), not `UnexpectedToken`.
+    ///
+    /// `expected` mirrors Python's `UnexpectedCharacters.allowed`: the terminals the
+    /// parser can act on in `state`, with the `$END` sentinel **dropped unless it is
+    /// the only option** — Python reports `{'B'}` for a state expecting `B` (no
+    /// `$END`), `{'A'}` for a state expecting `A` *or* end-of-input (`$END` stripped),
+    /// but `{'<END-OF-FILE>'}` for a state expecting *only* end-of-input. Fixing the
+    /// pre-#346 bug where the raw action row leaked `$END` into the expected set
+    /// alongside real terminals.
+    ///
+    /// [`UnexpectedCharacter`]: ParseError::UnexpectedCharacter
     fn lex_failure(&self, state: usize, f: LexFailure) -> ParseError {
-        ParseError::UnexpectedToken {
-            token: f.ch.to_string(),
-            token_type: String::new(),
+        let mut allowed: Vec<String> = self
+            .table
+            .action
+            .get(state)
+            .map(|row| {
+                row.iter()
+                    .enumerate()
+                    .filter(|(t, a)| a.is_some() && SymbolId(*t as u32) != SymbolId::END)
+                    .map(|(t, _)| self.table.symbols.name(SymbolId(t as u32)).to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        allowed.sort();
+        // `$END` survives only when nothing else is lexable here — a state that
+        // expects end-of-input and nothing more (Python's `<END-OF-FILE>`).
+        let expected = if allowed.is_empty() {
+            "<END-OF-FILE>".to_string()
+        } else {
+            allowed.join(", ")
+        };
+        ParseError::UnexpectedCharacter {
+            ch: f.ch,
             line: f.line,
             col: f.col,
-            expected: self.expected_at(state),
+            pos: f.pos,
+            expected,
         }
     }
 
