@@ -44,6 +44,34 @@ pub(super) fn spec_final_names(spec: &ImportSpec) -> Vec<String> {
     }
 }
 
+/// Split an `%import` directive into its module path (which file/library to load
+/// from) and the `(original_name, final_name)` pairs it registers — the same
+/// split `resolve_import` performs, factored out so the first compiler pass can
+/// pre-build the per-module merged alias map (see
+/// [`GrammarCompiler::import_alias_map`]) without re-running import resolution.
+///
+/// Returns `None` for a bare single-element path (`%import common` with no name),
+/// which imports nothing.
+pub(super) fn split_import_directive(
+    spec: &ImportSpec,
+) -> Option<(Vec<String>, Vec<(String, String)>)> {
+    if let Some(names) = &spec.names {
+        // Name-list form: a multi-import cannot carry per-name aliases, so each
+        // final name equals its original (Python: `dict(zip(names, names))`).
+        Some((
+            spec.path.clone(),
+            names.iter().map(|n| (n.clone(), n.clone())).collect(),
+        ))
+    } else if spec.path.len() > 1 {
+        let original = spec.path.last().cloned().unwrap_or_default();
+        let module = spec.path[..spec.path.len() - 1].to_vec();
+        let final_name = spec.alias.clone().unwrap_or_else(|| original.clone());
+        Some((module, vec![(original, final_name)]))
+    } else {
+        None
+    }
+}
+
 impl GrammarCompiler {
     pub(super) fn resolve_import(&mut self, spec: ImportSpec) -> Result<(), GrammarError> {
         // Split the directive into the module path (which file/library to load
@@ -263,12 +291,24 @@ impl GrammarCompiler {
     ) -> Result<(), GrammarError> {
         let dotted = module_path.join(".");
         let prefix = module_path.join("__");
+        // The per-module merged alias map (#343): every name independently
+        // imported from this module, across *all* `%import` directives. A closure
+        // symbol present here is left unmangled under its registered final name,
+        // mirroring Python's `_get_mangle(prefix, aliases)` (`if s in aliases`).
+        // Cloned out so the closure-copy can borrow `self` mutably.
+        let module_aliases = self.import_alias_map.get(module_path).cloned();
         for (name, alias) in names_to_import {
             let final_name = alias.clone().unwrap_or_else(|| name.clone());
             if imported.terminals.iter().any(|t| &t.name == name) {
                 self.import_terminal(imported, name, &final_name);
             } else if imported.rules.iter().any(|r| &r.origin.name == name) {
-                self.import_rule_closure(imported, name, &final_name, &prefix);
+                self.import_rule_closure(
+                    imported,
+                    name,
+                    &final_name,
+                    &prefix,
+                    module_aliases.as_ref(),
+                );
             } else {
                 return Err(GrammarError::ImportNotFound {
                     path: format!("{dotted}.{name}"),
@@ -294,12 +334,19 @@ impl GrammarCompiler {
     /// The requested rule keeps `final_name`; all dependencies are mangled under
     /// `prefix` (underscore-preserving, so transparent `_rules` stay transparent)
     /// to avoid colliding with the importing grammar's own symbols.
+    ///
+    /// `module_aliases` is the per-module merged import-alias map (#343): a
+    /// closure symbol that is *also* independently imported from this module is
+    /// left **unmangled** under its registered final name instead of being
+    /// prefix-mangled — mirroring Python's `_get_mangle(prefix, aliases)`, whose
+    /// `if s in aliases` arm short-circuits the prefix mangle.
     fn import_rule_closure(
         &mut self,
         imported: &Grammar,
         name: &str,
         final_name: &str,
         prefix: &str,
+        module_aliases: Option<&HashMap<String, String>>,
     ) {
         // Reachable rule origins (BFS from `name`) and the terminals they touch.
         let mut rule_names: std::collections::HashSet<String> =
@@ -329,9 +376,17 @@ impl GrammarCompiler {
             return;
         }
 
-        // Name map: requested symbol → final name; everything else → mangled.
+        // Name map, mirroring Python's `_get_mangle(prefix, aliases)`:
+        //   1. `if s in aliases:` → use the registered (final) name, unmangled.
+        //      This covers the requested rule itself (`name → final_name`) *and*
+        //      any closure symbol independently imported from this module (#343):
+        //      a multi-import registers `name → name`, so the reference stays
+        //      `NAME`, not `python__NAME`.
+        //   2. else mangle under the module prefix (underscore-preserving).
         let rename = |n: &str| -> String {
-            if n == name {
+            if let Some(final_) = module_aliases.and_then(|m| m.get(n)) {
+                final_.clone()
+            } else if n == name {
                 final_name.to_string()
             } else if let Some(rest) = n.strip_prefix('_') {
                 format!("_{prefix}__{rest}")

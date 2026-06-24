@@ -264,8 +264,10 @@ fn h4_4_priority_i32_saturation_tie() {
 /// import-vs-import collision) and RC2 (duplicate definition). Expected fix: build a
 /// per-module alias map from the full merged import list and consult it for every
 /// closure symbol, mirroring `_get_mangle`.
+// Fixed (#343): the per-module merged import-alias map (`import_alias_map`) leaves a
+// closure symbol that is also independently imported unmangled, mirroring Python's
+// `_get_mangle(prefix, aliases)` `if s in aliases` short-circuit.
 #[test]
-#[ignore = "XFAIL (bounty H4-5): import-closure mangles a sibling that is independently imported (token type python__NAME vs NAME)"]
 fn h4_5_import_closure_mangle_exemption() {
     let g = "start: pattern\n%import python (pattern, NAME)\n%ignore \" \"\n";
     let lark =
@@ -550,5 +552,112 @@ fn h4_12_dense_dfa_build_is_subexponential() {
          (bytes N=4 = {b4}, N=10 = {b10}; ratio {:.1}× ≫ linear) — unbounded eager \
          determinization with no dfa_size_limit",
         b10 as f64 / b4.max(1) as f64
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #343 adjacent import/alias shapes — closure mangle vs the per-module alias map.
+//
+// The #343 fix builds a per-module *merged* alias map and consults it for every
+// closure symbol. These four pins (token types verified against Python Lark 1.3.1,
+// `parser='lalr', lexer='contextual'`) bracket the fix so a future refactor cannot
+// over- or under-mangle: a closure symbol is unmangled iff it is independently
+// imported from the same module, across **all** directives, honoring the alias.
+// ─────────────────────────────────────────────────────────────────────────────
+fn h4_5_token_types(g: &str, inp: &str) -> Vec<String> {
+    let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual))
+        .expect("#343 adjacent: builds");
+    let tree = lark.parse(inp).expect("#343 adjacent: parses");
+    let mut t = Vec::new();
+    collect_token_types(&tree, &mut t);
+    t.into_iter().map(|s| s.to_string()).collect()
+}
+
+/// Cross-directive merge: `pattern` and `NAME` arrive in **separate** `%import
+/// python` directives. Python merges the per-dotted-path `aliases` dict before
+/// mangling, so the closure reference to `NAME` is still left unmangled (`NAME`).
+#[test]
+fn h4_5_cross_directive_sibling_import_unmangled() {
+    let types = h4_5_token_types(
+        "start: pattern\n%import python (pattern)\n%import python (NAME)\n%ignore \" \"\n",
+        "x",
+    );
+    assert!(
+        types.contains(&"NAME".to_string()) && !types.contains(&"python__NAME".to_string()),
+        "#343: `NAME` imported by a separate directive of the same module must stay \
+         unmangled (Python merges aliases across directives); got {types:?}"
+    );
+}
+
+/// Control: when the sibling is **not** independently imported, the closure
+/// reference *is* mangled — `python__NAME`. Confirms the fix did not blanket-exempt.
+#[test]
+fn h4_5_unimported_sibling_stays_mangled() {
+    let types = h4_5_token_types(
+        "start: pattern\n%import python (pattern)\n%ignore \" \"\n",
+        "x",
+    );
+    assert!(
+        types.contains(&"python__NAME".to_string()) && !types.contains(&"NAME".to_string()),
+        "#343 control: `NAME` not independently imported must stay prefix-mangled \
+         (`python__NAME`); got {types:?}"
+    );
+}
+
+/// Aliased sibling: `%import python.NAME -> ID` registers `NAME → ID`, so the
+/// closure reference is rewritten to the **alias** `ID` (Python's `aliases[s]`),
+/// not the mangled `python__NAME` nor the bare `NAME`.
+#[test]
+fn h4_5_aliased_sibling_uses_alias_in_closure() {
+    let types = h4_5_token_types(
+        "start: pattern ID\n%import python (pattern)\n%import python.NAME -> ID\n%ignore \" \"\n",
+        "x y",
+    );
+    assert_eq!(
+        types,
+        vec!["ID".to_string(), "ID".to_string()],
+        "#343: an aliased sibling import (`NAME -> ID`) must rename the closure \
+         reference to `ID` too (Python `aliases[NAME] == ID`); got {types:?}"
+    );
+}
+
+/// A closure **non-terminal** sub-rule that is also independently imported is left
+/// unmangled too — but an alias node (`-> capture_pattern`) that is *not* imported
+/// stays mangled. Verified against Python: nodes `[start, python__capture_pattern]`,
+/// token `NAME`. Confirms the alias map exempts only what is in the import list, and
+/// that the dedup (separately-imported `closed_pattern`/`NAME` copies) does not
+/// duplicate or drop a rule.
+#[test]
+fn h4_5_closure_subrule_imported_alias_still_mangled() {
+    let g = "start: pattern\n%import python (pattern, closed_pattern, NAME)\n%ignore \" \"\n";
+    let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).expect("builds");
+    let tree = lark.parse("x").expect("parses");
+    let mut tokens = Vec::new();
+    collect_token_types(&tree, &mut tokens);
+    fn node_names(c: &Child, out: &mut Vec<String>) {
+        if let Child::Tree(tr) = c {
+            out.push(tr.data.clone());
+            for ch in &tr.children {
+                node_names(ch, out);
+            }
+        }
+    }
+    let mut nodes = Vec::new();
+    if let ParseTree::Tree(tr) = &tree {
+        nodes.push(tr.data.clone());
+        for ch in &tr.children {
+            node_names(ch, &mut nodes);
+        }
+    }
+    assert_eq!(
+        nodes,
+        vec!["start".to_string(), "python__capture_pattern".to_string()],
+        "#343: un-imported alias node stays mangled even when a closure sub-rule is \
+         independently imported; got nodes {nodes:?}"
+    );
+    assert_eq!(
+        tokens,
+        vec!["NAME".to_string()],
+        "#343: independently-imported `NAME` stays unmangled in the closure; got {tokens:?}"
     );
 }
