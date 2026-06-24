@@ -466,18 +466,14 @@ impl EarleyParser {
             NodeValue::Tree(t) => ParseTree::Tree(t),
             NodeValue::Token(t) => ParseTree::Token(t),
             // A start rule is never transparent. Its value can still be `Inline`
-            // when a top-level `?start` collapses a lone-`None` placeholder (RC9 fix
-            // in tree_builder: lone-`None` expand1 → `Inline([None])`). The public
-            // `ParseTree` can't hold a bare `None`, so the single-`None` arm below
-            // falls back to an empty start node — that root-`?start` corner is a
-            // separate tracked divergence (#289). Stay defensive rather than panic.
+            // when a top-level `?start` collapses a lone-`None` placeholder (RC9 in
+            // tree_builder: lone-`None` expand1 → `Inline([None])`). Python Lark
+            // returns a bare `None` there (`?start: [A]` on `""`), so emit
+            // `ParseTree::None` to match the oracle (#289).
             NodeValue::Inline(mut cs) if cs.len() == 1 => match cs.pop().unwrap() {
                 Child::Tree(t) => ParseTree::Tree(t),
                 Child::Token(t) => ParseTree::Token(t),
-                Child::None => ParseTree::Tree(Tree::new(
-                    self.grammar.symbols.name(start_id).to_string(),
-                    vec![],
-                )),
+                Child::None => ParseTree::None,
             },
             NodeValue::Inline(cs) => ParseTree::Tree(Tree::new(
                 self.grammar.symbols.name(start_id).to_string(),
@@ -1410,7 +1406,7 @@ struct Transformer<'a> {
     /// Per-terminal-id priority, summed into the forest priority only when the
     /// dynamic lexer is used (the basic lexer consumes terminal priorities in its
     /// terminal ordering). Empty otherwise.
-    term_priority: HashMap<SymbolId, i32>,
+    term_priority: HashMap<SymbolId, i64>,
     /// Memoized symbol-node values (final assembled trees).
     memo: HashMap<usize, NodeValue>,
     /// Memoized per-symbol-node derivation lists (the deduped alternative values
@@ -1429,7 +1425,7 @@ struct Transformer<'a> {
     /// oracles pin. Computed once per node by [`Transformer::single_deriv`].
     single_deriv: HashMap<usize, bool>,
     /// Memoized node priorities + the in-progress set for cycle-safe summing.
-    prio: HashMap<usize, i32>,
+    prio: HashMap<usize, i64>,
     prio_visiting: HashSet<usize>,
     /// Resolve mode: nodes whose value has been fully built at least once. A value
     /// is memoized (and thereafter cloned) only on its *second* visit — so a node
@@ -1483,7 +1479,7 @@ impl<'a> Transformer<'a> {
     /// children, `Exit` combines their now-memoized priorities. Semantics are
     /// identical to the natural recursion: results memoize in `prio`, and an edge
     /// back into an in-progress node (`prio_visiting`) contributes 0.
-    fn node_priority(&mut self, id: usize) -> i32 {
+    fn node_priority(&mut self, id: usize) -> i64 {
         if let Some(&p) = self.prio.get(&id) {
             return p;
         }
@@ -1520,7 +1516,7 @@ impl<'a> Transformer<'a> {
                     let mut best = if node.families.is_empty() {
                         0
                     } else {
-                        i32::MIN
+                        i64::MIN
                     };
                     for k in 0..self.forest.nodes[n].families.len() {
                         let p = self.forest.nodes[n].families[k];
@@ -1540,7 +1536,7 @@ impl<'a> Transformer<'a> {
     /// A derivation's priority: the rule's own priority (only counted at a real
     /// symbol node, not at intermediates) plus its children's priorities. Token
     /// leaves count 0 — the basic lexer already "used up" terminal priorities.
-    fn packed_priority(&mut self, packed: &Packed, parent_inter: bool) -> i32 {
+    fn packed_priority(&mut self, packed: &Packed, parent_inter: bool) -> i64 {
         // Make sure both node children are computed (left before right, the
         // recursive evaluation order), then combine by lookup.
         for r in [packed.left, packed.right] {
@@ -1553,7 +1549,7 @@ impl<'a> Transformer<'a> {
 
     /// Lookup-only half of [`packed_priority`](Self::packed_priority): combines
     /// child priorities already computed (or in-progress → 0) by the DFS.
-    fn packed_priority_value(&self, packed: &Packed, parent_inter: bool) -> i32 {
+    fn packed_priority_value(&self, packed: &Packed, parent_inter: bool) -> i64 {
         let rule_prio = self.grammar.rules[packed.rule].options.priority;
         let base = if !parent_inter && rule_prio != 0 {
             rule_prio
@@ -1577,7 +1573,11 @@ impl<'a> Transformer<'a> {
                 .unwrap_or(0),
             ForestRef::None => 0,
         };
-        base + child(packed.left) + child(packed.right)
+        // Saturating accumulation: priorities are a bounded i64 domain (ADR-0034),
+        // so a derivation summing priorities near the i64 boundary saturates rather
+        // than wrapping/panicking — mirrors CYK's `weight.saturating_add` chains.
+        base.saturating_add(child(packed.left))
+            .saturating_add(child(packed.right))
     }
 
     /// Family indices of `node_id` in Lark's `sort_key` order: non-empty
@@ -1600,7 +1600,7 @@ impl<'a> Transformer<'a> {
         let forest = self.forest;
         let node = &forest.nodes[node_id];
         let parent_inter = node.is_intermediate;
-        let prios: Vec<i32> = (0..node.families.len())
+        let prios: Vec<i64> = (0..node.families.len())
             .map(|k| {
                 let p = node.families[k];
                 self.packed_priority(&p, parent_inter)

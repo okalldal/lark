@@ -377,6 +377,9 @@ fn parse_tree_to_py(py: Python<'_>, pt: &ParseTree) -> PyResult<PyObject> {
     match pt {
         ParseTree::Tree(t) => Ok(PyTree::from_tree(py, t)?.into_any()),
         ParseTree::Token(tok) => Ok(Py::new(py, PyToken::from_token(tok))?.into_any()),
+        // A bare `None` root (`?start: [A]` on `""`, #289) maps to Python's literal
+        // `None`, exactly what Python Lark returns for that collapse.
+        ParseTree::None => Ok(py.None()),
     }
 }
 

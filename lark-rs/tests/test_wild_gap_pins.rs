@@ -50,6 +50,7 @@ fn show(result: &ParseTree) -> String {
     match result {
         ParseTree::Tree(t) => tree(t),
         ParseTree::Token(tok) => format!("{}:{}", tok.type_, tok.value),
+        ParseTree::None => "None".to_string(),
     }
 }
 

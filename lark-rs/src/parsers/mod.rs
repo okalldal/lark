@@ -596,7 +596,7 @@ fn lower_with_lexer_conf(grammar: &Grammar, options: &LarkOptions) -> (CompiledG
 ///    accepted everywhere (it is the default path, and Python accepts `earley`/`cyk`
 ///    explicit/forest too). CYK's `cyk_ignores_ambiguity_option` test pins that
 ///    `cyk + Explicit` still builds, matching the oracle.
-fn validate_config(options: &LarkOptions) -> Result<(), LarkError> {
+pub(crate) fn validate_config(options: &LarkOptions) -> Result<(), LarkError> {
     let cfg_err = |msg: String| LarkError::Grammar(GrammarError::Other { msg });
 
     // Parser → allowed-lexer matrix. `Auto` is resolved per-parser downstream and
@@ -823,7 +823,21 @@ fn build_earley(
             }))
         }
     };
-    match options.lexer {
+    // Resolve `lexer='auto'` to a concrete lexer exactly as Python Lark does
+    // (`lark/lark.py`): for `parser='earley'`, auto→`dynamic` when there is no
+    // postlex, else `basic` (the dynamic lexer can't be used with a postlex). An
+    // explicit `Basic`/`Dynamic`/`DynamicComplete` is honored as-is; the front-door
+    // `validate_config` has already rejected any illegal explicit pairing
+    // (`contextual` on earley), so the only lexers that reach here are
+    // `Auto`/`Basic`/`Dynamic`/`DynamicComplete`. Before this resolution, `Auto`
+    // fell into the basic-lexer catch-all and silently diverged from Python — it
+    // maximal-munched where Python's parse-directed dynamic lexer segments (#334).
+    let resolved_lexer = match options.lexer {
+        LexerType::Auto if options.postlex.is_none() => LexerType::Dynamic,
+        LexerType::Auto => LexerType::Basic,
+        ref other => other.clone(),
+    };
+    match resolved_lexer {
         LexerType::Dynamic | LexerType::DynamicComplete => {
             let matcher = DynamicMatcher::new(&lexer_conf)?;
             let parser = EarleyParser::new(cg);
@@ -831,7 +845,7 @@ fn build_earley(
                 parser,
                 matcher,
                 resolve,
-                complete_lex: options.lexer == LexerType::DynamicComplete,
+                complete_lex: resolved_lexer == LexerType::DynamicComplete,
             }))
         }
         _ => {
@@ -845,11 +859,11 @@ fn build_earley(
             let lexer = BasicLexer::new(&lexer_conf)?;
             // postlex (issue #78): validate the hook's terminal names at build
             // time (same contract as the LALR builders), then rewrite the
-            // materialized stream before the chart is built. Python Lark's
-            // `lexer='auto'` resolves to 'basic' for Earley + postlex, which is
-            // exactly the path every non-dynamic LexerType takes here (the
-            // dynamic pairing was refused in `build_frontend`). The symbol
-            // table is cloned out before the parser consumes the grammar.
+            // materialized stream before the chart is built. This basic-lexer
+            // path is reached by an explicit `lexer='basic'` and by the
+            // `lexer='auto' + postlex` resolution above (Python routes auto→basic
+            // when a postlex is present). The symbol table is cloned out before
+            // the parser consumes the grammar.
             let postlex = match &options.postlex {
                 Some(p) => {
                     p.validate(&cg.symbols)?;

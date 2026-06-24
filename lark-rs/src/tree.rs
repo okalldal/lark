@@ -355,25 +355,33 @@ impl fmt::Display for Tree {
 /// Usually a [`Tree`], but a start rule that collapses via `?rule` (expand1) to a
 /// single token yields that bare [`Token`] — exactly as Python Lark does (e.g.
 /// `?start: NUMBER` on input `"1"` returns the `NUMBER` token, not a wrapping
-/// tree). This is the public return type of [`crate::Lark::parse`].
+/// tree). Likewise a `?start` whose sole alternative is an absent `[...]`
+/// placeholder collapses to a bare [`None`](ParseTree::None) — Python's literal
+/// `None` result for `?start: [A]` on `""` with `maybe_placeholders` (#289). This
+/// is the public return type of [`crate::Lark::parse`].
 #[derive(Debug, Clone)]
 pub enum ParseTree {
     Tree(Tree),
     Token(Token),
+    /// A `?start` rule that collapsed a lone `maybe_placeholders` `None` to the
+    /// root (e.g. `?start: [A]` on empty input). Mirrors Python Lark returning a
+    /// bare `None`, which neither [`Tree`](ParseTree::Tree) nor
+    /// [`Token`](ParseTree::Token) can represent (#289).
+    None,
 }
 
 impl ParseTree {
     pub fn as_tree(&self) -> Option<&Tree> {
         match self {
             ParseTree::Tree(t) => Some(t),
-            ParseTree::Token(_) => None,
+            ParseTree::Token(_) | ParseTree::None => None,
         }
     }
 
     pub fn as_token(&self) -> Option<&Token> {
         match self {
             ParseTree::Token(t) => Some(t),
-            ParseTree::Tree(_) => None,
+            ParseTree::Tree(_) | ParseTree::None => None,
         }
     }
 
@@ -382,6 +390,11 @@ impl ParseTree {
     }
     pub fn is_token(&self) -> bool {
         matches!(self, ParseTree::Token(_))
+    }
+    /// True when the parse collapsed to a bare `None` (Python's `None` result for a
+    /// root `?start: [A]` lone-placeholder collapse, #289).
+    pub fn is_none(&self) -> bool {
+        matches!(self, ParseTree::None)
     }
 }
 
@@ -401,6 +414,7 @@ impl fmt::Display for ParseTree {
         match self {
             ParseTree::Tree(t) => write!(f, "{t}"),
             ParseTree::Token(tok) => write!(f, "Token({}, {:?})", tok.type_, tok.value),
+            ParseTree::None => write!(f, "None"),
         }
     }
 }

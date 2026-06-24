@@ -157,6 +157,145 @@ fn rc2b_duplicate_terminal_import_then_local_rejected() {
     assert_build_rejected(g, ParserAlgorithm::Lalr, LexerType::Contextual, "RC2b");
 }
 
+/// RC2c (#299, spun out of #270). Two *different* imported terminals aliased to the
+/// same final name. Python: `Terminal 'X' defined more than once`; lark-rs used to
+/// keep one silently (`copy_requested`/`import_terminal` skip when the final name is
+/// already defined) and build. The fix dedups by import *source/definition*, not by
+/// final name, so two distinct sources at one alias collide while an idempotent
+/// re-import of one definition (RC2c-neg, below) still dedups.
+#[test]
+fn rc2c_duplicate_import_alias_collision_rejected() {
+    let g = "%import common.INT -> X\n%import common.WS -> X\nstart: X\n";
+    assert_build_rejected(g, ParserAlgorithm::Lalr, LexerType::Contextual, "RC2c");
+}
+
+/// RC2c-neg-a (#299, NEGATIVE CONTROL). A legitimate re-import of the *same* terminal
+/// under the *same* alias is idempotent — Python accepts it. The dedup must key on
+/// the import definition, not reject every duplicate final name.
+#[test]
+fn rc2c_neg_same_import_twice_accepted() {
+    let g = "%import common.INT -> X\n%import common.INT -> X\nstart: X\n";
+    assert_build_accepted(
+        g,
+        ParserAlgorithm::Lalr,
+        LexerType::Contextual,
+        "RC2c-neg-a",
+    );
+}
+
+/// RC2c-neg-b (#299, NEGATIVE CONTROL). The same idempotence via the un-aliased
+/// re-import surface (`%import common.INT` twice) — Python accepts.
+#[test]
+fn rc2c_neg_same_import_noalias_twice_accepted() {
+    let g = "%import common.INT\n%import common.INT\nstart: INT\n";
+    assert_build_accepted(
+        g,
+        ParserAlgorithm::Lalr,
+        LexerType::Contextual,
+        "RC2c-neg-b",
+    );
+}
+
+/// RC2c-388 (#388, FIXED — architect ask on omnibus #354). The risky edge of the
+/// RC2c source/alias dedup: the **same** original terminal imported **twice under
+/// two *different* aliases**, then only the *shadowed* (earlier) alias used. Python's
+/// per-module `import_aliases.update` keeps only the *last* alias binding (`X` is
+/// never defined) and rejects at build: `Rule 'X' used but not defined (in rule
+/// start)` (verified against Python Lark 1.3.1). lark-rs used to import *both* `X`
+/// and `Y` and over-accept `start: X` — a *more-permissive* divergence (ADR-0017
+/// corollary: unfalsifiable permissiveness ⇒ a bug). Filed as **#388**.
+///
+/// Fixed by **last-alias-wins**: the loader drops every non-last alias for a given
+/// `(module, original)` source so it is never defined (`alias_survives` /
+/// `import_alias_map`), and the #299 collision pre-pass only considers surviving
+/// aliases. Now lark-rs rejects `start: X` like Python. (No longer `#[ignore]`d.)
+#[test]
+fn rc2c_388_same_source_two_aliases_unused_alias_rejected() {
+    // common.INT imported as both X and Y; start uses only X. Python: last alias
+    // (Y) wins, X is undefined → "Rule 'X' used but not defined".
+    let g = "%import common.INT -> X\n%import common.INT -> Y\nstart: X\n";
+    assert_build_rejected(g, ParserAlgorithm::Lalr, LexerType::Contextual, "RC2c-388");
+}
+
+/// RC2c-388-last (#388, last-alias-wins ACCEPT). The mirror of the case above: the
+/// **surviving** (last) alias `Y` *is* defined and usable, so `start: Y` builds.
+/// Python Lark 1.3.1 accepts (only the last binding of `(common, INT)` survives).
+#[test]
+fn rc2c_388_same_source_two_aliases_last_alias_accepted() {
+    let g = "%import common.INT -> X\n%import common.INT -> Y\nstart: Y\n";
+    assert_build_accepted(
+        g,
+        ParserAlgorithm::Lalr,
+        LexerType::Contextual,
+        "RC2c-388-last",
+    );
+}
+
+/// RC2c-388-both (#388, last-alias-wins REJECT-on-dropped). Using *both* aliases in
+/// one rule still rejects: `X` was dropped (only `Y` survives), so `start: X | Y`
+/// references an undefined `X`. Python Lark 1.3.1 rejects `Rule 'X' used but not
+/// defined (in rule start)`.
+#[test]
+fn rc2c_388_same_source_two_aliases_both_used_rejected() {
+    let g = "%import common.INT -> X\n%import common.INT -> Y\nstart: X | Y\n";
+    assert_build_rejected(
+        g,
+        ParserAlgorithm::Lalr,
+        LexerType::Contextual,
+        "RC2c-388-both",
+    );
+}
+
+/// RC2c-388-rule (#388, bundled rule-closure variant — architect ask). Last-alias-wins
+/// must also hold where the imported symbol is a *rule* whose dependency closure is
+/// copied (not a `common` terminal). `%import python.name -> a` then `-> b` keeps
+/// only the last alias `b`: Python Lark 1.3.1 rejects `start: a` (`Rule 'a' used but
+/// not defined`) and accepts `start: b`. Exercises the closure-copy path
+/// (`import_rule_closure`), not just the `common` terminal-table fast path.
+#[test]
+fn rc2c_388_bundled_rule_two_aliases_dropped_alias_rejected() {
+    let g = "%import python.name -> a\n%import python.name -> b\nstart: a\n";
+    assert_build_rejected(
+        g,
+        ParserAlgorithm::Lalr,
+        LexerType::Contextual,
+        "RC2c-388-rule-a",
+    );
+}
+
+/// RC2c-388-rule-b (#388, bundled rule-closure variant — surviving alias ACCEPT).
+/// The mirror: the surviving rule alias `b` is defined, so `start: b` builds. Python
+/// Lark 1.3.1 accepts.
+#[test]
+fn rc2c_388_bundled_rule_two_aliases_last_alias_accepted() {
+    let g = "%import python.name -> a\n%import python.name -> b\nstart: b\n";
+    assert_build_accepted(
+        g,
+        ParserAlgorithm::Lalr,
+        LexerType::Contextual,
+        "RC2c-388-rule-b",
+    );
+}
+
+/// RC2d (#299, spun out of #270). `%extend` of an abstract (`%declare`d,
+/// pattern-less) terminal. After `%declare FOO`, FOO lives in `self.terminals`, not
+/// `raw_terms`; the Extend arm passed the pre-existence gate, found no `RawTerm` to
+/// splice onto, and silently dropped the body. Python:
+/// `Can't extend terminal FOO - it is abstract.` lark-rs used to build.
+#[test]
+fn rc2d_extend_abstract_declared_terminal_rejected() {
+    let g = "%declare FOO\n%extend FOO: \"x\"\nstart: FOO\n";
+    assert_build_rejected(g, ParserAlgorithm::Lalr, LexerType::Contextual, "RC2d");
+}
+
+/// RC2d-neg (#299, NEGATIVE CONTROL). A normal `%extend` of a *concrete* terminal
+/// (one with a pattern) must still work — Python accepts.
+#[test]
+fn rc2d_neg_extend_concrete_terminal_accepted() {
+    let g = "BAR: \"a\"\n%extend BAR: \"b\"\nstart: BAR\n";
+    assert_build_accepted(g, ParserAlgorithm::Lalr, LexerType::Contextual, "RC2d-neg");
+}
+
 /// RC3 (KNOWN — not a fresh find). Two sibling optional-bracket terminals collide
 /// into a duplicate production. Python: `GrammarError: Rules defined twice ...
 /// (colliding expansion of optionals)`. lark-rs accepts. This is the

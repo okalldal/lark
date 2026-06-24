@@ -174,6 +174,9 @@ fn write_parse_tree(out: &mut String, tree: &ParseTree) {
     match tree {
         ParseTree::Tree(t) => write_tree(out, t),
         ParseTree::Token(tok) => write_token(out, &tok.type_, &tok.value),
+        // Python's `tree_to_dict(None)` is JSON `null` — a bare-`None` root collapse
+        // (`?start: [A]` on `""`, #289) must serialize identically for the differ.
+        ParseTree::None => out.push_str("null"),
     }
 }
 

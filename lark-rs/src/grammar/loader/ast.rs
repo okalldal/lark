@@ -30,7 +30,7 @@ pub(super) struct RawRule {
     pub(super) name: String,
     pub(super) modifiers: String,
     pub(super) params: Vec<String>,
-    pub(super) priority: i32,
+    pub(super) priority: i64,
     pub(super) expansions: Vec<AliasedExpansion>,
     pub(super) directive: Directive,
 }
@@ -193,7 +193,7 @@ pub(super) enum LiteralVal {
 #[derive(Debug, Clone)]
 pub(super) struct RawTerm {
     pub(super) name: String,
-    pub(super) priority: i32,
+    pub(super) priority: i64,
     pub(super) expansions: Vec<AliasedExpansion>,
     pub(super) directive: Directive,
 }

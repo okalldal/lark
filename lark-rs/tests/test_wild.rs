@@ -90,6 +90,7 @@ fn canon(result: &ParseTree) -> String {
             tok.value
         )
         .unwrap(),
+        ParseTree::None => out.push_str("None"),
     }
     out
 }

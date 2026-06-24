@@ -46,8 +46,10 @@ pub struct RuleOptions {
     pub expand1: bool,
     /// Preserve all terminals in the tree (don't filter punctuation).
     pub keep_all_tokens: bool,
-    /// Priority for disambiguation — higher wins.
-    pub priority: i32,
+    /// Priority for disambiguation — higher wins. Stored `i64` (not `i32`) so two
+    /// distinct very-large declared priorities do not saturate to the same value and
+    /// tie (#352); Python uses unbounded ints, `i64` covers every realistic magnitude.
+    pub priority: i64,
     /// Under `maybe_placeholders`, the `None` placeholders a *distributed* absent
     /// `[...]` contributes to this alternative: entry `i` is the number of `None`
     /// children inserted before expansion position `i` (entry `expansion.len()` is
@@ -72,7 +74,7 @@ impl Default for RuleOptions {
 }
 
 impl RuleOptions {
-    pub fn with_priority(mut self, p: i32) -> Self {
+    pub fn with_priority(mut self, p: i64) -> Self {
         self.priority = p;
         self
     }

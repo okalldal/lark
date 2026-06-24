@@ -9,7 +9,7 @@ pub(super) enum Tok {
     Terminal(String),
     String(String, bool), // value, case_insensitive
     Regexp(String, u32),  // pattern, flags
-    Number(i32),
+    Number(i64),
     LPar,
     RPar,
     LBra,
@@ -409,16 +409,20 @@ impl<'a> Lexer<'a> {
                 .take_while(|b| b.is_ascii_digit())
                 .count();
         let digits = &rest[..len];
-        // Python Lark priorities are arbitrary-precision ints; we store i32 and
-        // saturate, so a huge (negative) priority like `A.-99999999999999999999999`
-        // clamps to the extreme rather than failing to lex.
-        let n: i32 = match digits.parse::<i128>() {
-            Ok(v) => v.clamp(i32::MIN as i128, i32::MAX as i128) as i32,
+        // Python Lark priorities are arbitrary-precision ints; we store i64 and
+        // saturate at the i64 bounds, so a huge (negative) priority like
+        // `A.-99999999999999999999999` clamps to the extreme rather than failing to
+        // lex. i64 is wide enough that two *distinct* declared priorities no longer
+        // collide at any realistic magnitude (#352: 5e9 vs 9e9 used to both saturate
+        // to i32::MAX and tie); only a pair past ±9.2e18 would re-collide, which no
+        // hand-authored grammar reaches.
+        let n: i64 = match digits.parse::<i128>() {
+            Ok(v) => v.clamp(i64::MIN as i128, i64::MAX as i128) as i64,
             Err(_) => {
                 if digits.starts_with('-') {
-                    i32::MIN
+                    i64::MIN
                 } else {
-                    i32::MAX
+                    i64::MAX
                 }
             }
         };
@@ -452,12 +456,15 @@ impl<'a> Lexer<'a> {
 }
 
 /// Decode escape sequences in a string literal, mirroring Python Lark's
-/// `eval_escaping` (which defers to `ast.literal_eval`). The numeric escapes
-/// `\xHH`, `\uHHHH`, and `\UHHHHHHHH` decode to the corresponding `char`;
-/// `\n \t \r \f \v \0` map to their control characters; `\\ \" \'` are literal.
-/// An unrecognized escape (e.g. `\w`, `\d`) keeps its backslash so regex
-/// metacharacters embedded in a string survive — matching Lark, which prepends a
-/// backslash for any escape outside `Uuxnftr`.
+/// `eval_escaping` (which defers to `ast.literal_eval`). Python decodes **only**
+/// the `Uuxnftr` set plus `\\` and `\"`: the numeric escapes `\xHH`, `\uHHHH`,
+/// and `\UHHHHHHHH` decode to the corresponding `char`; `\n \t \r \f` map to
+/// their control characters; `\\` is a literal backslash and `\"` is a literal
+/// quote. **Every other** escape — including `\v`, `\0`, `\'`, and regex
+/// metacharacters like `\w`/`\d` — keeps its backslash, because `eval_escaping`
+/// prepends a backslash for any escape outside `Uuxnftr` (so `\v` is the literal
+/// two chars backslash+`v`, not U+000B; `\0` is not NUL; `\'` is not `'`). This
+/// keeps the `PatternStr` value byte-identical to Python's (#344).
 fn unescape_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -471,11 +478,8 @@ fn unescape_string(s: &str) -> String {
             Some('t') => out.push('\t'),
             Some('r') => out.push('\r'),
             Some('f') => out.push('\u{0C}'),
-            Some('v') => out.push('\u{0B}'),
-            Some('0') => out.push('\0'),
             Some('\\') => out.push('\\'),
             Some('"') => out.push('"'),
-            Some('\'') => out.push('\''),
             Some('x') => push_hex_escape(&mut out, &mut chars, 2, "\\x"),
             Some('u') => push_hex_escape(&mut out, &mut chars, 4, "\\u"),
             Some('U') => push_hex_escape(&mut out, &mut chars, 8, "\\U"),

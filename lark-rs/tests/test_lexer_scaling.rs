@@ -81,22 +81,29 @@ fn lark(lexer: LexerType) -> Lark {
     .expect("scaling-test grammar must build")
 }
 
-/// The whole net runs as ONE test function: the `perf` counters are process-global
-/// atomics, so a second `#[test]` racing in parallel would corrupt the reads. A
-/// single sequential reset→parse→read loop keeps every measurement clean (the same
-/// rationale as the Earley/CYK scaling gates).
+/// The `perf` counters are process-global atomics, so two `#[test]` fns reading them
+/// in parallel would corrupt each other's measurements. Each gate below locks this
+/// mutex for its whole reset→parse→read sweep, so they run mutually exclusive even
+/// under the default multi-threaded test runner (the same rationale as the
+/// single-function Earley/CYK scaling gates, generalized so the basic/contextual gate
+/// and the dynamic-lexer gate #335 can be two named tests without racing).
+#[cfg(feature = "perf-counters")]
+static PERF_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The basic + contextual lexers share `Scanner::match_at`, so the pathology — and
+/// its `\G`-anchoring fix (#104) — live in one place; gate both so neither can
+/// regress independently.
 #[cfg(feature = "perf-counters")]
 #[test]
 fn lexer_scan_is_flat_per_byte() {
     use lark_rs::perf;
 
+    let _guard = PERF_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     assert!(
         perf::ENABLED,
         "test built with the perf-counters feature but counters report disabled"
     );
 
-    // Both lexers share `Scanner::match_at`, so the pathology — and its fix — live
-    // in one place; gate both so neither can regress independently.
     assert_flat_per_byte("basic", &lark(LexerType::Basic));
     assert_flat_per_byte("contextual", &lark(LexerType::Contextual));
 }
@@ -107,12 +114,20 @@ fn lexer_scan_is_flat_per_byte() {
 /// with `n` and trips this; an anchored one stays flat.
 #[cfg(feature = "perf-counters")]
 fn assert_flat_per_byte(label: &str, parser: &Lark) {
+    assert_flat_per_byte_with(label, parser, words);
+}
+
+/// Same gate as [`assert_flat_per_byte`] but with a caller-supplied input generator,
+/// so the dynamic-lexer gate (#335) can reuse the identical measurement loop with its
+/// own `#z#`-terminated workload.
+#[cfg(feature = "perf-counters")]
+fn assert_flat_per_byte_with(label: &str, parser: &Lark, input_of: fn(usize) -> String) {
     use lark_rs::perf;
 
     let sizes = [64usize, 256, 1024, 4096];
     let mut per_byte: Vec<(usize, f64)> = Vec::new();
     for &n in &sizes {
-        let input = words(n);
+        let input = input_of(n);
         perf::reset();
         parser
             .parse(&input)
@@ -136,6 +151,81 @@ fn assert_flat_per_byte(label: &str, parser: &Lark) {
          instead of matching anchored at `pos` (O(n²) lexing); anchor the \
          per-position search."
     );
+}
+
+// ─── #335: the Earley DYNAMIC lexer's per-terminal scan ───────────────────────
+//
+// The dynamic lexer (`parser=earley, lexer=dynamic`) does NOT use `Scanner::match_at`
+// above — it matches each predicted terminal individually through
+// `DynamicMatcher::match_at` (`src/lexer/dynamic.rs`). That path historically used
+// the unanchored `regex::Regex::find_at`, so a *sparse* terminal in the per-position
+// scan set forward-scanned to its next match at every boundary it missed — O(n) per
+// byte ⇒ O(n²) total, even though `\G`-anchoring landed for basic/contextual in #104.
+// The fix anchors the per-terminal search at `pos` (`Anchored::Yes`), the per-terminal
+// analog of `\G` and of Python's anchored `re.Pattern.match(text, pos)`.
+
+/// The issue #335 repro grammar, verbatim: a plain (non-lookaround) `STR` terminal
+/// whose pattern is longer than `WORD`'s, so the dynamic scan tries it at every word
+/// boundary. Over a run of bare words `STR` never matches at a word position; the
+/// sole `STR` lies at the trailing `#z#`, so an unanchored search reports that distant
+/// start (the skip we count) at every earlier position.
+const DYNAMIC_GRAMMAR: &str = r#"
+    start: (WORD | STR)+
+    WORD: /[a-z]+/
+    STR: /\#[^\#]*\#/
+    %ignore " "
+"#;
+
+/// `n` bare words separated by spaces, then **one** trailing `#z#` string. Same shape
+/// as `words` above; the trailing sparse `STR` match is what makes the unanchored
+/// forward-scan observable in the work counter. Length ≈ `2n`.
+#[cfg(feature = "perf-counters")]
+fn dynamic_words(n: usize) -> String {
+    let mut s = vec!["a"; n].join(" ");
+    s.push_str(" #z#");
+    s
+}
+
+#[cfg(feature = "perf-counters")]
+fn dynamic_lark() -> Lark {
+    Lark::new(
+        DYNAMIC_GRAMMAR,
+        LarkOptions {
+            start: vec!["start".to_string()],
+            parser: ParserAlgorithm::Earley,
+            lexer: LexerType::Dynamic,
+            ..LarkOptions::default()
+        },
+    )
+    .expect("dynamic scaling-test grammar must build")
+}
+
+/// #335: the Earley dynamic lexer's `lexer_scan_steps` must grow **linearly** (flat
+/// per byte), not quadratically. Before the anchoring fix, `lexer_scan_steps`/byte
+/// climbed ~linearly with `n` (67 → 259 → 1027 → 4099 total across n=64→4096), which
+/// trips the same flat-per-byte assertion the basic/contextual gate uses.
+#[cfg(feature = "perf-counters")]
+#[test]
+fn h11_dynamic_lexer_scan_is_flat_per_byte() {
+    use lark_rs::perf;
+
+    let _guard = PERF_SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    assert!(
+        perf::ENABLED,
+        "test built with the perf-counters feature but counters report disabled"
+    );
+
+    // First confirm the token stream is what we expect (the fix must not change WHAT
+    // is matched, only how the scan is anchored): n WORDs + one STR.
+    let parser = dynamic_lark();
+    let small = parser.parse("a b #z#").expect("dynamic grammar must parse");
+    assert_eq!(
+        small.to_string(),
+        r##"Tree(start, [Token(WORD, "a"), Token(WORD, "b"), Token(STR, "#z#")])"##,
+        "dynamic-lexer token output changed — the anchoring fix must be token-identical"
+    );
+
+    assert_flat_per_byte_with("dynamic", &parser, dynamic_words);
 }
 
 /// Without the `perf-counters` feature the counter is a no-op, so the gate cannot

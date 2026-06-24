@@ -135,7 +135,7 @@ import mangling, forest enumeration, eager determinization) untouched by the pri
 - **Affected:** every engine. **Unaffected:** scoped flags, named groups, `\A`, `{,n}`
   bounds, empty alternations (all agree).
 
-### H4-3 — `%ignore NAME` mints a duplicate terminal (Medium, lexer / loader)
+### H4-3 — `%ignore NAME` mints a duplicate terminal (Medium, lexer / loader) — FIXED (#345)
 - **Grammar (a, priority):** `start: A+` / `A: /[a-z]/` / `SKIP.5: /[a-z]/` / `%ignore SKIP`
   · **Input:** `ab`. **(b, filter):** `start: item+` / `item: "a" | WS` / `WS: /\s+/` /
   `%ignore WS` · **Input:** `a a`.
@@ -154,7 +154,13 @@ import mangling, forest enumeration, eager determinization) untouched by the pri
   priority).
 - **Nearest known:** RC5 (`%ignore` width), H11/#335 (dynamic scan cost), N5 (illegal
   pairing) — different code paths; this is the `__IGNORE_n` duplication in the loader.
-- **Test:** `h4_3_ignore_named_terminal_priority_and_filter`.
+- **Test:** `h4_3_ignore_named_terminal_priority_and_filter` (now passing); negative control
+  `h4_3_inline_ignore_still_synthesizes_terminal` pins the inline form unchanged.
+- **Fix (#345):** `grammar/loader/compiler.rs` — a `%ignore` directive that is a single
+  reference to a named terminal records `IgnoreEntry::Named(name)` and adds that terminal to
+  the ignore set with its declared priority intact (an undefined name is rejected, as Python
+  does); only inline directives mint a fresh `__IGNORE_n` (`IgnoreEntry::Pattern`), with the
+  number seeded from the running ignore count to match Python's `len(self._ignore_names)`.
 
 ### H4-4 — Priority clamped to `i32` ties distinct large priorities (Low, loader)
 - **Grammar:** `start: A | B` / `A.5000000000: "x"` / `B.9000000000: "x"` · **Input:** `x`.
@@ -217,7 +223,7 @@ import mangling, forest enumeration, eager determinization) untouched by the pri
 - **Nearest known:** H10/#337 (`Tree.meta`) — unrelated.
 - **Test:** `h4_7_eof_error_borrows_last_token_position`.
 
-### H4-8 — Nested optional-of-optional collision not detected (Medium, ebnf-loader)
+### H4-8 — Nested optional-of-optional collision not detected (Medium, ebnf-loader) — FIXED (#351)
 - **Grammar:** `start: ([A]?) B` (also `[[A]?] B`, `[[[A]?]?] B`) / `A: "a"` / `B: "b"` ·
   **Input:** any (build-time).
 - **Python:** build error — `Rules defined twice: <start : B> / <start : B>
@@ -226,11 +232,22 @@ import mangling, forest enumeration, eager determinization) untouched by the pri
   `(syms=[B], gaps=[0,0])` `CompiledAlt`, so `dedup_and_check_alts` (`compiler.rs`) merges
   them at its stage-1 `seen.insert` **before** the stage-2 `seen_syms` collision check sees
   the duplicate.
-- **Root cause:** `CompiledAlt` discards the `_EMPTY`-marker provenance Python keeps through
-  dedup; the #252/#259 fix only covers *sibling* collisions (`[A] [A]`), not this single-term
-  self-collision.
-- **Expected fix contract:** reject-like-Python (preserve enough provenance to collide at
-  stage 2).
+- **Root cause:** `compile_expansion`'s empty-arm dedup keyed on *emptiness alone* (under
+  `maybe_placeholders`), collapsing the two distinct empty arms a nested optional produces —
+  the inner `[A]`'s `_EMPTY`-bearing absent arm (`[],[1]`) and the outer `?`'s **bare** ε
+  (`[],[0]`, Python's `EBNF_to_BNF.expr`) — *inside the group*, before the tail `B` could
+  surface the difference. So both arms reduced to one `start -> B` and the stage-2 collision
+  check never saw a duplicate. The #252/#259 fix only covers *sibling* collisions (`[A] [A]`),
+  not this single-term self-collision.
+- **Fix (#351):** key that dedup on the **full** `(syms, gaps)` so it collapses only
+  byte-identical arms (mirroring Python's `SimplifyRule_Visitor` deduping identical expansion
+  *trees*, `_EMPTY` markers included). The bare-vs-marker empties now stay distinct, the tail
+  concat turns them into two distinct `start -> B` arms (`[1,0]` vs `[0,0]`), and
+  `dedup_and_check_alts` rejects them as "Rules defined twice" — every backend, both
+  `maybe_placeholders` modes. A *lone* nested optional (`([A]?)`, no tail) still builds: its
+  two empties reach `dedup_and_check_alts` still empty, where duplicate empty rules are
+  tolerated and collapsed on emptiness alone (first occurrence — the `(True,)` None-bearing
+  arm — kept, matching Python).
 - **Nearest known:** RC3/#252/#259 (sibling optionals), #289/RC9 (lone-None expand1 parse
   divergence) — distinct.
 - **Test:** `h4_8_nested_optional_of_optional_collision_rejected`.
@@ -272,7 +289,7 @@ import mangling, forest enumeration, eager determinization) untouched by the pri
   grammar shape evades them. Adjacent to the #208 fuzzer epic but minimized to a specific root.
 - **Test:** `h4_10_nullable_recursive_earley_enumerates_all_derivations`.
 
-### H4-11 — `%declare` of a lowercase name accepted (Low, grammar-loader)
+### H4-11 — `%declare` of a lowercase name accepted (Low, grammar-loader) — FIXED (#353)
 - **Grammar:** `%declare foo` / `start: "a"` · **Input:** `a`.
 - **Python:** rejects at build (a declared symbol must be an UPPERCASE terminal;
   `%declare FOO` builds fine).

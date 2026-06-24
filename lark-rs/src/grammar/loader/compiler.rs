@@ -10,7 +10,7 @@
 
 use super::ast::*;
 use super::ebnf::{CompiledAlt, HelperKey};
-use super::imports::spec_final_names;
+use super::imports::{spec_final_names, split_import_directive};
 use crate::error::GrammarError;
 use crate::grammar::rule::{Rule, RuleOptions};
 use crate::grammar::symbol::Symbol;
@@ -57,6 +57,17 @@ impl AnonKind {
 }
 
 /// Converts the parsed AST into flat BNF rules and terminal definitions.
+/// One resolved `%ignore` directive (see [`GrammarCompiler::ignore_patterns`]).
+pub(super) enum IgnoreEntry {
+    /// `%ignore NAME` — a single reference to an already-named terminal. The
+    /// terminal is added to the ignore set as-is, **preserving its declared
+    /// priority**; no new terminal is synthesized (Python `_ignore`).
+    Named(String),
+    /// `%ignore <inline pattern>` — synthesizes a fresh `__IGNORE_n` terminal
+    /// (priority 0) from the pattern, as both engines do for the inline form.
+    Pattern(Pattern),
+}
+
 pub(super) struct GrammarCompiler {
     pub(super) start: Vec<String>,
     pub(super) rules: Vec<Rule>,
@@ -64,7 +75,14 @@ pub(super) struct GrammarCompiler {
     /// Raw terminal definitions, collected before any are compiled so a terminal
     /// body may reference another terminal defined later (`C: "C" | D`).
     pub(super) raw_terms: Vec<RawTerm>,
-    pub(super) ignore_patterns: Vec<Pattern>,
+    /// `%ignore` directives, in document order. A directive that is a single
+    /// reference to a named terminal records that terminal's name
+    /// ([`IgnoreEntry::Named`]) so it is marked ignored with its **declared
+    /// priority** preserved, exactly as Python's `_ignore` short-circuits
+    /// (`load_grammar.py`, "Keep terminal name, no need to create a new
+    /// definition"); any other (inline) directive carries a synthesized
+    /// [`IgnoreEntry::Pattern`] that mints a fresh `__IGNORE_n` terminal.
+    pub(super) ignore_patterns: Vec<IgnoreEntry>,
     /// Counter for generating unique anonymous rule names.
     pub(super) anon_counter: usize,
     /// Counter for generating unique terminal names for literals.
@@ -75,7 +93,7 @@ pub(super) struct GrammarCompiler {
     /// The modifiers (`!` keep-all, `?` expand1) and priority are kept so each
     /// instantiation inherits the template's rule options, exactly as Python Lark
     /// deep-copies the template's `RuleOptions` onto every instance.
-    pub(super) templates: HashMap<String, (Vec<String>, Vec<AliasedExpansion>, String, i32)>,
+    pub(super) templates: HashMap<String, (Vec<String>, Vec<AliasedExpansion>, String, i64)>,
     /// Memo of template instantiations: canonical `name<args>` key → instance rule
     /// name. Lets a self-recursive template (`_sep{x,d}: x | _sep{x,d} d x`) resolve
     /// its own reference to the rule already being built instead of recursing
@@ -202,6 +220,17 @@ pub(super) struct GrammarCompiler {
     /// literal `"__anon_5"` interns under the hint `__ANON_5` (its uppercase
     /// form), which no up-front scan can see.
     reserved_term_names: HashSet<String>,
+    /// Per-module merged import-alias map, keyed by the resolved module path
+    /// (e.g. `["python"]`), mapping each *independently imported* original name
+    /// to its registered (aliased) final name. Mirrors Python Lark's per-dotted-
+    /// path `aliases` dict (`load_grammar.py`: imports of the same path are merged
+    /// before `_get_mangle(prefix, aliases)` runs, #343). When `import_rule_closure`
+    /// copies a rule's dependency closure, any closure symbol that is *also* an
+    /// independent import of the same module is left **unmangled** under its final
+    /// name instead of prefix-mangled — matching Python's `if s in aliases`.
+    /// Built up front (first pass) so a later `%import` directive's targets are
+    /// already known when an earlier directive's closure is copied.
+    pub(super) import_alias_map: HashMap<Vec<String>, HashMap<String, String>>,
 }
 
 impl GrammarCompiler {
@@ -240,6 +269,7 @@ impl GrammarCompiler {
             reserved_rule_names: HashSet::new(),
             anon_kinds: HashMap::new(),
             reserved_term_names: HashSet::new(),
+            import_alias_map: HashMap::new(),
         }
     }
 
@@ -308,6 +338,42 @@ impl GrammarCompiler {
         self.anon_terminal_name_free(name)
     }
 
+    /// Whether `(module, original) -> final_name` is the **surviving** alias for
+    /// that import source under last-alias-wins (#388).
+    ///
+    /// Python merges every `%import` of one dotted path into a single `aliases`
+    /// dict via `import_aliases.update(aliases)` (`load_grammar.py`), which keeps
+    /// only the **last** `original -> final` binding. So `%import common.INT -> X`
+    /// followed by `%import common.INT -> Y` defines **only** `Y`; the earlier `X`
+    /// is dropped and never registered (verified against Python Lark 1.3.1, where
+    /// `start: X` then rejects `Rule 'X' used but not defined`). This is *not* a
+    /// "defined more than once" collision (that error is for two **different**
+    /// sources landing on one final name — #299, which still rejects).
+    ///
+    /// The per-module merged `import_alias_map` is already keyed by `original` and
+    /// already keeps the last final name (its first pass `insert`s in document
+    /// order), so it *is* the surviving-alias map: a directive's `final_name`
+    /// survives iff it equals the merged map's entry for `(module, original)`.
+    ///
+    /// Name-list imports (`%import common (INT, FLOAT)`) register `original ==
+    /// final`, so they are always their own survivors. A module absent from the
+    /// map (no recorded alias) cannot have a dropped alias, so it survives too.
+    pub(super) fn alias_survives(
+        &self,
+        module: &[String],
+        original: &str,
+        final_name: &str,
+    ) -> bool {
+        match self
+            .import_alias_map
+            .get(module)
+            .and_then(|m| m.get(original))
+        {
+            Some(surviving) => surviving == final_name,
+            None => true,
+        }
+    }
+
     pub(super) fn process_items(&mut self, items: Vec<Item>) -> Result<(), GrammarError> {
         // First pass: register templates, and reserve every user-authored name so
         // generated `__anon_*` / `__ANON_*` names can never shadow one. An import's
@@ -348,6 +414,18 @@ impl GrammarCompiler {
                         self.reserved_rule_names.insert(name.clone());
                         self.reserved_term_names.insert(name);
                     }
+                    // Pre-build the per-module merged alias map (#343). Python
+                    // merges every `%import` of one dotted path into a single
+                    // `aliases` dict *before* any closure is copied, so an
+                    // imported rule's dependency that is independently imported
+                    // from the same module stays unmangled. Collect it up front,
+                    // across all directives, so directive order does not matter.
+                    if let Some((module_path, pairs)) = split_import_directive(spec) {
+                        let entry = self.import_alias_map.entry(module_path).or_default();
+                        for (original, final_name) in pairs {
+                            entry.insert(original, final_name);
+                        }
+                    }
                 }
                 Item::IgnoreItem(_) => {}
             }
@@ -372,13 +450,74 @@ impl GrammarCompiler {
         // two `_define(name, …, None)` calls do.
         let mut defined_rule_names: HashSet<String> = HashSet::new();
         let mut defined_term_names: HashSet<String> = HashSet::new();
+        // Import-vs-import collision detection (#299, spun out of #270). Python
+        // merges all aliases per *module* (`load_grammar`: `import_aliases.update`)
+        // keyed by the *original* name, then mangles each definition to its final
+        // name; two distinct originals (in one module) mangling to the same final
+        // name collide inside the imported grammar's `_define`
+        // (`Terminal 'X' defined more than once`). An identical re-import of one
+        // `(module, original) -> final` triple is idempotent (the alias dict dedups
+        // it). So we key the source by `(module_path, original)`: registering the
+        // same final name from a *different* source is a duplicate; re-registering
+        // the same source is benign. `final_source` maps a final name to the source
+        // that first claimed it.
+        //
+        // **Last-alias-wins (#388).** When the *same* source is imported under
+        // *different* aliases (`%import common.INT -> X` then `-> Y`), Python's
+        // `import_aliases.update` keeps only the **last** binding: only `Y` is
+        // defined, `X` is dropped. So the collision pre-pass considers only the
+        // **surviving** alias per source (`alias_survives`, backed by the merged
+        // `import_alias_map`): an earlier, shadowed alias is neither registered as a
+        // final name nor checked for collision — it simply never exists. (This is
+        // distinct from #299's *different*-source/same-final-name collision, which
+        // still rejects below, and from idempotent same-source/*same*-alias
+        // re-import, which stays benign because its single surviving alias is
+        // registered exactly once.)
+        let mut final_source: HashMap<(Vec<String>, String), String> = HashMap::new();
         for item in &items {
             if let Item::ImportItem(spec) = item {
-                for name in spec_final_names(spec) {
-                    if Self::name_is_terminal(&name) {
-                        defined_term_names.insert(name);
-                    } else {
-                        defined_rule_names.insert(name);
+                if let Some((module, pairs)) = split_import_directive(spec) {
+                    for (original, final_name) in pairs {
+                        // Shadowed (non-last) alias for this source: dropped, never
+                        // defined — skip without registering or colliding.
+                        if !self.alias_survives(&module, &original, &final_name) {
+                            continue;
+                        }
+                        let source = (module.clone(), original);
+                        if final_source.contains_key(&source) {
+                            // Same `(module, original)` source already imported under
+                            // its surviving alias: an identical re-import is
+                            // idempotent (Python's per-module alias dict dedups it),
+                            // so skip without colliding.
+                            continue;
+                        }
+                        // A *different* source already claimed this final name →
+                        // collision, exactly as two distinct originals mangling to
+                        // one final name collide inside Python's imported `_define`
+                        // (`Terminal 'X' defined more than once`).
+                        if final_source.values().any(|f| f == &final_name) {
+                            return Err(Self::duplicate_definition_error(
+                                Self::name_is_terminal(&final_name),
+                                &final_name,
+                            ));
+                        }
+                        final_source.insert(source, final_name);
+                    }
+                }
+                // Seed the running definition ledger with only the surviving final
+                // names: a shadowed last-alias-wins binding (#388) is never defined,
+                // so it must not pre-seed `defined_*_names` (else a later statement
+                // colliding with the *dropped* name would wrongly reject).
+                if let Some((module, pairs)) = split_import_directive(spec) {
+                    for (original, final_name) in pairs {
+                        if !self.alias_survives(&module, &original, &final_name) {
+                            continue;
+                        }
+                        if Self::name_is_terminal(&final_name) {
+                            defined_term_names.insert(final_name);
+                        } else {
+                            defined_rule_names.insert(final_name);
+                        }
                     }
                 }
             }
@@ -418,6 +557,16 @@ impl GrammarCompiler {
             }
         }
 
+        // H2 (#331): template parameter-list well-formedness, mirroring Python
+        // Lark's `GrammarDefinition.validate()` (`load_grammar.py`). For each
+        // template, every parameter name is checked, in order, against (a) the
+        // full set of *defined* names — a param that shadows a rule/terminal/
+        // template/import is rejected, exactly as Python's `p in self._definitions`
+        // — and (b) the parameters seen earlier in the same list (`p in
+        // params[:i]`), rejecting a duplicate. The conflict check runs *before* the
+        // duplicate check at each index, matching Python's error precedence.
+        self.validate_template_params(&defined_rule_names, &defined_term_names)?;
+
         // Resolve all terminals (inlining terminal-to-terminal references).
         self.resolve_terminals()?;
 
@@ -426,9 +575,21 @@ impl GrammarCompiler {
             self.compile_rule(r)?;
         }
         for expansions in ignore_items {
+            // Mirror Python's `_ignore` (`load_grammar.py`): a directive that is a
+            // single expansion containing a single value which is a reference to a
+            // named terminal marks *that* terminal ignored (keeping its declared
+            // priority) — "no need to create a new definition". Anything else
+            // (multiple alternatives, a sequence, or an inline literal/regex)
+            // synthesizes a fresh `__IGNORE_n` terminal, as before.
+            if let [single_expansion] = expansions.as_slice() {
+                if let [Expr::Value(Value::Terminal(name))] = single_expansion.as_slice() {
+                    self.ignore_patterns.push(IgnoreEntry::Named(name.clone()));
+                    continue;
+                }
+            }
             for expansion in expansions {
                 let pat = self.expansion_to_pattern(&expansion)?;
-                self.ignore_patterns.push(pat);
+                self.ignore_patterns.push(IgnoreEntry::Pattern(pat));
             }
         }
         Ok(())
@@ -539,6 +700,22 @@ impl GrammarCompiler {
                         ),
                     });
                 }
+                // Reject `%extend` of an abstract (`%declare`d, pattern-less)
+                // terminal (#299). A declared terminal lives in `self.terminals`
+                // with `declared == true` and has no `RawTerm` body to splice onto;
+                // Python's `_extend` rejects it (`d.tree is None`) with
+                // `Can't extend terminal FOO - it is abstract.`. Without this gate
+                // the extend body was silently dropped and the grammar built.
+                if self
+                    .terminals
+                    .iter()
+                    .any(|td| td.name == t.name && td.declared)
+                    && !self.raw_terms.iter().any(|prev| prev.name == t.name)
+                {
+                    return Err(GrammarError::Other {
+                        msg: format!("Can't extend terminal {} - it is abstract.", t.name),
+                    });
+                }
                 // Prepend the new alternatives to the existing terminal. A
                 // same-grammar terminal is still a `RawTerm` here (terminals
                 // resolve as a whole later), so splice onto its front.
@@ -614,6 +791,41 @@ impl GrammarCompiler {
         Ok(())
     }
 
+    /// H2 (#331): validate every template's parameter list, mirroring Python
+    /// Lark's `GrammarDefinition.validate()` (`load_grammar.py`):
+    /// for each parameter `p` at index `i`, reject it if it shadows a defined
+    /// name (rule/terminal/template/import — Python's `p in self._definitions`,
+    /// the "conflicts with rule" error) *before* checking whether it duplicates an
+    /// earlier parameter (`p in params[:i]`, the "Duplicate Template Parameter"
+    /// error). Template names are visited in a deterministic (sorted) order so the
+    /// reported error is stable; the oracle only pins single-template grammars.
+    fn validate_template_params(
+        &self,
+        defined_rules: &HashSet<String>,
+        defined_terms: &HashSet<String>,
+    ) -> Result<(), GrammarError> {
+        let mut names: Vec<&String> = self.templates.keys().collect();
+        names.sort();
+        for name in names {
+            let params = &self.templates[name].0;
+            for (i, p) in params.iter().enumerate() {
+                if defined_rules.contains(p) || defined_terms.contains(p) {
+                    return Err(GrammarError::Other {
+                        msg: format!(
+                            "Template Parameter conflicts with rule {p} (in template {name})"
+                        ),
+                    });
+                }
+                if params[..i].contains(p) {
+                    return Err(GrammarError::Other {
+                        msg: format!("Duplicate Template Parameter {p} (in template {name})"),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Gap vectors are stored on the rule only when they carry placeholders;
     /// the all-zero common case stays an empty `Vec` so ordinary rules pay
     /// nothing.
@@ -639,21 +851,72 @@ impl GrammarCompiler {
     /// is rejected *at load*, on every parser backend, instead of surfacing as an
     /// LALR-only conflict or being silently resolved by Earley. Duplicate *empty*
     /// expansions are tolerated, as in Python.
+    ///
+    /// Both stages compare symbols by the **filter-out-agnostic** key
+    /// [`sym_key`](Self::sym_key) — `(is_terminal, name)` — exactly mirroring
+    /// Python's `Symbol.__eq__`/`__hash__`, which ignore the per-occurrence
+    /// `filter_out` flag (and so does `Rule.__eq__`, keyed on `origin` +
+    /// `expansion` of those symbols). This is what collapses an alternative that
+    /// is a string literal equal to a named terminal — `start: A | "a"` with
+    /// `A: "a"`, where the literal unifies onto `A` for lexing but carries
+    /// `filter_out=true` while the `A` reference carries `filter_out=false` — to a
+    /// single arm (#347, H4-9). Without it the two arms survive as two byte-
+    /// identical `CompiledRule`s differing only in `filter_pos`, a spurious LALR
+    /// reduce/reduce and an Earley `explicit` phantom empty derivation Python never
+    /// produces. Stage 1 keeps the **first** occurrence, so its `filter_out` (hence
+    /// the kept/dropped fate of the token) wins exactly as Python's `dedup_list`
+    /// keeps the first tree — `A | "a"` keeps `A` (token kept), `"a" | A` keeps
+    /// `"a"` (token dropped). An alias-differing pair (`X -> p | X -> q`) still
+    /// survives stage 1 (alias is part of the key) to collide in stage 2.
     pub(super) fn dedup_and_check_alts(
         origin: &str,
         alts: Vec<(CompiledAlt, Option<String>)>,
     ) -> Result<Vec<(CompiledAlt, Option<String>)>, GrammarError> {
-        let mut seen: std::collections::HashSet<(CompiledAlt, Option<String>)> =
-            std::collections::HashSet::new();
+        // Stage-1 dedup key: filter-out-agnostic symbols + gaps + alias, so a
+        // literal-vs-named pair collapses but an alias-differing pair survives to
+        // collide in stage 2 (as Python's "Rules defined twice").
+        //
+        // An *empty* expansion keys on emptiness + alias **alone** — its gaps (the
+        // distributed-absent `None`/`_EMPTY` placeholder counts) are dropped from
+        // the key. Python tolerates and dedups duplicate empty rules regardless of
+        // their `empty_indices` (the line-780 "Rules defined twice" check fires only
+        // for non-empty `dups[0].expansion`), keeping the first. Two distributed
+        // optionals whose absent arms differ only in placeholder count — e.g.
+        // `[A] | ["a"]`, where `["a"]`'s filtered literal contributes a 0-size
+        // absent arm while `[A]`'s contributes a 1-size one (`FindRuleSize` /
+        // `_will_not_get_removed`) — would otherwise survive as two empty `start ->`
+        // productions, a spurious reduce/reduce Python never reports (#347, adjacent
+        // to H4-9: same `filter_out`-leak root, surfaced by the differential audit).
+        // The surviving arm in `out` keeps its real gaps (first occurrence), so the
+        // `maybe_placeholders` `None` count is preserved exactly as Python keeps the
+        // first absent arm's `empty_indices`.
+        type AltKey = (Vec<(bool, String)>, Vec<usize>, Option<String>);
+        let alt_key = |alt: &(CompiledAlt, Option<String>)| -> AltKey {
+            let ((syms, gaps), alias) = alt;
+            let gap_key = if syms.is_empty() {
+                Vec::new() // empty arm: dedup on emptiness alone, ignore placeholder count
+            } else {
+                gaps.clone()
+            };
+            (
+                syms.iter().map(Self::sym_key).collect(),
+                gap_key,
+                alias.clone(),
+            )
+        };
+        let mut seen: std::collections::HashSet<AltKey> = std::collections::HashSet::new();
         let mut out: Vec<(CompiledAlt, Option<String>)> = Vec::with_capacity(alts.len());
-        let mut seen_syms: std::collections::HashSet<Vec<Symbol>> =
+        let mut seen_syms: std::collections::HashSet<Vec<(bool, String)>> =
             std::collections::HashSet::new();
         for alt in alts {
-            if !seen.insert(alt.clone()) {
+            if !seen.insert(alt_key(&alt)) {
                 continue; // exact duplicate — Python's AST-level dedup_list
             }
             let syms = &alt.0 .0;
-            if !syms.is_empty() && !seen_syms.insert(syms.clone()) {
+            // Stage-2 collision key mirrors Python's `Rule.__eq__` (origin +
+            // expansion only): filter-out-agnostic symbols, no gaps/alias.
+            let syms_key: Vec<(bool, String)> = syms.iter().map(Self::sym_key).collect();
+            if !syms.is_empty() && !seen_syms.insert(syms_key) {
                 let rhs: Vec<&str> = syms.iter().map(|s| s.name()).collect();
                 return Err(GrammarError::Other {
                     msg: format!(
@@ -668,6 +931,22 @@ impl GrammarCompiler {
         Ok(out)
     }
 
+    /// A symbol's identity for cross-alternative dedup/collision, mirroring Python
+    /// Lark's `Symbol.__eq__`/`__hash__`: `(is_terminal, name)`. The per-occurrence
+    /// `Terminal::filter_out` flag is *deliberately* excluded so a literal unified
+    /// onto a named terminal (`"a"` → `A`, `filter_out` differing) compares equal to
+    /// a direct reference to that terminal (#347). lark-rs's derived `Eq`/`Hash` on
+    /// `Symbol` *do* include `filter_out`, so this is the one place that must
+    /// canonicalize it away. Also used by the recurse-helper arm dedup
+    /// (`ebnf::recurse_helper_keyed`), where Python likewise builds the one-or-more
+    /// rule from the filter-out-agnostic *set* of inner expansions.
+    pub(super) fn sym_key(sym: &Symbol) -> (bool, String) {
+        match sym {
+            Symbol::Terminal(t) => (true, t.name.clone()),
+            Symbol::NonTerminal(nt) => (false, nt.name.clone()),
+        }
+    }
+
     /// Register each `%declare`d name as a pattern-less terminal. A declared
     /// terminal is never lexed — it is interned (so rules can reference it and the
     /// parse table reserves a column) and injected into the token stream by a
@@ -676,18 +955,36 @@ impl GrammarCompiler {
     /// `_define(name, is_term, None)`): declaring a name already defined — by an
     /// import, a prior `%declare`, or a local terminal — is rejected as a
     /// duplicate (#270).
+    ///
+    /// A `%declare` target must be a terminal (UPPERCASE) name. A rule-cased
+    /// (lowercase) target — which the grammar parser surfaces as a
+    /// [`Symbol::NonTerminal`] — is rejected (#353, H4-11): Python Lark only ever
+    /// builds a `TerminalDef` from a declared symbol, so `%declare foo` blows up
+    /// internally (an `AttributeError`) rather than succeeding. We pin the
+    /// reject/accept verdict, not Python's accidental message, with a clean
+    /// `GrammarError`.
     fn declare_terminals(
         &mut self,
         syms: Vec<Symbol>,
         defined: &mut HashSet<String>,
     ) -> Result<(), GrammarError> {
         for sym in syms {
-            if let Symbol::Terminal(t) = sym {
-                if !defined.insert(t.name.clone()) {
-                    return Err(Self::duplicate_definition_error(true, &t.name));
+            match sym {
+                Symbol::Terminal(t) => {
+                    if !defined.insert(t.name.clone()) {
+                        return Err(Self::duplicate_definition_error(true, &t.name));
+                    }
+                    if !self.terminals.iter().any(|td| td.name == t.name) {
+                        self.terminals.push(TerminalDef::declared(&t.name));
+                    }
                 }
-                if !self.terminals.iter().any(|td| td.name == t.name) {
-                    self.terminals.push(TerminalDef::declared(&t.name));
+                Symbol::NonTerminal(nt) => {
+                    return Err(GrammarError::Other {
+                        msg: format!(
+                            "Cannot %declare a rule-cased name '{}': %declare targets must be UPPERCASE terminal names",
+                            nt.name
+                        ),
+                    });
                 }
             }
         }
@@ -730,17 +1027,39 @@ impl GrammarCompiler {
         // per-occurrence filter — they appear in no rule body.
         let ignore_patterns = std::mem::take(&mut self.ignore_patterns);
         let mut ignore_names: Vec<String> = Vec::with_capacity(ignore_patterns.len());
-        let mut ignore_counter = 0usize;
-        for pat in ignore_patterns {
-            let name = loop {
-                let candidate = format!("__IGNORE_{}", ignore_counter);
-                ignore_counter += 1;
-                if self.anon_terminal_name_free(&candidate) {
-                    break candidate;
+        for entry in ignore_patterns {
+            match entry {
+                // `%ignore NAME`: add the existing terminal to the ignore set with
+                // its declared priority intact — no clone (Python's `_ignore`
+                // short-circuit). Reject a name that resolves to no defined
+                // terminal, mirroring Python's "Terminals %s were marked to ignore
+                // but were not defined!" (a bare `%ignore WS` does not auto-import).
+                IgnoreEntry::Named(name) => {
+                    if !self.terminals.iter().any(|t| t.name == name) {
+                        return Err(GrammarError::UndefinedTerminal { name });
+                    }
+                    ignore_names.push(name);
                 }
-            };
-            self.terminals.push(TerminalDef::new(&name, pat, 0));
-            ignore_names.push(name);
+                // Inline pattern: synthesize a fresh `__IGNORE_n` terminal at the
+                // default priority, exactly as both engines do for the inline form.
+                // The base index is the count of ignore entries seen so far
+                // (Python's `'__IGNORE_%d' % len(self._ignore_names)`), so a named
+                // entry preceding an inline one bumps the inline name's number; the
+                // availability skip is lark-rs's extra collision guard (#326 import
+                // alias) layered on top of that base.
+                IgnoreEntry::Pattern(pat) => {
+                    let mut ignore_counter = ignore_names.len();
+                    let name = loop {
+                        let candidate = format!("__IGNORE_{}", ignore_counter);
+                        ignore_counter += 1;
+                        if self.anon_terminal_name_free(&candidate) {
+                            break candidate;
+                        }
+                    };
+                    self.terminals.push(TerminalDef::new(&name, pat, 0));
+                    ignore_names.push(name);
+                }
+            }
         }
 
         // Reject use-before-definition: a rule body that references a symbol which
@@ -754,6 +1073,21 @@ impl GrammarCompiler {
             self.rules.iter().map(|r| r.origin.name.as_str()).collect();
         let defined_terms: std::collections::HashSet<&str> =
             self.terminals.iter().map(|t| t.name.as_str()).collect();
+        // A start symbol (default `start` or a custom one) that resolves to no
+        // defined rule is rejected here, exactly as Python Lark does
+        // (`GrammarError: Using an undefined rule: NonTerminal('start')`). Without
+        // this gate, `lower()` reached an undefined start at
+        // `symbols.id(s).expect("start symbol interned")` and **panicked** instead
+        // of returning a clean error — a robustness/DoS hole on user- or
+        // attacker-supplied grammars (bug-bounty H1, #330). A start is always a
+        // non-terminal, so only the rule set matters.
+        for start in &self.start {
+            if !defined_rules.contains(start.as_str()) {
+                return Err(GrammarError::UndefinedRule {
+                    name: start.clone(),
+                });
+            }
+        }
         for rule in &self.rules {
             for sym in &rule.expansion {
                 match sym {
@@ -1253,6 +1587,63 @@ mod tests {
                 .contains("Rule 'foo' defined more than once"),
             "got: {err}"
         );
+    }
+
+    /// H2a (#331): a template with a duplicate parameter name is rejected with
+    /// Python Lark's verbatim message (`GrammarDefinition.validate()`).
+    #[test]
+    fn duplicate_template_param_rejected() {
+        let err = load("foo{x,x}: x\nstart: foo{\"a\",\"b\"}\n").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Duplicate Template Parameter x (in template foo)"),
+            "got: {err}"
+        );
+    }
+
+    /// H2b (#331): a template parameter whose name shadows a defined rule is
+    /// rejected — the "conflicts with rule" check, run *before* the duplicate check.
+    #[test]
+    fn template_param_shadows_rule_rejected() {
+        let err = load("x: \"z\"\nfoo{x}: x\nstart: foo{\"a\"}\n").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Template Parameter conflicts with rule x (in template foo)"),
+            "got: {err}"
+        );
+    }
+
+    /// No over-rejection: a well-formed template whose parameter names are distinct
+    /// and don't shadow any definition still builds (guards the H2 validation pass
+    /// against false positives).
+    #[test]
+    fn well_formed_template_params_accepted() {
+        load("foo{a,b}: a b\nstart: foo{\"x\",\"y\"}\n").unwrap();
+        load("_sep{item, sep}: item (sep item)*\nstart: _sep{NAME, \",\"}\nNAME: /[a-z]+/\n")
+            .unwrap();
+    }
+
+    /// H3 (#331): a top-level alias (`->`) in a terminal definition is rejected
+    /// with Python's verbatim message. A *group-nested* alias is also rejected (our
+    /// walk catches it); Python rejects it too, though via a later "used but not
+    /// defined" path — both reject, which is the contract.
+    #[test]
+    fn alias_in_terminal_rejected() {
+        let top = load("A: \"a\" -> foo\nstart: A\n").unwrap_err();
+        assert!(
+            top.to_string()
+                .contains("Aliasing not allowed in terminals (You used -> in the wrong place)"),
+            "got: {top}"
+        );
+        // Both engines reject the nested case; we report it precisely as an
+        // aliasing error rather than letting it leak downstream.
+        assert!(load("A: (\"a\" -> foo)\nstart: A\n").is_err());
+    }
+
+    /// No over-rejection: an alias on a *rule* (not a terminal) is still legal.
+    #[test]
+    fn alias_on_rule_still_accepted() {
+        load("start: \"a\" -> foo\n").unwrap();
     }
 
     /// Not a duplicate: one definition split across `|` arms is a single origin

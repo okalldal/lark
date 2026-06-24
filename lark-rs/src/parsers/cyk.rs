@@ -77,8 +77,10 @@ enum Sym {
 struct CnfRule {
     lhs: Nt,
     rhs: Vec<Sym>,
-    /// Disambiguation weight (sum of priorities); the DP keeps the minimum.
-    weight: i32,
+    /// Disambiguation weight (sum of priorities); the DP keeps the minimum. `i64`
+    /// (not `i32`) to match the widened priority storage (#352) and so summed
+    /// large priorities do not truncate.
+    weight: i64,
     /// Index into the [`EffRule`] table of the original rule (and ε-variant) this
     /// came from, or `None` for a synthetic TERM/BIN helper (never used to build a
     /// tree node).
@@ -138,7 +140,7 @@ enum PNode {
 #[derive(Clone)]
 struct Cell {
     node: Rc<PNode>,
-    weight: i32,
+    weight: i64,
 }
 
 /// The reverted (original-grammar) parse tree, ready for [`TreeOutputBuilder`].
@@ -284,12 +286,19 @@ impl CykParser {
         Ok(match value {
             NodeValue::Tree(t) => ParseTree::Tree(t),
             NodeValue::Token(t) => ParseTree::Token(t),
-            // A start rule is never transparent, so its value is never Inline; be
-            // defensive rather than panic (mirrors Earley's forest_to_tree).
+            // A start rule is never transparent, so its value is never Inline. The
+            // lone-`None` root collapse (`?start: [A]` on `""`, #289) also cannot
+            // reach here: both lark-rs and Python's CYK reject a nullable start at
+            // *build* time ("CYK doesn't support empty rules", verified byte-identical
+            // by the CYK compliance bank), so this arm is unreachable for that case.
+            // Mapping `Child::None` to `ParseTree::None` is therefore not a
+            // more-permissive divergence (ADR-0017) — the grammar was already
+            // rejected before any parse — and keeps the three root-assembly sites
+            // symmetric rather than panicking.
             NodeValue::Inline(mut cs) if cs.len() == 1 => match cs.pop().unwrap() {
                 Child::Tree(t) => ParseTree::Tree(t),
                 Child::Token(t) => ParseTree::Token(t),
-                Child::None => ParseTree::Tree(Tree::new(start_name, vec![])),
+                Child::None => ParseTree::None,
             },
             NodeValue::Inline(cs) => ParseTree::Tree(Tree::new(start_name, cs)),
         })

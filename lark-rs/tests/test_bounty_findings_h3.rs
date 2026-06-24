@@ -10,9 +10,11 @@
 //! Earley dynamic-lexer scan pathology.
 //!
 //! Each test asserts the **Python Lark 1.3.1** (oracle) behavior. This file is an XFAIL
-//! catalog: every test below is `#[ignore]`d and fails today. Drop a test's `#[ignore]`
-//! when its bug is fixed to turn it into a permanent regression guard. Run the still-open
-//! XFAILs with:
+//! catalog being burned down: a test loses its `#[ignore]` once its bug is fixed, turning
+//! it into a permanent regression guard (H1, H2a, H2b, H3, H4 are fixed and now run by
+//! default, as is the Python-`re` dialect set H6–H9 — possessive/stacked quantifiers,
+//! `(?#)` comment, octal/`[\b]` escapes, #333). The remaining `#[ignore]`d tests still
+//! fail today. Run the still-open XFAILs with:
 //!
 //!     cargo test --test test_bounty_findings_h3 -- --ignored
 //!
@@ -63,17 +65,26 @@ fn assert_build_rejected(grammar: &str, o: LarkOptions, why: &str) {
 /// returning a clean error — a robustness/DoS hole on attacker- or user-supplied
 /// grammars. Reproduces on lalr (basic+contextual) and earley.
 #[test]
-#[ignore = "XFAIL (bounty H1): undefined start symbol panics in lower() instead of GrammarError"]
 fn h1_undefined_start_rejected_not_panicked() {
-    let g = "foo: \"a\"\n".to_string();
-    let o = opts(ParserAlgorithm::Lalr, LexerType::Contextual);
-    // Must be a clean Err, never a panic.
-    let result =
-        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Lark::new(&g, o).is_err()));
-    assert!(
-        matches!(result, Ok(true)),
-        "H1: undefined start must be a clean GrammarError, not a panic (got {result:?})"
-    );
+    // Reproduces on lalr (basic + contextual) and earley — any undefined start,
+    // default (`start`) or custom, must be a clean GrammarError, never a panic.
+    for (parser, lexer) in [
+        (ParserAlgorithm::Lalr, LexerType::Contextual),
+        (ParserAlgorithm::Lalr, LexerType::Basic),
+        (ParserAlgorithm::Earley, LexerType::Basic),
+    ] {
+        let label = format!("{parser:?}/{lexer:?}");
+        let g = "foo: \"a\"\n".to_string();
+        let o = opts(parser, lexer);
+        // Must be a clean Err, never a panic.
+        let result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| Lark::new(&g, o).is_err()));
+        assert!(
+            matches!(result, Ok(true)),
+            "H1: undefined start must be a clean GrammarError, not a panic on \
+             {label} (got {result:?})"
+        );
+    }
 }
 
 /// H2a (HIGH). A template with a duplicate parameter name. Python:
@@ -81,7 +92,6 @@ fn h1_undefined_start_rejected_not_panicked() {
 /// analogue of Python's `GrammarDefinition.validate()` template-parameter pass, so it
 /// builds the malformed template silently.
 #[test]
-#[ignore = "XFAIL (bounty H2): duplicate template parameter not rejected"]
 fn h2a_duplicate_template_param_rejected() {
     let g = "foo{x,x}: x\nstart: foo{\"a\",\"b\"}\n";
     assert_build_rejected(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual), "H2a");
@@ -93,7 +103,6 @@ fn h2a_duplicate_template_param_rejected() {
 /// literal arg substitutes for the param, shadowing rule `x`) where Python rejects the
 /// grammar outright. Same missing-`validate()` root cause as H2a, second surface.
 #[test]
-#[ignore = "XFAIL (bounty H2): template parameter shadowing a rule not rejected"]
 fn h2b_template_param_shadows_rule_rejected() {
     let g = "x: \"z\"\nfoo{x}: x\nstart: foo{\"a\"}\n";
     assert_build_rejected(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual), "H2b");
@@ -105,7 +114,6 @@ fn h2b_template_param_shadows_rule_rejected() {
 /// `start(Token(A,"a"))`). Distinct from RC4a/b/c (aliases on *rules* / inside groups);
 /// this is the terminal-definition surface with its own Python check.
 #[test]
-#[ignore = "XFAIL (bounty H3): alias inside a terminal definition not rejected"]
 fn h3_alias_in_terminal_rejected() {
     let g = "A: \"a\" -> foo\nstart: A\n";
     assert_build_rejected(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual), "H3");
@@ -118,12 +126,11 @@ fn h3_alias_in_terminal_rejected() {
 /// H4 (HIGH). `lexer="auto"` (the *default*) with `parser="earley"` must resolve to
 /// the **dynamic** (parse-directed) lexer when there is no postlex, exactly as Python
 /// Lark does (`lark/lark.py`: auto→dynamic for earley, basic only with a postlex).
-/// lark-rs's `build_earley` (`src/parsers/mod.rs`) has a catch-all arm that routes
-/// `LexerType::Auto` to the **basic** lexer, so the common `Lark(g, parser="earley")`
-/// idiom silently uses a different lexer than Python — changing accept/reject (here)
-/// and tree shape. The whole Earley suite masks it by forcing an explicit lexer.
+/// Fixed in #334: `build_earley` (`src/parsers/mod.rs`) now resolves `LexerType::Auto`
+/// to `Dynamic` (no postlex) / `Basic` (postlex) before the lexer match, mirroring
+/// `lark/lark.py:399-413`, so the common `Lark(g, parser="earley")` idiom uses the
+/// same lexer as Python. Previously a catch-all arm routed `Auto` to the basic lexer.
 #[test]
-#[ignore = "XFAIL (bounty H4): earley+auto routes to the basic lexer instead of dynamic"]
 fn h4_earley_auto_lexer_is_dynamic() {
     let g = "start: \"print\" NAME\nNAME: /[a-z]+/\n%ignore \" \"\n";
     let lark = Lark::new(g, opts(ParserAlgorithm::Earley, LexerType::Auto)).expect("H4: builds");
@@ -190,7 +197,6 @@ fn h5b_class_setop_python_re_dialect() {
 /// mis-match. Acceptable fixes: refuse (categorized) or match Python — never silently
 /// accept the greedy reading.
 #[test]
-#[ignore = "XFAIL (bounty H6): possessive quantifier a++ silently reinterpreted as greedy (a+)+"]
 fn h6_possessive_not_silently_greedy() {
     let g = "start: A\nA: /a++a/\n";
     match Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)) {
@@ -210,7 +216,6 @@ fn h6_possessive_not_silently_greedy() {
 /// lark-rs builds and lexes the terminal. Per ADR-0017, being more permissive than the
 /// oracle is a bug. Distinct dialect axis from H5 (quantifier shape, not char class).
 #[test]
-#[ignore = "XFAIL (bounty H7): stacked quantifier /a{2}{3}/ accepted; Python rejects 'multiple repeat'"]
 fn h7_stacked_quantifier_rejected() {
     let g = "start: A\nA: /a{2}{3}/\n";
     assert_build_rejected(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual), "H7");
@@ -223,7 +228,6 @@ fn h7_stacked_quantifier_rejected() {
 /// construct. The minimum fix is to stop leaking a raw error; the oracle default is to
 /// support it (strip the comment) and match Python. Distinct from RC6 (`\b`).
 #[test]
-#[ignore = "XFAIL (bounty H8): (?#comment) leaks a raw uncategorized regex error; Python accepts it"]
 fn h8_inline_comment_group_supported() {
     let g = "start: A\nA: /a(?#c)b/\n";
     let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual));
@@ -247,7 +251,6 @@ fn h8_inline_comment_group_supported() {
 /// are the `\b`/`\B`/`\Z` *anchor* policy fork; these are Python-accepted regular
 /// escapes that should simply be translated and matched).
 #[test]
-#[ignore = "XFAIL (bounty H9): octal escape \\101 rejected + mis-categorized as backtracking lookaround"]
 fn h9a_octal_escape_supported() {
     let g = "start: A\nA: /\\101/\n";
     let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual));
@@ -267,7 +270,6 @@ fn h9a_octal_escape_supported() {
 /// class, and lark-rs mis-categorizes it as `LookaroundScope` "backtracking-only".
 /// Same route over-claim as H9a; `[\b]` is a regular, Python-accepted construct.
 #[test]
-#[ignore = "XFAIL (bounty H9): [\\b] (backspace-in-class) rejected + mis-categorized as lookaround"]
 fn h9b_backspace_in_class_supported() {
     let g = "start: A\nA: /[\\b]/\n";
     let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual));

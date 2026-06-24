@@ -228,12 +228,39 @@ impl<'a> GrammarParser<'a> {
         let expansions = self.parse_expansions()?;
         self.consume_newline()?;
 
+        // H3 (#331): an alias (`->`) is illegal anywhere inside a terminal
+        // definition. Python Lark rejects it in its terminal-tree builder's
+        // `alias()` transform (`load_grammar.py`), which fires on an alias node at
+        // any depth — top-level (`A: "a" -> foo`) or nested in a group/`[...]` —
+        // so we likewise walk the whole expansion tree, not just the top alts.
+        if Self::expansions_contain_alias(&expansions) {
+            return Err(
+                self.err("Aliasing not allowed in terminals (You used -> in the wrong place)")
+            );
+        }
+
         Ok(RawTerm {
             name,
             priority,
             expansions,
             directive,
         })
+    }
+
+    /// Whether any alternative in `alts`, at any nesting depth (through `(...)`
+    /// groups and `[...]` maybe-blocks), carries an `-> name` alias. Used to
+    /// reject aliases inside terminal definitions (H3, #331).
+    fn expansions_contain_alias(alts: &[AliasedExpansion]) -> bool {
+        alts.iter()
+            .any(|alt| alt.alias.is_some() || alt.expansion.iter().any(Self::expr_contains_alias))
+    }
+
+    fn expr_contains_alias(expr: &Expr) -> bool {
+        match expr {
+            Expr::Value(_) => false,
+            Expr::Repeat { inner, .. } => Self::expr_contains_alias(inner),
+            Expr::Group(alts) | Expr::Maybe(alts) => Self::expansions_contain_alias(alts),
+        }
     }
 
     fn parse_expansions(&mut self) -> Result<Vec<AliasedExpansion>, GrammarError> {

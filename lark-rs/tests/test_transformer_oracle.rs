@@ -517,6 +517,7 @@ mod transformer {
         match tree {
             ParseTree::Tree(t) => Child::Tree(t.clone()),
             ParseTree::Token(tok) => Child::Token(tok.clone()),
+            ParseTree::None => Child::None,
         }
     }
 

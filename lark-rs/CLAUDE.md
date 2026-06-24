@@ -427,9 +427,13 @@ misclassifies anonymous non-terminals like `__anon_opt_0`. Always look up agains
 (ACTION); otherwise it's a non-terminal (GOTO).
 
 **Ignore terminals must be in `always_accept`.** The contextual lexer only tries terminals
-listed for the current parser state. `%ignore` terminals appear in NO state's lookahead set,
-so they must be passed as `always_accept` when building `ContextualLexer`. The parse loop
-then explicitly skips tokens whose `type_` is in `lexer.ignore()`.
+listed for the current parser state. A `%ignore` terminal usually appears in no state's
+lookahead set (a synthetic `__IGNORE_n` from an inline pattern, or a named terminal no rule
+references), so it must be passed as `always_accept` when building `ContextualLexer`. A
+`%ignore NAME` whose terminal is *also* referenced in a rule body (#345) does appear in some
+state's lookahead — that is harmless: `always_accept` dedups against the state terminals, and
+the parse loop skips the token regardless of state via the per-token `lexer.is_ignored()`
+check, so the ignored terminal never reaches the tree even where a rule names it.
 
 **Import aliases are the registered name.** `%import common.WS -> _WS` means the terminal
 is `_WS` in this grammar, not `WS`. Store and look up by alias.

@@ -12,11 +12,11 @@ use crate::error::GrammarError;
 use crate::grammar::intern::SymbolId;
 use crate::grammar::terminal::{Pattern, PatternRe, PatternStr, TerminalDef};
 
-fn re_term(id: u32, name: &str, pat: &str, prio: i32) -> (SymbolId, TerminalDef) {
+fn re_term(id: u32, name: &str, pat: &str, prio: i64) -> (SymbolId, TerminalDef) {
     let p = Pattern::Re(PatternRe::new(pat, 0).unwrap());
     (SymbolId(id), TerminalDef::new(name, p, prio))
 }
-fn str_term(id: u32, name: &str, val: &str, prio: i32) -> (SymbolId, TerminalDef) {
+fn str_term(id: u32, name: &str, val: &str, prio: i64) -> (SymbolId, TerminalDef) {
     let p = Pattern::Str(PatternStr::new(val));
     (
         SymbolId(id),

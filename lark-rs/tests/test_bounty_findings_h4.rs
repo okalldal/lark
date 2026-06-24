@@ -11,8 +11,10 @@
 //! a **DFA-build** determinization blow-up.
 //!
 //! Each test asserts the **Python Lark 1.3.1** (oracle) behavior. This file is an XFAIL
-//! catalog: every test below is `#[ignore]`d and fails today. Drop a test's `#[ignore]`
-//! when its bug is fixed to turn it into a permanent regression guard. Run the still-open
+//! catalog: a test is `#[ignore]`d while its bug is open and fails today; once the bug is
+//! fixed its `#[ignore]` is dropped so it runs as a permanent regression guard (e.g.
+//! `h4_2_*`, `h4_5_*`, `h4_6_*`, and `h4_9_*` are fixed and now run by default). Run the
+//! still-open
 //! XFAILs with:
 //!
 //!     cargo test --test test_bounty_findings_h4 -- --ignored
@@ -67,6 +69,7 @@ fn collect_token_types<'a>(t: &'a ParseTree, out: &mut Vec<&'a str>) {
                 walk(ch, out);
             }
         }
+        ParseTree::None => {}
     }
 }
 
@@ -111,6 +114,7 @@ fn derivation_count(t: &ParseTree) -> usize {
     let root = match t {
         ParseTree::Tree(tr) => Child::Tree(tr.clone()),
         ParseTree::Token(tok) => Child::Token(tok.clone()),
+        ParseTree::None => Child::None,
     };
     enum_derivations(&root).len()
 }
@@ -123,11 +127,12 @@ fn derivation_count(t: &ParseTree) -> usize {
 /// (`src/grammar/loader/tokenizer.rs`) decodes a *superset* of the escapes Python
 /// Lark's `eval_escaping` (`lark/load_grammar.py`) recognizes. Python decodes only
 /// `\\ \U \u \x \n \f \t \r`; **every other** escape keeps a literal backslash.
-/// lark-rs additionally decodes `\v`→VT, `\0`→NUL, `\'`→`'`, so the `PatternStr` value
-/// (and the input it matches) diverges. Engine-independent (loader bug). Expected fix:
-/// reject-like-Python at the value level — leave `\v`/`\0`/`\'` as literal backslash+char.
+/// lark-rs additionally decoded `\v`→VT, `\0`→NUL, `\'`→`'`, so the `PatternStr` value
+/// (and the input it matched) diverged. Engine-independent (loader bug). FIXED (#344):
+/// `unescape_string` now drops those three arms so they fall through to the keep-backslash
+/// arm, leaving `\v`/`\0`/`\'` as literal backslash+char — matching `eval_escaping`. Live
+/// regression guard.
 #[test]
-#[ignore = "XFAIL (bounty H4-1): grammar string-literal escapes \\v \\0 \\' over-decoded vs Python eval_escaping"]
 fn h4_1_string_literal_escape_overdecoded() {
     // Python reads `"\v"` as the 2-char literal backslash+`v`, so it accepts the
     // 2-byte input `\v` and rejects a bare vertical tab. lark-rs decodes to U+000B
@@ -143,6 +148,32 @@ fn h4_1_string_literal_escape_overdecoded() {
             lark.parse(accepted_literal).is_ok(),
             "H4-1: Python treats the escape as a literal backslash+char and accepts {accepted_literal:?}, \
              but lark-rs over-decoded it and rejects"
+        );
+    }
+
+    // Negative control — escapes inside the `Uuxnftr` set (plus `\\`/`\"`) must STILL
+    // decode after the fix. `\n`→LF, `\t`→TAB, `\x41`/`A`/`\U00000041`→'A',
+    // `\\`→one backslash, `\"`→'"', and a bare literal char are unchanged. Each grammar
+    // accepts the *decoded* byte(s) and rejects the literal escape source, exactly opposite
+    // to the over-decoded set above.
+    for (g, decoded, literal_src) in [
+        ("start: \"\\n\"\n", "\n", "\\n"),
+        ("start: \"\\t\"\n", "\t", "\\t"),
+        ("start: \"\\x41\"\n", "A", "\\x41"),
+        ("start: \"\\u0041\"\n", "A", "\\u0041"),
+        ("start: \"\\\\\"\n", "\\", "\\\\"),
+        ("start: \"A\"\n", "A", "AA"),
+    ] {
+        let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual))
+            .expect("H4-1 negative control: grammar builds");
+        assert!(
+            lark.parse(decoded).is_ok(),
+            "H4-1 negative control: {g:?} must still decode and accept {decoded:?}"
+        );
+        assert!(
+            lark.parse(literal_src).is_err(),
+            "H4-1 negative control: {g:?} decodes its escape, so the literal source \
+             {literal_src:?} must NOT match"
         );
     }
 }
@@ -161,7 +192,6 @@ fn h4_1_string_literal_escape_overdecoded() {
 /// H6–H9/#333 (quantifier/octal/comment), and #275 (`\b`/`\B`/`\Z`, which Python
 /// *accepts*/parks). Expected fix: reject-like-Python (categorized `InvalidRegex`).
 #[test]
-#[ignore = "XFAIL (bounty H4-2): regex-crate-only \\p{} / \\x{} / \\z silently accepted; Python rejects at build"]
 fn h4_2_regex_crate_only_dialect_rejected() {
     for g in [
         "start: T\nT: /\\p{L}+/\n",
@@ -194,8 +224,12 @@ fn h4_2_regex_crate_only_dialect_rejected() {
 /// in *both* engines, so only the *named* form diverges. Expected fix: when a `%ignore`
 /// directive is a single reference to a named terminal, mark *that* terminal ignored
 /// (preserving its priority); only inline patterns synthesize a fresh terminal.
+// Fixed (#345): when a `%ignore` directive is a single reference to a named
+// terminal, the loader adds *that* terminal to the ignore set with its declared
+// priority intact (Python's `_ignore` "keep terminal name" short-circuit,
+// `grammar/loader/compiler.rs::IgnoreEntry::Named`), instead of minting a
+// priority-0 `__IGNORE_n` clone. Only inline patterns synthesize a fresh terminal.
 #[test]
-#[ignore = "XFAIL (bounty H4-3): %ignore NAME mints a priority-0 __IGNORE_n clone, dropping priority and failing to filter the named terminal"]
 fn h4_3_ignore_named_terminal_priority_and_filter() {
     // (a) priority: SKIP.5 outranks A and should ignore each char, leaving nothing for
     // A → Python rejects. lark-rs keeps the priority-0 clone, A wins, parse succeeds.
@@ -226,6 +260,30 @@ fn h4_3_ignore_named_terminal_priority_and_filter() {
     );
 }
 
+/// H4-3 negative control (#345): the *inline* form `%ignore /[a-z]/` must still
+/// synthesize a fresh priority-0 `__IGNORE_n` terminal — the fix only changes the
+/// *named* form. Same grammar shape as H4-3a but with an inline pattern: the
+/// priority-0 clone loses the lexer tie to `A`, so `ab` parses as `start(A, A)` in
+/// **both** engines (verified against Python Lark 1.3.1). If the fix had wrongly
+/// also short-circuited the inline form to the declared `SKIP.5`, this would reject.
+#[test]
+fn h4_3_inline_ignore_still_synthesizes_terminal() {
+    let g = "start: A+\nA: /[a-z]/\nSKIP.5: /[a-z]/\n%ignore /[a-z]/\n";
+    let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual))
+        .expect("inline %ignore: grammar builds");
+    let tree = lark
+        .parse("ab")
+        .expect("inline %ignore mints a priority-0 clone that loses to A → 'ab' parses");
+    let mut types = Vec::new();
+    collect_token_types(&tree, &mut types);
+    assert_eq!(
+        types,
+        vec!["A", "A"],
+        "inline %ignore /[a-z]/ synthesizes a priority-0 terminal (not the declared SKIP.5), \
+         so each char is an A — Python yields start(A, A); got {types:?}"
+    );
+}
+
 /// H4-4 (LOW, loader / priority). Terminal/rule priority is parsed as `i128` then
 /// **clamped to `i32`** (`tokenizer.rs`), while Python uses arbitrary-precision `int`.
 /// Two priorities that both exceed `i32::MAX` saturate to the same value and tie, so
@@ -233,8 +291,12 @@ fn h4_3_ignore_named_terminal_priority_and_filter() {
 /// Narrow (needs priorities > 2.1e9) but an honest, explicit-priority-determined
 /// divergence. Expected fix: store priorities wide enough to not collide (or reject
 /// out-of-range). Control: both ≤ `i32::MAX` agree.
+// Fixed (#352): priority storage widened `i32` → `i64` (loader clamp + `RuleOptions`/
+// `TerminalDef` fields + the Earley/CYK priority accumulators), so 5e9 and 9e9 no
+// longer both saturate to `i32::MAX` and tie — `B` (9e9) outranks `A` (5e9), matching
+// Python (which uses unbounded ints). Python accepts arbitrarily large priorities (no
+// rejection even at 9e20), so the contract is store-wide-not-reject.
 #[test]
-#[ignore = "XFAIL (bounty H4-4): terminal priority clamped to i32 ties two distinct >i32::MAX priorities"]
 fn h4_4_priority_i32_saturation_tie() {
     let g = "start: A | B\nA.5000000000: \"x\"\nB.9000000000: \"x\"\n";
     let lark =
@@ -247,6 +309,119 @@ fn h4_4_priority_i32_saturation_tie() {
         vec!["B"],
         "H4-4: B (priority 9e9) outranks A (5e9); Python picks B, lark-rs saturated both to \
          i32::MAX and picked A by name order (got {types:?})"
+    );
+}
+
+/// H4-4 negative control: priorities at and *below* `i32::MAX` (where there was never
+/// any saturation) must still order correctly — the widening is not allowed to perturb
+/// the ordinary case. Two small distinct priorities and a pair straddling the old
+/// `i32::MAX` boundary both pick the higher one, matching Python.
+#[test]
+fn h4_4_priority_small_and_boundary_still_order() {
+    for (a_prio, b_prio) in [("5", "9"), ("2000000000", "2100000000")] {
+        let g = format!("start: A | B\nA.{a_prio}: \"x\"\nB.{b_prio}: \"x\"\n");
+        let lark = Lark::new(&g, opts(ParserAlgorithm::Lalr, LexerType::Contextual))
+            .expect("H4-4 control: builds");
+        let tree = lark.parse("x").expect("H4-4 control: parses");
+        let mut types = Vec::new();
+        collect_token_types(&tree, &mut types);
+        assert_eq!(
+            types,
+            vec!["B"],
+            "H4-4 control: B (priority {b_prio}) outranks A ({a_prio}); the i32→i64 widening \
+             must not regress ordinary (non-saturating) priority ordering (got {types:?})"
+        );
+    }
+}
+
+/// H4-4 follow-up (#384 / omnibus #354 blocking finding): the Earley forest priority
+/// **accumulator** must saturate, not wrap/panic. `packed_priority_value` sums a rule's
+/// own priority with its children's priorities along a derivation; with the `i32`→`i64`
+/// widening (#352) the *storage* no longer collides, but a derivation that sums two
+/// priorities each near `i64::MAX` would overflow the plain `+`. Pre-fix this panicked
+/// (debug `attempt to add with overflow`) / wrapped (release: the high-priority sum
+/// wraps negative and *loses*, picking the wrong derivation). Post-fix the sum uses
+/// `saturating_add` (mirroring CYK's `weight.saturating_add`), so it pins at `i64::MAX`
+/// and the high-priority alternative still wins, deterministically.
+///
+/// Grammar: `"xx"` is ambiguous between `hh` (two `high` rules, each priority
+/// `i64::MAX/2`, so their sum is `i64::MAX + 1` — the overflow point) and `ll` (two
+/// `low` rules, total priority 2). Python (unbounded ints) resolves to `hh`; lark-rs
+/// must do the same without overflowing, saturating the `hh` sum to `i64::MAX`.
+#[test]
+fn h4_4_earley_priority_accumulation_saturates_no_overflow() {
+    // 4611686018427387904 == 2^62 == (i64::MAX + 1) / 2; two of them sum to
+    // exactly i64::MAX + 1 — the minimal overflow point for the plain `+`.
+    let g = "start: hh | ll\n\
+             hh: high high\n\
+             ll: low low\n\
+             high.4611686018427387904: \"x\"\n\
+             low.1: \"x\"\n";
+    for lexer in [LexerType::Dynamic, LexerType::Basic] {
+        let lark = Lark::new(g, opts(ParserAlgorithm::Earley, lexer.clone()))
+            .unwrap_or_else(|e| panic!("H4-4 earley ({lexer:?}): builds: {e:?}"));
+        // Must not panic on overflow during forest priority resolution.
+        let tree = lark
+            .parse("xx")
+            .unwrap_or_else(|e| panic!("H4-4 earley ({lexer:?}): parses: {e:?}"));
+        // The summed-priority winner is `hh` (≈i64::MAX, saturating) over `ll` (2).
+        let names: Vec<&str> = tree
+            .as_tree()
+            .unwrap_or_else(|| panic!("H4-4 earley ({lexer:?}): root is a tree"))
+            .children
+            .iter()
+            .filter_map(|c| c.as_tree().map(|ct| ct.data.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            vec!["hh"],
+            "H4-4 earley ({lexer:?}): the saturating priority sum of `hh` (2^62 + 2^62 \
+             == i64::MAX + 1, pinned at i64::MAX) must outrank `ll` (2); a wrapping `+` \
+             would flip `hh` negative and pick `ll` (got {names:?})"
+        );
+    }
+}
+
+/// H4-4 boundary policy (ADR-0034): lark-rs intentionally supports a **bounded i64**
+/// priority domain — values beyond ±i64::MAX *saturate*, a deliberate narrowing from
+/// Python's unbounded ints. This pins that policy as tested, not accidental:
+///   (a) two *distinct* priorities both beyond i64::MAX both clamp to i64::MAX and
+///       **tie** (the documented bounded behavior — there is no Python oracle here
+///       since Python is unbounded), so the tie breaks by rule order (first wins); and
+///   (b) two *distinct in-range* large priorities still order correctly (the higher
+///       wins), so saturation only bites past the boundary.
+#[test]
+fn h4_4_priority_beyond_i64_saturates_to_bounded_domain() {
+    // (a) Both priorities are > i64::MAX (≈9.22e18); both clamp to i64::MAX and tie.
+    //     With a tie, Earley breaks by rule order, so the first alternative (`A`) wins.
+    let g_tie = "start: A | B\n\
+                 A.99999999999999999999: \"x\"\n\
+                 B.88888888888888888888: \"x\"\n";
+    let lark = Lark::new(g_tie, opts(ParserAlgorithm::Earley, LexerType::Dynamic))
+        .expect("H4-4 boundary: builds");
+    let tree = lark.parse("x").expect("H4-4 boundary: parses");
+    let mut types = Vec::new();
+    collect_token_types(&tree, &mut types);
+    assert_eq!(
+        types,
+        vec!["A"],
+        "H4-4 boundary (a): two priorities beyond i64::MAX both saturate to i64::MAX and \
+         tie (bounded-i64 policy, ADR-0034); the tie breaks by rule order so `A` wins \
+         (got {types:?})"
+    );
+
+    // (b) Two distinct *in-range* large priorities still order: B (9e9) > A (5e9).
+    let g_order = "start: A | B\nA.5000000000: \"x\"\nB.9000000000: \"x\"\n";
+    let lark = Lark::new(g_order, opts(ParserAlgorithm::Earley, LexerType::Dynamic))
+        .expect("H4-4 boundary: in-range builds");
+    let tree = lark.parse("x").expect("H4-4 boundary: in-range parses");
+    let mut types = Vec::new();
+    collect_token_types(&tree, &mut types);
+    assert_eq!(
+        types,
+        vec!["B"],
+        "H4-4 boundary (b): distinct in-range priorities still order (B 9e9 > A 5e9); \
+         saturation must only bite beyond the i64 boundary (got {types:?})"
     );
 }
 
@@ -264,8 +439,10 @@ fn h4_4_priority_i32_saturation_tie() {
 /// import-vs-import collision) and RC2 (duplicate definition). Expected fix: build a
 /// per-module alias map from the full merged import list and consult it for every
 /// closure symbol, mirroring `_get_mangle`.
+// Fixed (#343): the per-module merged import-alias map (`import_alias_map`) leaves a
+// closure symbol that is also independently imported unmangled, mirroring Python's
+// `_get_mangle(prefix, aliases)` `if s in aliases` short-circuit.
 #[test]
-#[ignore = "XFAIL (bounty H4-5): import-closure mangles a sibling that is independently imported (token type python__NAME vs NAME)"]
 fn h4_5_import_closure_mangle_exemption() {
     let g = "start: pattern\n%import python (pattern, NAME)\n%ignore \" \"\n";
     let lark =
@@ -291,7 +468,6 @@ fn h4_5_import_closure_mangle_exemption() {
 /// mis-routes. Expected fix: build `ParseError::UnexpectedCharacter` from the lex
 /// failure, mirroring the recovering path. (Distinct from N8/#307, token positions.)
 #[test]
-#[ignore = "XFAIL (bounty H4-6): contextual lexer reports UnexpectedToken for an unlexable char; Python+basic say UnexpectedCharacter"]
 fn h4_6_contextual_unlexable_char_is_unexpected_character() {
     let lark = Lark::new(
         "start: \"a\" \"b\"\n",
@@ -299,10 +475,71 @@ fn h4_6_contextual_unlexable_char_is_unexpected_character() {
     )
     .expect("H4-6: builds");
     let err = lark.parse("ax").expect_err("H4-6: 'ax' rejects");
+    match err {
+        ParseError::UnexpectedCharacter {
+            ch,
+            line,
+            col,
+            ref expected,
+            ..
+        } => {
+            // Python: UnexpectedCharacters, line 1, col 2, char 'x', allowed {'B'}.
+            assert_eq!(ch, 'x', "H4-6: offending char");
+            assert_eq!((line, col), (1, 2), "H4-6: position (line 1, col 2)");
+            // The `allowed`/expected set is the lexable terminals at the state
+            // — here just `B` — and must NOT include the `$END` sentinel.
+            assert!(
+                !expected.contains("$END"),
+                "H4-6: `$END` must be excluded from the allowed set, got {expected:?}"
+            );
+            assert!(
+                expected.contains('B'),
+                "H4-6: expected set should name the lexable terminal `B`, got {expected:?}"
+            );
+        }
+        other => panic!(
+            "H4-6: 'x' matches no terminal → Python raises UnexpectedCharacters; \
+             lark-rs's contextual path raised {other:?}"
+        ),
+    }
+}
+
+/// H4-6 companion (regression guard). The H4-6 fix builds `UnexpectedCharacter` from a
+/// contextual `LexFailure`, but a non-recovering contextual `LexFailure` must mean
+/// *genuinely un-lexable* — NOT merely *invalid in this parser state*. A globally-valid
+/// but state-invalid token (`}` while the parser is inside `a_part`, where the per-state
+/// scanner only offers `AWORD`/`]`) is matched by the contextual lexer's root fallback,
+/// fed to the parser, and rejected as `UnexpectedToken` — byte-for-byte what Python's
+/// batch contextual parse raises (`l_ctx.parse("[}")` → `UnexpectedToken(RBRACE)`,
+/// Python Lark 1.3.1). If the H4-6 fix ever converts *every* `LexFailure` to
+/// `UnexpectedCharacter` (dropping the root fallback), this case regresses to the wrong
+/// variant. Pinned alongside `tests/test_interactive.rs::contextual_state_invalid_token_rbrace`
+/// (the interactive-cursor sibling).
+#[test]
+fn h4_6_contextual_state_invalid_token_is_unexpected_token() {
+    let lark = Lark::new(
+        "start: a_part b_part\n\
+         a_part: \"[\" AWORD \"]\"\n\
+         b_part: \"{\" BWORD \"}\"\n\
+         AWORD: /[a-z]+/\n\
+         BWORD: /[A-Z]+/\n\
+         %ignore \" \"\n",
+        opts(ParserAlgorithm::Lalr, LexerType::Contextual),
+    )
+    .expect("companion: builds");
+    // `}` after `[` is globally lexable (it is the `b_part` closer) but invalid in the
+    // `a_part` state → Python: UnexpectedToken(RBRACE), NOT UnexpectedCharacters.
+    let err = lark.parse("[}").expect_err("companion: '[}' rejects");
     assert!(
-        matches!(err, ParseError::UnexpectedCharacter { ch: 'x', .. }),
-        "H4-6: 'x' matches no terminal → Python raises UnexpectedCharacters; \
-         lark-rs's contextual path raised {err:?}"
+        matches!(err, ParseError::UnexpectedToken { .. }),
+        "companion: a state-invalid-but-globally-valid token must raise UnexpectedToken \
+         (Python parity via the contextual root fallback), got {err:?}"
+    );
+    // And a genuinely un-lexable char on the same grammar is still UnexpectedCharacter.
+    let unlexable = lark.parse("[x]@").expect_err("companion: '[x]@' rejects");
+    assert!(
+        matches!(unlexable, ParseError::UnexpectedCharacter { ch: '@', .. }),
+        "companion: a truly un-lexable char must raise UnexpectedCharacter, got {unlexable:?}"
     );
 }
 
@@ -352,7 +589,6 @@ fn h4_7_eof_error_borrows_last_token_position() {
 /// slips past it. Expected fix: reject-like-Python (keep enough provenance that the two
 /// arms collide at stage 2). Distinct from #289/RC9 (lone-None expand1 parse divergence).
 #[test]
-#[ignore = "XFAIL (bounty H4-8): nested optional-of-optional ([A]?) B silently accepted; Python rejects 'Rules defined twice'"]
 fn h4_8_nested_optional_of_optional_collision_rejected() {
     for g in [
         "start: ([A]?) B\nA: \"a\"\nB: \"b\"\n",
@@ -372,11 +608,13 @@ fn h4_8_nested_optional_of_optional_collision_rejected() {
 /// (`terminals.rs`/`intern.rs`), a duplicate alternative Python collapses to a single
 /// `<start : A>`. The duplicate manifests as a spurious LALR reduce/reduce **build
 /// rejection** (Python accepts and parses) and, under Earley `explicit`, a spurious extra
-/// empty `start()` derivation. Distinct from RC7/#272 (recurse-helper over-share). Expected
-/// fix: dedup rule alternatives that lower to byte-identical expansions, preferring the
-/// kept-token occurrence.
+/// empty `start()` derivation. Distinct from RC7/#272 (recurse-helper over-share).
+///
+/// FIXED (#347): `dedup_and_check_alts` (`grammar/loader/compiler.rs`) now compares
+/// alternatives by a filter-out-agnostic symbol key (`sym_key`), mirroring Python's
+/// `Symbol.__eq__`/`Rule.__eq__`, so the two `start -> A` arms collapse to a single
+/// arm keeping the first occurrence's `filter_out`.
 #[test]
-#[ignore = "XFAIL (bounty H4-9): equal named-terminal-vs-literal alternation is a spurious LALR reduce/reduce; Python accepts"]
 fn h4_9_terminal_vs_literal_alternation() {
     let g = "start: A | \"a\"\nA: \"a\"\n";
 
@@ -404,6 +642,96 @@ fn h4_9_terminal_vs_literal_alternation() {
         data, "_ambig",
         "H4-9: Python yields a single unambiguous tree; lark-rs added a phantom empty derivation"
     );
+}
+
+/// H4-9 differential audit (#347). The named banks under-sample the
+/// literal-vs-named-terminal-unification dedup, and the issue warns of
+/// adjacent-but-distinct dedup bugs (#272/#159). This pins a hand-rolled
+/// differential against Python Lark 1.3.1 over the shapes around the H4-9 root —
+/// source order (which decides kept vs dropped), multi-position, optional pairs,
+/// and the `+`/`*` recurse helper — all of which lower to byte-identical
+/// expansions differing only in per-occurrence `filter_out`. Each expected value
+/// is what Python actually produces (recorded at fix time); a `None` LALR entry
+/// means Python rejects the grammar at build.
+#[test]
+fn h4_9_literal_vs_named_dedup_differential() {
+    // (grammar, input, expected LALR token-types | None if Python rejects at build)
+    let lalr_cases: &[(&str, &str, Option<&[&str]>)] = &[
+        // First-occurrence wins: `A | "a"` keeps the named `A` (token kept);
+        // `"a" | A` keeps the literal (token dropped → no children).
+        ("start: A | \"a\"\nA: \"a\"\n", "a", Some(&["A"])),
+        ("start: \"a\" | A\nA: \"a\"\n", "a", Some(&[])),
+        ("start: A | \"a\" | \"a\"\nA: \"a\"\n", "a", Some(&["A"])),
+        ("start: \"a\" | \"a\" | A\nA: \"a\"\n", "a", Some(&[])),
+        // `_A` is filtered by its `_` prefix, so `_A | "a"` drops the token too.
+        ("start: _A | \"a\"\n_A: \"a\"\n", "a", Some(&[])),
+        // Multi-position: only the unified slot dedups; siblings stay.
+        (
+            "start: A B | \"a\" B\nA: \"a\"\nB: \"b\"\n",
+            "ab",
+            Some(&["A", "B"]),
+        ),
+        // Distributed optional pair: the two absent arms differ only in their
+        // placeholder count (filtered literal = size 0), which must still dedup.
+        ("start: [A] | [\"a\"]\nA: \"a\"\n", "a", Some(&["A"])),
+        // `+`/`*` recurse helper: `(A | "a")` collapses to one inner arm.
+        ("start: (A | \"a\")+\nA: \"a\"\n", "aa", Some(&["A", "A"])),
+        ("start: (A | \"a\")*\nA: \"a\"\n", "aa", Some(&["A", "A"])),
+        // Distinctness preserved — two genuinely distinct named terminals over the
+        // same pattern do NOT dedup (Python keeps both → LALR resolves to the first).
+        ("start: A | B\nA: \"a\"\nB: \"a\"\n", "a", Some(&["A"])),
+        // Alias-differing arms collapse to the same `(origin, expansion)` and Python
+        // rejects "Rules defined twice" — the dedup must not silently swallow them.
+        ("start: A -> x | \"a\" -> y\nA: \"a\"\n", "a", None),
+    ];
+    for (g, inp, expect) in lalr_cases {
+        let built = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual));
+        match expect {
+            None => assert!(
+                built.is_err(),
+                "audit: Python rejects {g:?} at build; lark-rs accepted it"
+            ),
+            Some(want) => {
+                let lark = built.unwrap_or_else(|e| {
+                    panic!("audit: Python accepts {g:?}; lark-rs rejected: {e:?}")
+                });
+                let tree = lark
+                    .parse(inp)
+                    .unwrap_or_else(|e| panic!("audit: {g:?} should parse {inp:?}: {e:?}"));
+                let mut types = Vec::new();
+                collect_token_types(&tree, &mut types);
+                assert_eq!(
+                    &types[..],
+                    *want,
+                    "audit: {g:?} on {inp:?} — token-type mismatch vs Python"
+                );
+            }
+        }
+    }
+
+    // Earley `explicit`: a unified literal-vs-named pair yields a single tree (no
+    // phantom empty/extra derivation), while two genuinely distinct named
+    // terminals stay a real `_ambig` (the dedup must collapse byte-identical only,
+    // never structurally-distinct derivations — ADR-0017).
+    let earley_cases: &[(&str, &str, bool)] = &[
+        ("start: A | \"a\"\nA: \"a\"\n", "a", false), // single tree
+        ("start: (A | \"a\")*\nA: \"a\"\n", "aa", false), // single tree
+        ("start: A | B\nA: \"a\"\nB: \"a\"\n", "a", true), // real ambiguity kept
+    ];
+    for (g, inp, want_ambig) in earley_cases {
+        let mut eopts = opts(ParserAlgorithm::Earley, LexerType::Dynamic);
+        eopts.ambiguity = Ambiguity::Explicit;
+        let lark =
+            Lark::new(g, eopts).unwrap_or_else(|e| panic!("audit: earley builds {g:?}: {e:?}"));
+        let tree = lark
+            .parse(inp)
+            .unwrap_or_else(|e| panic!("audit: earley parses {g:?} on {inp:?}: {e:?}"));
+        let is_ambig = tree.as_tree().map(|t| t.data == "_ambig").unwrap_or(false);
+        assert_eq!(
+            is_ambig, *want_ambig,
+            "audit: earley `_ambig`-ness mismatch vs Python for {g:?} on {inp:?}"
+        );
+    }
 }
 
 /// H4-10 (HIGH, earley). A nullable + directly-recursive grammar — `start: z` /
@@ -437,12 +765,19 @@ fn h4_10_nullable_recursive_earley_enumerates_all_derivations() {
 /// a clean `GrammarError`, so only the accept/reject verdict is asserted, not the message.
 /// Expected fix: reject `%declare` of a non-terminal-cased name with a `GrammarError`.
 #[test]
-#[ignore = "XFAIL (bounty H4-11): %declare of a lowercase name accepted; Python rejects (terminal-case convention)"]
 fn h4_11_declare_lowercase_name_rejected() {
     let g = "%declare foo\nstart: \"a\"\n";
     assert!(
         Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).is_err(),
         "H4-11: Python rejects `%declare foo` (lowercase); lark-rs accepted it"
+    );
+    // Negative control: a normal UPPERCASE `%declare` must still build (Python
+    // accepts `%declare FOO`) — the fix gates only on the case convention, it
+    // must not over-reject a legitimate declared terminal.
+    let ok = "%declare FOO\nstart: \"a\"\n";
+    assert!(
+        Lark::new(ok, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).is_ok(),
+        "H4-11 negative control: Python accepts `%declare FOO` (uppercase); lark-rs must too"
     );
 }
 
@@ -490,5 +825,112 @@ fn h4_12_dense_dfa_build_is_subexponential() {
          (bytes N=4 = {b4}, N=10 = {b10}; ratio {:.1}× ≫ linear) — unbounded eager \
          determinization with no dfa_size_limit",
         b10 as f64 / b4.max(1) as f64
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #343 adjacent import/alias shapes — closure mangle vs the per-module alias map.
+//
+// The #343 fix builds a per-module *merged* alias map and consults it for every
+// closure symbol. These four pins (token types verified against Python Lark 1.3.1,
+// `parser='lalr', lexer='contextual'`) bracket the fix so a future refactor cannot
+// over- or under-mangle: a closure symbol is unmangled iff it is independently
+// imported from the same module, across **all** directives, honoring the alias.
+// ─────────────────────────────────────────────────────────────────────────────
+fn h4_5_token_types(g: &str, inp: &str) -> Vec<String> {
+    let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual))
+        .expect("#343 adjacent: builds");
+    let tree = lark.parse(inp).expect("#343 adjacent: parses");
+    let mut t = Vec::new();
+    collect_token_types(&tree, &mut t);
+    t.into_iter().map(|s| s.to_string()).collect()
+}
+
+/// Cross-directive merge: `pattern` and `NAME` arrive in **separate** `%import
+/// python` directives. Python merges the per-dotted-path `aliases` dict before
+/// mangling, so the closure reference to `NAME` is still left unmangled (`NAME`).
+#[test]
+fn h4_5_cross_directive_sibling_import_unmangled() {
+    let types = h4_5_token_types(
+        "start: pattern\n%import python (pattern)\n%import python (NAME)\n%ignore \" \"\n",
+        "x",
+    );
+    assert!(
+        types.contains(&"NAME".to_string()) && !types.contains(&"python__NAME".to_string()),
+        "#343: `NAME` imported by a separate directive of the same module must stay \
+         unmangled (Python merges aliases across directives); got {types:?}"
+    );
+}
+
+/// Control: when the sibling is **not** independently imported, the closure
+/// reference *is* mangled — `python__NAME`. Confirms the fix did not blanket-exempt.
+#[test]
+fn h4_5_unimported_sibling_stays_mangled() {
+    let types = h4_5_token_types(
+        "start: pattern\n%import python (pattern)\n%ignore \" \"\n",
+        "x",
+    );
+    assert!(
+        types.contains(&"python__NAME".to_string()) && !types.contains(&"NAME".to_string()),
+        "#343 control: `NAME` not independently imported must stay prefix-mangled \
+         (`python__NAME`); got {types:?}"
+    );
+}
+
+/// Aliased sibling: `%import python.NAME -> ID` registers `NAME → ID`, so the
+/// closure reference is rewritten to the **alias** `ID` (Python's `aliases[s]`),
+/// not the mangled `python__NAME` nor the bare `NAME`.
+#[test]
+fn h4_5_aliased_sibling_uses_alias_in_closure() {
+    let types = h4_5_token_types(
+        "start: pattern ID\n%import python (pattern)\n%import python.NAME -> ID\n%ignore \" \"\n",
+        "x y",
+    );
+    assert_eq!(
+        types,
+        vec!["ID".to_string(), "ID".to_string()],
+        "#343: an aliased sibling import (`NAME -> ID`) must rename the closure \
+         reference to `ID` too (Python `aliases[NAME] == ID`); got {types:?}"
+    );
+}
+
+/// A closure **non-terminal** sub-rule that is also independently imported is left
+/// unmangled too — but an alias node (`-> capture_pattern`) that is *not* imported
+/// stays mangled. Verified against Python: nodes `[start, python__capture_pattern]`,
+/// token `NAME`. Confirms the alias map exempts only what is in the import list, and
+/// that the dedup (separately-imported `closed_pattern`/`NAME` copies) does not
+/// duplicate or drop a rule.
+#[test]
+fn h4_5_closure_subrule_imported_alias_still_mangled() {
+    let g = "start: pattern\n%import python (pattern, closed_pattern, NAME)\n%ignore \" \"\n";
+    let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).expect("builds");
+    let tree = lark.parse("x").expect("parses");
+    let mut tokens = Vec::new();
+    collect_token_types(&tree, &mut tokens);
+    fn node_names(c: &Child, out: &mut Vec<String>) {
+        if let Child::Tree(tr) = c {
+            out.push(tr.data.clone());
+            for ch in &tr.children {
+                node_names(ch, out);
+            }
+        }
+    }
+    let mut nodes = Vec::new();
+    if let ParseTree::Tree(tr) = &tree {
+        nodes.push(tr.data.clone());
+        for ch in &tr.children {
+            node_names(ch, &mut nodes);
+        }
+    }
+    assert_eq!(
+        nodes,
+        vec!["start".to_string(), "python__capture_pattern".to_string()],
+        "#343: un-imported alias node stays mangled even when a closure sub-rule is \
+         independently imported; got nodes {nodes:?}"
+    );
+    assert_eq!(
+        tokens,
+        vec!["NAME".to_string()],
+        "#343: independently-imported `NAME` stays unmangled in the closure; got {tokens:?}"
     );
 }

@@ -20,7 +20,7 @@ use crate::error::{GrammarError, ParseError, RecoveryAction};
 use crate::grammar::analysis::GrammarAnalysis;
 use crate::grammar::intern::{CompiledGrammar, CompiledRule, SymbolId, SymbolTable};
 use crate::lexer::{BasicLexer, ContextualLexer};
-use crate::tree::{ParseTree, Token};
+use crate::tree::{Child, ParseTree, Token};
 
 use super::token_source::{
     postlex_basic_recovering_source, postlex_contextual_recovering_source,
@@ -682,17 +682,22 @@ impl ParserStack {
     }
 
     /// ACCEPT: the final value on the stack is the parse result (a `?start` rule can
-    /// collapse to a bare token, hence [`ParseTree`]).
+    /// collapse to a bare token or a bare `None`, hence [`ParseTree`]).
     fn accept(&mut self) -> Result<ParseTree, ParseError> {
         match self.value_stack.pop() {
             Some(Slot::Tree(t)) => Ok(ParseTree::Tree(t)),
             Some(Slot::Token(tok)) => Ok(ParseTree::Token(tok)),
             // A start rule is never transparent. The one way its value can be
             // `Inline` is a top-level `?start` collapsing a lone-`None` placeholder
-            // (RC9 fix in tree_builder: lone-`None` expand1 → `Inline([None])`),
-            // which the public `ParseTree` (Tree|Token only) cannot represent as a
-            // bare `None`; that root-`?start` corner is a separate tracked divergence
-            // (#289). Treat it, like an empty stack, as no parse result.
+            // (RC9 in tree_builder: lone-`None` expand1 → `Inline([None])`). Python
+            // Lark returns a bare `None` there (`?start: [A]` on `""`), so emit
+            // `ParseTree::None` to match the oracle on every backend (#289).
+            Some(Slot::Inline(cs)) if cs.len() == 1 && matches!(cs[0], Child::None) => {
+                Ok(ParseTree::None)
+            }
+            // Any other `Inline` shape on a start rule is structurally impossible
+            // (a start rule never inlines); treat it, like an empty stack, as no
+            // parse result rather than panicking.
             Some(Slot::Inline(_)) | None => Err(ParseError::unexpected_eof(0, 0, vec![])),
         }
     }
@@ -991,16 +996,51 @@ impl LalrParser {
         }
     }
 
-    /// Turn a lexer-level failure (no valid terminal at the position) into a
-    /// parse error, enriched with the terminals expected in `state` — which only
-    /// the parser knows.
+    /// Turn a lexer-level failure into a parse error. By the time the
+    /// non-recovering driver reaches here the contextual source has already tried
+    /// the **root** (full-terminal) scanner and it too missed (see
+    /// [`Contextual::lex_next`](super::token_source::Contextual)), so the character
+    /// is *genuinely* un-lexable — a *character* error, not a token error: no token
+    /// was ever produced. So this builds [`UnexpectedCharacter`] (matching Python's
+    /// `UnexpectedCharacters`, and lark-rs's own basic-lexer and recovering paths —
+    /// issue #346), not `UnexpectedToken`.
+    ///
+    /// `expected` mirrors Python's `UnexpectedCharacters.allowed`: the terminals the
+    /// parser can act on in `state`, with the `$END` sentinel **dropped unless it is
+    /// the only option** — Python reports `{'B'}` for a state expecting `B` (no
+    /// `$END`), `{'A'}` for a state expecting `A` *or* end-of-input (`$END` stripped),
+    /// but `{'<END-OF-FILE>'}` for a state expecting *only* end-of-input. Fixing the
+    /// pre-#346 bug where the raw action row leaked `$END` into the expected set
+    /// alongside real terminals.
+    ///
+    /// [`UnexpectedCharacter`]: ParseError::UnexpectedCharacter
     fn lex_failure(&self, state: usize, f: LexFailure) -> ParseError {
-        ParseError::UnexpectedToken {
-            token: f.ch.to_string(),
-            token_type: String::new(),
+        let mut allowed: Vec<String> = self
+            .table
+            .action
+            .get(state)
+            .map(|row| {
+                row.iter()
+                    .enumerate()
+                    .filter(|(t, a)| a.is_some() && SymbolId(*t as u32) != SymbolId::END)
+                    .map(|(t, _)| self.table.symbols.name(SymbolId(t as u32)).to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        allowed.sort();
+        // `$END` survives only when nothing else is lexable here — a state that
+        // expects end-of-input and nothing more (Python's `<END-OF-FILE>`).
+        let expected = if allowed.is_empty() {
+            "<END-OF-FILE>".to_string()
+        } else {
+            allowed.join(", ")
+        };
+        ParseError::UnexpectedCharacter {
+            ch: f.ch,
             line: f.line,
             col: f.col,
-            expected: self.expected_at(state),
+            pos: f.pos,
+            expected,
         }
     }
 
