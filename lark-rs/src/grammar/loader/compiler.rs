@@ -414,8 +414,42 @@ impl GrammarCompiler {
         // two `_define(name, …, None)` calls do.
         let mut defined_rule_names: HashSet<String> = HashSet::new();
         let mut defined_term_names: HashSet<String> = HashSet::new();
+        // Import-vs-import collision detection (#299, spun out of #270). Python
+        // merges all aliases per *module* (`load_grammar`: `import_aliases.update`)
+        // keyed by the *original* name, then mangles each definition to its final
+        // name; two distinct originals (in one module) mangling to the same final
+        // name collide inside the imported grammar's `_define`
+        // (`Terminal 'X' defined more than once`). An identical re-import of one
+        // `(module, original) -> final` triple is idempotent (the alias dict dedups
+        // it). So we key the source by `(module_path, original)`: registering the
+        // same final name from a *different* source is a duplicate; re-registering
+        // the same source is benign. `final_source` maps a final name to the source
+        // that first claimed it.
+        let mut final_source: HashMap<(Vec<String>, String), String> = HashMap::new();
         for item in &items {
             if let Item::ImportItem(spec) = item {
+                if let Some((module, pairs)) = split_import_directive(spec) {
+                    for (original, final_name) in pairs {
+                        let source = (module.clone(), original);
+                        if final_source.contains_key(&source) {
+                            // Same `(module, original)` source already imported: an
+                            // identical re-import is idempotent (Python's per-module
+                            // alias dict dedups it), so skip without colliding.
+                            continue;
+                        }
+                        // A *different* source already claimed this final name →
+                        // collision, exactly as two distinct originals mangling to
+                        // one final name collide inside Python's imported `_define`
+                        // (`Terminal 'X' defined more than once`).
+                        if final_source.values().any(|f| f == &final_name) {
+                            return Err(Self::duplicate_definition_error(
+                                Self::name_is_terminal(&final_name),
+                                &final_name,
+                            ));
+                        }
+                        final_source.insert(source, final_name);
+                    }
+                }
                 for name in spec_final_names(spec) {
                     if Self::name_is_terminal(&name) {
                         defined_term_names.insert(name);
@@ -601,6 +635,22 @@ impl GrammarCompiler {
                             "Can't extend terminal {} as it wasn't defined before",
                             t.name
                         ),
+                    });
+                }
+                // Reject `%extend` of an abstract (`%declare`d, pattern-less)
+                // terminal (#299). A declared terminal lives in `self.terminals`
+                // with `declared == true` and has no `RawTerm` body to splice onto;
+                // Python's `_extend` rejects it (`d.tree is None`) with
+                // `Can't extend terminal FOO - it is abstract.`. Without this gate
+                // the extend body was silently dropped and the grammar built.
+                if self
+                    .terminals
+                    .iter()
+                    .any(|td| td.name == t.name && td.declared)
+                    && !self.raw_terms.iter().any(|prev| prev.name == t.name)
+                {
+                    return Err(GrammarError::Other {
+                        msg: format!("Can't extend terminal {} - it is abstract.", t.name),
                     });
                 }
                 // Prepend the new alternatives to the existing terminal. A
