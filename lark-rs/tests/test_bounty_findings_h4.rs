@@ -13,7 +13,8 @@
 //! Each test asserts the **Python Lark 1.3.1** (oracle) behavior. This file is an XFAIL
 //! catalog: a test is `#[ignore]`d while its bug is open and fails today; once the bug is
 //! fixed its `#[ignore]` is dropped so it runs as a permanent regression guard (e.g.
-//! `h4_5_*`, `h4_6_*`, and `h4_9_*` are fixed and now run by default). Run the still-open
+//! `h4_2_*`, `h4_5_*`, `h4_6_*`, and `h4_9_*` are fixed and now run by default). Run the
+//! still-open
 //! XFAILs with:
 //!
 //!     cargo test --test test_bounty_findings_h4 -- --ignored
@@ -189,7 +190,6 @@ fn h4_1_string_literal_escape_overdecoded() {
 /// H6–H9/#333 (quantifier/octal/comment), and #275 (`\b`/`\B`/`\Z`, which Python
 /// *accepts*/parks). Expected fix: reject-like-Python (categorized `InvalidRegex`).
 #[test]
-#[ignore = "XFAIL (bounty H4-2): regex-crate-only \\p{} / \\x{} / \\z silently accepted; Python rejects at build"]
 fn h4_2_regex_crate_only_dialect_rejected() {
     for g in [
         "start: T\nT: /\\p{L}+/\n",

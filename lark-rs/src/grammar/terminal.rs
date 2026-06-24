@@ -634,6 +634,82 @@ fn reject_quantifier_dialect_divergence(pattern: &str) -> Result<(), GrammarErro
     Ok(())
 }
 
+/// Reject the regex-crate-only escapes that Python `re` has **no syntax for** at all —
+/// so the Rust `regex` crate compiles them but Python errors at build, which would make
+/// lark-rs more permissive than the oracle (ADR-0017, the unfalsifiable corollary). The
+/// `regex` crate's own validation (`Regex::new` in [`PatternRe::new`]) *accepts* each, so
+/// this screen must run first. Three surfaces (H4-2, #342):
+///
+/// * **`\p` / `\P` unicode-property escapes** — `\p{L}`, `\pL`, `\P{L}`, `\P{Greek}`, even a
+///   bare `\p`. The regex crate supports Unicode general-category/script classes via
+///   `\p{…}` / `\pX`; Python `re` has no `\p` syntax and raises `bad escape \p`/`\P`. Python
+///   rejects these *in and out* of a character class and at any position (`[\p{L}]`,
+///   `a\pLb`), so we reject every `\p`/`\P` regardless of class context.
+/// * **`\x{…}` braced hex** — `\x{41}`, `\x{1F600}`. The regex crate reads a braced hex
+///   code point; Python `re`'s `\x` takes *exactly two* hex digits (`\x41`), so `\x{` is an
+///   `incomplete escape \x` to it. We reject `\x` followed by `{` (the braced form). A
+///   two-digit `\xHH` is left untouched — Python supports it (the negative control).
+/// * **`\z` lowercase end-of-text anchor** — the regex crate's `\z` matches end-of-text;
+///   Python `re` spells that `\Z` (uppercase) and raises `bad escape \z` for the lowercase
+///   form. Python rejects `\z` in and out of a class, so we reject it unconditionally.
+///   (`\Z`/`\b`/`\B` — which Python *accepts* — are the parked anchor-policy fork #275 and
+///   are deliberately left alone here.)
+///
+/// The scan is **escape-aware** (it only triggers on a real `\`-escape, never a literal
+/// `p`/`x`/`z`) and walks `\…` pairs so a `\\` does not mask the following char. It does
+/// **not** otherwise distinguish class context, because all three constructs are rejected
+/// by Python identically in and out of `[…]`. Runs on the **raw** source before
+/// [`normalize_python_escapes`] (which would not touch these — they are not in its
+/// translation set).
+fn reject_regex_crate_only_dialect(pattern: &str) -> Result<(), GrammarError> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] == '\\' {
+            match chars.get(i + 1).copied() {
+                Some(esc @ ('p' | 'P')) => {
+                    return Err(GrammarError::InvalidRegex {
+                        pattern: pattern.to_string(),
+                        reason: format!(
+                            "`\\{esc}` unicode-property escape (`\\p{{L}}`/`\\pL`/`\\P{{L}}`) is \
+                             a Rust `regex`-crate-only construct — Python `re` has no `\\{esc}` \
+                             syntax and raises \"bad escape \\{esc}\" at build. lark-rs matches \
+                             that rejection (ADR-0017): being more permissive than the oracle is \
+                             unfalsifiable.",
+                        ),
+                    });
+                }
+                Some('z') => {
+                    return Err(GrammarError::InvalidRegex {
+                        pattern: pattern.to_string(),
+                        reason: "`\\z` end-of-text anchor is a Rust `regex`-crate-only construct \
+                                 — Python `re` spells end-of-text `\\Z` (uppercase) and raises \
+                                 \"bad escape \\z\" for the lowercase form. lark-rs matches that \
+                                 rejection (ADR-0017)."
+                            .to_string(),
+                    });
+                }
+                Some('x') if chars.get(i + 2) == Some(&'{') => {
+                    return Err(GrammarError::InvalidRegex {
+                        pattern: pattern.to_string(),
+                        reason:
+                            "`\\x{…}` braced-hex escape is a Rust `regex`-crate-only construct \
+                                 — Python `re`'s `\\x` takes exactly two hex digits (`\\x41`), so \
+                                 `\\x{` is an \"incomplete escape \\x\" at build. Use `\\xHH` (or \
+                                 `\\uHHHH`) instead. lark-rs matches Python's rejection (ADR-0017)."
+                                .to_string(),
+                    });
+                }
+                Some(_) => i += 2, // an ordinary escape pair — skip both chars
+                None => i += 1,    // a trailing backslash
+            }
+            continue;
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
 /// If `chars[i]` opens a **base quantifier** — `*`, `+`, `?`, or a well-formed
 /// `{m}`/`{m,}`/`{,n}`/`{m,n}` — return its length in chars; else `None`. A `{` that is
 /// not a well-formed bound is a literal brace in Python `re` (so it is not a quantifier).
@@ -684,6 +760,10 @@ impl PatternRe {
         //     Python rejects it.
         reject_out_of_range_octal(&raw)?;
         reject_quantifier_dialect_divergence(&raw)?;
+        // Reject the regex-crate-only escapes Python `re` has no syntax for
+        // (`\p`/`\P` unicode-property, `\x{…}` braced hex, `\z` end-of-text) — the crate
+        // accepts each, so `Regex::new` below would let them through (#342, H4-2).
+        reject_regex_crate_only_dialect(&raw)?;
         let pattern = normalize_python_escapes(&raw);
         let flag_prefix = build_flag_prefix(flags);
         let full = format!("{}{}", flag_prefix, pattern);
@@ -1021,6 +1101,55 @@ mod tests {
             assert!(
                 reject_out_of_range_octal(p).is_ok(),
                 "{p:?} is in-range / not octal — must pass"
+            );
+        }
+    }
+
+    /// H4-2 (#342): the regex-crate-only escapes Python `re` has no syntax for —
+    /// `\p`/`\P` unicode-property, `\x{…}` braced hex, `\z` end-of-text anchor — are
+    /// refused (the crate accepts each, so this screen, not `Regex::new`, is what catches
+    /// them), in and out of a character class and at any position. The negative controls —
+    /// two-digit `\xHH`, `\Z`/`\b`/`\B` (which Python accepts/parks, #275), and a literal
+    /// `p`/`x`/`z` — are left accepted, so the screen does not over-reject.
+    #[test]
+    fn regex_crate_only_dialect_is_rejected() {
+        // Rejected: \p / \P (unicode property), \x{…} (braced hex), \z (end-of-text).
+        for p in [
+            r"\p{L}+",
+            r"\pL+",
+            r"\P{L}+",
+            r"\P{Greek}",
+            r"\p", // bare \p — Python still errors "bad escape \p"
+            r"\x{41}",
+            r"\x{1F600}",
+            r"abc\z",
+            // In a character class Python rejects each identically.
+            r"[\p{L}]",
+            r"[\pL]",
+            r"[\P{L}]",
+            r"[\x{41}]",
+            r"[\za-z]",
+            // Mid-pattern / after other constructs.
+            r"a\pLb",
+            r"foo\zbar",
+        ] {
+            assert!(
+                reject_regex_crate_only_dialect(p).is_err(),
+                "{p:?} is a regex-crate-only construct Python `re` rejects — must be refused"
+            );
+        }
+        // Accepted: two-digit hex, the Python-accepted/parked anchors (\Z/\b/\B), a
+        // literal (non-escaped) p/x/z, and an escaped backslash before one of them.
+        for p in [
+            r"\x41", r"[\x41]", r"\Z", // Python *accepts* \Z (the parked anchor fork, #275)
+            r"abc\Z", r"\b\B", r"pxz",    // literal letters, no escape
+            r"\\p{L}", // escaped backslash then a literal `p{L}` — the `p` is not escaped
+            r"\x4a",   // two hex digits (lowercase) — Python accepts
+            r"[a-z]+", r"\d+",
+        ] {
+            assert!(
+                reject_regex_crate_only_dialect(p).is_ok(),
+                "{p:?} is Python-accepted — must NOT be refused"
             );
         }
     }
