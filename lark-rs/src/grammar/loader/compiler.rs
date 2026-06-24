@@ -231,6 +231,15 @@ pub(super) struct GrammarCompiler {
     /// Built up front (first pass) so a later `%import` directive's targets are
     /// already known when an earlier directive's closure is copied.
     pub(super) import_alias_map: HashMap<Vec<String>, HashMap<String, String>>,
+    /// Renamed origins already copied by a previous `import_rule_closure` call
+    /// (#372). Two rules independently imported from the same module can have
+    /// overlapping interior closures; the shared interior origin must be copied
+    /// **once**, or the duplicate origin is a spurious reduce/reduce the build
+    /// rejects. `import_rule_closure` skips an interior origin already in this set
+    /// — scoped to *import-copied* origins only (never a user-authored rule of the
+    /// same name), so a genuine collision between a user rule and a mangled import
+    /// origin is still rejected, exactly as Python's "defined more than once".
+    pub(super) imported_origins: HashSet<String>,
 }
 
 impl GrammarCompiler {
@@ -270,6 +279,7 @@ impl GrammarCompiler {
             anon_kinds: HashMap::new(),
             reserved_term_names: HashSet::new(),
             import_alias_map: HashMap::new(),
+            imported_origins: HashSet::new(),
         }
     }
 

@@ -411,12 +411,34 @@ impl GrammarCompiler {
             }
         };
 
+        // Cross-call dedup for interior closure origins (#372). The early-return
+        // above only guards the *requested* rule's `final_name`; an interior
+        // closure origin (e.g. the mangled `python__name` shared by two
+        // independently-imported sibling rules) has no such guard, so a previous
+        // `import_rule_closure` call could already have copied it. Pushing it again
+        // duplicates the origin → a spurious reduce/reduce the build rejects (the
+        // terminal-copy loop below already dedups this way; the rule loop did not).
+        //
+        // Skip a rule whose renamed origin is in `self.imported_origins` — the set
+        // of origins *previously copied by an import closure*. Scoping to
+        // import-copied origins (not all of `self.rules`) is load-bearing: a
+        // user-authored rule that happens to share a mangled interior name (a
+        // hand-written `python__name` beside `%import python ...`) is **not** in
+        // this set, so the import is not silently dropped — it still collides and
+        // the build rejects, matching Python's `Rule '…' defined more than once`
+        // (the over-permissiveness ADR-0017's corollary forbids). `self.imported_origins`
+        // is read *before* this call records its own origins (recorded after the
+        // loop), so the loop still copies *every* alternative of a genuinely new
+        // origin within this call.
+        let mut copied_origins: Vec<String> = Vec::new();
         for rule in imported
             .rules
             .iter()
             .filter(|r| rule_names.contains(&r.origin.name))
+            .filter(|r| !self.imported_origins.contains(&rename(&r.origin.name)))
         {
             let origin = NonTerminal::new(rename(&rule.origin.name));
+            copied_origins.push(origin.name.clone());
             // Carry source provenance across the rename: a generated anonymous EBNF
             // helper from the imported grammar (e.g. the `__anon_rep_*` a `(B*)~2`
             // emits) must stay classified as loader-generated after import, or the
@@ -452,6 +474,11 @@ impl GrammarCompiler {
                 rule.order,
             ));
         }
+        // Record this call's copied origins so a later import-closure call from any
+        // module dedups against them (#372). Recorded *after* the loop, so the
+        // filter above never skipped an alternative of an origin first copied in
+        // this same call.
+        self.imported_origins.extend(copied_origins);
         for td in imported
             .terminals
             .iter()
