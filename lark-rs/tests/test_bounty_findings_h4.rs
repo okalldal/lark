@@ -222,8 +222,12 @@ fn h4_2_regex_crate_only_dialect_rejected() {
 /// in *both* engines, so only the *named* form diverges. Expected fix: when a `%ignore`
 /// directive is a single reference to a named terminal, mark *that* terminal ignored
 /// (preserving its priority); only inline patterns synthesize a fresh terminal.
+// Fixed (#345): when a `%ignore` directive is a single reference to a named
+// terminal, the loader adds *that* terminal to the ignore set with its declared
+// priority intact (Python's `_ignore` "keep terminal name" short-circuit,
+// `grammar/loader/compiler.rs::IgnoreEntry::Named`), instead of minting a
+// priority-0 `__IGNORE_n` clone. Only inline patterns synthesize a fresh terminal.
 #[test]
-#[ignore = "XFAIL (bounty H4-3): %ignore NAME mints a priority-0 __IGNORE_n clone, dropping priority and failing to filter the named terminal"]
 fn h4_3_ignore_named_terminal_priority_and_filter() {
     // (a) priority: SKIP.5 outranks A and should ignore each char, leaving nothing for
     // A → Python rejects. lark-rs keeps the priority-0 clone, A wins, parse succeeds.
@@ -251,6 +255,30 @@ fn h4_3_ignore_named_terminal_priority_and_filter() {
         n, 2,
         "H4-3b: Python ignores WS globally → start has 2 items; lark-rs kept the \
          rule-referenced WS as an extra child (got {n})"
+    );
+}
+
+/// H4-3 negative control (#345): the *inline* form `%ignore /[a-z]/` must still
+/// synthesize a fresh priority-0 `__IGNORE_n` terminal — the fix only changes the
+/// *named* form. Same grammar shape as H4-3a but with an inline pattern: the
+/// priority-0 clone loses the lexer tie to `A`, so `ab` parses as `start(A, A)` in
+/// **both** engines (verified against Python Lark 1.3.1). If the fix had wrongly
+/// also short-circuited the inline form to the declared `SKIP.5`, this would reject.
+#[test]
+fn h4_3_inline_ignore_still_synthesizes_terminal() {
+    let g = "start: A+\nA: /[a-z]/\nSKIP.5: /[a-z]/\n%ignore /[a-z]/\n";
+    let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual))
+        .expect("inline %ignore: grammar builds");
+    let tree = lark
+        .parse("ab")
+        .expect("inline %ignore mints a priority-0 clone that loses to A → 'ab' parses");
+    let mut types = Vec::new();
+    collect_token_types(&tree, &mut types);
+    assert_eq!(
+        types,
+        vec!["A", "A"],
+        "inline %ignore /[a-z]/ synthesizes a priority-0 terminal (not the declared SKIP.5), \
+         so each char is an A — Python yields start(A, A); got {types:?}"
     );
 }
 

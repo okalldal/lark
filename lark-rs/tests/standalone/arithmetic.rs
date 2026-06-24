@@ -534,7 +534,7 @@ static DATA: GrammarData = GrammarData {
         "$END",
         "NUMBER",
         "NAME",
-        "__IGNORE_0",
+        "WS_INLINE",
         "LPAR",
         "MINUS",
         "PLUS",
