@@ -157,6 +157,64 @@ fn rc2b_duplicate_terminal_import_then_local_rejected() {
     assert_build_rejected(g, ParserAlgorithm::Lalr, LexerType::Contextual, "RC2b");
 }
 
+/// RC2c (#299, spun out of #270). Two *different* imported terminals aliased to the
+/// same final name. Python: `Terminal 'X' defined more than once`; lark-rs used to
+/// keep one silently (`copy_requested`/`import_terminal` skip when the final name is
+/// already defined) and build. The fix dedups by import *source/definition*, not by
+/// final name, so two distinct sources at one alias collide while an idempotent
+/// re-import of one definition (RC2c-neg, below) still dedups.
+#[test]
+fn rc2c_duplicate_import_alias_collision_rejected() {
+    let g = "%import common.INT -> X\n%import common.WS -> X\nstart: X\n";
+    assert_build_rejected(g, ParserAlgorithm::Lalr, LexerType::Contextual, "RC2c");
+}
+
+/// RC2c-neg-a (#299, NEGATIVE CONTROL). A legitimate re-import of the *same* terminal
+/// under the *same* alias is idempotent — Python accepts it. The dedup must key on
+/// the import definition, not reject every duplicate final name.
+#[test]
+fn rc2c_neg_same_import_twice_accepted() {
+    let g = "%import common.INT -> X\n%import common.INT -> X\nstart: X\n";
+    assert_build_accepted(
+        g,
+        ParserAlgorithm::Lalr,
+        LexerType::Contextual,
+        "RC2c-neg-a",
+    );
+}
+
+/// RC2c-neg-b (#299, NEGATIVE CONTROL). The same idempotence via the un-aliased
+/// re-import surface (`%import common.INT` twice) — Python accepts.
+#[test]
+fn rc2c_neg_same_import_noalias_twice_accepted() {
+    let g = "%import common.INT\n%import common.INT\nstart: INT\n";
+    assert_build_accepted(
+        g,
+        ParserAlgorithm::Lalr,
+        LexerType::Contextual,
+        "RC2c-neg-b",
+    );
+}
+
+/// RC2d (#299, spun out of #270). `%extend` of an abstract (`%declare`d,
+/// pattern-less) terminal. After `%declare FOO`, FOO lives in `self.terminals`, not
+/// `raw_terms`; the Extend arm passed the pre-existence gate, found no `RawTerm` to
+/// splice onto, and silently dropped the body. Python:
+/// `Can't extend terminal FOO - it is abstract.` lark-rs used to build.
+#[test]
+fn rc2d_extend_abstract_declared_terminal_rejected() {
+    let g = "%declare FOO\n%extend FOO: \"x\"\nstart: FOO\n";
+    assert_build_rejected(g, ParserAlgorithm::Lalr, LexerType::Contextual, "RC2d");
+}
+
+/// RC2d-neg (#299, NEGATIVE CONTROL). A normal `%extend` of a *concrete* terminal
+/// (one with a pattern) must still work — Python accepts.
+#[test]
+fn rc2d_neg_extend_concrete_terminal_accepted() {
+    let g = "BAR: \"a\"\n%extend BAR: \"b\"\nstart: BAR\n";
+    assert_build_accepted(g, ParserAlgorithm::Lalr, LexerType::Contextual, "RC2d-neg");
+}
+
 /// RC3 (KNOWN — not a fresh find). Two sibling optional-bracket terminals collide
 /// into a duplicate production. Python: `GrammarError: Rules defined twice ...
 /// (colliding expansion of optionals)`. lark-rs accepts. This is the
