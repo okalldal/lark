@@ -1113,9 +1113,27 @@ impl GrammarCompiler {
         // identical `P arm` recurse reductions) into the same state — an
         // unresolvable reduce/reduce Python never reports (#210, seed 99). Order is
         // preserved because `rule.order` drives the resolve disambiguation (#49/#72).
+        //
+        // The dedup key is **filter-out-agnostic** (`sym_key`), mirroring Python's
+        // `Symbol.__eq__` (which ignores `filter_out`): `(A | "a")+` with `A: "a"`
+        // unifies the literal onto `A`, so its two inner arms `[A(keep)]` and
+        // `[A(drop)]` differ only in `filter_out` and collapse to a single recurse
+        // arm — keeping the first occurrence (and thus its `filter_out`). Without
+        // this they emit two byte-identical `_p -> A` reductions, the spurious LALR
+        // reduce/reduce (and Earley `_ambig` over-count) of #347 in the `+`/`*`
+        // path, adjacent to the H4-9 top-level-alternation case.
         {
-            let mut seen: std::collections::HashSet<CompiledAlt> = std::collections::HashSet::new();
-            arms.retain(|arm| seen.insert(arm.clone()));
+            let mut seen: std::collections::HashSet<(Vec<(bool, String)>, Vec<usize>)> =
+                std::collections::HashSet::new();
+            arms.retain(|(syms, gaps)| {
+                let key = (
+                    syms.iter()
+                        .map(GrammarCompiler::sym_key)
+                        .collect::<Vec<_>>(),
+                    gaps.clone(),
+                );
+                seen.insert(key)
+            });
         }
         // Named (non-filtered) single-terminal arms are always kept regardless of
         // keep_all, so the rule options difference is semantically invisible →

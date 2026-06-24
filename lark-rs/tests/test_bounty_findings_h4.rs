@@ -11,8 +11,9 @@
 //! a **DFA-build** determinization blow-up.
 //!
 //! Each test asserts the **Python Lark 1.3.1** (oracle) behavior. This file is an XFAIL
-//! catalog: every test below is `#[ignore]`d and fails today. Drop a test's `#[ignore]`
-//! when its bug is fixed to turn it into a permanent regression guard. Run the still-open
+//! catalog: a test is `#[ignore]`d while its bug is open and fails today; once the bug is
+//! fixed its `#[ignore]` is dropped so it runs as a permanent regression guard (e.g.
+//! `h4_5_*`, `h4_6_*`, and `h4_9_*` are fixed and now run by default). Run the still-open
 //! XFAILs with:
 //!
 //!     cargo test --test test_bounty_findings_h4 -- --ignored
@@ -461,11 +462,13 @@ fn h4_8_nested_optional_of_optional_collision_rejected() {
 /// (`terminals.rs`/`intern.rs`), a duplicate alternative Python collapses to a single
 /// `<start : A>`. The duplicate manifests as a spurious LALR reduce/reduce **build
 /// rejection** (Python accepts and parses) and, under Earley `explicit`, a spurious extra
-/// empty `start()` derivation. Distinct from RC7/#272 (recurse-helper over-share). Expected
-/// fix: dedup rule alternatives that lower to byte-identical expansions, preferring the
-/// kept-token occurrence.
+/// empty `start()` derivation. Distinct from RC7/#272 (recurse-helper over-share).
+///
+/// FIXED (#347): `dedup_and_check_alts` (`grammar/loader/compiler.rs`) now compares
+/// alternatives by a filter-out-agnostic symbol key (`sym_key`), mirroring Python's
+/// `Symbol.__eq__`/`Rule.__eq__`, so the two `start -> A` arms collapse to a single
+/// arm keeping the first occurrence's `filter_out`.
 #[test]
-#[ignore = "XFAIL (bounty H4-9): equal named-terminal-vs-literal alternation is a spurious LALR reduce/reduce; Python accepts"]
 fn h4_9_terminal_vs_literal_alternation() {
     let g = "start: A | \"a\"\nA: \"a\"\n";
 
@@ -493,6 +496,96 @@ fn h4_9_terminal_vs_literal_alternation() {
         data, "_ambig",
         "H4-9: Python yields a single unambiguous tree; lark-rs added a phantom empty derivation"
     );
+}
+
+/// H4-9 differential audit (#347). The named banks under-sample the
+/// literal-vs-named-terminal-unification dedup, and the issue warns of
+/// adjacent-but-distinct dedup bugs (#272/#159). This pins a hand-rolled
+/// differential against Python Lark 1.3.1 over the shapes around the H4-9 root —
+/// source order (which decides kept vs dropped), multi-position, optional pairs,
+/// and the `+`/`*` recurse helper — all of which lower to byte-identical
+/// expansions differing only in per-occurrence `filter_out`. Each expected value
+/// is what Python actually produces (recorded at fix time); a `None` LALR entry
+/// means Python rejects the grammar at build.
+#[test]
+fn h4_9_literal_vs_named_dedup_differential() {
+    // (grammar, input, expected LALR token-types | None if Python rejects at build)
+    let lalr_cases: &[(&str, &str, Option<&[&str]>)] = &[
+        // First-occurrence wins: `A | "a"` keeps the named `A` (token kept);
+        // `"a" | A` keeps the literal (token dropped → no children).
+        ("start: A | \"a\"\nA: \"a\"\n", "a", Some(&["A"])),
+        ("start: \"a\" | A\nA: \"a\"\n", "a", Some(&[])),
+        ("start: A | \"a\" | \"a\"\nA: \"a\"\n", "a", Some(&["A"])),
+        ("start: \"a\" | \"a\" | A\nA: \"a\"\n", "a", Some(&[])),
+        // `_A` is filtered by its `_` prefix, so `_A | "a"` drops the token too.
+        ("start: _A | \"a\"\n_A: \"a\"\n", "a", Some(&[])),
+        // Multi-position: only the unified slot dedups; siblings stay.
+        (
+            "start: A B | \"a\" B\nA: \"a\"\nB: \"b\"\n",
+            "ab",
+            Some(&["A", "B"]),
+        ),
+        // Distributed optional pair: the two absent arms differ only in their
+        // placeholder count (filtered literal = size 0), which must still dedup.
+        ("start: [A] | [\"a\"]\nA: \"a\"\n", "a", Some(&["A"])),
+        // `+`/`*` recurse helper: `(A | "a")` collapses to one inner arm.
+        ("start: (A | \"a\")+\nA: \"a\"\n", "aa", Some(&["A", "A"])),
+        ("start: (A | \"a\")*\nA: \"a\"\n", "aa", Some(&["A", "A"])),
+        // Distinctness preserved — two genuinely distinct named terminals over the
+        // same pattern do NOT dedup (Python keeps both → LALR resolves to the first).
+        ("start: A | B\nA: \"a\"\nB: \"a\"\n", "a", Some(&["A"])),
+        // Alias-differing arms collapse to the same `(origin, expansion)` and Python
+        // rejects "Rules defined twice" — the dedup must not silently swallow them.
+        ("start: A -> x | \"a\" -> y\nA: \"a\"\n", "a", None),
+    ];
+    for (g, inp, expect) in lalr_cases {
+        let built = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual));
+        match expect {
+            None => assert!(
+                built.is_err(),
+                "audit: Python rejects {g:?} at build; lark-rs accepted it"
+            ),
+            Some(want) => {
+                let lark = built.unwrap_or_else(|e| {
+                    panic!("audit: Python accepts {g:?}; lark-rs rejected: {e:?}")
+                });
+                let tree = lark
+                    .parse(inp)
+                    .unwrap_or_else(|e| panic!("audit: {g:?} should parse {inp:?}: {e:?}"));
+                let mut types = Vec::new();
+                collect_token_types(&tree, &mut types);
+                assert_eq!(
+                    &types[..],
+                    *want,
+                    "audit: {g:?} on {inp:?} — token-type mismatch vs Python"
+                );
+            }
+        }
+    }
+
+    // Earley `explicit`: a unified literal-vs-named pair yields a single tree (no
+    // phantom empty/extra derivation), while two genuinely distinct named
+    // terminals stay a real `_ambig` (the dedup must collapse byte-identical only,
+    // never structurally-distinct derivations — ADR-0017).
+    let earley_cases: &[(&str, &str, bool)] = &[
+        ("start: A | \"a\"\nA: \"a\"\n", "a", false), // single tree
+        ("start: (A | \"a\")*\nA: \"a\"\n", "aa", false), // single tree
+        ("start: A | B\nA: \"a\"\nB: \"a\"\n", "a", true), // real ambiguity kept
+    ];
+    for (g, inp, want_ambig) in earley_cases {
+        let mut eopts = opts(ParserAlgorithm::Earley, LexerType::Dynamic);
+        eopts.ambiguity = Ambiguity::Explicit;
+        let lark =
+            Lark::new(g, eopts).unwrap_or_else(|e| panic!("audit: earley builds {g:?}: {e:?}"));
+        let tree = lark
+            .parse(inp)
+            .unwrap_or_else(|e| panic!("audit: earley parses {g:?} on {inp:?}: {e:?}"));
+        let is_ambig = tree.as_tree().map(|t| t.data == "_ambig").unwrap_or(false);
+        assert_eq!(
+            is_ambig, *want_ambig,
+            "audit: earley `_ambig`-ness mismatch vs Python for {g:?} on {inp:?}"
+        );
+    }
 }
 
 /// H4-10 (HIGH, earley). A nullable + directly-recursive grammar — `start: z` /
