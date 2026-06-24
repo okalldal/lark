@@ -813,18 +813,17 @@ mod tests {
         catch_unwind(AssertUnwindSafe(|| bake(grammar, opts).is_ok())).unwrap_or(false)
     }
 
-    /// XFAIL (bounty H12): the baked standalone runtime does not collapse an
+    /// Regression pin (bounty H12, fixed): the baked standalone runtime collapses an
     /// `expand1` (`?rule`) down to a lone placeholder-`None` child the way the
     /// in-process tree builder does (the RC9 carve-out in
-    /// `parsers/tree_builder.rs`). `runtime::shape`'s expand1 arm carries an extra
-    /// `&& !matches!(children[0], Child::None)` guard, so a lone `None` is wrapped
-    /// as `Tree(w, [None])` instead of being spliced as a bare `None`. Core lark-rs
-    /// AND Python Lark both yield `Tree(start, [None])`; the standalone bake diverges
-    /// from both — falsifying the "byte-faithful to core by construction" standalone
-    /// contract (round-2 `BOUNTY_FINDINGS_H2.md` declared this a clean bucket). Drop
-    /// the `#[ignore]` once `runtime::shape` mirrors the RC9 lone-`None` carve-out.
+    /// `parsers/tree_builder.rs`). `runtime::shape`'s expand1 arm previously carried
+    /// an extra `&& !matches!(children[0], Child::None)` guard, so a lone `None` was
+    /// wrapped as `Tree(w, [None])` instead of being spliced as a bare `None`; core
+    /// lark-rs AND Python Lark both yield `Tree(start, [None])`, so the standalone
+    /// bake diverged from both — falsifying the "byte-faithful to core by
+    /// construction" standalone contract. The runtime now mirrors the RC9 lone-`None`
+    /// carve-out, so this case agrees with core/Python.
     #[test]
-    #[ignore = "XFAIL (bounty H12): standalone expand1 lone-None not collapsed (runtime.rs guard vs tree_builder.rs)"]
     fn standalone_expand1_lone_none_collapses_like_core() {
         let opts = LarkOptions {
             parser: ParserAlgorithm::Lalr,
