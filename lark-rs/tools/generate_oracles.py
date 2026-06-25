@@ -654,6 +654,27 @@ EARLEY_AMBIG_FLAT_PRODUCT_GRAMMAR = r"""
 !a: "y" a | a "y" | "y"
 """
 
+# ── Aliased nullable alternatives — first-arm-wins on the empty input (#432) ────
+# `p: "a"? -> al1 | "b"? -> al2` lowers to two byte-identical `p -> ε` arms
+# differing only by alias/tree_name (al1 order 1, al2 order 3). On the empty input
+# both ε arms complete, so the SPPF `p` node would carry two ε families with
+# `(left,right)=(None,None)`. Python keeps the alias as tree-naming metadata
+# *outside* the packed-node identity and resolves the same-(origin,expansion) tie
+# by `rule.order` (first arm wins → `al1`); the LALR side resolves this identically
+# (#401). This pins that Earley does too, instead of letting the SPPF's
+# `(left,right)`-only family dedup keep whichever ε arm was processed first (al2,
+# LIFO → the wrong arm). `'a'→al1`, `'b'→al2` agree on every engine already; only
+# the empty-input nullable tie diverged. Three-way (`-> al3`) strengthens the pin.
+EARLEY_ALIASED_NULLABLE_GRAMMAR = r"""
+start: p
+p: "a"? -> al1 | "b"? -> al2
+"""
+
+EARLEY_ALIASED_NULLABLE3_GRAMMAR = r"""
+start: p
+p: "a"? -> al1 | "b"? -> al2 | "c"? -> al3
+"""
+
 # ── maybe_placeholders × a transparent helper, explicit walk (#59) ─────────────
 # A transparent rule (`_t`) carrying a `maybe_placeholders` optional `[B]` — when
 # absent, the empty `[...]` contributes a `None` placeholder slot. This pins the
@@ -780,6 +801,17 @@ EARLEY_GRAMMARS = [
         ("yyy",  True),
         ("yyyy", True),
     ]),
+    ("aliased_nullable", EARLEY_ALIASED_NULLABLE_GRAMMAR, [
+        ("",  True),   # both ε arms complete → first-arm-wins (al1), #432
+        ("a", True),   # al1
+        ("b", True),   # al2
+    ]),
+    ("aliased_nullable3", EARLEY_ALIASED_NULLABLE3_GRAMMAR, [
+        ("",  True),   # first-arm-wins (al1) across three aliased ε arms
+        ("a", True),
+        ("b", True),
+        ("c", True),
+    ]),
 ]
 
 # Groups that must be built with `maybe_placeholders=True` (the rest use False).
@@ -904,8 +936,22 @@ X: /x/
 %ignore " "
 """
 
+# Aliased nullable alternatives under the DYNAMIC lexer (#432). Same root cause as
+# the basic-lexer `aliased_nullable` group: on the empty input both ε arms of `p`
+# complete and the SPPF `p` node would carry two `(None,None)` families; the
+# resolve must pick the lowest-`rule.order` arm (al1), matching Python.
+DYN_ALIASED_NULLABLE_GRAMMAR = r"""
+start: p
+p: "a"? -> al1 | "b"? -> al2
+"""
+
 # (name, grammar, lexer, [(input, should_parse)])
 EARLEY_DYNAMIC_GRAMMARS = [
+    ("aliased_nullable", DYN_ALIASED_NULLABLE_GRAMMAR, "dynamic", [
+        ("",  True),   # both ε arms complete → first-arm-wins (al1), #432
+        ("a", True),   # al1
+        ("b", True),   # al2
+    ]),
     ("nulltail", DYN_NULLTAIL_GRAMMAR, "dynamic", [
         ("x", True),
         ("x x", True),

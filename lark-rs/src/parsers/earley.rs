@@ -166,7 +166,34 @@ struct Packed {
 struct SymbolNode {
     is_intermediate: bool,
     families: Vec<Packed>,
+    /// De-duplication set over `(left, right)` — Python Lark's `PackedNode`
+    /// equality compares exactly those (`earley_forest.py`: `__eq__` ignores
+    /// `rule`). The **ε family** `(None, None)` is special-cased *outside* this set
+    /// (`eps_family` below), so it is never inserted here.
     family_set: HashSet<(ForestRef, ForestRef)>,
+    /// Index into `families` of this node's single ε derivation (`left`/`right`
+    /// both `None`), and the `rule.order` it was recorded with — `None` until one
+    /// is added.
+    ///
+    /// **Why exactly one ε family, by lowest `rule.order` (#432).** Python keeps a
+    /// *single* ε packed node per symbol: its `PackedNode.__eq__` compares only
+    /// `(left, right)`, so two ε derivations collapse to one (the first inserted),
+    /// and its `EBNF_to_BNF` lowering emits just one ε production even for distinct
+    /// aliased nullable arms (`p: "a"? -> al1 | "b"? -> al2` → one `p -> ε` aliased
+    /// al1). lark-rs keeps **both** aliased ε rules (so the LALR R/R resolver can
+    /// pick the first arm by `rule.order`, #401), so its forest would otherwise
+    /// carry two ε families differing only by alias/`tree_name`. Resolving them the
+    /// way Python's *observable result* does — first-arm-wins — means keeping the
+    /// lowest-`rule.order` ε family (al1), discarding the rest. A raw `(left,right)`
+    /// dedup keyed the wrong one (al2 drained LIFO, processed/inserted first); a
+    /// keep-both key turned the empty input into a spurious `_ambig(al1, al2)` under
+    /// `ambiguity='explicit'` (the empty string is a single derivation, just
+    /// alias-named). Keeping one ε family by lowest order yields al1 under *both*
+    /// resolve and explicit, matching Python's forest (one ε family) and its
+    /// first-arm-wins result. Non-empty families are untouched — the `(left,right)`
+    /// dedup is load-bearing for the SPPF over-sharing the `_ambig` dedup
+    /// compensates for (#159, ADR-0017), and this is scoped to ε derivations alone.
+    eps_family: Option<(usize, usize)>,
     /// Joop-Leo deferred reconstructions: `(transitive, bottom_node, end_col)`. A
     /// Leo completion records a path here instead of materializing the O(n) skipped
     /// reduction nodes eagerly; `load_leo_paths` expands them (once, lazily) into
@@ -233,6 +260,7 @@ impl Forest {
             is_intermediate: key.is_intermediate(),
             families: Vec::new(),
             family_set: HashSet::new(),
+            eps_family: None,
             paths: Vec::new(),
         });
         self.index.insert((key, start, end), id);
@@ -240,17 +268,48 @@ impl Forest {
         id
     }
 
-    /// Record a derivation (packed node) on `node_id`, de-duplicated by its
-    /// `(left, right)` children exactly as Python's `PackedNode` equality.
+    /// Record a derivation (packed node) on `node_id`.
+    ///
+    /// A non-empty derivation is de-duplicated by its `(left, right)` children,
+    /// exactly as Python Lark's `PackedNode` equality (`earley_forest.py`).
+    ///
+    /// The **ε derivation** `(None, None)` is kept at most **once** per node, by
+    /// lowest `rule.order` (`order`): the first ε family added installs it; a later
+    /// ε family with a *lower* order replaces it in place; a higher-or-equal order
+    /// is dropped. This reproduces Python's single ε packed node and its
+    /// first-arm-wins result over lark-rs's twin aliased ε rules — see
+    /// [`SymbolNode::eps_family`] for the full rationale (#432).
     fn add_family(
         &mut self,
         node_id: usize,
         rule: usize,
+        order: usize,
         left: ForestRef,
         right: ForestRef,
         right_pos: usize,
     ) {
         let node = &mut self.nodes[node_id];
+        if matches!((left, right), (ForestRef::None, ForestRef::None)) {
+            // ε derivation: keep a single family, the lowest-order arm.
+            let packed = Packed {
+                rule,
+                left,
+                right,
+                right_pos,
+            };
+            match node.eps_family {
+                None => {
+                    node.eps_family = Some((node.families.len(), order));
+                    node.families.push(packed);
+                }
+                Some((idx, best_order)) if order < best_order => {
+                    node.families[idx] = packed;
+                    node.eps_family = Some((idx, order));
+                }
+                Some(_) => {} // an ε family of equal/higher order already wins
+            }
+            return;
+        }
         if node.family_set.insert((left, right)) {
             node.families.push(Packed {
                 rule,
@@ -601,7 +660,14 @@ impl EarleyParser {
                     _ => {
                         let id = forest.get_or_create(NodeKey::Sym(origin), item.origin, i);
                         // ε derivation: no right child, so right_pos is unused.
-                        forest.add_family(id, item.rule, ForestRef::None, ForestRef::None, 0);
+                        forest.add_family(
+                            id,
+                            item.rule,
+                            self.grammar.rules[item.rule].order,
+                            ForestRef::None,
+                            ForestRef::None,
+                            0,
+                        );
                         id
                     }
                 };
@@ -668,7 +734,14 @@ impl EarleyParser {
                     let new_node = forest.get_or_create(key, o.origin, i);
                     // `origin` was expected at position `o.dot`, so the completed
                     // node is the right child at that expansion position.
-                    forest.add_family(new_node, o.rule, o.node, ForestRef::Node(node_id), o.dot);
+                    forest.add_family(
+                        new_node,
+                        o.rule,
+                        self.grammar.rules[o.rule].order,
+                        o.node,
+                        ForestRef::Node(node_id),
+                        o.dot,
+                    );
                     let advanced = Item {
                         rule: o.rule,
                         dot: o.dot + 1,
@@ -706,6 +779,7 @@ impl EarleyParser {
                     forest.add_family(
                         new_node,
                         item.rule,
+                        self.grammar.rules[item.rule].order,
                         item.node,
                         ForestRef::Node(hnode),
                         item.dot,
@@ -930,6 +1004,7 @@ impl EarleyParser {
                 forest.add_family(
                     prev_node,
                     tr.red.rule,
+                    self.grammar.rules[tr.red.rule].order,
                     tr.red.node,
                     ForestRef::Node(right),
                     tr.red.dot,
@@ -954,6 +1029,7 @@ impl EarleyParser {
                     forest.add_family(
                         next_node,
                         tr.red.rule,
+                        self.grammar.rules[tr.red.rule].order,
                         ForestRef::Node(prev_node),
                         ForestRef::Node(eps),
                         pos,
@@ -983,7 +1059,9 @@ impl EarleyParser {
     /// `families.is_empty()` check above rather than relying on the guard. Such
     /// mutually-ε-recursive nullable symbols are outside the linearization target;
     /// the regular completer still builds their canonical ε-node, which this node
-    /// merges into by global identity (`add_family` dedups by `(left, right)`).
+    /// merges into by global identity. A node keeps a single ε family (the lowest
+    /// `rule.order`, see [`SymbolNode::eps_family`]), so re-adding the same rule's ε
+    /// derivation is a no-op (equal order keeps the incumbent).
     fn eps_node(
         &self,
         forest: &mut Forest,
@@ -1014,7 +1092,14 @@ impl EarleyParser {
             }
             if expansion.is_empty() {
                 // The empty production: Scott's (None, None) ε family.
-                forest.add_family(id, ri, ForestRef::None, ForestRef::None, 0);
+                forest.add_family(
+                    id,
+                    ri,
+                    self.grammar.rules[ri].order,
+                    ForestRef::None,
+                    ForestRef::None,
+                    0,
+                );
             } else {
                 // A non-empty all-nullable production: binarize its ε-children
                 // left to right, mirroring the regular completer's spine.
@@ -1024,7 +1109,14 @@ impl EarleyParser {
                     let child = self.eps_node(forest, expansion[pos], col, building);
                     let key = self.node_key(ri, pos + 1);
                     let node = forest.get_or_create(key, col, col);
-                    forest.add_family(node, ri, left, ForestRef::Node(child), pos);
+                    forest.add_family(
+                        node,
+                        ri,
+                        self.grammar.rules[ri].order,
+                        left,
+                        ForestRef::Node(child),
+                        pos,
+                    );
                     left = ForestRef::Node(node);
                 }
             }
@@ -1056,7 +1148,14 @@ impl EarleyParser {
                 let key = self.node_key(item.rule, item.dot + 1);
                 let new_node = forest.get_or_create(key, item.origin, end);
                 // The scanned terminal is the right child at position `item.dot`.
-                forest.add_family(new_node, item.rule, item.node, tok_ref, item.dot);
+                forest.add_family(
+                    new_node,
+                    item.rule,
+                    self.grammar.rules[item.rule].order,
+                    item.node,
+                    tok_ref,
+                    item.dot,
+                );
                 let advanced = Item {
                     rule: item.rule,
                     dot: item.dot + 1,
@@ -1317,7 +1416,14 @@ impl EarleyParser {
                     let new_node = forest.get_or_create(key, item.origin, end);
                     let tok_ref = ForestRef::Tok(forest.add_token(token));
                     // The scanned terminal is the right child at position `item.dot`.
-                    forest.add_family(new_node, item.rule, item.node, tok_ref, item.dot);
+                    forest.add_family(
+                        new_node,
+                        item.rule,
+                        self.grammar.rules[item.rule].order,
+                        item.node,
+                        tok_ref,
+                        item.dot,
+                    );
                     let advanced = Item {
                         rule: item.rule,
                         dot: item.dot + 1,
@@ -1360,7 +1466,14 @@ impl EarleyParser {
                         if old != new_node {
                             let fams = forest.nodes[old].families.clone();
                             for f in fams {
-                                forest.add_family(new_node, f.rule, f.left, f.right, f.right_pos);
+                                forest.add_family(
+                                    new_node,
+                                    f.rule,
+                                    self.grammar.rules[f.rule].order,
+                                    f.left,
+                                    f.right,
+                                    f.right_pos,
+                                );
                             }
                         }
                         Item {

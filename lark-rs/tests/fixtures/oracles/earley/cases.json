@@ -6472,6 +6472,280 @@
     ]
   },
   {
+    "name": "aliased_nullable",
+    "grammar": "\nstart: p\np: \"a\"? -> al1 | \"b\"? -> al2\n",
+    "ambiguity": "resolve",
+    "lexer": "basic",
+    "maybe_placeholders": false,
+    "cases": [
+      {
+        "input": "",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "al1",
+              "children": []
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "a",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "al1",
+              "children": []
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "b",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "al2",
+              "children": []
+            }
+          ]
+        },
+        "error": null
+      }
+    ]
+  },
+  {
+    "name": "aliased_nullable",
+    "grammar": "\nstart: p\np: \"a\"? -> al1 | \"b\"? -> al2\n",
+    "ambiguity": "explicit",
+    "lexer": "basic",
+    "maybe_placeholders": false,
+    "cases": [
+      {
+        "input": "",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "al1",
+              "children": []
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "a",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "al1",
+              "children": []
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "b",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "al2",
+              "children": []
+            }
+          ]
+        },
+        "error": null
+      }
+    ]
+  },
+  {
+    "name": "aliased_nullable3",
+    "grammar": "\nstart: p\np: \"a\"? -> al1 | \"b\"? -> al2 | \"c\"? -> al3\n",
+    "ambiguity": "resolve",
+    "lexer": "basic",
+    "maybe_placeholders": false,
+    "cases": [
+      {
+        "input": "",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "al1",
+              "children": []
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "a",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "al1",
+              "children": []
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "b",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "al2",
+              "children": []
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "c",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "al3",
+              "children": []
+            }
+          ]
+        },
+        "error": null
+      }
+    ]
+  },
+  {
+    "name": "aliased_nullable3",
+    "grammar": "\nstart: p\np: \"a\"? -> al1 | \"b\"? -> al2 | \"c\"? -> al3\n",
+    "ambiguity": "explicit",
+    "lexer": "basic",
+    "maybe_placeholders": false,
+    "cases": [
+      {
+        "input": "",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "al1",
+              "children": []
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "a",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "al1",
+              "children": []
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "b",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "al2",
+              "children": []
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "c",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "al3",
+              "children": []
+            }
+          ]
+        },
+        "error": null
+      }
+    ]
+  },
+  {
     "name": "maybe_transparent",
     "grammar": "\nstart: _t\n_t: A [B]\nA: \"a\"\nB: \"b\"\n",
     "ambiguity": "resolve",
