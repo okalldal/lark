@@ -13,7 +13,9 @@
 //!      checked-in artifact never drifts. Run with `LARK_STANDALONE_WRITE=1` to
 //!      rewrite the fixtures after an intentional generator change.
 
-use lark_rs::{generate_standalone, Lark, LarkOptions, LexerType, ParserAlgorithm};
+use lark_rs::{
+    generate_standalone, GrammarError, Lark, LarkError, LarkOptions, LexerType, ParserAlgorithm,
+};
 
 // The generated parsers, compiled as isolated modules. Each defines its own
 // `Parser`, `Tree`, `Token`, `ParseTree` — nothing is shared with lark-rs.
@@ -175,6 +177,46 @@ fn rejects_unsupported_backends() {
     assert!(
         generate_standalone(src, &earley).is_err(),
         "Earley unsupported"
+    );
+}
+
+/// #425 (option b): standalone bake **rejects** `propagate_positions=true` with a
+/// typed error rather than silently dropping spans. The standalone runtime
+/// (`src/standalone/runtime.rs`) has no `Tree.meta`/span tracking at all and `bake`
+/// never threads `cg.propagate_positions`, so a standalone parser built with
+/// `propagate_positions=true` would produce absent spans where the in-process engine
+/// produces real ones (#402) — an ADR-0017 "more permissive / unfalsifiable" silent
+/// asymmetry. Until the capability gap is closed (option a, #457) the bake fails loud,
+/// the same fail-loud chokepoint the #298 (illegal lexer/ambiguity) and #280
+/// (un-hostable lookaround) guards already use.
+///
+/// Oracle precondition: the in-process API *accepts* `propagate_positions=true` (it is
+/// a legal config that yields a meta-bearing tree), so this is genuinely a standalone
+/// gap to fail loud on, not an illegal config both front doors reject.
+#[test]
+fn standalone_rejects_propagate_positions_until_meta_support() {
+    let src = "start: \"a\"\n";
+    let opts = LarkOptions {
+        parser: ParserAlgorithm::Lalr,
+        propagate_positions: true,
+        ..Default::default()
+    };
+
+    // Oracle precondition: the in-process API accepts propagate_positions=true.
+    assert!(
+        Lark::new(src, opts.clone()).is_ok(),
+        "#425 precondition: the in-process API must accept propagate_positions=true \
+         (it produces meta spans) — otherwise this would be an illegal config, not a \
+         standalone capability gap"
+    );
+
+    // The fix: standalone bake rejects it with a typed GrammarError rather than baking
+    // a parser that silently drops spans.
+    let err = generate_standalone(src, &opts)
+        .expect_err("#425: standalone bake must reject propagate_positions=true");
+    assert!(
+        matches!(err, LarkError::Grammar(GrammarError::Other { .. })),
+        "#425: expected a typed GrammarError for propagate_positions=true, got {err:?}"
     );
 }
 

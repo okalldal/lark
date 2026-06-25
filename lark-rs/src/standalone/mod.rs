@@ -153,6 +153,23 @@ fn bake(grammar_src: &str, options: &LarkOptions) -> Result<Baked, LarkError> {
             msg: "standalone generation does not support a postlex (Indenter) hook".to_string(),
         }));
     }
+    // Reject `propagate_positions` rather than silently drop spans (#425, option b).
+    // The in-process LALR/Earley/CYK paths thread `cg.propagate_positions` into their
+    // tree builder so a node's `meta` spans its rule's pre-filter children (#402), but
+    // the standalone runtime (`runtime.rs`) has no `Tree.meta`/span tracking at all and
+    // `bake` does not set `cg.propagate_positions`. Baking a parser here would therefore
+    // produce *absent* spans where the in-process engine produces real ones — an
+    // ADR-0017 "more permissive / unfalsifiable" silent asymmetry. Fail loud (ADR-0030
+    // spirit) at the same chokepoint the postlex / illegal-config (#298) / un-hostable-
+    // lookaround (#280) guards use, until the capability gap is closed (option a, #457).
+    if options.propagate_positions {
+        return Err(LarkError::Grammar(GrammarError::Other {
+            msg: "standalone generation does not support propagate_positions \
+                  (the standalone runtime has no Tree.meta/span support yet — see #457); \
+                  build without propagate_positions, or use the in-process parser"
+                .to_string(),
+        }));
+    }
 
     // Run the same front-door config-legality gate the in-process build runs
     // (`build_frontend` → `validate_config`, bug-bounty N5/N6, #273) so the two
