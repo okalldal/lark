@@ -1,5 +1,12 @@
 # lark-rs — Rust Rewrite of the Lark Parsing Toolkit
 
+> **Maintainer/internal automation notes.** This is the maintainer's own
+> operational reference. Its "agent-facing" framing, governance commands, and
+> "bug-bounty"/"XFAIL burndown" terminology describe internal tooling — they are
+> **not** an invitation for external autonomous agents to claim issues or open
+> PRs, and there is **no public bug-bounty program**. External contributors: read
+> [`/CONTRIBUTING.md`](/CONTRIBUTING.md) and [`/SECURITY.md`](/SECURITY.md) first.
+
 ## Documentation Map
 
 This file is the **agent-facing** operational reference. The companions:

@@ -2,6 +2,8 @@
 description: Run a structured 10-team adversarial oracle sweep and open a findings-only XFAIL/catalog PR
 ---
 
+> _Internal maintainer automation — not an invitation for external agents to claim issues or open PRs, and not a public bug-bounty program. See [`/CONTRIBUTING.md`](/CONTRIBUTING.md)._
+
 # /bug-hackathon — adversarial oracle sweep
 
 Run a structured bug-bounty style adversarial testing sweep against lark-rs.

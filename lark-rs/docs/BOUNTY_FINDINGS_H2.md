@@ -1,5 +1,11 @@
 # lark-rs Bug-Bounty Findings — Round 2 (Phase 2)
 
+> **Internal maintainer document — not a public bug-bounty program.**
+> "Bug-bounty" and "strike team" here are shorthand for an internal differential
+> parity audit of `lark-rs/` against Python Lark (our oracle). They imply **no**
+> reward eligibility, issue assignment, or acceptance of unsolicited PRs. External
+> contributors: see [`/CONTRIBUTING.md`](/CONTRIBUTING.md) and [`/SECURITY.md`](/SECURITY.md) first.
+
 Round 1 (`docs/BOUNTY_FINDINGS.md`, PR #263) harvested the "front door too
 permissive" layer (missing build-time validation gates + the RC5 lexer width
 bug). Round 2 was retargeted at the **subtler classes**: valid grammar → wrong

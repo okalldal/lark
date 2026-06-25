@@ -2,6 +2,8 @@
 description: Summarize the architect's open decision inbox as decision memos
 ---
 
+> _Internal maintainer automation — not an invitation for external agents to claim issues or open PRs, and not a public bug-bounty program. See [`/CONTRIBUTING.md`](/CONTRIBUTING.md)._
+
 Produce a read-only architect decision brief. Do not mutate GitHub, do not apply
 labels, do not file issues, do not start implementation, and do not ask the
 architect to decide via `AskUserQuestion` — the brief itself is the deliverable.

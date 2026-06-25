@@ -2,6 +2,8 @@
 description: Proactively survey the repo and propose the next epics/issues for architect approval
 ---
 
+> _Internal maintainer automation — not an invitation for external agents to claim issues or open PRs, and not a public bug-bounty program. See [`/CONTRIBUTING.md`](/CONTRIBUTING.md)._
+
 The **proactive planning** layer — the modern form of the original phase plans.
 Where `/next-task` *executes* the backlog, `/roadmap` *grows* it: survey the
 state of the project, propose what should come next, and bring the proposal to the

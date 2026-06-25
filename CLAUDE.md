@@ -3,6 +3,14 @@
 This is the [Lark](https://github.com/lark-parser/lark) Python parsing toolkit repo.
 The Python source lives in `lark/` and its tests in `tests/`.
 
+> **Maintainer/internal automation notes.** This file and the workflows it
+> describes (`/next-task`, `/finish-task`, `/review-pr`, the "autonomous
+> development" rules, etc.) document how the maintainer's *own* tooling operates
+> this repo. They are **not** an invitation for external autonomous agents to
+> claim issues or open PRs, and there is **no public bug-bounty program**.
+> External contributors: read [`CONTRIBUTING.md`](CONTRIBUTING.md) and
+> [`SECURITY.md`](SECURITY.md) first.
+
 ## Active Work: Rust Rewrite (`lark-rs/`)
 
 All current development is in `lark-rs/` — a ground-up Rust rewrite of Lark's core.

@@ -2,6 +2,8 @@
 description: Regenerate a compliance/wild bank XFAIL allow-list after a fix
 ---
 
+> _Internal maintainer automation — not an invitation for external agents to claim issues or open PRs, and not a public bug-bounty program. See [`/CONTRIBUTING.md`](/CONTRIBUTING.md)._
+
 After fixing an engine gap, regenerate the affected bank's XFAIL allow-list and
 commit the **shrunk** file. The banks fail the build only on *regressions*; the
 xfail files encode the known-failure set, and the burndown discipline is that

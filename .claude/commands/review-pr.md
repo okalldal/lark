@@ -2,6 +2,8 @@
 description: Adversarially review a PR against the constitution and decide its merge tier
 ---
 
+> _Internal maintainer automation — not an invitation for external agents to claim issues or open PRs, and not a public bug-bounty program. See [`/CONTRIBUTING.md`](/CONTRIBUTING.md)._
+
 The autonomous-merge gate. Review a PR **against `PRINCIPLES.md` + the Definition
 of Done**, then either merge it (auto tier) or hand it to the architect (escalate
 tier). Usage: `/review-pr <number>`.

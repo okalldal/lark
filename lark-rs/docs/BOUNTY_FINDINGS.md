@@ -1,5 +1,11 @@
 # lark-rs Bug-Bounty Findings
 
+> **Internal maintainer document — not a public bug-bounty program.**
+> "Bug-bounty" and "strike team" here are shorthand for an internal differential
+> parity audit of `lark-rs/` against Python Lark (our oracle). They imply **no**
+> reward eligibility, issue assignment, or acceptance of unsolicited PRs. External
+> contributors: see [`/CONTRIBUTING.md`](/CONTRIBUTING.md) and [`/SECURITY.md`](/SECURITY.md) first.
+
 A differential strike-team sweep of lark-rs against **Python Lark 1.3.1** (the
 oracle). Ten teams probed disjoint root-cause buckets; after minimization,
 independent re-verification, and dedup-by-root-cause this catalog records:

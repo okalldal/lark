@@ -2,6 +2,8 @@
 description: Drain the entire kaizen backlog in one orchestrated sweep — stage every kit/governance fix as a child PR onto a kaizen integration branch and land it as one architect-merged omnibus PR; the sweep proposes, never ratifies
 ---
 
+> _Internal maintainer automation — not an invitation for external agents to claim issues or open PRs, and not a public bug-bounty program. See [`/CONTRIBUTING.md`](/CONTRIBUTING.md)._
+
 This is the codified **process-improvement sweep**. Where `/next-task` and
 `/start-sprint` move the *product* backlog, `/kaizen-sweep` improves the *kit* —
 the commands, governance docs (`PRINCIPLES.md`, `LABELS.md`, ADRs), harness, and

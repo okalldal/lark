@@ -2,6 +2,8 @@
 description: End-of-task loop — code review, fast gate, PR, CI callback
 ---
 
+> _Internal maintainer automation — not an invitation for external agents to claim issues or open PRs, and not a public bug-bounty program. See [`/CONTRIBUTING.md`](/CONTRIBUTING.md)._
+
 Run the lark-rs end-of-task loop. Do **NOT** run the full CI locally before
 pushing — that runs everything twice (once here, once in GitHub Actions).
 
