@@ -238,21 +238,76 @@ fn h6_2_empty_lower_bound_quantifier_accepted() {
 /// default options. Distinct from H4-9/#347 (Str-vs-Str *alternation-arm* dedup via
 /// `sym_key`); this is the Re-vs-Str *interning* merge. Expected fix: gate
 /// `patterns_equivalent` on matching `Pattern` kind (never `Str` ≡ `Re`).
-#[test]
-#[ignore = "XFAIL (bounty H6-6): string literal unified onto a same-source regex terminal, kept instead of filtered"]
+#[test] // FIXED (#403): `patterns_equivalent` gates on matching `Pattern` kind, so a
+        // string literal never unifies onto a same-source regex terminal — it stays a
+        // distinct, filtered `__ANON_*` exactly as Python's `Pattern.__eq__` requires.
 fn h6_6_string_literal_not_unified_with_regex_terminal() {
+    // The issue's named configs: lalr/contextual, lalr/basic, earley/basic
+    // (earley/dynamic already agreed). All must match Python 1.3.1 (verified live).
+    let configs = [
+        (ParserAlgorithm::Lalr, LexerType::Contextual),
+        (ParserAlgorithm::Lalr, LexerType::Basic),
+        (ParserAlgorithm::Earley, LexerType::Basic),
+    ];
+
     let g = "start: AB | \"ab\"\nAB: /ab/\n";
-    let lark =
-        Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).expect("H6-6: builds");
-    let tree = lark.parse("ab").expect("H6-6: parses");
-    // Python: the literal "ab" is a distinct PatternStr (__ANON_0), filtered → no tokens.
-    // lark-rs: the literal is unified onto AB and kept → one token.
-    assert_eq!(
-        token_count(&tree),
-        0,
-        "H6-6: Python keeps the literal as a distinct filtered __ANON terminal (0 tokens in the tree); \
-         lark-rs unified it onto the regex terminal AB and kept it"
-    );
+    for (parser, lexer) in configs.clone() {
+        let lark = Lark::new(g, opts(parser.clone(), lexer.clone()))
+            .unwrap_or_else(|e| panic!("H6-6 ({parser:?}/{lexer:?}): builds: {e:?}"));
+        let tree = lark.parse("ab").expect("H6-6: parses");
+        // Python: the literal "ab" is a distinct PatternStr (__ANON_0), filtered → no tokens.
+        // lark-rs (pre-fix): the literal is unified onto AB and kept → one token.
+        assert_eq!(
+            token_count(&tree),
+            0,
+            "H6-6 ({parser:?}/{lexer:?}): Python keeps the literal as a distinct filtered __ANON \
+             terminal (0 tokens in the tree); lark-rs unified it onto the regex terminal AB and kept it"
+        );
+    }
+
+    // keep_all_tokens=True proves the collapse: Python types the surviving token `__ANON_0`
+    // (the distinct literal terminal), where the pre-fix lark-rs typed it `AB` (the regex
+    // terminal it had been merged onto).
+    for (parser, lexer) in configs.clone() {
+        let mut o = opts(parser.clone(), lexer.clone());
+        o.keep_all_tokens = true;
+        let lark = Lark::new(g, o)
+            .unwrap_or_else(|e| panic!("H6-6 keep_all ({parser:?}/{lexer:?}): builds: {e:?}"));
+        let tree = lark.parse("ab").expect("H6-6 keep_all: parses");
+        assert_eq!(
+            first_token_type(&tree).as_deref(),
+            Some("__ANON_0"),
+            "H6-6 keep_all ({parser:?}/{lexer:?}): Python types the literal token __ANON_0 (a \
+             distinct anonymous terminal); lark-rs collapsed it onto the regex terminal AB"
+        );
+    }
+
+    // Control: a regex `/[ab]/` beside a literal `"a"` must NOT unify (regex source `[ab]`
+    // ≠ literal `a`) — and must NOT diverge from Python. Python filters the literal under
+    // default options (childless start) and types the surviving token `A` (the literal's
+    // name hint) under keep_all_tokens. The fix must not perturb this control.
+    let control = "start: R | \"a\"\nR: /[ab]/\n";
+    for (parser, lexer) in configs {
+        let lark = Lark::new(control, opts(parser.clone(), lexer.clone()))
+            .unwrap_or_else(|e| panic!("H6-6 control ({parser:?}/{lexer:?}): builds: {e:?}"));
+        assert_eq!(
+            token_count(&lark.parse("a").expect("H6-6 control: parses")),
+            0,
+            "H6-6 control ({parser:?}/{lexer:?}): literal \"a\" beside /[ab]/ is filtered (0 tokens), \
+             matching Python — the regex source [ab] never matches the literal a, so no unification"
+        );
+        let mut o = opts(parser.clone(), lexer.clone());
+        o.keep_all_tokens = true;
+        let lark = Lark::new(control, o).unwrap_or_else(|e| {
+            panic!("H6-6 control keep_all ({parser:?}/{lexer:?}): builds: {e:?}")
+        });
+        assert_eq!(
+            first_token_type(&lark.parse("a").expect("H6-6 control keep_all: parses")).as_deref(),
+            Some("A"),
+            "H6-6 control keep_all ({parser:?}/{lexer:?}): the literal \"a\" keeps its own name A, \
+             matching Python — it never merged with /[ab]/"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

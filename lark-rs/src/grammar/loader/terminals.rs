@@ -628,11 +628,15 @@ fn terminal_name_hint(s: &str) -> Option<String> {
     None
 }
 
-/// Two patterns are equivalent for terminal unification when they match the same
-/// language: identical regex source *and* identical flags. Python Lark keys its
-/// `term_reverse` map on `Pattern` equality (and raises on a flag mismatch for the
-/// same source); we treat differing flags as simply distinct, so unification never
-/// merges, say, `"a"` with `"a"i`.
+/// Two patterns are equivalent for terminal unification when they are the **same
+/// kind** (both `Str` or both `Re`) and match the same language: identical regex
+/// source *and* identical flags. Python Lark keys its `term_reverse` map on `Pattern`
+/// equality, and `Pattern.__eq__` requires `type(self) == type(other)` — a `PatternStr`
+/// never equals a `PatternRE` even when both project to the same source (`"ab"` vs
+/// `/ab/`). Without the kind gate, `as_regex_str()` collapses them (both → `ab`), so a
+/// literal would wrongly unify onto a same-source regex terminal and be kept instead of
+/// filtered as a distinct `__ANON_*` (#403, H6-6). We also treat differing flags as
+/// simply distinct, so unification never merges, say, `"a"` with `"a"i`.
 fn patterns_equivalent(a: &Pattern, b: &Pattern) -> bool {
     fn flags_of(p: &Pattern) -> u32 {
         match p {
@@ -641,7 +645,13 @@ fn patterns_equivalent(a: &Pattern, b: &Pattern) -> bool {
             Pattern::Re(r) => r.flags,
         }
     }
-    a.as_regex_str() == b.as_regex_str() && flags_of(a) == flags_of(b)
+    // Gate on matching kind (never `Str` ≡ `Re`), mirroring Python's
+    // `type(self) == type(other)` in `Pattern.__eq__`.
+    matches!(
+        (a, b),
+        (Pattern::Str(_), Pattern::Str(_)) | (Pattern::Re(_), Pattern::Re(_))
+    ) && a.as_regex_str() == b.as_regex_str()
+        && flags_of(a) == flags_of(b)
 }
 
 /// Standard terminal names for common punctuation/operators.
