@@ -75,6 +75,16 @@ pub(super) struct GrammarCompiler {
     /// Raw terminal definitions, collected before any are compiled so a terminal
     /// body may reference another terminal defined later (`C: "C" | D`).
     pub(super) raw_terms: Vec<RawTerm>,
+    /// `%extend` bodies targeting a terminal that is **already a compiled
+    /// `TerminalDef`** (an import or `%declare`) by the time the directive is
+    /// staged — there is no `RawTerm` to splice onto, and reconstructing one from a
+    /// baked regex is lossy (#286). Each entry is `(name, new alternatives)` in
+    /// document order; [`resolve_terminals`](GrammarCompiler::resolve_terminals)
+    /// prepends them onto the resolved terminal's regex before baking, matching
+    /// Python's `_extend` (`base.children.insert(0, exp)` on the still-AST
+    /// definition tree). A same-grammar `%extend` (whose target is still a
+    /// `RawTerm`) never lands here — it splices in [`stage_term_directive`].
+    pub(super) pending_term_extends: Vec<(String, Vec<AliasedExpansion>)>,
     /// `%ignore` directives, in document order. A directive that is a single
     /// reference to a named terminal records that terminal's name
     /// ([`IgnoreEntry::Named`]) so it is marked ignored with its **declared
@@ -274,6 +284,7 @@ impl GrammarCompiler {
             rules: Vec::new(),
             terminals: Vec::new(),
             raw_terms: Vec::new(),
+            pending_term_extends: Vec::new(),
             ignore_patterns: Vec::new(),
             anon_counter: 0,
             term_counter: 0,
@@ -746,9 +757,14 @@ impl GrammarCompiler {
                     });
                 }
                 // Replace any prior same-grammar body and any already-imported
-                // terminal at this name, then stage the override body.
+                // terminal at this name, then stage the override body. A pending
+                // imported-terminal `%extend` staged *earlier* (#286) is discarded:
+                // Python's `_define(override=True)` replaces the whole `Definition`,
+                // dropping any alternatives a prior `_extend` had inserted onto it.
                 self.raw_terms.retain(|prev| prev.name != t.name);
                 self.terminals.retain(|td| td.name != t.name);
+                self.pending_term_extends
+                    .retain(|(name, _)| name != &t.name);
                 self.raw_terms.push(t);
             }
             Directive::Extend => {
@@ -780,17 +796,21 @@ impl GrammarCompiler {
                 // same-grammar terminal is still a `RawTerm` here (terminals
                 // resolve as a whole later), so splice onto its front.
                 //
-                // KNOWN GAP (#286): an *imported* terminal has already been
-                // compiled into `self.terminals` (not `raw_terms`), and
-                // `resolve_terminals` skips a `RawTerm` whose name is already a
-                // resolved terminal — so a staged extend body for an imported
-                // terminal would be silently dropped. Rather than drop it, we leave
-                // the imported terminal unchanged; the divergence is pinned as an
-                // XFAIL (`n1_extend_imported_terminal_*`) and tracked in #286.
+                // An *imported* terminal has already been compiled into
+                // `self.terminals` (not `raw_terms`) by the time the directive is
+                // staged, and reconstructing a `RawTerm` from its baked regex is
+                // lossy (#286). So stage the new alternatives in
+                // `pending_term_extends`; `resolve_terminals` prepends them onto the
+                // resolved terminal's regex before baking — matching Python's
+                // `_extend`, which does `base.children.insert(0, exp)` on the
+                // *still-AST* definition tree (so both the new alt and the original
+                // body survive). The same-grammar splice below stays the fast path.
                 if let Some(existing) = self.raw_terms.iter_mut().find(|prev| prev.name == t.name) {
                     let mut merged = t.expansions;
                     merged.append(&mut existing.expansions);
                     existing.expansions = merged;
+                } else {
+                    self.pending_term_extends.push((t.name, t.expansions));
                 }
             }
         }
@@ -1557,6 +1577,56 @@ mod tests {
             .find(|t| t.name == "INT")
             .expect("INT survives");
         assert_eq!(int.pattern.as_regex_str(), "z");
+    }
+
+    /// `%extend` of an *imported* terminal adds the new alternative to its body — the
+    /// imported terminal is already a compiled `TerminalDef`, so the extend is staged
+    /// in `pending_term_extends` and prepended onto the resolved regex in
+    /// `resolve_terminals` (#286, Python's `_extend`). The terminal becomes an
+    /// alternation of the new arm and the original body (so both `"z"` and the
+    /// original digit body match), and it is no longer a `string_type`.
+    #[test]
+    fn extend_imported_terminal_keeps_both_alternatives() {
+        let g = load("%import common.INT\nstart: INT\n%extend INT: \"z\"\n").unwrap();
+        let int = g
+            .terminals
+            .iter()
+            .find(|t| t.name == "INT")
+            .expect("INT survives");
+        let re = int.pattern.as_regex_str();
+        // The combined regex is `original_body | z` (each arm wrapped in `(?:…)`),
+        // so it carries the imported INT's digit class, the new `z` arm, and a
+        // top-level alternation. (We assert the stable pieces, not the exact
+        // `(?:…)` nesting the inline-regex builder happens to produce.)
+        assert!(
+            re.contains("[0-9]") && re.contains('z') && re.contains('|'),
+            "extended INT must keep both the original [0-9] body and the new \"z\" \
+             arm in an alternation; got: {re}"
+        );
+        assert!(
+            !int.string_type,
+            "an extended terminal is an alternation (PatternRE), not a string literal"
+        );
+    }
+
+    /// A later `%override` of an imported terminal *discards* an earlier `%extend`'s
+    /// staged alternatives — Python's `_define(override=True)` replaces the whole
+    /// `Definition`, dropping anything a prior `_extend` inserted (#286 edge). So
+    /// `INT` ends up exactly the override body `"z"`, with no `[0-9]+` arm.
+    #[test]
+    fn override_after_extend_discards_pending_extend() {
+        let g = load("%import common.INT\nstart: INT\n%extend INT: \"y\"\n%override INT: \"z\"\n")
+            .unwrap();
+        let int = g
+            .terminals
+            .iter()
+            .find(|t| t.name == "INT")
+            .expect("INT survives");
+        assert_eq!(
+            int.pattern.as_regex_str(),
+            "z",
+            "override after extend keeps only the override body, dropping the extend arm"
+        );
     }
 
     // ── Single-definition-per-origin (#270, bounty RC1/RC2) ─────────────────────
