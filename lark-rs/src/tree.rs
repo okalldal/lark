@@ -94,9 +94,17 @@ impl Meta {
                 break;
             }
         }
-        if children.is_empty() {
-            meta.empty = true;
-        }
+        // `empty` is true iff no child contributed a position — not only when the
+        // child list is literally empty. Mirrors Python: `Meta.empty` defaults
+        // `True` and is cleared only by a position-bearing first/last child, which
+        // skips empty subtrees (`PropagatePositions._pp_get_meta`). So a node whose
+        // sole child is a positionless empty subtree (`start: empty` / `empty:` on
+        // `""`) stays `empty=true`, matching Python (#337/H10), while a node with any
+        // position-bearing child clears it via the `line` set above. The
+        // `propagate_positions` widen pass (`tree_builder::ContainerSpan::widen_meta`)
+        // only ever *clears* `empty` on a positioned pre-filter child, so this base
+        // computation is the deciding site for the positionless case.
+        meta.empty = meta.line.is_none();
         meta
     }
 }

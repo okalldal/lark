@@ -287,16 +287,20 @@ fn h9b_backspace_in_class_supported() {
 // Tree.meta parity.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// H10 (MEDIUM). `Tree.meta.empty` for a node whose children are all positionless. In
-/// Python, `Meta.empty` defaults `True` and `PropagatePositions` clears it only when a
-/// position-bearing first/last child is found (skipping empty subtrees) — so for
-/// `start: empty` / `empty:` on `""`, both `start.meta.empty` and the inner subtree's
-/// are `True`. lark-rs's `Meta::from_children` (`src/tree.rs`) sets `empty=true` **only
-/// when `children.is_empty()`**, so the `start` node (one positionless child) reports
-/// `empty=false`. The position *spans* are correct (the bug is isolated to the flag);
-/// #307 fixed `Token` char-vs-byte positions but never touched this `Meta` field.
+/// H10 (MEDIUM) — **FIXED** (#337). `Tree.meta.empty` for a node whose children are all
+/// positionless. In Python, `Meta.empty` defaults `True` and `PropagatePositions` clears
+/// it only when a position-bearing first/last child is found (skipping empty subtrees) —
+/// so for `start: empty` / `empty:` on `""`, both `start.meta.empty` and the inner
+/// subtree's are `True`. lark-rs's `Meta::from_children` (`src/tree.rs`) used to set
+/// `empty=true` **only when `children.is_empty()`**, so the `start` node (one positionless
+/// child) wrongly reported `empty=false`. The position *spans* were always correct (the
+/// bug was isolated to the flag); #307 fixed `Token` char-vs-byte positions but never
+/// touched this `Meta` field. The fix sets `empty` true whenever no child contributed a
+/// position (`meta.line.is_none()`), and the `propagate_positions` widen pass only ever
+/// *clears* it on a positioned pre-filter child. The green `propagate_positions` oracle
+/// bank (`tests/test_propagate_positions.rs`) pins `meta.empty` against Python in both
+/// directions across many grammars/inputs/engines — including a position-bearing control.
 #[test]
-#[ignore = "XFAIL (bounty H10): Tree.meta.empty is false for a node with only positionless children"]
 fn h10_meta_empty_for_positionless_children() {
     let mut o = opts(ParserAlgorithm::Lalr, LexerType::Contextual);
     o.propagate_positions = true;
@@ -308,12 +312,13 @@ fn h10_meta_empty_for_positionless_children() {
         t.meta.empty,
         "H10: start has only a positionless child, so meta.empty must be true (Python)"
     );
-    if let Some(Child::Tree(inner)) = t.children.first() {
-        assert!(
-            inner.meta.empty,
-            "H10: the empty subtree's meta.empty must be true"
-        );
-    }
+    let Some(Child::Tree(inner)) = t.children.first() else {
+        panic!("H10: expected the empty subtree as start's sole child");
+    };
+    assert!(
+        inner.meta.empty,
+        "H10: the empty subtree's meta.empty must be true"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
