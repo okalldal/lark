@@ -257,7 +257,24 @@ impl GrammarCompiler {
                 // A distributed plain group: its arms fan out as-is, no ε arm.
                 Slot::Choices(arms) => arms,
             };
-            acc = Self::concat_alts(&acc, &choices);
+            // Dedup the running product at **every** position rather than only at
+            // the end (the trailing `retain` below). Without this, a chain of `k`
+            // duplicate-arm inline groups (`(X|X) (X|X) … (X|X)`) materializes the
+            // full `m^k` cartesian product before the final dedup collapses it to a
+            // single alternative — a deterministic `2^k` build blowup (#404, H6-7).
+            // First-occurrence dedup at each fold step produces the byte-identical
+            // final set (same alternatives, same order, same `dedup_and_check_alts`
+            // verdict), bounding the working set to the distinct alternatives at that
+            // prefix length — exactly as Python Lark's `SimplifyRule_Visitor` dedups
+            // each group's arms *before* the cross-product. This is the same technique
+            // [`repeat_union`](Self::repeat_union) already applies on the `~n` repeat
+            // path (#252); here it is wired into the general per-position loop.
+            acc = Self::concat_alts_dedup(&acc, &choices);
+            // Deterministic build-cost signal: the size of the running product
+            // after each fold step. With the deduping fold this stays flat in the
+            // group-chain length `k`; the old non-deduping fold made it `2^k`
+            // (#404, gated by `tests/test_grammar_build_scaling.rs`).
+            crate::perf::add_expansion_alts(acc.len() as u64);
         }
         // Distributing two optionals can coincide (`X? X?` → `X X | X | X | ε`);
         // identical alternatives would reduce/reduce on the same item, so keep the
@@ -877,6 +894,16 @@ impl GrammarCompiler {
         };
         let name = self.fresh_anon_rule(tag);
         let origin = NonTerminal::new(&name);
+        // A nested bare nullable (`[[A]]`, `([A])` under `[...]`) distributes its
+        // own absent arm as an *empty* alternative in `alts`; the synthetic empty
+        // arm an optional helper appends below would then duplicate it, minting two
+        // byte-identical `helper -> ε` productions — the self reduce/reduce Python
+        // never reports (#401, H6-4). Python's `EBNF_to_BNF` collapses the twin
+        // empties (the inner `maybe()` and the outer `[...]` empty are one ε arm), so
+        // skip the synthetic empty when `alts` already carries one. The pre-existing
+        // arm keeps its own placeholder gaps (first-occurrence wins, matching
+        // `dedup_and_check_alts`'s empty-arm dedup).
+        let has_empty_arm = alts.iter().any(|((syms, _), _)| syms.is_empty());
         let mut max_size = 0;
         for (order, ((syms, gaps), alias)) in alts.iter().enumerate() {
             // An alternative's inlined size counts its kept symbols plus any
@@ -904,8 +931,9 @@ impl GrammarCompiler {
         match kind {
             // `(...)` is spliced inline with no empty arm.
             HelperKind::Group => {}
-            // A placeholder-less optional group: just an empty alternative.
-            HelperKind::GroupOptional => {
+            // A placeholder-less optional group: just an empty alternative
+            // (unless a nested nullable already distributed one — #401, H6-4).
+            HelperKind::GroupOptional if !has_empty_arm => {
                 self.rules.push(Rule::new(
                     origin.clone(),
                     vec![],
@@ -914,9 +942,11 @@ impl GrammarCompiler {
                     100,
                 ));
             }
+            HelperKind::GroupOptional => {}
             // `[...]` under maybe_placeholders: the empty case emits one `None`
-            // per kept slot of the widest alternative.
-            HelperKind::Maybe => {
+            // per kept slot of the widest alternative (skipped when a nested
+            // nullable already supplied the empty arm — #401, H6-4).
+            HelperKind::Maybe if !has_empty_arm => {
                 let empty_opts = RuleOptions {
                     placeholder_count: max_size,
                     ..self.anon_opts()
@@ -924,6 +954,7 @@ impl GrammarCompiler {
                 self.rules
                     .push(Rule::new(origin.clone(), vec![], None, empty_opts, 100));
             }
+            HelperKind::Maybe => {}
             // `x?` / `x*`: a single-arm nullable wrapper `P: inner | ε`.
             HelperKind::Opt | HelperKind::Star => {
                 self.nullable_opts.insert(name.clone());

@@ -158,7 +158,22 @@ impl GrammarCompiler {
             {
                 Some((value, false)) => Pattern::Str(PatternStr::new(&value)),
                 Some((value, true)) => Pattern::Str(PatternStr::new_ci(&value)),
-                None => Pattern::Re(PatternRe::new(memo[&t.name].as_str(), 0)?),
+                None => {
+                    // Build the compiled pattern from the normalized combined regex
+                    // exactly as before — `pattern`/`flags` (and so every scanner, the
+                    // `unless` retype, collision, eq/hash) stay byte-identical. Then, for
+                    // a terminal whose whole body is a single `/regex/` literal, override
+                    // `raw` with the **verbatim** pre-normalization source so the
+                    // value-length tiebreak measures `len(pattern.value)` (#399 H6-1):
+                    // the normalized memo de-escapes the body (`\<\<\<` → `<<<`, `(?#…)`
+                    // stripped) and would undercount the rank. A composite body keeps
+                    // `raw == pattern` (the unchanged, pre-existing measure).
+                    let mut re = PatternRe::new(memo[&t.name].as_str(), 0)?;
+                    if let Some(src) = Self::single_re_literal(t) {
+                        re.raw = src;
+                    }
+                    Pattern::Re(re)
+                }
             };
             self.terminals
                 .push(TerminalDef::new(&t.name, pat, t.priority).with_string_type(string_type));
@@ -298,6 +313,25 @@ impl GrammarCompiler {
             // Regex literal, range, repetition, `?`, rule/template ref → PatternRE.
             _ => false,
         }
+    }
+
+    /// The verbatim `/…/` source iff this terminal's whole body is a **single regex
+    /// literal** (`A: /…/flags`) — exactly one alternative, one expr, a `LiteralVal::Re`.
+    /// This is the pre-normalization spelling Python keeps as `pattern.value` and ranks
+    /// terminals by (`len(pattern.value)`, #399 H6-1); the caller overrides `PatternRe.raw`
+    /// with it. The flag suffix is irrelevant to the length (Python stores flags off the
+    /// value), so it is not returned. `None` for any composite body (concatenation,
+    /// alternation, reference, range, repetition), which keeps today's normalized-memo
+    /// measure — a pre-existing, unchanged path.
+    fn single_re_literal(t: &RawTerm) -> Option<String> {
+        let [alt] = t.expansions.as_slice() else {
+            return None;
+        };
+        let [Expr::Value(Value::Literal(LiteralVal::Re(src, _flags)))] = alt.expansion.as_slice()
+        else {
+            return None;
+        };
+        Some(src.clone())
     }
 
     /// Resolve one terminal to its combined regex string, recursing into any

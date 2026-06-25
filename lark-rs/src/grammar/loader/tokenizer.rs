@@ -341,6 +341,25 @@ impl<'a> Lexer<'a> {
         let mut i = 1; // skip opening "
         while i < src.len() {
             match src.as_bytes()[i] {
+                // A literal newline inside a `"…"` literal is a build error: Python's
+                // grammar tokenizer's STRING terminal cannot span a newline
+                // (`GrammarError: Unexpected input` at the newline). lark-rs used to
+                // scan straight past it and match a literal newline (bounty H7-2b,
+                // #414). Per ADR-0017 (more permissive than the oracle is
+                // unfalsifiable), reject it. The escape *sequence* `\n` (the two chars
+                // backslash+`n`) is a real `\n`-escape and is consumed by the `b'\\'`
+                // arm below — only an actual newline *byte* is rejected. A backslash
+                // does **not** escape a following newline byte: Python's grammar
+                // tokenizer's `\\.` escape cannot match `\n`, so `"a\<LF>b"` still
+                // breaks at the newline (the `b'\\'` arm checks before skipping).
+                b'\n' => {
+                    return Err(GrammarError::SyntaxError {
+                        line: self.line,
+                        col: self.col,
+                        msg: "Newline in string literal".to_string(),
+                    })
+                }
+                b'\\' if src.as_bytes().get(i + 1) == Some(&b'\n') => i += 1,
                 b'\\' => i += 2,
                 b'"' => {
                     i += 1;
@@ -367,8 +386,18 @@ impl<'a> Lexer<'a> {
     fn lex_regexp(&mut self) -> Result<Option<Tok>, GrammarError> {
         let src = self.src[self.pos..].to_string();
         let mut i = 1; // skip opening /
+        let mut saw_newline = false;
         while i < src.len() {
             match src.as_bytes()[i] {
+                b'\n' => {
+                    saw_newline = true;
+                    i += 1;
+                }
+                // A backslash does **not** escape a following newline byte: Python's
+                // grammar tokenizer rejects `/a\<LF>b/` too (the `\\.` escape cannot
+                // match `\n`). Skip only the backslash so the newline byte is seen and
+                // counted on the next iteration; otherwise `i += 2` would jump over it.
+                b'\\' if src.as_bytes().get(i + 1) == Some(&b'\n') => i += 1,
                 b'\\' => i += 2,
                 b'/' => {
                     i += 1;
@@ -379,6 +408,23 @@ impl<'a> Lexer<'a> {
                     let flag_str = &src[flag_start..i];
                     let pattern = src[1..i - 1 - flag_str.len()].to_string();
                     let flags = parse_re_flags(flag_str);
+                    // A literal newline inside a `/…/` literal is a build error unless
+                    // the `x` (verbose) flag is set — matching Python's
+                    // `_literal_to_pattern`: `GrammarError: You can only use newlines
+                    // in regular expressions with the `x` (verbose) flag`. lark-rs used
+                    // to scan past it and match a literal newline (bounty H7-2a, #414).
+                    // With `x`, Python allows it (verbose mode ignores unescaped
+                    // whitespace), so we accept. An escaped `\n` is the `b'\\'` arm and
+                    // is unaffected. Per ADR-0017 (more permissive is unfalsifiable).
+                    if saw_newline && flags & flags::VERBOSE == 0 {
+                        return Err(GrammarError::SyntaxError {
+                            line: self.line,
+                            col: self.col,
+                            msg: "You can only use newlines in regular expressions with \
+                                  the `x` (verbose) flag"
+                                .to_string(),
+                        });
+                    }
                     self.advance(i);
                     return Ok(Some(Tok::Regexp(pattern, flags)));
                 }

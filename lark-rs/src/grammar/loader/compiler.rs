@@ -231,6 +231,15 @@ pub(super) struct GrammarCompiler {
     /// Built up front (first pass) so a later `%import` directive's targets are
     /// already known when an earlier directive's closure is copied.
     pub(super) import_alias_map: HashMap<Vec<String>, HashMap<String, String>>,
+    /// Renamed origins already copied by a previous `import_rule_closure` call
+    /// (#372). Two rules independently imported from the same module can have
+    /// overlapping interior closures; the shared interior origin must be copied
+    /// **once**, or the duplicate origin is a spurious reduce/reduce the build
+    /// rejects. `import_rule_closure` skips an interior origin already in this set
+    /// — scoped to *import-copied* origins only (never a user-authored rule of the
+    /// same name), so a genuine collision between a user rule and a mangled import
+    /// origin is still rejected, exactly as Python's "defined more than once".
+    pub(super) imported_origins: HashSet<String>,
 }
 
 impl GrammarCompiler {
@@ -270,6 +279,7 @@ impl GrammarCompiler {
             anon_kinds: HashMap::new(),
             reserved_term_names: HashSet::new(),
             import_alias_map: HashMap::new(),
+            imported_origins: HashSet::new(),
         }
     }
 
@@ -1035,8 +1045,21 @@ impl GrammarCompiler {
                 // terminal, mirroring Python's "Terminals %s were marked to ignore
                 // but were not defined!" (a bare `%ignore WS` does not auto-import).
                 IgnoreEntry::Named(name) => {
-                    if !self.terminals.iter().any(|t| t.name == name) {
-                        return Err(GrammarError::UndefinedTerminal { name });
+                    // A `%ignore NAME` whose terminal is absent, **or** present only
+                    // as a pattern-less `%declare`d terminal, is rejected — matching
+                    // Python's `LexError: Ignore terminals are not defined: {…}`. A
+                    // declared terminal carries no pattern and is absent from the
+                    // lexer's terminal list, so Python's ignore-set difference is
+                    // non-empty even though the name *is* defined as a symbol; our
+                    // existing presence check passed for it (bounty H7-1, #414). Per
+                    // ADR-0017, being more permissive than the oracle is unfalsifiable,
+                    // so we reject it at build.
+                    match self.terminals.iter().find(|t| t.name == name) {
+                        None => return Err(GrammarError::UndefinedTerminal { name }),
+                        Some(t) if t.declared => {
+                            return Err(GrammarError::UndefinedTerminal { name })
+                        }
+                        Some(_) => {}
                     }
                     ignore_names.push(name);
                 }

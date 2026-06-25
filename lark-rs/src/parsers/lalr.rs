@@ -58,6 +58,10 @@ pub struct ParseTable {
     pub symbols: SymbolTable,
     /// Size of the terminal id range; non-terminal GOTO index is `id - this`.
     pub n_terminals: usize,
+    /// Python Lark's `propagate_positions` (carried from the [`CompiledGrammar`]):
+    /// the reducer threads it to the [`TreeOutputBuilder`](super::tree_builder) so a
+    /// node's `meta` spans its pre-filter children (#402).
+    pub propagate_positions: bool,
 }
 
 impl ParseTable {
@@ -473,6 +477,38 @@ pub fn build_lalr_table(
             candidates.sort_unstable();
             candidates.dedup();
 
+            // Collapse candidates that are the *same reduction* modulo tree-naming:
+            // two rules sharing `origin` + `expansion` differ only by an alias /
+            // `tree_name` (`p: "a"? -> al1 | "b"? -> al2`, both nullable → two
+            // `p -> ε` reductions; or a helper's byte-identical twin ε arms). Python
+            // Lark keeps the alias as tree-naming metadata *outside* the LALR
+            // reduce/reduce comparison and resolves a same-origin/same-expansion tie
+            // by rule order (first arm wins), so this is not a real collision. Keep
+            // the lowest-`order` representative per (origin, expansion) group — the
+            // first arm — matching Python (#401, H6-3; also folds H6-4's identical
+            // ε arms). Genuinely distinct reductions (different `expansion`) are
+            // untouched and still error below. The winning rule's `tree_name` /
+            // alias / placeholder options drive the built node, exactly as the
+            // first-arm reduction would.
+            if candidates.len() > 1 {
+                let mut by_group: BTreeMap<(SymbolId, &[SymbolId]), usize> = BTreeMap::new();
+                for &ri in &candidates {
+                    let key = (rules[ri].origin, rules[ri].expansion.as_slice());
+                    by_group
+                        .entry(key)
+                        .and_modify(|best| {
+                            if rules[ri].order < rules[*best].order {
+                                *best = ri;
+                            }
+                        })
+                        .or_insert(ri);
+                }
+                if by_group.len() < candidates.len() {
+                    candidates = by_group.into_values().collect();
+                    candidates.sort_unstable();
+                }
+            }
+
             let winner = if candidates.len() > 1 {
                 let mut by_prio = candidates.clone();
                 by_prio.sort_by_key(|&ri| std::cmp::Reverse(rules[ri].options.priority));
@@ -529,6 +565,7 @@ pub fn build_lalr_table(
         rules: rules.clone(),
         symbols: grammar.symbols.clone(),
         n_terminals,
+        propagate_positions: grammar.propagate_positions,
     })
 }
 
@@ -661,7 +698,9 @@ impl ParserStack {
         for _ in 0..len {
             self.state_stack.pop();
         }
-        let value = TreeOutputBuilder::new(&table.rules).assemble(rule_idx, child_values);
+        let value =
+            TreeOutputBuilder::with_propagate_positions(&table.rules, table.propagate_positions)
+                .assemble(rule_idx, child_values);
 
         let top_state = self.position();
         let nt_index = rule.origin.index() - table.n_terminals;
