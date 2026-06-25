@@ -1,5 +1,123 @@
 [
   {
+    "name": "aliased_nullable",
+    "grammar": "\nstart: p\np: \"a\"? -> al1 | \"b\"? -> al2\n",
+    "ambiguity": "resolve",
+    "lexer": "dynamic",
+    "cases": [
+      {
+        "input": "",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "al1",
+              "children": []
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "a",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "al1",
+              "children": []
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "b",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "al2",
+              "children": []
+            }
+          ]
+        },
+        "error": null
+      }
+    ]
+  },
+  {
+    "name": "aliased_nullable",
+    "grammar": "\nstart: p\np: \"a\"? -> al1 | \"b\"? -> al2\n",
+    "ambiguity": "explicit",
+    "lexer": "dynamic",
+    "cases": [
+      {
+        "input": "",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "al1",
+              "children": []
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "a",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "al1",
+              "children": []
+            }
+          ]
+        },
+        "error": null
+      },
+      {
+        "input": "b",
+        "should_parse": true,
+        "ok": true,
+        "tree": {
+          "type": "tree",
+          "data": "start",
+          "children": [
+            {
+              "type": "tree",
+              "data": "al2",
+              "children": []
+            }
+          ]
+        },
+        "error": null
+      }
+    ]
+  },
+  {
     "name": "nulltail",
     "grammar": "\nstart: a\na: X a opt | X\nopt:\nX: /x/\n%ignore \" \"\n",
     "ambiguity": "resolve",
