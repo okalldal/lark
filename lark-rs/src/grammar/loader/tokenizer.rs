@@ -486,6 +486,7 @@ impl<'a> Lexer<'a> {
             .count();
         let name = rest[..len].to_string();
         self.reject_double_underscore_name(&name)?;
+        self.reject_letterless_name(&name)?;
         self.advance(len);
         Ok(Some(Tok::Rule(name)))
     }
@@ -498,6 +499,7 @@ impl<'a> Lexer<'a> {
             .count();
         let name = rest[..len].to_string();
         self.reject_double_underscore_name(&name)?;
+        self.reject_letterless_name(&name)?;
         self.advance(len);
         Ok(Some(Tok::Terminal(name)))
     }
@@ -513,9 +515,10 @@ impl<'a> Lexer<'a> {
     /// The predicate is deliberately scoped to the `__`-leading class — a name that
     /// *has* a letter but a disallowed `>= 2`-underscore prefix. A name with **no**
     /// alphabetic char at all (`_`/`__`/`_9`, which Python also rejects) is the sibling
-    /// finding #405 (H6-8), a different predicate handled separately; requiring a letter
-    /// here keeps the two changes composable. Non-leading underscores (`x__`/`a__b`) and
-    /// a single leading underscore + letter (`_x`/`_X`) stay accepted, matching Python.
+    /// finding #405 (H6-8), handled by [`Self::reject_letterless_name`]; requiring a letter
+    /// here keeps the two predicates composable (this one never fires on a letterless name).
+    /// Non-leading underscores (`x__`/`a__b`) and a single leading underscore + letter
+    /// (`_x`/`_X`) stay accepted, matching Python.
     fn reject_double_underscore_name(&self, name: &str) -> Result<(), GrammarError> {
         let leading_underscores = name.bytes().take_while(|&b| b == b'_').count();
         if leading_underscores >= 2 && name.bytes().any(|b| b.is_ascii_alphabetic()) {
@@ -525,6 +528,40 @@ impl<'a> Lexer<'a> {
                 msg: format!(
                     "Unexpected input: name {name:?} has a leading `__`; a rule or terminal \
                      name may have at most one leading underscore before its first letter"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    /// Reject a name token with **no alphabetic char** at all, mirroring Python Lark's
+    /// `RULE`/`TERMINAL` shape (`_?[a-z][_a-z0-9]*` / `_?[A-Z][_A-Z0-9]*`): both regexes
+    /// require AT LEAST ONE letter after the optional leading underscore. lark-rs's
+    /// `lex_rule`/`lex_terminal` otherwise consume any run of `[A-Za-z0-9_]`, so a
+    /// letterless name (`_`, `__`, `_9`) was silently accepted where Python rejects the
+    /// grammar at grammar-lex (`GrammarError: Unexpected input`). Per ADR-0017's
+    /// corollary, being more permissive than the oracle is unfalsifiable → a bug (#405,
+    /// bounty H6-8).
+    ///
+    /// This composes with — and is deliberately distinct from — `reject_double_underscore_name`
+    /// (#361, H5-2), which catches the `__foo` class (a name that *has* a letter but a
+    /// disallowed `>= 2`-underscore prefix). That predicate requires a letter, so it does
+    /// **not** fire on `_`/`__`/`_9`; this one closes exactly that no-letter-at-all gap.
+    /// Together they pin all of `_`/`__`/`_9`/`__foo` as rejected (a lone `_` is the
+    /// minimal letterless name — `"_"` — and is rejected here).
+    ///
+    /// Note: lark-rs's dispatch only routes a name to `lex_terminal` when its first
+    /// (post-underscore) char is uppercase, so a *purely* letterless name always lands in
+    /// `lex_rule`; the identical check in `lex_terminal` is belt-and-suspenders for the
+    /// terminal-name analog and keeps the two name-token lexers symmetric.
+    fn reject_letterless_name(&self, name: &str) -> Result<(), GrammarError> {
+        if !name.bytes().any(|b| b.is_ascii_alphabetic()) {
+            return Err(GrammarError::SyntaxError {
+                line: self.line,
+                col: self.col,
+                msg: format!(
+                    "Unexpected input: name {name:?} has no alphabetic character; a rule or \
+                     terminal name must contain at least one letter"
                 ),
             });
         }

@@ -43,8 +43,9 @@
 //! catalog: each test starts `#[ignore]`d and failing. Drop a test's `#[ignore]` when its
 //! bug is fixed to turn it into a permanent regression guard — H6-2 (the `{,n}`
 //! empty-lower-bound quantifier `{0,n}` normalization, #400), H6-5 (the
-//! `propagate_positions` filtered-token meta span, #402) and H6-7 (the duplicate-arm
-//! inline-group cross-product build blowup, #404) are fixed and now run by default.
+//! `propagate_positions` filtered-token meta span, #402), H6-7 (the duplicate-arm
+//! inline-group cross-product build blowup, #404) and H6-8 (the letterless rule/terminal
+//! name shape validation, #405) are fixed and now run by default.
 //! H6-3 + H6-4 (the spurious LALR reduce/reduce on nullable arms) are fixed and run by
 //! default (#401), with a differential-audit block pinning the adversarial
 //! nullable/alias/nested-optional cases. (The H6-3 Earley `al1`-vs-`al2` resolution
@@ -561,26 +562,82 @@ fn h6_5_meta_span_includes_filtered_tokens() {
 // Grammar name-token lexer: name shape validation.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// H6-8 (LOW, grammar-loader). Python's grammar lexer regexes are
+/// H6-8 (LOW, grammar-loader) — **FIXED** (#405). Python's grammar lexer regexes are
 /// `RULE = _?[a-z][_a-z0-9]*` and `TERMINAL = _?[A-Z][_A-Z0-9]*` — at most one leading
 /// underscore and **at least one** alphabetic char. lark-rs's `lex_rule`/`lex_terminal`
-/// (`grammar/loader/tokenizer.rs`) consume any run of name characters with no name-shape
-/// validation, so a name with no letter (`_`, `__`, `_9`) is accepted where Python
-/// rejects it at grammar-lex time. Distinct from H5-2/#361 (`__foo` — a name that *has*
-/// a letter but a disallowed `__` prefix); this is the no-letter-at-all class, a
+/// (`grammar/loader/tokenizer.rs`) consumed any run of name characters with no name-shape
+/// validation, so a name with no letter (`_`, `__`, `_9`) was accepted where Python
+/// rejects it at grammar-lex time (oracle-confirmed, lark 1.3.1: each rejects at build
+/// with `GrammarError: Unexpected input`). Distinct from H5-2/#361 (`__foo` — a name that
+/// *has* a letter but a disallowed `__` prefix); this is the no-letter-at-all class, a
 /// different validation predicate. Per ADR-0017 (being more permissive than the oracle
-/// is unfalsifiable), expected fix: reject-like-Python.
+/// is unfalsifiable), the fix rejects-like-Python: `reject_letterless_name` in the
+/// tokenizer, alongside #361's `reject_double_underscore_name`.
+///
+/// The two checks **compose**: `reject_double_underscore_name` requires a letter present,
+/// so it never fires on `_`/`__`/`_9`; `reject_letterless_name` closes exactly that gap.
+/// This test pins all three letterless rule-name forms reject, the terminal-name analog
+/// rejects, the accepted boundary (`_x`/`_X` single-underscore-then-letter, non-leading
+/// `x__`/`a__b`) still builds + parses, and #361's `__`-leading rejection still holds.
 #[test]
-#[ignore = "XFAIL (bounty H6-8): rule/terminal names with no alphabetic char accepted; Python rejects"]
 fn h6_8_letterless_names_rejected() {
+    // All three folded letterless rule-name forms (oracle: REJECT at build).
     for g in [
         "_: \"a\"\nstart: _\n",
         "__: \"a\"\nstart: __\n",
         "_9: \"a\"\nstart: _9\n",
     ] {
+        for lexer in [LexerType::Basic, LexerType::Contextual] {
+            assert!(
+                Lark::new(g, opts(ParserAlgorithm::Lalr, lexer.clone())).is_err(),
+                "H6-8 ({lexer:?}): Python rejects a name with no [a-z]/[A-Z] at grammar-lex; \
+                 lark-rs accepted it. grammar={g:?}"
+            );
+        }
+    }
+
+    // Terminal-name analog. A purely letterless name can carry no uppercase letter, so
+    // Python's grammar-of-grammars lexes `_9` as a (rejected) RULE rather than a TERMINAL;
+    // referencing a letterless name where a terminal is expected (`A: _9` / `%declare _9`)
+    // still rejects at grammar-lex. lark-rs's dispatch likewise routes a letterless name to
+    // `lex_rule`, but `reject_letterless_name` guards `lex_terminal` too (belt-and-suspenders),
+    // so these reject regardless of which name-token lexer the dispatch picks (oracle: REJECT).
+    for g in ["start: A\nA: _9\n", "start: _9\n%declare _9\n"] {
         assert!(
             Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).is_err(),
-            "H6-8: Python rejects a name with no [a-z]/[A-Z] at grammar-lex; lark-rs accepted it. grammar={g:?}"
+            "H6-8 (terminal analog): Python rejects a letterless name in a terminal position \
+             at grammar-lex; lark-rs accepted it. grammar={g:?}"
+        );
+    }
+
+    // Boundary — still accepted by both (oracle: BUILD + parse `a`): a single leading
+    // underscore followed by a letter (`_x`/`_X`), and non-leading underscores
+    // (`x__`/`a__b`). The fix must not regress these.
+    for (label, g) in [
+        ("single-underscore rule", "start: _x\n_x: \"a\"\n"),
+        ("single-underscore terminal", "start: _X\n_X: \"a\"\n"),
+        ("trailing underscores", "start: x__\nx__: \"a\"\n"),
+        ("mid underscores", "start: a__b\na__b: \"a\"\n"),
+    ] {
+        let lark =
+            Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).unwrap_or_else(|e| {
+                panic!("H6-8 boundary ({label}): must still build. {g:?} err={e:?}")
+            });
+        assert!(
+            lark.parse("a").is_ok(),
+            "H6-8 boundary ({label}): must still parse `a`. grammar={g:?}"
+        );
+    }
+
+    // #361 composition: a `__`-leading name that *has* a letter still rejects (the
+    // `reject_double_underscore_name` predicate, unaffected by the new check). Oracle: REJECT.
+    for g in [
+        "start: __foo\n__foo: \"a\"\n",
+        "start: __FOO\n__FOO: \"a\"\n",
+    ] {
+        assert!(
+            Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).is_err(),
+            "H6-8 (composes with #361): a `__`-leading name with a letter must still reject. grammar={g:?}"
         );
     }
 }
