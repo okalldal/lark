@@ -2,6 +2,8 @@
 description: Drive the entire open backlog onto a sprint integration branch in one orchestrated session, landing it as a single architect-approved omnibus PR — workers never merge, nothing reaches master except the omnibus
 ---
 
+> _Internal maintainer automation — not an invitation for external agents to claim issues or open PRs, and not a public bug-bounty program. See [`/CONTRIBUTING.md`](/CONTRIBUTING.md)._
+
 This is the codified **whole-backlog sprint**. Where `/next-task` takes *one* issue,
 `/start-sprint` runs the loop over *all* schedulable open issues in a single session,
 **staging** every result onto a temporary integration branch and presenting the whole

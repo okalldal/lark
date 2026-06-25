@@ -1,5 +1,11 @@
 # lark-rs bug-bounty findings — round 6 (h6)
 
+> **Internal maintainer document — not a public bug-bounty program.**
+> "Bug-bounty" and "strike team" here are shorthand for an internal differential
+> parity audit of `lark-rs/` against Python Lark (our oracle). They imply **no**
+> reward eligibility, issue assignment, or acceptance of unsolicited PRs. External
+> contributors: see [`/CONTRIBUTING.md`](/CONTRIBUTING.md) and [`/SECURITY.md`](/SECURITY.md) first.
+
 ## Target and method
 
 - **Baseline SHA (frozen):** `b4ab6cd578b1bd334f7fddc79781202fc66bba4a`

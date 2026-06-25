@@ -2,6 +2,8 @@
 description: Regenerate Python-Lark oracle fixtures and verify freshness
 ---
 
+> _Internal maintainer automation — not an invitation for external agents to claim issues or open PRs, and not a public bug-bounty program. See [`/CONTRIBUTING.md`](/CONTRIBUTING.md)._
+
 Regenerate the committed oracle fixtures from Python Lark (the ground truth).
 **Never hand-edit anything under `lark-rs/tests/fixtures/oracles/`** — the
 `.claude/settings.json` deny rules enforce this; the generators are the only

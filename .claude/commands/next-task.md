@@ -2,6 +2,8 @@
 description: Survey the backlog, pick the highest-value task, execute it end-to-end
 ---
 
+> _Internal maintainer automation — not an invitation for external agents to claim issues or open PRs, and not a public bug-bounty program. See [`/CONTRIBUTING.md`](/CONTRIBUTING.md)._
+
 This is the codified flow for "what is the most high-value work in this repo?
 Take it on as a task." Survey the backlog, pick **one** task, announce it, then
 carry it through implementation and `/finish-task` in this session.

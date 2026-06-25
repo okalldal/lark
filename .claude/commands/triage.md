@@ -2,6 +2,8 @@
 description: Order the open backlog and apply the label state machine
 ---
 
+> _Internal maintainer automation — not an invitation for external agents to claim issues or open PRs, and not a public bug-bounty program. See [`/CONTRIBUTING.md`](/CONTRIBUTING.md)._
+
 Keep the backlog's durable state (`lark-rs/docs/LABELS.md`) accurate so
 `/next-task` and `/review-pr` can read it instead of re-deriving priority every
 run. Triage **labels and orders**; it does not implement anything.
