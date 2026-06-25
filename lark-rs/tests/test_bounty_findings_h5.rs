@@ -73,38 +73,72 @@ fn collect_token_types<'a>(t: &'a ParseTree, out: &mut Vec<&'a str>) {
 // Lexer: terminal width inference / ranking.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// H5-1 (MEDIUM, lexer). `Pattern::max_width()` (`src/grammar/terminal.rs`) sizes a
-/// regex by `regex_syntax::parse(...).ok().and_then(hir_max_width_chars)`. For any
-/// *lowerable-lookaround* terminal (`(?=…)`, `(?<=…)`, …) `regex_syntax` **rejects**
-/// the source, so `.ok()` is `None`, which `plan.rs` maps to `usize::MAX` (unbounded).
+/// H5-1 (MEDIUM, lexer) — **fixed (#360); now a regression guard.** `Pattern::max_width()`
+/// (`src/grammar/terminal.rs`) used to size a regex by
+/// `regex_syntax::parse(...).ok().and_then(hir_max_width_chars)`. For any
+/// *lowerable-lookaround* terminal (`(?=…)`, `(?<=…)`, …) `regex_syntax` **rejects** the
+/// source, so `.ok()` was `None`, which `plan.rs` maps to `usize::MAX` (unbounded).
 /// Python's `get_regexp_width` parses via `sre_parse`, which sizes every standard
 /// lookaround (assertions are zero-width) and returns a **finite** width. So at a
-/// same-span tie lark-rs sorts the finite-but-`None`-sized lookaround terminal *ahead*
-/// of a genuinely wider terminal, picking the wrong terminal type.
+/// same-span tie lark-rs sorted the finite-but-`None`-sized lookaround terminal *ahead*
+/// of a genuinely wider terminal and picked the wrong terminal type.
+///
+/// The fix sizes a lookaround terminal the parser rejects through the shared
+/// assertion-aware width walk (`lookaround::pattern_max_width`, the analogue of Python's
+/// `get_regexp_width(...)[1]`; assertions zero-width) instead of falling back to `None`.
+/// The sort key itself was already correct.
 ///
 /// Distinct from RC5/#268 ("max_width=None for finite regex"): #268 added the
 /// `hir_max_width_chars` walk for patterns `regex_syntax` *can* parse and pinned it
-/// with `/a+/`/`/aa?/`; this is the **parse-failure fallback branch** #268 left in
+/// with `/a+/`/`/aa?/`; this was the **parse-failure fallback branch** #268 left in
 /// place, exercised only by lookaround terminals (which the RC5 pin never builds).
-/// Expected fix: size lowerable-lookaround terminals to their finite `sre_parse` width
-/// (assertions zero-width) instead of `None`; the sort key itself is already correct.
+///
+/// Repro contract (verified against Python Lark 1.3.1): with `keep_all_tokens`, both at
+/// a same-span tie, the wider finite `REG=/a|zz/` (max_width 2) must beat the
+/// max_width-1 lookaround terminal under **both** lexers and for **both** the lookahead
+/// (`/a(?=b)/`) and lookbehind (`/(?<=x)a/`) forms — the catalog's noted variant.
 #[test]
-#[ignore = "XFAIL (bounty H5-1): lowerable-lookaround terminal gets max_width=None (unbounded), mis-ranking it ahead of a wider finite terminal"]
 fn h5_1_lookaround_terminal_width_misrank() {
-    // Both LA=/a(?=b)/ (max_width 1) and REG=/a|zz/ (max_width 2) match the span "a".
-    // Python's -max_width key puts REG (wider) first → token type REG. lark-rs sizes
-    // LA as unbounded (None) and picks LA.
-    let mut o = opts(ParserAlgorithm::Lalr, LexerType::Basic);
+    // The lookahead terminal LA=/a(?=b)/ (max_width 1) ties REG=/a|zz/ (max_width 2) on
+    // the span "a". Python's -max_width key puts REG (wider) first → token type REG.
+    for lexer in [LexerType::Basic, LexerType::Contextual] {
+        assert_picks_reg(
+            "start: t B\nt: LA | REG\nLA: /a(?=b)/\nREG: /a|zz/\nB: \"b\"\n",
+            "ab",
+            lexer,
+            "lookahead /a(?=b)/",
+        );
+    }
+    // The lookbehind variant /(?<=x)a/ (the catalog's "H5-1 / lookbehind" form) also
+    // sizes to max_width 1 in Python and must likewise lose to REG.
+    for lexer in [LexerType::Basic, LexerType::Contextual] {
+        assert_picks_reg(
+            "start: B t\nt: LB | REG\nLB: /(?<=x)a/\nREG: /a|zz/\nB: \"x\"\n",
+            "xa",
+            lexer,
+            "lookbehind /(?<=x)a/",
+        );
+    }
+}
+
+/// Build `grammar` (lalr + `lexer`, `keep_all_tokens`), parse `input`, and assert the
+/// wider finite `REG` terminal — not the max_width-1 lookaround terminal — was chosen
+/// at the same-span tie (H5-1).
+fn assert_picks_reg(grammar: &str, input: &str, lexer: LexerType, label: &str) {
+    let mut o = opts(ParserAlgorithm::Lalr, lexer.clone());
     o.keep_all_tokens = true;
-    let g = "start: t B\nt: LA | REG\nLA: /a(?=b)/\nREG: /a|zz/\nB: \"b\"\n";
-    let lark = Lark::new(g, o).expect("H5-1: grammar builds");
-    let tree = lark.parse("ab").expect("H5-1: 'ab' parses");
+    let lark = Lark::new(grammar, o)
+        .unwrap_or_else(|e| panic!("H5-1 ({label}, {lexer:?}): grammar builds: {e}"));
+    let tree = lark
+        .parse(input)
+        .unwrap_or_else(|e| panic!("H5-1 ({label}, {lexer:?}): {input:?} parses: {e}"));
     let mut types = Vec::new();
     collect_token_types(&tree, &mut types);
     assert!(
         types.contains(&"REG"),
-        "H5-1: Python sizes REG (max_width 2) wider than LA (max_width 1) and picks REG; \
-         lark-rs sized the lookaround LA as unbounded (None) and picked it. types={types:?}"
+        "H5-1 ({label}, {lexer:?}): Python sizes REG (max_width 2) wider than the \
+         max_width-1 lookaround terminal and picks REG; lark-rs must too (not size the \
+         lookaround as unbounded). types={types:?}"
     );
 }
 

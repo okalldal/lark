@@ -274,6 +274,25 @@ pub(crate) fn pattern_min_width_is_zero(pattern: &str) -> Option<bool> {
     Some(lower::width_range(&node).0 == 0)
 }
 
+/// The **maximum** match width of `pattern` in characters — the lark-rs equivalent of
+/// Python Lark's `get_regexp_width(regexp)[1]` (`sre_parse.getwidth()[1]`), the second
+/// key of the terminal-ordering sort (`lark/lexer.py`). The outer `Option` reports
+/// *parseability* (`None` = this front-end cannot parse the pattern, e.g. a genuine
+/// backreference — the caller then falls back to its own sizing); the inner `Option`
+/// is the width itself (`None` = unbounded, the `MAXWIDTH`/∞ Python reports for a `*` /
+/// `+` / `{m,}`).
+///
+/// This is the assertion-aware counterpart of [`pattern_min_width_is_zero`]: it sees
+/// lookaround/boundary assertions the `regex` crate cannot even compile (`(?=…)`,
+/// `(?<=…)`, `\b`) and sizes them at their finite consumed width (assertions are
+/// zero-width), exactly as `sre_parse` does — so a lowerable-lookaround terminal like
+/// `/a(?=b)/` sizes to `1`, not unbounded. Computed via the same shared
+/// [`width_range`](lower::width_range) walk, so the min and max sides can never drift.
+pub(crate) fn pattern_max_width(pattern: &str) -> Option<Option<usize>> {
+    let node = parse(pattern).ok()?;
+    Some(lower::width_range(&node).1)
+}
+
 struct Parser<'a> {
     src: &'a str,
     chars: Vec<char>,
