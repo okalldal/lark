@@ -25,7 +25,7 @@
   normalization, the lookaround `OutOfScope` taxonomy, `ESCAPED_STRING`'s adaptation).
 - **Reproduction command:**
   ```bash
-  cargo test --test test_bounty_findings_h5 -- --ignored   # 8 XFAILs, all fail today
+  cargo test --test test_bounty_findings_h5 -- --ignored   # remaining XFAILs (H5-8 fixed, #366)
   ```
   (H5-9 is a measured perf/representation finding with no committed gate — see below.)
 
@@ -256,6 +256,8 @@
 
 ### H5-8 — Anonymous `"\\"` / `"\r\n"` literals mis-named
 
+- **Status:** FIXED (#366) — the two missing `TERMINAL_NAMES` rows were added; the
+  XFAIL `h5_8_anon_terminal_naming_table` now passes un-ignored.
 - **Severity:** Low
 - **Evidence:** A
 - **Freshness:** fresh (one root cause, two surfaces)
