@@ -236,6 +236,18 @@ pub struct PatternRe {
 /// * **`\b` inside a character class** (H9b) — Python reads `[\b]` as the backspace char
 ///   `\x08` (only *outside* a class is `\b` a word boundary); the regex crate rejects
 ///   `\b` in a class. We rewrite the in-class `\b` to `\x08`.
+/// * **empty-lower-bound quantifier `{,n}`** (#400, H6-2) — Python `re` reads `{,n}` (one
+///   or more upper digits, empty lower bound) as `{0,n}` (`re.match(r'a{,3}b','aaab')`
+///   matches); the regex crate requires a decimal lower bound and rejects the bare form
+///   ("repetition quantifier expects a valid decimal"). We insert the implicit `0`,
+///   rewriting `{,n}` → `{0,n}` — outside a class only (inside `[...]` a `{` is a literal)
+///   and only on a `base_quantifier_len`-valid `{,n}`. A `{,x}` with a non-digit upper, or
+///   an unterminated `{,3`, is a literal brace run in Python and is left byte-exact. The
+///   inverted-bound `{m,n}` with `m>n` (`a{3,2}`) is *not* touched — it has a lower bound,
+///   so it never matches this shape and stays rejected by both engines. **Scoped to
+///   `n ≥ 1`:** the fully-empty `{,}` — which Python reads as `{0,}` (== `*`), *not* a
+///   literal — is a distinct divergence tracked in #447 (`base_quantifier_len` itself does
+///   not yet recognize `{,}`), deliberately out of this rewrite's scope.
 ///
 /// Every other escape — class-special ones like `\]`, idiom-pinned ones like `[^\/]`
 /// (the bundled `lark.REGEXP` shape), and `\b`/`\B` *outside* a class (the parked
@@ -303,6 +315,27 @@ fn normalize_python_escapes(pattern: &str) -> String {
                 }
             }
             continue;
+        }
+        // Empty-lower-bound quantifier `{,n}` → `{0,n}` (#400, H6-2). Python `re` reads
+        // `{,n}` (n ≥ 1 upper digits) as `{0,n}`, but the regex crate requires a decimal
+        // lower bound and rejects the bare form. We supply the implicit `0` so the crate
+        // sees the equivalent pattern. Outside a class only (inside `[...]` a `{` is a
+        // literal), and only on a `base_quantifier_len`-valid `{,n}` — a `{,x}` with a
+        // non-digit upper / unterminated `{,3` stays a literal brace run, as Python reads
+        // it. The fully-empty `{,}` (which Python reads as `{0,}` == `*`, not a literal) is
+        // out of scope here and tracked in #447. (A `\{` never reaches this branch: the
+        // `\\` branch above consumes the escape pair first.)
+        if c == '{' && !in_class {
+            if let Some(upper_len) = empty_lower_bound_quantifier_upper_len(&chars, i) {
+                out.push_str("{0,");
+                // Copy the `n}` verbatim (upper digits + closing brace).
+                let rest_start = i + 2; // past `{,`
+                for &d in &chars[rest_start..rest_start + upper_len + 1] {
+                    out.push(d);
+                }
+                i = rest_start + upper_len + 1; // past the `}`
+                continue;
+            }
         }
         if c == '[' && !in_class {
             in_class = true;
@@ -773,6 +806,46 @@ fn base_quantifier_len(chars: &[char], i: usize) -> Option<usize> {
     }
 }
 
+/// If `chars[i]` opens a Python-`re` **empty-lower-bound quantifier** `{,n}` (no lower
+/// bound, `≥1` upper digit, e.g. the `{,3}` in `a{,3}b`), return the length of the
+/// upper-bound digit run `n` (so `{,3}` ⇒ `1`); else `None`. Python `re` reads `{,n}` as
+/// `{0,n}` (`re.match(r'a{,3}b','aaab')` matches), but the Rust `regex` crate requires a
+/// decimal lower bound and rejects the bare form ("repetition quantifier expects a valid
+/// decimal"), so `normalize_python_escapes` inserts the implicit `0` to feed the crate
+/// the equivalent `{0,n}` (#400, H6-2).
+///
+/// This is precisely the **`{,n}` (n ≥ 1) subcase** of [`base_quantifier_len`]: it
+/// returns `Some` iff `base_quantifier_len` would accept this `{…}` *and* the lower bound
+/// is empty with the comma present and ≥1 upper digit. So the rewrite fires exactly on
+/// the well-formed empty-lower-bound form and never on a literal `{` (`{x}`, `{`), an
+/// `{m,n}` carrying a lower bound, or an open `{m,}`. The caller guarantees we are outside
+/// a character class and not after a `\` (a `\{` is a literal brace), matching the
+/// class-/escape-awareness the rest of `normalize_python_escapes` enforces.
+///
+/// **`{,}` is deliberately excluded** (returns `None`): Python reads the fully-empty `{,}`
+/// as `{0,}` (== `*`), *not* as a literal brace, but `base_quantifier_len` does not yet
+/// recognize it, so rewriting it here would be inconsistent with the rest of the
+/// quantifier machinery. That distinct divergence is tracked in #447.
+fn empty_lower_bound_quantifier_upper_len(chars: &[char], i: usize) -> Option<usize> {
+    if chars.get(i).copied()? != '{' || chars.get(i + 1).copied()? != ',' {
+        return None;
+    }
+    // `{,` — count the upper-bound digits; in scope iff `≥1` digit then `}`. (A `{,}` with
+    // zero upper digits is Python's `{0,}` == `*`, but is out of this rewrite's scope —
+    // #447; a non-digit upper `{,x}` / unterminated `{,3` is a literal brace run.)
+    let upper_start = i + 2;
+    let mut j = upper_start;
+    while chars.get(j).is_some_and(|c| c.is_ascii_digit()) {
+        j += 1;
+    }
+    let upper_len = j - upper_start;
+    if upper_len > 0 && chars.get(j) == Some(&'}') {
+        Some(upper_len)
+    } else {
+        None
+    }
+}
+
 impl PatternRe {
     pub fn new(pattern: impl Into<String>, flags: u32) -> Result<Self, GrammarError> {
         let raw = pattern.into();
@@ -1039,6 +1112,51 @@ mod tests {
         // The existing \< \> normalization still applies; other escapes byte-exact.
         assert_eq!(normalize_python_escapes("\\<\\>"), "<>");
         assert_eq!(normalize_python_escapes("[^\\/]"), "[^\\/]");
+    }
+
+    /// H6-2 (#400): `normalize_python_escapes` rewrites the Python-`re` empty-lower-bound
+    /// quantifier `{,n}` (n ≥ 1) → `{0,n}` (Python reads `{,n}` as `{0,n}`; the regex
+    /// crate rejects the bare form). The rewrite is class-aware (a `{` inside `[...]` is a
+    /// literal), escape-aware (a `\{` is a literal brace), and fires only on a
+    /// `base_quantifier_len`-valid `{,n}` — a `{,x}` with a non-digit upper, an
+    /// unterminated `{,3`, or a lower-bounded `{m,n}` is left byte-exact. The inverted
+    /// bound `{3,2}` is left untouched (it has a lower bound, so it never matches this
+    /// shape and stays rejected downstream). The fully-empty `{,}` (Python's `{0,}` == `*`)
+    /// is out of scope (#447) and currently passes through unchanged.
+    #[test]
+    fn normalize_rewrites_empty_lower_bound_quantifier() {
+        // The bug repro and minimal forms.
+        assert_eq!(normalize_python_escapes("a{,3}b"), "a{0,3}b");
+        // The rewrite is a pure shape translation, position-agnostic — `{,3}` ⇒ `{0,3}`
+        // exactly as a bare `{0,3}` is itself. A leading quantifier with nothing to repeat
+        // is then a Python `re` error AND a lark-rs build error alike (the shared, pre-
+        // existing "nothing to repeat" mis-categorization is #448) — this only pins the
+        // normalization output, not that a standalone `{,3}` is accepted.
+        assert_eq!(normalize_python_escapes("{,3}"), "{0,3}");
+        assert_eq!(normalize_python_escapes("a{,12}"), "a{0,12}"); // multi-digit upper
+                                                                   // Multiple occurrences in one pattern are all rewritten.
+        assert_eq!(normalize_python_escapes("a{,2}b{,3}"), "a{0,2}b{0,3}");
+        // The other well-formed bound forms are untouched (they already have a lower
+        // bound or are open-ended — the regex crate accepts them verbatim).
+        assert_eq!(normalize_python_escapes("a{2,3}"), "a{2,3}");
+        assert_eq!(normalize_python_escapes("a{2,}"), "a{2,}");
+        assert_eq!(normalize_python_escapes("a{3}"), "a{3}");
+        // Inverted bound — NOT this shape; left byte-exact (stays rejected by both engines).
+        assert_eq!(normalize_python_escapes("a{3,2}b"), "a{3,2}b");
+        // Class-aware: a `{,3}` *inside* a character class is a set of literal chars in
+        // Python (`{`, `,`, `3`, `}`), not a quantifier — left untouched.
+        assert_eq!(normalize_python_escapes("[a{,3}]"), "[a{,3}]");
+        // Escape-aware: a `\{` is a literal brace, never a quantifier open.
+        assert_eq!(normalize_python_escapes("a\\{,3}"), "a\\{,3}");
+        // A non-digit upper (`{,x}`) / unterminated (`{,3`) is a literal brace run in
+        // Python — left untouched.
+        assert_eq!(normalize_python_escapes("a{,x}b"), "a{,x}b"); // non-digit upper
+        assert_eq!(normalize_python_escapes("a{,3"), "a{,3"); // unterminated (no `}`)
+                                                              // `{,}` is OUT OF SCOPE here (#447): Python reads it as `{0,}` (== `*`), NOT a
+                                                              // literal — but `base_quantifier_len` doesn't yet recognize it, so this rewrite
+                                                              // leaves it unchanged (lark-rs then still rejects it; the parity fix is #447).
+                                                              // This pins only the *current* normalize pass-through, not an oracle claim.
+        assert_eq!(normalize_python_escapes("a{,}b"), "a{,}b");
     }
 
     /// H6/H7 (#333): the quantifier-shape dialect screen refuses possessive (`a++`) and
