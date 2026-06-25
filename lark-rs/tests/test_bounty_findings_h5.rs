@@ -12,10 +12,11 @@
 //! a **regex-crate-only named-group** spelling, a **Turkish-i case-fold** boundary,
 //! and the **anonymous-terminal naming table** (`\\`→`BACKSLASH`, `\r\n`→`CRLF`).
 //!
-//! Each test asserts the **Python Lark 1.3.1** (oracle) behavior. This file is an XFAIL
-//! catalog: every test below is `#[ignore]`d and fails today. Drop a test's `#[ignore]`
-//! when its bug is fixed to turn it into a permanent regression guard. Run the still-open
-//! XFAILs with:
+//! Each test asserts the **Python Lark 1.3.1** (oracle) behavior. This file started as an
+//! XFAIL catalog where every test was `#[ignore]`d and failed; as findings are fixed their
+//! `#[ignore]` is dropped, turning them into permanent regression guards (so far: H5-1,
+//! #360/#456; H5-2, #361/#446; H5-3, fixed via #347/#378 and pinned here; H5-8). The
+//! remaining `#[ignore]`d tests are the still-open XFAILs — run them with:
 //!
 //!     cargo test --test test_bounty_findings_h5 -- --ignored
 //!
@@ -202,26 +203,166 @@ fn h5_2_double_underscore_name_rejected() {
 // EBNF loader: cross-alternative empty-arm dedup.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// H5-3 (MEDIUM, ebnf-loader). A bracket-optional `[A]` alternative distributes an
-/// absent arm carrying a positional gap marker (`gaps=[..]`), while a sibling explicit
-/// empty (`|`) alternative is a bare `(syms=[], gaps=[])`. `dedup_and_check_alts`
-/// (`src/grammar/loader/compiler.rs`) keys dedup on the full `CompiledAlt` (syms+gaps),
-/// so the two empty `x ->` arms differ by their gap marker and **both** survive into
-/// lowering, colliding as a spurious LALR reduce/reduce. Python's `EBNF_to_BNF`
-/// collapses them to one empty production and accepts. `A?`/`(A)?` in the same shape
-/// route through the within-expansion canonicalizer and are fine — only `[...]` trips it.
-/// Expected fix: canonicalize empty alternatives that differ only in gap markers in
-/// `dedup_and_check_alts` (reusing `ebnf.rs`'s MP-vs-non-MP None-count rule).
+/// Summarize a child list as a compact string: a token's value, `_` for a `None`
+/// placeholder, `(data)` for a subtree — matching the `shape` helper used in
+/// `test_placeholders_and_priority.rs`, so the H5-3 placeholder counts read directly.
+fn shape(children: &[Child]) -> String {
+    children
+        .iter()
+        .map(|c| match c {
+            Child::Token(t) => t.value.clone(),
+            Child::None => "_".to_string(),
+            Child::Tree(t) => format!("({})", t.data),
+        })
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Parse `inp` and return the single child rule's shape as `x[..]` (the grammars below
+/// are all `start: x` over a one-rule `x`). Panics if the build or parse fails — a
+/// build failure here is exactly the H5-3 regression (spurious reduce/reduce).
+fn x_shape(g: &str, mp: bool, inp: &str) -> String {
+    let lark = Lark::new(
+        g,
+        LarkOptions {
+            maybe_placeholders: mp,
+            ..opts(ParserAlgorithm::Lalr, LexerType::Contextual)
+        },
+    )
+    .unwrap_or_else(|e| panic!("H5-3 build (mp={mp}): grammar={g:?} err={e:?}"));
+    let tree = lark
+        .parse(inp)
+        .unwrap_or_else(|e| panic!("H5-3 parse (mp={mp}, inp={inp:?}): {e:?}"));
+    match tree {
+        ParseTree::Tree(t) => match &t.children[0] {
+            Child::Tree(x) => format!("x[{}]", shape(&x.children)),
+            other => panic!("H5-3: expected `x` subtree, got {other:?}"),
+        },
+        other => panic!("H5-3: expected `start` tree, got {other:?}"),
+    }
+}
+
+/// H5-3 (MEDIUM, ebnf-loader) — regression guard (was XFAIL; **fixed**, no longer
+/// `#[ignore]`d). A bracket-optional `[A]` alternative distributes an absent arm
+/// carrying a positional gap marker (`gaps=[..]`), while a sibling explicit empty (`|`)
+/// alternative is a bare `(syms=[], gaps=[])`. The bug: `dedup_and_check_alts`
+/// (`src/grammar/loader/compiler.rs`) keyed dedup on the full `CompiledAlt` (syms+gaps),
+/// so the two empty `x ->` arms differed only by their gap marker and **both** survived
+/// into lowering, colliding as a spurious LALR reduce/reduce — where Python's
+/// `EBNF_to_BNF` collapses them to one empty production and accepts. `A?`/`(A)?` in the
+/// same shape route through the within-expansion canonicalizer and were always fine —
+/// only `[...]` tripped it.
+///
+/// **Fixed on the sprint branch**, not by a fresh change for this issue but as a
+/// documented side effect of #347/#378 (commit `fe457ca`, "collapse equal
+/// named-terminal-vs-literal alternation"): `dedup_and_check_alts`'s stage-1 `alt_key`
+/// now drops the gap vector for an empty arm (`if syms.is_empty() { Vec::new() }`), so it
+/// dedups empty arms on emptiness + alias alone, exactly the canonicalization H5-3's fix
+/// contract asked for. The surviving arm keeps the **first** occurrence's real gaps, so
+/// the `maybe_placeholders` `None` count matches Python (which keeps the first absent
+/// arm's `empty_indices`). This test was promoted to a permanent regression guard;
+/// `h5_3_empty_arm_collapse_does_not_over_collapse` pins the other side (non-empty
+/// colliding arms still rejected). Oracle: Python Lark 1.3.1, both MP modes.
 #[test]
-#[ignore = "XFAIL (bounty H5-3): [A] optional alternative beside an explicit empty | arm spuriously rejected as reduce/reduce; Python accepts"]
 fn h5_3_optional_plus_empty_alt_accepted() {
-    let g = "start: x\nx: [A]\n  |\nA: \"a\"\n";
-    let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual))
-        .expect("H5-3: Python accepts `[A] | (empty)`; lark-rs raised a spurious reduce/reduce");
-    assert!(
-        lark.parse("").is_ok(),
-        "H5-3: empty input parses to start[x[]] under Python"
+    // Core finding: `[A]` beside an explicit empty `|` arm. Both MP modes pinned —
+    // Python: no-MP `''`→`x[]`, MP `''`→`x[None]` (the `[A]` absent arm's one slot),
+    // `'a'`→`x[A]` either way. (Independent of maybe_placeholders for the *accept*, but
+    // the placeholder count is MP-specific.)
+    let g_main = "start: x\nx: [A]\n  |\nA: \"a\"\n";
+    assert_eq!(x_shape(g_main, false, ""), "x[]", "H5-3 no-MP empty");
+    assert_eq!(
+        x_shape(g_main, true, ""),
+        "x[_]",
+        "H5-3 MP empty → one None"
     );
+    assert_eq!(x_shape(g_main, false, "a"), "x[a]", "H5-3 no-MP present");
+    assert_eq!(x_shape(g_main, true, "a"), "x[a]", "H5-3 MP present");
+
+    // Order flip: explicit empty `|` *before* `[A]` collapses identically (builds, no
+    // reduce/reduce). The surviving arm is the **first** occurrence — here the bare `|`
+    // (zero slots) — so under MP the count is `x[]` (zero Nones), *not* `x[None]`. This
+    // is the mirror of `[A] | ε` above (where `[A]` is first → one None): the
+    // placeholder count is the first empty arm's slot count, exactly as Python keeps the
+    // first absent arm's `empty_indices`. Oracle-confirmed both modes.
+    let g_flip = "start: x\nx:\n  | [A]\nA: \"a\"\n";
+    assert_eq!(x_shape(g_flip, false, ""), "x[]", "H5-3 flip no-MP");
+    assert_eq!(
+        x_shape(g_flip, true, ""),
+        "x[]",
+        "H5-3 flip MP → first arm (bare) zero Nones"
+    );
+
+    // Multi-symbol bracket `[A B] | ε`: the absent arm is two kept slots, so MP emits
+    // two Nones (Python `FindRuleSize`); present input keeps both tokens.
+    let g_ab = "start: x\nx: [A B]\n  |\nA: \"a\"\nB: \"b\"\n";
+    assert_eq!(x_shape(g_ab, false, ""), "x[]", "H5-3 [A B] no-MP empty");
+    assert_eq!(
+        x_shape(g_ab, true, ""),
+        "x[_,_]",
+        "H5-3 [A B] MP → two Nones"
+    );
+    assert_eq!(x_shape(g_ab, true, "ab"), "x[a,b]", "H5-3 [A B] MP present");
+
+    // Two distinct brackets `[A] | [B]`: both empty arms collapse to one; the surviving
+    // arm is the **first** (`[A]`'s one slot), so MP `''`→`x[None]` (one, not two).
+    let g_ab2 = "start: x\nx: [A]\n  | [B]\nA: \"a\"\nB: \"b\"\n";
+    assert_eq!(x_shape(g_ab2, false, ""), "x[]", "H5-3 [A]|[B] no-MP empty");
+    assert_eq!(
+        x_shape(g_ab2, true, ""),
+        "x[_]",
+        "H5-3 [A]|[B] MP → first arm's one None"
+    );
+
+    // Controls from the catalog: `A? | ε` and `(A)? | ε` build and route through the
+    // within-expansion canonicalizer. NB Python emits **no** placeholder for `?` even
+    // under MP (only `[...]` does), so both modes give `x[]` — this is the distinguishing
+    // detail vs the `[A]` form above, oracle-confirmed.
+    for (label, g) in [
+        ("A? | ε", "start: x\nx: A?\n  |\nA: \"a\"\n"),
+        ("(A)? | ε", "start: x\nx: (A)?\n  |\nA: \"a\"\n"),
+    ] {
+        for mp in [false, true] {
+            assert_eq!(x_shape(g, mp, ""), "x[]", "H5-3 control {label} (mp={mp})");
+        }
+    }
+}
+
+/// H5-3 over-collapse guard. The empty-arm collapse in `dedup_and_check_alts` must touch
+/// **only** empty (`syms.is_empty()`) arms: a pair of *non-empty* arms that differ only
+/// in placeholder positions, or only in alias, must still be rejected as Python's "Rules
+/// defined twice" (a real reduce/reduce / duplicate production), on every backend at
+/// load. This is the falsifiable other side of the fix — without it, collapsing empties
+/// could be mis-generalized to swallow a genuine collision. Oracle: Python Lark 1.3.1
+/// rejects both at grammar build.
+#[test]
+fn h5_3_empty_arm_collapse_does_not_over_collapse() {
+    // `x: [A] [A] B` → two `A B` arms differing only in placeholder positions; Python
+    // raises "Rules defined twice". And an alias-differing non-empty pair (`A -> p` /
+    // `A -> q`) likewise — alias is part of the stage-1 key, so it survives to the
+    // stage-2 collision. Both must reject in *both* MP modes.
+    for (label, g) in [
+        ("[A] [A] B", "start: x\nx: [A] [A] B\nA: \"a\"\nB: \"b\"\n"),
+        (
+            "alias dup A->p | A->q",
+            "start: x\nx: A -> p\n  | A -> q\nA: \"a\"\n",
+        ),
+    ] {
+        for mp in [false, true] {
+            let r = Lark::new(
+                g,
+                LarkOptions {
+                    maybe_placeholders: mp,
+                    ..opts(ParserAlgorithm::Lalr, LexerType::Contextual)
+                },
+            );
+            assert!(
+                r.is_err(),
+                "H5-3 over-collapse guard ({label}, mp={mp}): Python rejects this as a \
+                 duplicate production; lark-rs must not silently collapse it. grammar={g:?}"
+            );
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
