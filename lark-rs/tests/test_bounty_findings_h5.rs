@@ -284,14 +284,13 @@ fn h5_7_turkish_i_casefold() {
 
 /// H5-8 (LOW, grammar-loader / naming). Python Lark's `_TERMINAL_NAMES` maps a set of
 /// literal strings to friendly terminal names. lark-rs's `TERMINAL_NAMES`
-/// (`src/grammar/loader/terminals.rs`) reproduces all 35 single-char entries but is
+/// (`src/grammar/loader/terminals.rs`) reproduced all 35 single-char entries but was
 /// missing exactly two of Python's multi-char rows: `"\\"`→`BACKSLASH` and
-/// `"\r\n"`→`CRLF`. So an anonymous `"\\"`/`"\r\n"` literal is named `__ANON_n` instead
+/// `"\r\n"`→`CRLF`. So an anonymous `"\\"`/`"\r\n"` literal was named `__ANON_n` instead
 /// of `BACKSLASH`/`CRLF`, diverging in the token's `type_` (value is correct). Surfaces
 /// in the tree under `keep_all_tokens` and in error messages. One root cause, two
-/// surfaces. Expected fix: add the two missing rows to `TERMINAL_NAMES`.
+/// surfaces. Fixed (#366) by adding the two missing rows to `TERMINAL_NAMES`.
 #[test]
-#[ignore = "XFAIL (bounty H5-8): anonymous \"\\\\\" / \"\\r\\n\" literals named __ANON_n, not BACKSLASH / CRLF as Python does"]
 fn h5_8_anon_terminal_naming_table() {
     for (g, input, expected) in [
         (
