@@ -848,6 +848,7 @@ static TERMINAL_NAMES: &[(&str, &str)] = &[
     ("-", "MINUS"),
     ("*", "STAR"),
     ("/", "SLASH"),
+    ("\\", "BACKSLASH"),
     ("|", "VBAR"),
     ("?", "QMARK"),
     ("!", "BANG"),
@@ -872,6 +873,7 @@ static TERMINAL_NAMES: &[(&str, &str)] = &[
     ("[", "LSQB"),
     ("]", "RSQB"),
     ("\n", "NEWLINE"),
+    ("\r\n", "CRLF"),
     ("\t", "TAB"),
     (" ", "SPACE"),
 ];
