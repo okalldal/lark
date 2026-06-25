@@ -178,7 +178,191 @@ impl GrammarCompiler {
             self.terminals
                 .push(TerminalDef::new(&t.name, pat, t.priority).with_string_type(string_type));
         }
+
+        // #286: `%extend` of an *imported* (already-compiled) terminal. The new
+        // alternatives could not splice into a `RawTerm` (there is none — the
+        // target is a baked `TerminalDef`), so they were staged in
+        // `pending_term_extends`. Prepend them onto the resolved terminal's regex
+        // here, matching Python's `_extend` (`base.children.insert(0, exp)` on the
+        // still-AST definition tree): the extended terminal becomes an alternation
+        // of the new alternatives and the original body, so both parse. Resolution
+        // reuses the same `by_name` / `imported` / `memo` machinery, so an extend
+        // body may itself reference any terminal. Multiple extends of one name apply
+        // in document order, each inserting at the front (so the last-staged is
+        // outermost-first), exactly as repeated `_extend` calls do.
+        let pending = std::mem::take(&mut self.pending_term_extends);
+        // The pending-extend reference graph, for recursion detection. A terminal
+        // denotes a *regular* language, so it may not reference itself (Python:
+        // `Recursion in terminal 'X'`). The main `resolve_term_regex` pass catches a
+        // cycle among `RawTerm`s, but an imported terminal short-circuits via the
+        // `imported` map *before* that check, so a self/mutually-recursive extend
+        // body would slip through and over-accept. Detect it here over the names a
+        // pending body references, walking on through any `RawTerm` body (`by_name`)
+        // or *other* pending-extend body until either `name` is reached (recursion)
+        // or the walk dead-ends at an already-resolved imported terminal.
+        let pending_refs: HashMap<&str, Vec<&AliasedExpansion>> =
+            pending.iter().fold(HashMap::new(), |mut m, (n, exps)| {
+                m.entry(n.as_str()).or_default().extend(exps.iter());
+                m
+            });
+        for (name, expansions) in &pending {
+            if Self::extend_reaches(name, expansions, &by_name, &pending_refs, &mut Vec::new()) {
+                return Err(GrammarError::Other {
+                    msg: format!(
+                        "Recursion in terminal {name:?} (recursion is only allowed in rules, \
+                         not terminals)"
+                    ),
+                });
+            }
+        }
+        for (name, expansions) in pending {
+            // Resolve each new alternative to a regex, concatenating its exprs —
+            // the same per-alternative build the main resolution loop performs.
+            let mut new_alts = Vec::with_capacity(expansions.len());
+            for alt in &expansions {
+                let mut parts = String::new();
+                for expr in &alt.expansion {
+                    parts.push_str(&Self::term_expr_regex(
+                        expr,
+                        &by_name,
+                        &imported,
+                        &mut memo,
+                        &mut Vec::new(),
+                    )?);
+                }
+                new_alts.push(parts);
+            }
+            // Prepend onto the existing terminal's resolved body, then re-rank ALL
+            // arms by Python Lark's terminal-arm key `(-max_width, -len(value))`
+            // (`TerminalTreeToPattern` sorts the spliced `expansions` tree; mirrors
+            // `lexer/plan.rs::sort_terminals`). The match engine is leftmost-*first*
+            // (`MatchKind::LeftmostFirst`), so arm order is load-bearing: a string-
+            // length sort would put a shorter-source arm ahead of a wider one and the
+            // wider arm would never match (e.g. `%extend LETTER: "abc"` — `abc`
+            // (width 3) must beat the `[A-Z]|[a-z]` body (width 1), else only `a`
+            // matches). The prior body is kept as one unit (its baked regex has no
+            // recoverable per-arm structure); ranking it by its overall max width
+            // matches Python for every case except a new arm whose width falls
+            // *strictly between* two internal arms of a multi-alt imported body —
+            // tracked as #449 (the body's per-arm interleave needs the un-baked
+            // AST, the very thing #286's design avoids). The result is
+            // always a `Pattern::Re` (≥2 arms), so `string_type` clears — an extended
+            // terminal is no longer a lone string literal (Python: `PatternRE`).
+            if let Some(idx) = self.terminals.iter().position(|td| td.name == name) {
+                let existing = self.terminals[idx].pattern.to_inline_regex();
+                let mut alts = new_alts;
+                alts.push(existing);
+                Self::sort_terminal_arms(&mut alts)?;
+                let combined = alts
+                    .into_iter()
+                    .map(|p| format!("(?:{p})"))
+                    .collect::<Vec<_>>()
+                    .join("|");
+                self.terminals[idx].pattern = Pattern::Re(PatternRe::new(combined.as_str(), 0)?);
+                self.terminals[idx].string_type = false;
+            } else {
+                // Unreachable: the Extend arm gated on the target being defined, and a
+                // later `%override` clears the pending entry — so the terminal is
+                // always present here. Guard the invariant rather than silently drop.
+                debug_assert!(false, "pending extend for unknown terminal {name:?}");
+            }
+        }
         Ok(())
+    }
+
+    /// Sort already-resolved alternation arm regexes by Python Lark's terminal
+    /// ordering key `(-max_width, -len(value))` — widest first, then longest source
+    /// first — exactly as [`crate::lexer::plan`]'s `sort_terminals` ranks whole
+    /// terminals. The match engine is leftmost-first, so the widest arm must come
+    /// first to be tried first. An unbounded arm (`max_width == None`) maps to
+    /// `usize::MAX` and sorts ahead of every finite arm (Python's `MAXWIDTH`). Each
+    /// arm is a valid regex (it was just built by the resolver / `to_inline_regex`),
+    /// so re-parsing it through `PatternRe::new` to measure width cannot fail; the
+    /// `?` is a defensive guard, not an expected path.
+    fn sort_terminal_arms(arms: &mut [String]) -> Result<(), GrammarError> {
+        // Measure each arm once (width + raw length), then sort on the cached keys —
+        // avoids re-parsing the regex inside the comparator.
+        let mut keyed: Vec<(usize, usize, &str)> = Vec::with_capacity(arms.len());
+        for arm in arms.iter() {
+            let pat = Pattern::Re(PatternRe::new(arm.as_str(), 0)?);
+            keyed.push((
+                pat.max_width().unwrap_or(usize::MAX),
+                pat.raw_value_len(),
+                arm.as_str(),
+            ));
+        }
+        // Descending max_width, then descending raw length; ties keep input order
+        // (stable sort) so equal-rank arms preserve their prepend sequence.
+        keyed.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+        let order: Vec<String> = keyed.into_iter().map(|(_, _, s)| s.to_string()).collect();
+        arms.clone_from_slice(&order);
+        Ok(())
+    }
+
+    /// Does the `%extend` body of terminal `name` reference `name` itself —
+    /// directly or transitively — making it a recursive terminal Python rejects?
+    /// Walks the terminal names each expansion references, continuing through a
+    /// referenced name's `RawTerm` body (`by_name`) or its own pending-extend body
+    /// (`pending_refs`); an already-resolved imported terminal that is *not* a
+    /// pending-extend target dead-ends the walk (its body was inlined at import, so
+    /// it cannot reach the extend). `seen` guards against an unrelated `RawTerm`
+    /// cycle the main pass already rejected, so this terminates.
+    fn extend_reaches(
+        name: &str,
+        expansions: &[AliasedExpansion],
+        by_name: &HashMap<&str, &RawTerm>,
+        pending_refs: &HashMap<&str, Vec<&AliasedExpansion>>,
+        seen: &mut Vec<String>,
+    ) -> bool {
+        let mut refs = Vec::new();
+        for alt in expansions {
+            for expr in &alt.expansion {
+                Self::collect_term_refs(expr, &mut refs);
+            }
+        }
+        for r in refs {
+            if r == name {
+                return true;
+            }
+            if seen.iter().any(|s| s == &r) {
+                continue; // already explored this name on another path
+            }
+            seen.push(r.clone());
+            // Follow through a same-grammar RawTerm body…
+            if let Some(raw) = by_name.get(r.as_str()) {
+                if Self::extend_reaches(name, &raw.expansions, by_name, pending_refs, seen) {
+                    return true;
+                }
+            }
+            // …and through another terminal's own pending-extend body (the mutual
+            // imported-extend case `%extend A: B` / `%extend B: A`).
+            if let Some(exps) = pending_refs.get(r.as_str()) {
+                let owned: Vec<AliasedExpansion> = exps.iter().map(|e| (*e).clone()).collect();
+                if Self::extend_reaches(name, &owned, by_name, pending_refs, seen) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Collect the terminal names a terminal-body `Expr` references (recursing into
+    /// repetition / group / maybe sub-expressions). Used by [`extend_reaches`] for
+    /// recursion detection; rule/template references are not valid in a terminal
+    /// body (the resolver rejects them) so they are ignored here.
+    fn collect_term_refs(expr: &Expr, out: &mut Vec<String>) {
+        match expr {
+            Expr::Value(Value::Terminal(n)) => out.push(n.clone()),
+            Expr::Value(_) => {}
+            Expr::Repeat { inner, .. } => Self::collect_term_refs(inner, out),
+            Expr::Group(alts) | Expr::Maybe(alts) => {
+                for alt in alts {
+                    for e in &alt.expansion {
+                        Self::collect_term_refs(e, out);
+                    }
+                }
+            }
+        }
     }
 
     /// The string value (and case-insensitivity) iff this terminal compiles to

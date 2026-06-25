@@ -110,13 +110,15 @@ fn n1_template_override_and_extend() {
     assert!(ex.parse("bc").is_ok(), "extend adds the new arm");
 }
 
-/// N1 differential pin (#269 audit), XFAIL — tracked as #286. `%extend` of an
-/// *imported* terminal should add the new alternative (Python: `"z"` parses),
-/// but lark-rs drops it because the imported terminal is already resolved by the
-/// time the directive is staged. Same-grammar terminal extend and imported
-/// terminal *override* both work; only imported-terminal extend diverges.
+/// N1 differential pin (#269 audit). `%extend` of an *imported* terminal adds the
+/// new alternative (Python: `"z"` parses, and `"123"` still parses). Fixed in #286:
+/// the imported terminal is already a compiled `TerminalDef` by the time the
+/// directive is staged, so the new alternatives are staged in
+/// `pending_term_extends` and prepended onto the resolved terminal's regex in
+/// `resolve_terminals` (Python's `_extend` does `base.children.insert(0, exp)` on
+/// the still-AST definition tree). Same-grammar terminal extend and imported
+/// terminal *override* already worked; this closes the last imported-terminal gap.
 #[test]
-#[ignore = "XFAIL (#286): %extend of an imported terminal drops the new alternative"]
 fn n1_extend_imported_terminal_keeps_both() {
     let g = "%import common.INT\nstart: INT\n%extend INT: \"z\"\n";
     let lark =
@@ -125,6 +127,75 @@ fn n1_extend_imported_terminal_keeps_both() {
     assert!(
         lark.parse("z").is_ok(),
         "the extended `\"z\"` alternative should parse (Python accepts it)"
+    );
+}
+
+/// #286 edge — *multiple* `%extend`s of one imported terminal each add their
+/// alternative (repeated `_extend` = repeated `insert(0, exp)`). Python accepts
+/// `"123"`, `"y"`, and `"z"`.
+#[test]
+fn extend_imported_terminal_multiple_times_keeps_all() {
+    let g = "%import common.INT\nstart: INT\n%extend INT: \"y\"\n%extend INT: \"z\"\n";
+    let lark =
+        Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).expect("grammar builds");
+    for s in ["123", "y", "z"] {
+        assert!(lark.parse(s).is_ok(), "extended INT should parse {s:?}");
+    }
+}
+
+/// #286 edge — an imported-terminal `%extend` body may itself *reference another
+/// terminal* (resolution reuses the full terminal-algebra machinery, not just
+/// literals). Python accepts both the original `INT` and a `WORD`.
+#[test]
+fn extend_imported_terminal_body_references_terminal() {
+    let g = "%import common.INT\n%import common.WORD\nstart: INT\n%extend INT: WORD\n";
+    let lark =
+        Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).expect("grammar builds");
+    assert!(
+        lark.parse("123").is_ok(),
+        "the original INT body still parses"
+    );
+    assert!(
+        lark.parse("hello").is_ok(),
+        "the extended WORD alternative should parse (Python accepts it)"
+    );
+}
+
+/// #286 — the extend arm must be ranked by *match width*, not regex-source length.
+/// The lexer is leftmost-first, so a wider new arm has to sort ahead of a narrower
+/// imported body or it never matches. `%extend LETTER: "abc"` makes `LETTER` match
+/// `"abc"` (width 3) even though the imported `[A-Z]|[a-z]` body (width 1) has a
+/// shorter source; Python accepts `"abc"`. A naive `str::len` sort would put the
+/// 1-char body first and reject `"abc"` (matching only `"a"`).
+#[test]
+fn extend_imported_terminal_wider_arm_outranks_narrower_body() {
+    let g = "%import common.LETTER\nstart: LETTER\n%extend LETTER: \"abc\"\n";
+    let lark =
+        Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).expect("grammar builds");
+    assert!(
+        lark.parse("abc").is_ok(),
+        "the wider extended arm \"abc\" must win over the 1-char LETTER body"
+    );
+    assert!(
+        lark.parse("a").is_ok(),
+        "the original LETTER body still parses"
+    );
+}
+
+/// #286 — a self-referential `%extend` of an imported terminal is rejected, exactly
+/// as Python (`Recursion in terminal 'INT'`). A terminal denotes a regular language,
+/// so it may not reference itself; without the recursion check the imported terminal
+/// short-circuits resolution and the build would over-accept (`"123x"` would parse).
+#[test]
+fn extend_imported_terminal_self_recursion_rejected() {
+    let g = "%import common.INT\nstart: INT\n%extend INT: INT \"x\"\n";
+    let err = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual))
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(
+        err.contains("Recursion in terminal"),
+        "self-referential terminal extend must be rejected like Python; got: {err:?}"
     );
 }
 
