@@ -120,15 +120,46 @@ fn h5_1_lookaround_terminal_width_misrank() {
 /// corollary, accepting what the oracle rejects is unfalsifiable → a bug. Holds for
 /// rule defs, terminal defs, references, alias targets, and template parameters.
 /// Expected fix: reject-like-Python — mirror Lark's name-token shape in the tokenizer.
+///
+/// Scope is precisely the `__`-leading class — a name that *has* a letter but a
+/// disallowed `__` prefix. The no-letter-at-all class (`_`/`__`/`_9`, which Python
+/// also rejects) is the sibling finding H6-8/#405, a different predicate pinned by
+/// `h6_8_letterless_names_rejected`; the fix here deliberately does not touch it.
 #[test]
-#[ignore = "XFAIL (bounty H5-2): double-leading-underscore names (__x / __X) accepted; Python rejects at grammar-parse"]
 fn h5_2_double_underscore_name_rejected() {
-    // `_x`/`_X` (single leading underscore + letter) are accepted by both — this asserts
-    // only the `__`-leading shape is a build error, matching Python.
-    for g in ["start: __x\n__x: \"a\"\n", "start: __X\n__X: \"a\"\n"] {
+    // All four surfaces a `__`-leading name can appear on. Each grammar parses input
+    // "a" if it builds; Python rejects every one at grammar-parse with
+    // `GrammarError: Unexpected input` (oracle-confirmed, lark 1.3.1).
+    let reject = [
+        ("rule def", "start: __x\n__x: \"a\"\n"),
+        ("terminal def", "start: __X\n__X: \"a\"\n"),
+        ("alias target", "start: \"a\" -> __x\n"),
+        ("template param", "t{__x}: __x\nstart: t{\"a\"}\n"),
+    ];
+    for (surface, g) in reject {
         assert!(
             Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).is_err(),
-            "H5-2: Python rejects a `__`-leading name token at grammar-parse; lark-rs accepted it. grammar={g:?}"
+            "H5-2 ({surface}): Python rejects a `__`-leading name token at grammar-parse; \
+             lark-rs accepted it. grammar={g:?}"
+        );
+    }
+
+    // Boundary — still accepted by both: a single leading underscore followed by a
+    // letter (`_x`/`_X`), and non-leading underscores (`x__`/`a__b`). The fix must not
+    // regress these.
+    for (surface, g) in [
+        ("single-underscore rule", "start: _x\n_x: \"a\"\n"),
+        ("single-underscore terminal", "start: _X\n_X: \"a\"\n"),
+        ("trailing underscores", "start: x__\nx__: \"a\"\n"),
+        ("mid underscores", "start: a__b\na__b: \"a\"\n"),
+    ] {
+        let lark =
+            Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).unwrap_or_else(|e| {
+                panic!("H5-2 boundary ({surface}): must still build. grammar={g:?} err={e:?}")
+            });
+        assert!(
+            lark.parse("a").is_ok(),
+            "H5-2 boundary ({surface}): must still parse `a`. grammar={g:?}"
         );
     }
 }

@@ -17,7 +17,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 /// Synthetic start rule appended to an imported file so the requested terminals
 /// survive dead-terminal pruning while the file is compiled. Never copied out.
-const IMPORT_PROBE_RULE: &str = "__lark_import_probe";
+///
+/// A single leading underscore (transparent rule), not `__`: a `__`-leading name is a
+/// build error in both Python Lark and lark-rs (#361), and this synthetic probe rule is
+/// re-lexed through the loader, so a `__` prefix would reject every `%import`. One leading
+/// underscore is still a valid name and vanishingly unlikely to collide with user content.
+const IMPORT_PROBE_RULE: &str = "_lark_import_probe";
 
 /// Canonical key for a virtual path in the in-memory `import_sources` map:
 /// components joined with `/`, regardless of the host's path separator, so map
@@ -671,8 +676,11 @@ pub(super) fn common_terminals() -> &'static HashMap<String, String> {
                 is_term_name.then_some(name)
             })
             .collect();
-        let probe = format!("{COMMON_LARK}\n__common_probe: {}\n", names.join(" "));
-        let grammar = load_grammar(&probe, &["__common_probe".to_string()], false, false)
+        // One leading underscore, not `__`: a `__`-leading name is a build error (#361)
+        // and this probe is re-lexed through the loader. `_common_probe` is a valid
+        // transparent rule name and is never copied out (only `grammar.terminals` is read).
+        let probe = format!("{COMMON_LARK}\n_common_probe: {}\n", names.join(" "));
+        let grammar = load_grammar(&probe, &["_common_probe".to_string()], false, false)
             .expect("bundled common.lark must compile");
         grammar
             .terminals

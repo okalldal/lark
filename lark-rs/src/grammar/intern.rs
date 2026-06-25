@@ -500,18 +500,19 @@ mod tests {
     }
 
     /// Provenance plumbing (#101, ADR-0024): a *generated* anonymous EBNF helper
-    /// carries `Some(AnonKind)`, while a user-written rule — even one transparent
-    /// (`_a`) or spelled like a helper (`__anon_star_0`) — carries `None`. This is
-    /// the discriminator CYK keys empty-rule rejection on, and it must be source
-    /// provenance, not the `__anon_` name spelling (#144).
+    /// carries `Some(AnonKind)`, while a user-written rule — including a transparent
+    /// (`_a`) one — carries `None`. This is the discriminator CYK keys empty-rule
+    /// rejection on, and it must be source provenance, not the `__anon_` name
+    /// spelling (#144). (A user rule literally *spelled* `__anon_star_0` is no longer
+    /// authorable: a `__`-leading name token is rejected at grammar-parse since #361,
+    /// exactly as Python rejects it — so the spelling-vs-provenance hazard can only be
+    /// exercised by a generated name today, which is what this asserts.)
     #[test]
     fn anon_kind_marks_generated_helpers_not_user_rules() {
-        // `(B*)~2` forces a standalone nullable helper; `_a` is a transparent user
-        // rule; `__anon_star_0` is a user rule the author happened to name like a
-        // helper.
-        let cg = compile("start: _a (B*)~2 __anon_star_0\n_a: B\n__anon_star_0: B\nB: \"b\"\n");
-        // The transparent user rule and the helper-looking user rule are user-written.
-        for user in ["_a", "__anon_star_0", "start"] {
+        // `(B*)~2` forces a standalone nullable helper; `_a` is a transparent user rule.
+        let cg = compile("start: _a (B*)~2\n_a: B\nB: \"b\"\n");
+        // The transparent user rule and the start rule are user-written.
+        for user in ["_a", "start"] {
             let id = cg.symbols.id(user).unwrap();
             assert!(
                 cg.symbols.info(id).anon_kind.is_none(),
