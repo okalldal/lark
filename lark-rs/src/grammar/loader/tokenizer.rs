@@ -485,6 +485,7 @@ impl<'a> Lexer<'a> {
             })
             .count();
         let name = rest[..len].to_string();
+        self.reject_double_underscore_name(&name)?;
         self.advance(len);
         Ok(Some(Tok::Rule(name)))
     }
@@ -496,8 +497,38 @@ impl<'a> Lexer<'a> {
             .take_while(|&b| b.is_ascii_uppercase() || b == b'_' || b.is_ascii_digit())
             .count();
         let name = rest[..len].to_string();
+        self.reject_double_underscore_name(&name)?;
         self.advance(len);
         Ok(Some(Tok::Terminal(name)))
+    }
+
+    /// Reject a `__`-leading name token, mirroring Python Lark's `RULE`/`TERMINAL`
+    /// shape (`_?[a-z][_a-z0-9]*` / `_?[A-Z][_A-Z0-9]*`): at most **one** leading
+    /// underscore is allowed before the first letter. lark-rs's `lex_rule`/`lex_terminal`
+    /// otherwise consume any run of `[A-Za-z0-9_]`, so a `__`-leading name was silently
+    /// accepted where Python rejects the grammar at parse (`GrammarError: Unexpected
+    /// input`). Per ADR-0017's corollary, being more permissive than the oracle is
+    /// unfalsifiable → a bug (#361, bounty H5-2).
+    ///
+    /// The predicate is deliberately scoped to the `__`-leading class — a name that
+    /// *has* a letter but a disallowed `>= 2`-underscore prefix. A name with **no**
+    /// alphabetic char at all (`_`/`__`/`_9`, which Python also rejects) is the sibling
+    /// finding #405 (H6-8), a different predicate handled separately; requiring a letter
+    /// here keeps the two changes composable. Non-leading underscores (`x__`/`a__b`) and
+    /// a single leading underscore + letter (`_x`/`_X`) stay accepted, matching Python.
+    fn reject_double_underscore_name(&self, name: &str) -> Result<(), GrammarError> {
+        let leading_underscores = name.bytes().take_while(|&b| b == b'_').count();
+        if leading_underscores >= 2 && name.bytes().any(|b| b.is_ascii_alphabetic()) {
+            return Err(GrammarError::SyntaxError {
+                line: self.line,
+                col: self.col,
+                msg: format!(
+                    "Unexpected input: name {name:?} has a leading `__`; a rule or terminal \
+                     name may have at most one leading underscore before its first letter"
+                ),
+            });
+        }
+        Ok(())
     }
 }
 
