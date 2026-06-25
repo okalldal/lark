@@ -23,17 +23,28 @@ impl Pattern {
     /// `(-priority, -max_width, -len(value), name)`): a finite regex must sort
     /// *behind* a genuinely-unbounded one, so a maximal greedy match wins (#268, RC5).
     ///
-    /// For a regex we parse its source to a `regex-syntax` HIR and walk it counting
-    /// characters; a pattern the parser rejects (lookaround/backref idioms — Python
-    /// `re` constructs the linear engine doesn't model) falls back to `None`
-    /// (unbounded), the conservative "sort first" default and the same outcome
-    /// Python's own `MAXWIDTH` fallback produces for a pattern `sre_parse` can't size.
+    /// For a regex we first parse its source to a `regex-syntax` HIR and walk it
+    /// counting characters. A pattern the `regex` crate's parser rejects but Python
+    /// `re` *can* size — a **lowerable-lookaround** terminal (`(?=…)`, `(?<=…)`, …),
+    /// whose assertions are zero-width — is sized by the assertion-aware analyzer
+    /// ([`crate::lookaround::pattern_max_width`], the analogue of Python's
+    /// `get_regexp_width(...)[1]`) so `/a(?=b)/` reports a finite `1` rather than
+    /// sorting as unbounded (#360, H5-1). Only a pattern *neither* can size (a genuine
+    /// backreference — which never builds a lexer anyway) falls back to `None`
+    /// (unbounded), the conservative "sort first" default.
     pub fn max_width(&self) -> Option<usize> {
         match self {
             Pattern::Str(p) => Some(p.value.chars().count()),
-            Pattern::Re(p) => regex_syntax::parse(&p.pattern)
-                .ok()
-                .and_then(|hir| hir_max_width_chars(&hir)),
+            Pattern::Re(p) => match regex_syntax::parse(&p.pattern) {
+                // The `regex` crate parses it (no lookaround/backref): walk the HIR.
+                // `None` here is a genuinely-unbounded finite-engine pattern (`/a+/`).
+                Ok(hir) => hir_max_width_chars(&hir),
+                // The `regex` crate rejects it — a lookaround idiom Python sizes
+                // finitely via `sre_parse` (assertions zero-width). Size it the same
+                // way through the shared assertion-aware width walk; only a pattern the
+                // analyzer also cannot parse (a real backref) stays `None`/unbounded.
+                Err(_) => crate::lookaround::pattern_max_width(&p.pattern).flatten(),
+            },
         }
     }
 
@@ -1025,6 +1036,61 @@ impl std::hash::Hash for TerminalDef {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #360 (H5-1): `Pattern::max_width` sizes a **lowerable-lookaround** terminal — one
+    /// the `regex` crate refuses to parse — to its finite consumed width (assertions are
+    /// zero-width) through the shared assertion-aware analyzer, exactly as Python's
+    /// `get_regexp_width(...)[1]` does, instead of falling back to `None`/unbounded.
+    /// Every expected number below was grounded against Python Lark 1.3.1.
+    #[test]
+    fn lookaround_terminal_max_width_is_finite() {
+        let w =
+            |src: &str| Pattern::Re(PatternRe::new(src, 0).expect("pattern builds")).max_width();
+        // Lookaround terminals: the assertion contributes zero width.
+        assert_eq!(
+            w("a(?=b)"),
+            Some(1),
+            "trailing lookahead → consumed `a` only"
+        );
+        assert_eq!(
+            w("(?<=x)a"),
+            Some(1),
+            "leading lookbehind → consumed `a` only"
+        );
+        assert_eq!(w("foo(?!bar)"), Some(3), "negative lookahead is zero-width");
+        // A bare assertion consumes nothing.
+        assert_eq!(w("(?=b)"), Some(0), "pure assertion is zero-width");
+        // A plain (parseable) pattern still goes through the HIR walk (#268 path).
+        assert_eq!(w("a|zz"), Some(2), "finite alternation");
+        assert_eq!(w("aa?"), Some(2), "optional element");
+        // A `*`/`+` *outside* the assertion is genuinely unbounded → None, matching
+        // Python's MAXWIDTH (the conservative "sort first" key is still correct here).
+        assert_eq!(
+            w("a*(?=b)"),
+            None,
+            "unbounded repetition outside the assertion"
+        );
+        assert_eq!(w("a+"), None, "plain unbounded repetition");
+    }
+
+    /// #360: the outer `Option` of [`crate::lookaround::pattern_max_width`] reports
+    /// *parseability*. A pattern the assertion-aware front-end cannot parse at all (here
+    /// a structurally unbalanced `(`) returns the outer `None`, so `Pattern::max_width`'s
+    /// `.flatten()` yields `None` (unbounded) — the conservative "sort first" default —
+    /// rather than mistaking the un-parse for a width of 0. A pattern it *can* parse
+    /// returns `Some(width)`.
+    #[test]
+    fn unparseable_pattern_reports_outer_none() {
+        // Unbalanced paren: the front-end's `parse` errors, so the outer Option is None.
+        assert_eq!(crate::lookaround::pattern_max_width("(a"), None);
+        // A parseable lookaround pattern reports its finite width (inner Some).
+        assert_eq!(
+            crate::lookaround::pattern_max_width("a(?=b)"),
+            Some(Some(1))
+        );
+        // A parseable but genuinely-unbounded pattern reports inner None (unbounded).
+        assert_eq!(crate::lookaround::pattern_max_width("a+(?=b)"), Some(None));
+    }
 
     /// N3: a *global* (bodiless) inline flag group is detected anywhere — leading or
     /// mid-pattern — and `reject_global_inline_flags` (the loader gate on user regex
