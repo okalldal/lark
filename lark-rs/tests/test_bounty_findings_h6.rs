@@ -41,7 +41,8 @@
 //!
 //! Each test asserts the **Python Lark 1.3.1** (oracle) behavior. This file is an XFAIL
 //! catalog: each test starts `#[ignore]`d and failing. Drop a test's `#[ignore]` when its
-//! bug is fixed to turn it into a permanent regression guard — H6-5 (the
+//! bug is fixed to turn it into a permanent regression guard — H6-2 (the `{,n}`
+//! empty-lower-bound quantifier `{0,n}` normalization, #400), H6-5 (the
 //! `propagate_positions` filtered-token meta span, #402) and H6-7 (the duplicate-arm
 //! inline-group cross-product build blowup, #404) are fixed and now run by default.
 //! H6-3 + H6-4 (the spurious LALR reduce/reduce on nullable arms) are fixed and run by
@@ -211,8 +212,10 @@ fn h6_1_value_length_tiebreak_uses_raw_source_comment_strip() {
 /// only the `{,n}` → `{0,n}` normalization is missing. Opposite polarity to the
 /// H6–H9/#375 dialect *narrowings* (which reject to match Python's rejection). Expected
 /// fix: normalize `{,n}` → `{0,n}` in `normalize_python_escapes` (class/escape-aware).
-#[test]
-#[ignore = "XFAIL (bounty H6-2): {,m} quantifier rejected and mis-categorized as OutOfScope lookaround"]
+#[test] // FIXED (#400): `normalize_python_escapes` rewrites the empty-lower-bound `{,n}`
+        // → `{0,n}` (class-aware, escape-aware, only on a `base_quantifier_len`-valid
+        // `{,n}`), so `/a{,3}b/` builds and matches exactly as Python's `{0,3}` does. The
+        // inverted-bound `a{3,2}` stays rejected by both engines (the negative control).
 fn h6_2_empty_lower_bound_quantifier_accepted() {
     let g = "start: A\nA: /a{,3}b/\n";
     let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual));
@@ -224,6 +227,33 @@ fn h6_2_empty_lower_bound_quantifier_accepted() {
         Some("A"),
         "H6-2: /a{{,3}}b/ must match 'aaab' as token A, matching Python"
     );
+    // `{,3}` is `{0,3}`, not unbounded: four `a`s overrun the bound, so the token can no
+    // longer cover the whole input — the parse must fail exactly as Python's does
+    // (`re.match(r'a{,3}b','aaaab')` is None). This pins the *semantics*, not just that
+    // the build stopped rejecting.
+    assert!(
+        lark.parse("aaaab").is_err(),
+        "H6-2: /a{{,3}}b/ == /a{{0,3}}b/ caps at 3 leading 'a's; 'aaaab' (4) must NOT parse"
+    );
+
+    // Negative control: the inverted-bound `a{3,2}` (min > max) is a Python `re` build
+    // error ("min repeat greater than max repeat" → Lark LexError). It has a *lower*
+    // bound, so the `{,n}` rewrite never touches it; the regex crate rejects it too, and
+    // it routes to a build error on every engine path. Both engines must keep rejecting.
+    let inverted = "start: A\nA: /a{3,2}b/\n";
+    for (parser, lexer) in [
+        (ParserAlgorithm::Lalr, LexerType::Contextual),
+        (ParserAlgorithm::Lalr, LexerType::Basic),
+        (ParserAlgorithm::Earley, LexerType::Basic),
+        (ParserAlgorithm::Earley, LexerType::Dynamic),
+    ] {
+        assert!(
+            Lark::new(inverted, opts(parser.clone(), lexer.clone())).is_err(),
+            "H6-2 negative control ({parser:?}/{lexer:?}): the inverted-bound /a{{3,2}}b/ \
+             must stay a build error (Python rejects it; the `{{,n}}` rewrite does not touch a \
+             lower-bounded quantifier)"
+        );
+    }
 }
 
 /// H6-6 (MEDIUM-HIGH, terminal unification). A string literal `"ab"` whose source is
