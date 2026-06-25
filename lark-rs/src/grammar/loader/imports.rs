@@ -324,7 +324,7 @@ impl GrammarCompiler {
                     &final_name,
                     &prefix,
                     module_aliases.as_ref(),
-                );
+                )?;
             } else {
                 return Err(GrammarError::ImportNotFound {
                     path: format!("{dotted}.{name}"),
@@ -363,7 +363,7 @@ impl GrammarCompiler {
         final_name: &str,
         prefix: &str,
         module_aliases: Option<&HashMap<String, String>>,
-    ) {
+    ) -> Result<(), GrammarError> {
         // Reachable rule origins (BFS from `name`) and the terminals they touch.
         let mut rule_names: std::collections::HashSet<String> =
             std::collections::HashSet::from([name.to_string()]);
@@ -387,29 +387,75 @@ impl GrammarCompiler {
         }
 
         // Don't re-import a rule already defined locally (Python raises; we keep the
-        // existing definition rather than duplicate the origin).
+        // existing definition rather than duplicate the origin). The requested-name
+        // collision proper — a user `decorator` beside `%import python (decorator)`
+        // — is already rejected upstream: the directive seeds its final name into the
+        // compiler's single-definition ledger (#270), so the user's plain rule trips
+        // `duplicate_definition_error` before resolution ever reaches here.
         if self.rules.iter().any(|r| r.origin.name == final_name) {
-            return;
+            return Ok(());
         }
 
-        // Name map, mirroring Python's `_get_mangle(prefix, aliases)`:
-        //   1. `if s in aliases:` → use the registered (final) name, unmangled.
-        //      This covers the requested rule itself (`name → final_name`) *and*
-        //      any closure symbol independently imported from this module (#343):
-        //      a multi-import registers `name → name`, so the reference stays
-        //      `NAME`, not `python__NAME`.
+        // Name map, mirroring Python's `_get_mangle(prefix, aliases)`. Returns the
+        // renamed symbol plus whether the rename was a **prefix mangle** (vs. left
+        // unmangled because the symbol is an import target). The mangled flag is what
+        // the #428 collision guard keys on: only a prefix-mangled interior origin can
+        // collide with a user rule of that literal name.
+        //   1. `if s in aliases:` → registered (final) name, unmangled. Covers the
+        //      requested rule itself (`name → final_name`) *and* any closure symbol
+        //      independently imported from this module (#343): a multi-import
+        //      registers `name → name`, so the reference stays `NAME`, not
+        //      `python__NAME`.
         //   2. else mangle under the module prefix (underscore-preserving).
-        let rename = |n: &str| -> String {
+        let rename_classified = |n: &str| -> (String, bool) {
             if let Some(final_) = module_aliases.and_then(|m| m.get(n)) {
-                final_.clone()
+                (final_.clone(), false)
             } else if n == name {
-                final_name.to_string()
+                (final_name.to_string(), false)
             } else if let Some(rest) = n.strip_prefix('_') {
-                format!("_{prefix}__{rest}")
+                (format!("_{prefix}__{rest}"), true)
             } else {
-                format!("{prefix}__{n}")
+                (format!("{prefix}__{n}"), true)
             }
         };
+        let rename = |n: &str| -> String { rename_classified(n).0 };
+
+        // User-rule-vs-import-origin collision (#428, RC1-class). An interior closure
+        // origin is prefix-mangled (`python__name`, the transitively-pulled `name`
+        // under `%import python (decorator)`). If the importing grammar *also* defines
+        // a rule of that exact mangled name, Python raises `Rule 'python__name'
+        // defined more than once`; lark-rs used to silently MERGE the two and build.
+        // Matching the rejection is the ADR-0017 corollary (being more permissive than
+        // the oracle is a bug).
+        //
+        // The discriminator is `self.claimed_rule_names` — every name the importing
+        // grammar will *actually define as a distinct origin*: user-authored
+        // rule/template names plus the *surviving* import final names (last-alias-wins,
+        // #388). Built up front (first pass), so it is populated regardless of whether
+        // the user's `python__name` is staged before or after this `%import`. Two cases
+        // it correctly rejects: a hand-written `python__name`, and a *surviving* alias
+        // `%import .mod.thing -> mod__inner` that lands on another import's interior
+        // `mod__inner`. A *dropped* alias of that same `<module>__interior` shape is
+        // **not** in the set (it is never defined), so a grammar Python accepts is not
+        // false-rejected. The `module_aliases`/requested-rule branches (`mangled ==
+        // false`) are legitimate import targets — skip them, or the #343 "interior
+        // symbol independently imported" case (`name → name`) would false-reject.
+        //
+        // This is orthogonal to the `imported_origins` dedup below (two sibling imports
+        // sharing an interior origin, #372): those copies are *import*-provenanced and
+        // never enter `claimed_rule_names`, so they dedup rather than collide.
+        for rule in imported
+            .rules
+            .iter()
+            .filter(|r| rule_names.contains(&r.origin.name))
+        {
+            let (renamed, mangled) = rename_classified(&rule.origin.name);
+            if mangled && self.claimed_rule_names.contains(&renamed) {
+                // An interior closure origin is always a rule (mangled lowercase or
+                // `_`-prefixed), so the message takes the `Rule` wording.
+                return Err(Self::duplicate_definition_error(false, &renamed));
+            }
+        }
 
         // Cross-call dedup for interior closure origins (#372). The early-return
         // above only guards the *requested* rule's `final_name`; an interior
@@ -422,14 +468,12 @@ impl GrammarCompiler {
         // Skip a rule whose renamed origin is in `self.imported_origins` — the set
         // of origins *previously copied by an import closure*. Scoping to
         // import-copied origins (not all of `self.rules`) is load-bearing: a
-        // user-authored rule that happens to share a mangled interior name (a
-        // hand-written `python__name` beside `%import python ...`) is **not** in
-        // this set, so the import is not silently dropped — it still collides and
-        // the build rejects, matching Python's `Rule '…' defined more than once`
-        // (the over-permissiveness ADR-0017's corollary forbids). `self.imported_origins`
-        // is read *before* this call records its own origins (recorded after the
-        // loop), so the loop still copies *every* alternative of a genuinely new
-        // origin within this call.
+        // user-authored rule that happens to share a mangled interior name is **not**
+        // in this set, so it is *rejected* by the collision guard just above rather
+        // than silently merged or dropped, matching Python's `Rule '…' defined more
+        // than once`. `self.imported_origins` is read *before* this call records its
+        // own origins (recorded after the loop), so the loop still copies *every*
+        // alternative of a genuinely new origin within this call.
         let mut copied_origins: Vec<String> = Vec::new();
         for rule in imported
             .rules
@@ -491,6 +535,7 @@ impl GrammarCompiler {
                 self.terminals.push(copy);
             }
         }
+        Ok(())
     }
 }
 

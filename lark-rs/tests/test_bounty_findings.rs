@@ -66,6 +66,31 @@ fn assert_build_rejected(grammar: &str, parser: ParserAlgorithm, lexer: LexerTyp
     );
 }
 
+/// Assert a build rejected specifically as Python Lark's duplicate-definition error
+/// — `GrammarError::Other` whose message is `"<Type> '<name>' defined more than
+/// once"`. Tighter than a bare `is_err()` (cf. `assert_reduce_reduce_conflict`): it
+/// fails if the grammar rejected for an *unrelated* reason (a reduce/reduce conflict,
+/// a broken import, a nullable-`$END` collision), so a #428 rejection cannot silently
+/// regress to a false pass that rejects for the wrong cause.
+fn assert_duplicate_definition_rejected(
+    grammar: &str,
+    parser: ParserAlgorithm,
+    lexer: LexerType,
+    name: &str,
+    why: &str,
+) {
+    let expected = format!("Rule '{name}' defined more than once");
+    match build(grammar, parser, lexer, false) {
+        Err(LarkError::Grammar(GrammarError::Other { msg })) => assert!(
+            msg.contains(&expected),
+            "{why}: rejected as GrammarError::Other, but the message is not the \
+             duplicate-definition error (expected to contain {expected:?}):\n{msg}"
+        ),
+        Err(e) => panic!("{why}: expected the duplicate-definition GrammarError, got: {e:?}"),
+        Ok(_) => panic!("{why}: expected a duplicate-definition rejection, but build succeeded"),
+    }
+}
+
 /// Assert that building `grammar` succeeds (Python accepts it at build).
 fn assert_build_accepted(grammar: &str, parser: ParserAlgorithm, lexer: LexerType, why: &str) {
     let r = build(grammar, parser, lexer, false);
@@ -1021,4 +1046,129 @@ fn rc_import_overlapping_interior_closure_builds_all_orders() {
             "#372: tree mismatch vs Python oracle for grammar:\n{g}"
         );
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #428 — a user rule colliding with a mangled interior import origin.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// #428 (RC1-class, import surface). A user-authored rule whose name equals the
+/// **mangled interior origin** of an imported closure (`python__name`, the
+/// prefix-mangled `name` that `%import python (decorator)` pulls in transitively)
+/// collides. Python Lark 1.3.1 raises `GrammarError: Rule 'python__name' defined
+/// more than once` in **both** definition orders (rule-before-import and
+/// import-before-rule — verified against the oracle). lark-rs used to silently
+/// MERGE the user rule with the import-copied origin and build (the
+/// over-permissiveness ADR-0017's corollary forbids).
+///
+/// This is distinct from the *requested*-name collision (a user `decorator` beside
+/// `%import python (decorator)`), which the import-final-name seeding of the
+/// single-definition ledger (#270) already rejects: here the collision is on an
+/// *interior* origin that no `%import` directive names, so it never reaches that
+/// ledger. It is also distinct from #372's import-vs-import interior dedup
+/// (negative control below), which must keep building.
+#[test]
+fn rc1_user_rule_vs_mangled_import_origin_rejected() {
+    // The exact repro from the issue: the user rule precedes the import.
+    let rule_before_import =
+        "start: decorator python__name\npython__name: \"z\"\n%import python (decorator)\n%ignore \" \"\n";
+    assert_duplicate_definition_rejected(
+        rule_before_import,
+        ParserAlgorithm::Lalr,
+        LexerType::Contextual,
+        "python__name",
+        "#428 rule-before-import",
+    );
+
+    // The mirror order: the import copies the interior origin first, then the user
+    // rule is staged. Python rejects this order too, with the same message.
+    let import_before_rule =
+        "start: decorator python__name\n%import python (decorator)\npython__name: \"z\"\n%ignore \" \"\n";
+    assert_duplicate_definition_rejected(
+        import_before_rule,
+        ParserAlgorithm::Lalr,
+        LexerType::Contextual,
+        "python__name",
+        "#428 import-before-rule",
+    );
+}
+
+/// #428 NEGATIVE CONTROL — must not regress #372. Two rules independently imported
+/// from the same bundled module whose dependency closures overlap (`decorator` and
+/// `decorators` share the interior `python__name`): the shared interior origin is
+/// copied **once** (the `imported_origins` dedup), so this is *not* a user-vs-import
+/// collision and Python builds it. The #428 rejection keys on *import-copied vs.
+/// claimed* origins precisely so it fires for the collision above without dropping a
+/// legitimate import here.
+#[test]
+fn rc1_import_vs_import_interior_origin_still_builds() {
+    let g = "start: decorators\n%import python (decorator, decorators)\n%ignore \" \"\n";
+    assert_build_accepted(
+        g,
+        ParserAlgorithm::Lalr,
+        LexerType::Contextual,
+        "#428 negative control (import-vs-import interior dedup, #372)",
+    );
+}
+
+/// #428 — a *surviving* import alias that lands on another import's mangled interior
+/// origin is a genuine collision and is rejected. `mod.lark` defines `outer: inner`
+/// (interior `inner` mangles to `mod__inner` under `%import .mod (outer)`); the alias
+/// `%import .mod.thing -> mod__inner` registers a *second* definition of `mod__inner`.
+/// Python Lark 1.3.1: `GrammarError: Rule 'mod__inner' defined more than once`. The
+/// #428 discriminator includes surviving import final names, so this rejects exactly
+/// like a user rule of the same name.
+#[test]
+fn rc1_surviving_alias_vs_import_origin_rejected() {
+    let files = [
+        ("mod.lark", "outer: inner\ninner: \"i\"\nthing: \"t\"\n"),
+        (
+            "main.lark",
+            "start: outer mod__inner\n%import .mod.thing -> mod__inner\n%import .mod (outer)\n%ignore \" \"\n",
+        ),
+    ];
+    match build_with_imports(&files) {
+        Err(LarkError::Grammar(GrammarError::Other { msg })) => assert!(
+            msg.contains("Rule 'mod__inner' defined more than once"),
+            "#428 surviving-alias collision: rejected, but not as the duplicate-definition \
+             error (expected `Rule 'mod__inner' defined more than once`):\n{msg}"
+        ),
+        Err(e) => panic!(
+            "#428 surviving-alias collision: expected the duplicate-definition GrammarError, got: {e:?}"
+        ),
+        Ok(_) => panic!(
+            "#428 surviving-alias collision: Python rejects this; lark-rs accepted it"
+        ),
+    }
+}
+
+/// #428 NEGATIVE CONTROL (#388, last-alias-wins). A *dropped* import alias whose name
+/// happens to have the `<module>__interior` mangle shape must NOT false-reject. Here
+/// `%import .mod.thing -> mod__inner` is shadowed by a later `%import .mod.thing ->
+/// other` (last-alias-wins, #388), so `mod__inner` is *never defined* — and the
+/// interior `inner → mod__inner` from `%import .mod (outer)` therefore does not
+/// collide. Python Lark 1.3.1 BUILDS and parses this; the #428 check must key on the
+/// *surviving* final names only (`claimed_rule_names`), not every reserved name, or it
+/// regresses a grammar the oracle accepts.
+#[test]
+fn rc1_dropped_alias_of_mangled_shape_still_builds() {
+    let files = [
+        ("mod.lark", "outer: inner\ninner: \"i\"\nthing: \"t\"\n"),
+        (
+            "main.lark",
+            "start: outer other\n%import .mod.thing -> mod__inner\n%import .mod.thing -> other\n%import .mod (outer)\n%ignore \" \"\n",
+        ),
+    ];
+    let lark = build_with_imports(&files).unwrap_or_else(|e| {
+        panic!("#428 dropped-alias: Python builds this; lark-rs rejected: {e:?}")
+    });
+    // Tree-identical to the Python oracle (maybe_placeholders default) for input `i t`.
+    let tree = lark
+        .parse("i t")
+        .unwrap_or_else(|e| panic!("#428 dropped-alias: parse failed: {e:?}"));
+    assert_eq!(
+        tree.to_string(),
+        "Tree(start, [Tree(outer, [Tree(mod__inner, [])]), Tree(other, [])])",
+        "#428 dropped-alias: tree mismatch vs Python oracle"
+    );
 }

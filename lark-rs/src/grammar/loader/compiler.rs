@@ -200,7 +200,26 @@ pub(super) struct GrammarCompiler {
     /// Generated names never collide with each other (one monotonic counter), and
     /// import-mangled dependencies (`mod__name` / `_mod__name`) cannot take the
     /// `__anon_{tag}_{n}` shape, so user-authored names are the only hazard.
+    ///
+    /// This set is deliberately *over-inclusive* for the anon-name guard: it reserves
+    /// **every** import final name from [`spec_final_names`], including a non-surviving
+    /// last-alias-wins binding (#388). That is harmless for dodging generated names,
+    /// but it is **not** the right discriminator for the #428 user-vs-import-origin
+    /// collision — see [`claimed_rule_names`](Self::claimed_rule_names).
     reserved_rule_names: HashSet<String>,
+    /// Rule names the importing grammar will **actually define as a distinct origin**:
+    /// every user-authored rule/template name, plus every import final name that
+    /// *survives* last-alias-wins (#388). This is the precise discriminator for the
+    /// #428 user-rule-vs-mangled-interior-import-origin collision: a prefix-mangled
+    /// interior origin (`python__name`) that lands on a name in this set genuinely
+    /// collides (Python's `Rule '…' defined more than once`), whereas one landing on a
+    /// *dropped* alias's name does **not** (Python builds it — the dropped alias is
+    /// never defined). Built in the first pass, after the per-module alias map is
+    /// complete, so it is populated independently of the user-rule-vs-`%import`
+    /// document order.
+    ///
+    /// `pub(super)` so the sibling `imports` module reads it from `import_rule_closure`.
+    pub(super) claimed_rule_names: HashSet<String>,
     /// Provenance of every generated anonymous EBNF helper rule, keyed by the name
     /// [`fresh_anon_rule`](Self::fresh_anon_rule) minted for it. This is the
     /// *source-provenance* discriminator the engine needs (#101): a nullable
@@ -276,6 +295,7 @@ impl GrammarCompiler {
             base_path,
             import_sources,
             reserved_rule_names: HashSet::new(),
+            claimed_rule_names: HashSet::new(),
             anon_kinds: HashMap::new(),
             reserved_term_names: HashSet::new(),
             import_alias_map: HashMap::new(),
@@ -393,6 +413,11 @@ impl GrammarCompiler {
             match item {
                 Item::RuleItem(r) => {
                     self.reserved_rule_names.insert(r.name.clone());
+                    // A user-authored rule/template name is unconditionally a name the
+                    // grammar defines — the precise discriminator for the #428
+                    // user-vs-import-origin collision (a *surviving* import final name
+                    // is added after this loop, once the alias map is complete).
+                    self.claimed_rule_names.insert(r.name.clone());
                     // Register *plain* templates here; `%override`/`%extend` of a
                     // template are resolved (with their pre-existence gate) during
                     // the staging pass, so they must not pre-seed `self.templates`
@@ -438,6 +463,25 @@ impl GrammarCompiler {
                     }
                 }
                 Item::IgnoreItem(_) => {}
+            }
+        }
+
+        // Now that the per-module alias map is complete, fold each import's
+        // *surviving* final name into `claimed_rule_names` (the #428 discriminator).
+        // A name dropped by last-alias-wins (#388) is never defined, so it is
+        // excluded — `alias_survives` is the exact filter the rest of the loader uses.
+        // Done in a second pass over the imports because `alias_survives` reads the
+        // merged `import_alias_map`, which the loop above only finishes building on its
+        // last iteration.
+        for item in &items {
+            if let Item::ImportItem(spec) = item {
+                if let Some((module, pairs)) = split_import_directive(spec) {
+                    for (original, final_name) in pairs {
+                        if self.alias_survives(&module, &original, &final_name) {
+                            self.claimed_rule_names.insert(final_name);
+                        }
+                    }
+                }
             }
         }
 
@@ -623,6 +667,12 @@ impl GrammarCompiler {
                 // exactly as Python's `_define` rejects it. `%override`/`%extend`
                 // carry a non-`Plain` directive and are handled below — they
                 // *legitimately* redefine, so they must not trip this check.
+                //
+                // A user rule colliding with a *mangled interior* import origin
+                // (`python__name` under `%import python (decorator)`, #428) is caught
+                // in `import_rule_closure` against `reserved_rule_names`, in either
+                // document order — not here, because the interior origin never enters
+                // the `defined` ledger (which holds only import *final* names).
                 if !defined.insert(r.name.clone()) {
                     return Err(Self::duplicate_definition_error(false, &r.name));
                 }
@@ -1016,7 +1066,10 @@ impl GrammarCompiler {
     /// `load_grammar.py`), raised when a plain rule / terminal / `%declare`
     /// definition names an origin already defined. `is_term` picks the `Terminal`
     /// vs `Rule` wording, matching the oracle's exact message (RC1/RC2, #270).
-    fn duplicate_definition_error(is_term: bool, name: &str) -> GrammarError {
+    ///
+    /// `pub(super)` so the sibling `imports` module raises the identical message
+    /// for a user-rule-vs-mangled-import-origin collision (#428).
+    pub(super) fn duplicate_definition_error(is_term: bool, name: &str) -> GrammarError {
         let kind = if is_term { "Terminal" } else { "Rule" };
         GrammarError::Other {
             msg: format!("{kind} '{name}' defined more than once"),
