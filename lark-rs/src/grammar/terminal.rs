@@ -782,6 +782,134 @@ fn reject_regex_crate_only_dialect(pattern: &str) -> Result<(), GrammarError> {
     Ok(())
 }
 
+/// Reject the Rust `regex`-crate-only **angle named-group** spelling `(?<name>…)` —
+/// Python `re` has no such syntax (it spells a named capture only `(?P<name>…)`) and
+/// raises `unknown extension ?<n` at build, but the crate accepts the angle form
+/// natively, so `Regex::new` in [`PatternRe::new`] would otherwise let it through and
+/// make lark-rs more permissive than the oracle (ADR-0017, the unfalsifiable corollary).
+/// H5-6 (#364).
+///
+/// The trigger is an **unescaped, unclassed** `(?<` whose char after the `<` is a *name*
+/// character — i.e. **not** `=` or `!`. The two excluded chars are exactly the lookbehind
+/// spellings `(?<=…)` / `(?<!…)`, which Python *accepts* and the lowering supports; those
+/// stay exempt. The Python-accepted `(?P<name>…)` form is naturally exempt: its third
+/// char after `(?` is `P`, not `<`, so it never matches `(?<`. (`(?'name'…)` is rejected
+/// by *both* engines — the crate also rejects the quote spelling — so it is not screened
+/// here; the crate's own `Regex::new` rejection covers it.)
+///
+/// The scan is **escape-aware** (a literal `\(` is not a group open) and
+/// **character-class-aware** (`[(?<x>]` is a literal class — Python reads `(?<` inside
+/// `[…]` as plain members, so we must not reject it). Runs on the **raw** source before
+/// [`normalize_python_escapes`] (which does not touch `(?<…`).
+fn reject_regex_crate_angle_named_group(pattern: &str) -> Result<(), GrammarError> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0usize;
+    let mut in_class = false;
+    while i < chars.len() {
+        match chars[i] {
+            '\\' => {
+                i += 2; // skip the escape pair (`\(`, `\[`, `\\`, …)
+                continue;
+            }
+            '[' if !in_class => {
+                in_class = true;
+                i += 1;
+                // A `]` as the first class member (or first after `^`) is a literal — copy
+                // past it so the close-tracking doesn't end the class early.
+                if chars.get(i) == Some(&'^') {
+                    i += 1;
+                }
+                if chars.get(i) == Some(&']') {
+                    i += 1;
+                }
+                continue;
+            }
+            ']' if in_class => {
+                in_class = false;
+                i += 1;
+                continue;
+            }
+            '(' if !in_class
+                && chars.get(i + 1) == Some(&'?')
+                && chars.get(i + 2) == Some(&'<') =>
+            {
+                // `(?<` outside a class. Only the lookbehind forms `(?<=` / `(?<!` are
+                // valid Python; anything else (`(?<x>…)`, `(?<name>…)`) is the
+                // regex-crate-only angle named group Python rejects.
+                match chars.get(i + 3).copied() {
+                    Some('=') | Some('!') => {
+                        i += 3; // lookbehind — leave it for the lowering path
+                        continue;
+                    }
+                    _ => {
+                        return Err(GrammarError::InvalidRegex {
+                            pattern: pattern.to_string(),
+                            reason: "`(?<name>…)` angle named-group is a Rust `regex`-crate-only \
+                                     spelling — Python `re` names a capture only `(?P<name>…)` \
+                                     and raises \"unknown extension ?<\" for the angle form. Use \
+                                     `(?P<name>…)` instead. lark-rs matches Python's rejection \
+                                     (ADR-0017): being more permissive than the oracle is \
+                                     unfalsifiable. (The lookbehind spellings `(?<=…)`/`(?<!…)` \
+                                     are unaffected.)"
+                                .to_string(),
+                        });
+                    }
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(())
+}
+
+/// Re-bucket the Python-`re` **named-character escape** `\N{NAME}` (`\N{BULLET}` →
+/// U+2022). Python `re` *accepts* it (the codepoint named `NAME`), but the Rust `regex`
+/// crate has no `\N{}` escape and rejects it ("unrecognized escape sequence"). Because the
+/// lookaround analyzer parses `\N{…}` as an *ordinary* escape (no assertion), that crate
+/// failure would otherwise reach the refusal seam ([`crate::lexer::route_fancy_only_terminal`])
+/// and be **mis-categorized** as `LookaroundScope` / "backtracking-only syntax" — none of
+/// which `\N{}` is. Screening it here turns it into a correctly-categorized
+/// [`GrammarError::InvalidRegex`], fixing the wrong-taxonomy defect (H5-5, #364).
+///
+/// This is the **fallback** contract of #364 (re-bucket only): **full support** would
+/// translate `\N{NAME}` to its codepoint so the terminal builds and matches like Python,
+/// but that needs a vendored Unicode-name→codepoint table (138k+ named codepoints) the
+/// `regex`/`regex-syntax` crates do not ship — out of scope for the originating task and
+/// tracked as a follow-up in #461. Opposite contract to H4-2 (#342), which *rejects*
+/// `\p`/`\x{}`/`\z`.
+///
+/// The trigger is a real `\N` escape (escape-aware: a `\\N{…}` is an escaped backslash
+/// then a literal `N{…}`, *not* a named-character escape) immediately followed by `{` —
+/// the braced form. A bare `\N` without a brace is a *different* construct (Python `re`
+/// raises "missing {"; the crate reads `\N` as "any char except newline") and is left for
+/// the existing validation to handle. Class context is irrelevant: Python accepts
+/// `[\N{…}]` too, and the crate rejects it identically, so we re-bucket both. Runs on the
+/// **raw** source before [`normalize_python_escapes`] (which does not touch `\N{…}`).
+fn reject_named_unicode_escape(pattern: &str) -> Result<(), GrammarError> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] == '\\' {
+            if chars.get(i + 1) == Some(&'N') && chars.get(i + 2) == Some(&'{') {
+                return Err(GrammarError::InvalidRegex {
+                    pattern: pattern.to_string(),
+                    reason: "`\\N{NAME}` named-character escape is not supported: Python `re` \
+                             accepts it (the codepoint named NAME, e.g. `\\N{BULLET}` → U+2022), \
+                             but the Rust `regex` crate has no `\\N{}` escape. Full support needs \
+                             a Unicode-name→codepoint table the crate does not ship (tracked in \
+                             #461). Use the codepoint directly (`\\u2022`) or a `\\xHH`/`\\uHHHH` \
+                             escape instead."
+                        .to_string(),
+                });
+            }
+            i += 2; // skip the escape pair so a `\\` cannot mask the following `N`
+            continue;
+        }
+        i += 1;
+    }
+    Ok(())
+}
+
 /// If `chars[i]` opens a **base quantifier** — `*`, `+`, `?`, or a well-formed
 /// `{m}`/`{m,}`/`{,n}`/`{m,n}` — return its length in chars; else `None`. A `{` that is
 /// not a well-formed bound is a literal brace in Python `re` (so it is not a quantifier).
@@ -876,6 +1004,21 @@ impl PatternRe {
         // (`\p`/`\P` unicode-property, `\x{…}` braced hex, `\z` end-of-text) — the crate
         // accepts each, so `Regex::new` below would let them through (#342, H4-2).
         reject_regex_crate_only_dialect(&raw)?;
+        // Reject the regex-crate-only *angle* named-group spelling `(?<name>…)` — Python
+        // `re` has only `(?P<name>…)` and errors "unknown extension ?<n", but the crate
+        // accepts the angle form, so `Regex::new` below would let it through (H5-6, #364).
+        // The lookbehind spellings `(?<=`/`(?<!` stay exempt; only `(?<` + a name char is
+        // the divergent capture form.
+        reject_regex_crate_angle_named_group(&raw)?;
+        // Re-bucket the `\N{NAME}` named-character escape: the crate has no `\N{}`, so
+        // `Regex::new` fails and — because the lookaround analyzer parses `\N{…}` as a
+        // plain escape — the failure would otherwise route through the lookaround seam and
+        // be *mis-labelled* "backtracking-only syntax". Screen it here so it surfaces as a
+        // correctly-categorized `InvalidRegex`, not `LookaroundScope`. Python *accepts*
+        // `\N{NAME}` (named-character escape → codepoint); full support needs a vendored
+        // Unicode-name→codepoint table (138k+ named codepoints) and is tracked in #461
+        // (H5-5, #364). The opposite contract to H4-2's reject set.
+        reject_named_unicode_escape(&raw)?;
         let pattern = normalize_python_escapes(&raw);
         let flag_prefix = build_flag_prefix(flags);
         let full = format!("{}{}", flag_prefix, pattern);
@@ -1368,6 +1511,81 @@ mod tests {
             assert!(
                 reject_regex_crate_only_dialect(p).is_ok(),
                 "{p:?} is Python-accepted — must NOT be refused"
+            );
+        }
+    }
+
+    /// H5-6 (#364): the regex-crate-only angle named-group `(?<name>…)` is rejected, but
+    /// the Python-accepted forms (the `(?P<name>…)` capture, the `(?<=`/`(?<!` lookbehinds,
+    /// and a `(?<` that is not a real unescaped group-open) are not. Oracle: `re.compile`.
+    #[test]
+    fn regex_crate_angle_named_group_is_rejected() {
+        // Rejected: `(?<` + a name char (anything but `=`/`!`) — Python "unknown extension".
+        for p in [
+            r"(?<x>a)",
+            r"(?<name>a)",
+            r"(?<_n>a)",
+            r"a(?<x>b)c",      // mid-pattern
+            r"(?:(?<x>a))",    // nested inside a non-capturing group (still unclassed)
+            r"(?<x>a)(?<y>b)", // two of them
+        ] {
+            assert!(
+                reject_regex_crate_angle_named_group(p).is_err(),
+                "{p:?} is the regex-crate-only angle named-group Python rejects — must be refused"
+            );
+        }
+        // Accepted (Python compiles each): the `(?P<name>…)` spelling, both lookbehind
+        // forms, a `(?<` inside a character class (literal members), an escaped `\(?<`,
+        // and plain patterns.
+        for p in [
+            r"(?P<x>a)",  // Python's named capture — exempt
+            r"(?<=a)b",   // lookbehind
+            r"(?<!a)b",   // negative lookbehind
+            r"a(?<=x)b",  // mid-pattern lookbehind
+            r"[(?<x>]",   // inside a class: `(?<` are literal members
+            r"\(?<x>a\)", // escaped `(` — not a group open
+            r"\\(?<=a)b", // escaped backslash then a real lookbehind — still exempt
+            r"(?:abc)+",  // ordinary non-capturing group
+            r"(a)(b)",    // ordinary captures
+        ] {
+            assert!(
+                reject_regex_crate_angle_named_group(p).is_ok(),
+                "{p:?} is Python-accepted — the angle-named-group screen must NOT refuse it"
+            );
+        }
+    }
+
+    /// H5-5 (#364): the `\N{NAME}` named-character escape is re-bucketed (refused here as
+    /// `InvalidRegex`) — the crate has no `\N{}` escape and Python *accepts* it, so full
+    /// support is deferred to #461, but this screen at least fixes the wrong-taxonomy
+    /// defect (it must not reach the lookaround seam). A bare `\N` (no brace) and an
+    /// escaped `\\N{…}` are NOT this escape and are left alone.
+    #[test]
+    fn named_unicode_escape_is_rebucketed() {
+        // The braced named-character escape, in and out of a class, at any position.
+        for p in [
+            r"\N{BULLET}",
+            r"a\N{BULLET}b",
+            r"[\N{BULLET}]",
+            r"\N{LATIN SMALL LETTER A}",
+        ] {
+            assert!(
+                reject_named_unicode_escape(p).is_err(),
+                "{p:?} uses the `\\N{{NAME}}` escape the crate cannot host — must be re-bucketed (#364)"
+            );
+        }
+        // Not the named escape: a bare `\N` (no `{` — a different construct), an escaped
+        // backslash before `N{…}` (a literal `N{…}`), and plain patterns.
+        for p in [
+            r"\Na",    // bare \N, no brace
+            r"a\Nb",   // bare \N mid-pattern
+            r"\\N{x}", // escaped backslash then literal `N{x}` — not `\N{`
+            r"N{2}",   // a literal N then a quantifier — no backslash
+            r"[a-z]+",
+        ] {
+            assert!(
+                reject_named_unicode_escape(p).is_ok(),
+                "{p:?} is not the `\\N{{NAME}}` escape — must NOT be re-bucketed by this screen"
             );
         }
     }
