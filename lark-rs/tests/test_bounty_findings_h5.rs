@@ -32,7 +32,9 @@
 //! re-confirmed but does **not** re-count — `\b`/`\B` (RC6/#275), `\Z` (N10), POSIX
 //! classes (H5/#332), `(?#)`/octal (H8/H9) — are documented in the catalog, not here.
 
-use lark_rs::{Child, Lark, LarkOptions, LexerType, ParseTree, ParserAlgorithm};
+use lark_rs::{
+    Child, GrammarError, Lark, LarkError, LarkOptions, LexerType, ParseTree, ParserAlgorithm,
+};
 
 fn opts(parser: ParserAlgorithm, lexer: LexerType) -> LarkOptions {
     LarkOptions {
@@ -404,8 +406,17 @@ fn h5_4_w_class_unicode_membership() {
 /// those Python *rejects* (contract reject-like-Python), but Python *accepts* `\N{}`,
 /// so the oracle-faithful contract is **support** (translate `\N{NAME}` to its
 /// codepoint), or at minimum re-bucket the error as `InvalidRegex`, not `LookaroundScope`.
+///
+/// **Status (#364):** the **wrong-taxonomy** half is FIXED — `reject_named_unicode_escape`
+/// in `PatternRe::new` now re-buckets `\N{NAME}` to `GrammarError::InvalidRegex` (pinned by
+/// `h5_5_named_unicode_escape_rebucketed_to_invalid_regex` below). The **parity** half —
+/// translating `\N{NAME}` to its codepoint so the terminal *builds and matches* `•` like
+/// Python — needs a vendored Unicode-name→codepoint table (138k+ named codepoints) the
+/// `regex`/`regex-syntax` crates do not ship, so it is deferred to **#461**. This test
+/// asserts that full-support contract (a successful build + match), so it STAYS `#[ignore]`d
+/// until #461 lands.
 #[test]
-#[ignore = "XFAIL (bounty H5-5): \\N{NAME} named-Unicode escape rejected (and mis-categorized as backtracking); Python accepts"]
+#[ignore = "XFAIL (H5-5 full support, tracked in #461): \\N{NAME} should build & match its codepoint like Python; needs a vendored Unicode-name table. The wrong-taxonomy half is fixed and pinned by h5_5_named_unicode_escape_rebucketed_to_invalid_regex."]
 fn h5_5_named_unicode_escape_supported() {
     let g = "start: A\nA: /\\N{BULLET}/\n";
     let lark = Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Basic))
@@ -416,21 +427,74 @@ fn h5_5_named_unicode_escape_supported() {
     );
 }
 
+/// H5-5 taxonomy pin (#364, the re-bucket floor). The full-support contract above is
+/// deferred to #461, but the **wrong-taxonomy** defect is fixed now: `\N{NAME}` must
+/// surface a correctly-categorized `GrammarError::InvalidRegex`, **not** the bogus
+/// `GrammarError::LookaroundScope` ("backtracking-only syntax") it used to be mislabelled
+/// as — `\N{}` involves no lookaround/backtracking, the Rust `regex` crate simply has no
+/// such escape. (Build-stage, lexer-independent.)
+#[test]
+fn h5_5_named_unicode_escape_rebucketed_to_invalid_regex() {
+    for body in [r"\N{BULLET}", r"a\N{BULLET}b", r"[\N{BULLET}]"] {
+        let g = format!("start: A\nA: /{body}/\n");
+        match Lark::new(&g, opts(ParserAlgorithm::Lalr, LexerType::Basic)) {
+            Err(LarkError::Grammar(GrammarError::InvalidRegex { .. })) => {}
+            Err(LarkError::Grammar(GrammarError::LookaroundScope { .. })) => panic!(
+                "H5-5 ({body:?}): `\\N{{NAME}}` must NOT be mislabelled LookaroundScope — \
+                 it is a regex-dialect gap, not backtracking syntax (#364)"
+            ),
+            Ok(_) => panic!(
+                "H5-5 ({body:?}): the crate has no `\\N{{}}` escape — expected a build error \
+                 (full support is deferred to #461), but the grammar built"
+            ),
+            Err(other) => panic!(
+                "H5-5 ({body:?}): expected a categorized InvalidRegex build error, got {other:?}"
+            ),
+        }
+    }
+}
+
 /// H5-6 (LOW, lexer dialect). The Rust `regex` crate accepts `(?<name>...)` as a named
 /// capture (angle syntax); Python `re` has **no** such spelling (only `(?P<name>...)`)
 /// and rejects it at build (`unknown extension ?<x`). So lark-rs silently builds a
 /// grammar Python rejects — unfalsifiable (ADR-0017). The lookbehind spellings
 /// `(?<=...)`/`(?<!...)` must stay exempt; only `(?<` + name + `>` is the divergent form.
-/// Expected fix: reject-like-Python (a categorized build error, alongside
-/// `reject_global_inline_flags` in `PatternRe::new`).
+/// Fixed (#364): `reject_regex_crate_angle_named_group` in `PatternRe::new` rejects it
+/// with a categorized `InvalidRegex` (alongside `reject_global_inline_flags`), while the
+/// lookbehind forms and Python's `(?P<name>...)` stay accepted.
 #[test]
-#[ignore = "XFAIL (bounty H5-6): regex-crate angle named-group (?<name>...) accepted; Python re rejects at build"]
 fn h5_6_angle_named_group_rejected() {
-    let g = "start: A\nA: /(?<x>a)/\n";
-    assert!(
-        Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Basic)).is_err(),
-        "H5-6: Python `re` has no `(?<name>...)` spelling and rejects it; lark-rs's regex crate accepted it"
-    );
+    // The divergent angle named-group: Python rejects, lark-rs must too — as a
+    // categorized InvalidRegex (NOT routed to the lookaround seam).
+    for body in [r"(?<x>a)", r"(?<name>a)"] {
+        let g = format!("start: A\nA: /{body}/\n");
+        match Lark::new(&g, opts(ParserAlgorithm::Lalr, LexerType::Basic)) {
+            Err(LarkError::Grammar(GrammarError::InvalidRegex { .. })) => {}
+            Ok(_) => panic!(
+                "H5-6 ({body:?}): Python `re` rejects the angle named-group spelling; \
+                 lark-rs accepted it (must reject with a categorized InvalidRegex)"
+            ),
+            Err(other) => panic!(
+                "H5-6 ({body:?}): expected a categorized InvalidRegex build error, got {other:?}"
+            ),
+        }
+    }
+    // Controls that Python ACCEPTS must keep building (the exemptions): the Python
+    // named-group spelling `(?P<name>...)`, both lookbehind forms, and a `(?<` that is
+    // not a real unescaped group-open (inside a class / escaped).
+    for body in [
+        r"(?P<x>a)",
+        r"(?<=a)b",
+        r"(?<!a)b",
+        r"[(?<x>]",
+        r"\(?<x>a\)",
+    ] {
+        let g = format!("start: A\nA: /{body}/\n");
+        assert!(
+            Lark::new(&g, opts(ParserAlgorithm::Lalr, LexerType::Basic)).is_ok(),
+            "H5-6 control ({body:?}): Python accepts this; the angle-named-group screen must NOT reject it"
+        );
+    }
 }
 
 /// H5-7 (LOW, lexer dialect — NEEDS-DECISION contract). Under `/i`, Python `re` folds
