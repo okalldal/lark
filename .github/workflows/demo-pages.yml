@@ -1,7 +1,11 @@
-# Build the lark-rs WASM playground (lark-rs/wasm/demo/) and deploy it to
-# GitHub Pages. The site is pure static files: the demo page plus the
-# wasm-pack web build copied to demo/pkg/ — the browser instantiates the
-# .wasm itself, so there is nothing to "host" beyond serving the files.
+# Build and deploy the lark-rs GitHub Pages site.
+#
+# A repository has exactly one Pages site, so this workflow assembles a single
+# artifact from two pieces:
+#   /            → the static showcase in lark-rs/site/
+#   /playground/ → the WASM playground (lark-rs/wasm/demo/ + the wasm-pack web
+#                  build). The browser instantiates the .wasm itself, so there is
+#                  nothing to "host" beyond serving the files.
 #
 # One-time repo setup: Settings → Pages → Source = "GitHub Actions".
 
@@ -28,9 +32,6 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: lark-rs/wasm
     steps:
       - uses: actions/checkout@v4
 
@@ -45,15 +46,29 @@ jobs:
           node-version: '22'
 
       - name: Install wasm-pack
+        working-directory: lark-rs/wasm
         run: npm ci
 
-      - name: Build demo (wasm-pack web build → demo/pkg)
+      - name: Build playground (wasm-pack web build → demo/pkg)
+        working-directory: lark-rs/wasm
         run: npm run demo:build
+
+      - name: Assemble Pages site (showcase at root, playground at /playground)
+        run: |
+          set -eux
+          rm -rf _site
+          # showcase landing page is the site root
+          cp -r lark-rs/site _site
+          # the live playground lives under /playground/
+          cp -r lark-rs/wasm/demo _site/playground
+          # belt-and-braces: keep Jekyll out of the way
+          touch _site/.nojekyll
+          ls -R _site | head -40
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: lark-rs/wasm/demo
+          path: _site
 
   deploy:
     needs: build

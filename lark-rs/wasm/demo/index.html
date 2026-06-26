@@ -5,6 +5,15 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>lark-rs playground</title>
   <link rel="stylesheet" href="style.css">
+  <!-- Embed mode: when loaded as ?embed=1 (e.g. iframed into the showcase),
+       drop our own header/footer and go transparent so the host frame owns
+       the chrome. One demo, two contexts. Set the class before paint to
+       avoid a flash of the standalone layout. -->
+  <script>
+    if (new URLSearchParams(location.search).has("embed")) {
+      document.documentElement.classList.add("embed");
+    }
+  </script>
 </head>
 <body>
   <header>

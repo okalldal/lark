@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" font-family="'IBM Plex Sans', system-ui, sans-serif">
+  <!-- Interim placeholder. Replace with the commissioned 1200x630 PNG
+       (assets/social-preview.png) and update the og:image tag in index.html. -->
+  <rect width="1200" height="630" fill="#f3f0e7"/>
+  <!-- fine field-guide grid marks -->
+  <g stroke="#d5d0c4" stroke-width="1">
+    <line x1="80" y1="120" x2="1120" y2="120"/>
+    <line x1="80" y1="510" x2="1120" y2="510"/>
+  </g>
+  <!-- three-stroke wing -->
+  <g fill="none" stroke="#ad5f3c" stroke-width="9" stroke-linecap="round" transform="translate(840 250) scale(7.2)">
+    <path d="M5 24 C 12 22, 20 18, 28 7"/>
+    <path d="M7 25 C 13 24, 19 21, 25 13" stroke="#3f739c"/>
+    <path d="M9 26 C 14 26, 18 24, 22 19" stroke="#39745f"/>
+  </g>
+  <text x="80" y="245" font-family="'Source Serif 4', Georgia, serif" font-size="104" font-weight="600" fill="#171a1f">lark<tspan fill="#ad5f3c">-rs</tspan></text>
+  <text x="84" y="320" font-family="'Source Serif 4', Georgia, serif" font-size="46" fill="#171a1f">Lark grammars, native Rust.</text>
+  <text x="84" y="382" font-size="30" fill="#63666d">One grammar. Three engines. Evidence at every layer.</text>
+  <!-- evidence chips -->
+  <g font-family="'IBM Plex Mono', monospace" font-size="24">
+    <g transform="translate(84 440)">
+      <rect width="200" height="54" rx="8" fill="#faf8f2" stroke="#d5d0c4"/>
+      <rect width="4" height="54" rx="2" fill="#39745f"/>
+      <text x="22" y="34" fill="#171a1f">LALR 512/512</text>
+    </g>
+    <g transform="translate(300 440)">
+      <rect width="220" height="54" rx="8" fill="#faf8f2" stroke="#d5d0c4"/>
+      <rect width="4" height="54" rx="2" fill="#39745f"/>
+      <text x="22" y="34" fill="#171a1f">Earley 211/211</text>
+    </g>
+    <g transform="translate(536 440)">
+      <rect width="290" height="54" rx="8" fill="#faf8f2" stroke="#d5d0c4"/>
+      <rect width="4" height="54" rx="2" fill="#39745f"/>
+      <text x="22" y="34" fill="#171a1f">JSONTestSuite 293/293</text>
+    </g>
+  </g>
+  <text x="80" y="555" font-family="'IBM Plex Mono', monospace" font-size="22" fill="#63666d" letter-spacing="2">CHECKED AGAINST PYTHON LARK · github.com/okalldal/lark</text>
+</svg>

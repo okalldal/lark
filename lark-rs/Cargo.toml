@@ -4,7 +4,9 @@ version = "0.1.0"
 edition = "2021"
 description = "A Rust implementation of the Lark parsing toolkit"
 license = "MIT"
-repository = "https://github.com/lark-parser/lark"
+repository = "https://github.com/okalldal/lark"
+homepage = "https://okalldal.github.io/lark/"
+readme = "README.md"
 
 # lark-rs is the workspace root and a member. Sibling members are the C-API crate
 # (`lark_h`, issue #48) and the compile-time `include_lark!` proc-macro
