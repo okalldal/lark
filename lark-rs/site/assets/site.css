@@ -146,6 +146,35 @@ section > p, section > .lede, section > ul { max-width: 42rem; }
 /* the canonical grammar, shown above the engine picker + live demo */
 .grammar-card { margin: 1.4rem 0; max-width: 640px; }
 
+/* ---- /method/ essay ---------------------------------------------------- */
+.essay { max-width: 44rem; margin: 0 auto; padding-block: clamp(2rem, 5vw, 3.5rem); }
+.essay section { border-top: 1px solid var(--rule); padding-block: clamp(1.6rem, 4vw, 2.6rem); }
+.essay section:first-of-type { border-top: none; }
+.essay .essay-title { font-size: clamp(2rem, 5vw, 3.1rem); letter-spacing: -0.015em; margin: 0 0 .5em; }
+.essay .lead { font-size: 1.18rem; color: var(--ink); max-width: none; margin-bottom: .4rem; }
+.essay h2 { font-size: clamp(1.4rem, 3vw, 1.9rem); margin: 0 0 .5em; }
+.essay h3 { font-family: var(--mono); font-size: .92rem; font-weight: 600; letter-spacing: .02em; color: var(--copper); margin: 1.4rem 0 .35rem; }
+.essay p, .essay ul { max-width: none; }
+.essay ul { padding-left: 1.1rem; display: grid; gap: .55rem; }
+.essay li { line-height: 1.6; }
+.essay .channels, .essay .table-wrap { max-width: none; }
+
+.pullquote {
+  font-family: var(--serif); font-size: clamp(1.3rem, 3vw, 1.7rem); line-height: 1.3;
+  color: var(--ink); border-left: 3px solid var(--copper);
+  padding: .1rem 0 .1rem 1.1rem; margin: 1.6rem 0;
+}
+.epigraph {
+  margin: 1.4rem 0 0; padding: 1rem 1.2rem; border: 1px solid var(--rule);
+  border-radius: 10px; background: var(--paper-raised);
+  font-family: var(--serif); font-size: 1.05rem; color: var(--ink-muted);
+}
+.epigraph span { display: block; margin-top: .5rem; font-family: var(--mono); font-size: .78rem; color: var(--ink-muted); }
+
+.backlink { font-family: var(--mono); font-size: .82rem; margin: 0 0 1.4rem; }
+.backlink a { color: var(--ink-muted); text-decoration: none; }
+.backlink a:hover { color: var(--sky-deep); }
+
 /* ---- evidence strip ---------------------------------------------------- */
 .evidence-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .9rem; margin-top: 1.4rem; }
 .ev {
