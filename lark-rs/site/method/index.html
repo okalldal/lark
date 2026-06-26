@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Evidence-gated development — lark-rs</title>
+  <meta name="description" content="How lark-rs is built: authority follows evidence, not confidence. Why parsing is unusually suited to oracle-based development, where the approach generalises, and where it does not.">
+
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="Evidence-gated development — lark-rs">
+  <meta property="og:description" content="Autonomy ends where verification ends. The method behind lark-rs, and its limits.">
+  <meta property="og:image" content="../assets/social-preview.png">
+  <meta property="og:url" content="https://okalldal.github.io/lark/method/">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="../assets/social-preview.png">
+
+  <link rel="icon" href="../assets/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="wing" viewBox="0 0 32 32">
+    <g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+      <path d="M5 24 C 12 22, 20 18, 28 7"/>
+      <path d="M7 25 C 13 24, 19 21, 25 13"/>
+      <path d="M9 26 C 14 26, 18 24, 22 19"/>
+    </g>
+  </symbol>
+</svg>
+
+<header class="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="../"><svg aria-hidden="true"><use href="#wing"/></svg>lark<span class="rs">-rs</span></a>
+    <nav class="nav-links" aria-label="Sections">
+      <a href="../#engines">Engines</a>
+      <a href="../#evidence">Evidence</a>
+      <a href="../#architecture">Architecture</a>
+      <a href="../#start">Quick start</a>
+    </nav>
+    <a class="nav-cta" href="https://github.com/okalldal/lark/blob/master/lark-rs/docs/PRINCIPLES.md">PRINCIPLES.md ↗</a>
+  </div>
+</header>
+
+<main>
+  <article class="wrap">
+    <div class="essay">
+
+      <!-- ===== masthead ===== -->
+      <p class="backlink"><a href="../#method">← lark-rs showcase</a></p>
+      <p class="eyebrow">Evidence-gated development</p>
+      <h1 class="essay-title">Autonomy ends where verification ends</h1>
+      <p class="lead">
+        lark-rs is built with coding agents. That sentence is now unremarkable — many projects
+        can say it. The interesting claim is narrower and harder: <strong>authority follows
+        evidence, not confidence.</strong> An agent may decide what it can independently check;
+        everything else it must escalate. This essay is how that line is drawn, why parsing is an
+        unusually good place to draw it, and where the method stops.
+      </p>
+
+      <!-- ===== the trust problem ===== -->
+      <section>
+        <h2>The trust problem, stated plainly</h2>
+        <p>
+          A reasonable engineer, told that a context-free parser — LALR table construction, an
+          SPPF-based Earley engine, a CYK dynamic program, a contextual lexer — was written
+          substantially by coding agents, should be sceptical. Parsers are exactly the kind of
+          software where a plausible-looking implementation can be subtly, silently wrong on the
+          input you didn't try.
+        </p>
+        <p>
+          The answer to that scepticism is not “the agent is capable.” Capability is precisely
+          what you cannot verify by inspection. The answer is structural:
+        </p>
+        <p class="pullquote">
+          The claims that matter are independently checked, and the agent is not authorised to
+          guess outside those checks.
+        </p>
+        <p>
+          That is the whole proposition. Everything below is the machinery that makes it true
+          rather than aspirational.
+        </p>
+      </section>
+
+      <!-- ===== the thesis ===== -->
+      <section>
+        <h2>The thesis: falsifiability is the boundary</h2>
+        <p>
+          The project began with one move that worked — <em>oracle-first testing</em>. It
+          converted a question that would otherwise need human review (“is this code correct?”)
+          into one an agent can settle by itself (“does it match Python Lark?”). The
+          <a href="https://github.com/okalldal/lark/blob/master/lark-rs/docs/PRINCIPLES.md">constitution</a>
+          generalises that single move into a rule for every class of decision:
+        </p>
+        <p class="pullquote">
+          The boundary of safe autonomy is the boundary of what we have made falsifiable.
+        </p>
+        <p>
+          An agent may decide anything it can ground against an oracle, a gate, or a written
+          rule. Everything else it escalates — or the human architect builds the missing gate.
+          This reframes the human's job. At this altitude the architect is not reviewing every
+          commit or merging every change; the architect is <strong>building gates and handling
+          escalations</strong>. The constitution is itself the gate for the decisions that don't
+          have a test-shaped one.
+        </p>
+        <p>
+          A corollary makes the whole thing durable: <strong>all state that matters lives in git
+          and GitHub</strong> — the constitution, the decision log, the issues, the compliance
+          banks. A session is a stateless operator over that state. It reads, acts, writes back,
+          and leaves nothing important in conversational memory. That is what lets ordinary,
+          unprivileged sessions add up to a coherent project instead of a pile of context that
+          evaporates when the window closes.
+        </p>
+      </section>
+
+      <!-- ===== the routing table ===== -->
+      <section>
+        <h2>The decision boundary</h2>
+        <p>
+          Every decision is routed by a single question: <em>what grounds it?</em> There are
+          three answers, and they map to three different authorities.
+        </p>
+        <div class="channels" aria-label="Decision routing">
+          <div class="channel c1">
+            <div class="no">01</div>
+            <div>
+              <div class="basis">Oracle · gate · bank</div>
+              <p class="gloss">The result can be independently checked — a parse tree against Python Lark, a regression against a committed bank, a complexity envelope against a work-counter.</p>
+              <div class="act">→ Decide freely, and self-check.</div>
+            </div>
+          </div>
+          <div class="channel c2">
+            <div class="no">02</div>
+            <div>
+              <div class="basis">Written principle + judgement</div>
+              <p class="gloss">Evidence narrows the choice but does not settle it — an architecture call, a priority ordering, whether a divergence from the oracle is intended contract or implementation leakage.</p>
+              <div class="act">→ Decide, explain, and record the reasoning as an ADR.</div>
+            </div>
+          </div>
+          <div class="channel c3">
+            <div class="no">03</div>
+            <div>
+              <div class="basis">Nothing falsifiable</div>
+              <p class="gloss">Product direction, taste, a genuine trade-off with no objective test.</p>
+              <div class="act">→ Escalate. Keep the decision human.</div>
+            </div>
+          </div>
+        </div>
+        <p class="note" style="margin-top:1.1rem">
+          The load-bearing rule is the tie-breaker: <strong>when you are unsure which row you are
+          in, you are in the bottom row.</strong> Uncertainty routes to the human, never to the
+          easiest implementation.
+        </p>
+      </section>
+
+      <!-- ===== why parsing ===== -->
+      <section>
+        <h2>Why parsing is an unusually good place to try this</h2>
+        <p>
+          Oracle-gated autonomy is only as good as the oracle. Parsing happens to come with a
+          near-perfect one.
+        </p>
+        <ul>
+          <li><strong>A reference implementation already exists.</strong> Python Lark is mature,
+            widely used, and defines the behaviour lark-rs wants. The oracle is not a model of
+            correctness we invented — it is a second implementation we can run.</li>
+          <li><strong>The output is structured and comparable.</strong> A parse is a tree. Two
+            trees are equal or they are not; an ambiguous result is a set you can compare. There
+            is little room for “close enough.”</li>
+          <li><strong>It is hard to write but easy to check.</strong> This is the asymmetry that
+            makes the whole approach pay: generating the expected answer (run Python Lark) is
+            cheap and trustworthy, even though producing it natively in Rust is intricate.</li>
+          <li><strong>The expensive failure mode is deterministic.</strong> Super-linear blow-up
+            in an Earley completer or a CYK table is a property of work done per byte — countable,
+            not a stopwatch reading.</li>
+        </ul>
+        <blockquote class="epigraph">
+          “Traditional computers automate what you can specify in code. AI/LLMs automate what you
+          can verify.” <span>— Andrej Karpathy</span>
+        </blockquote>
+      </section>
+
+      <!-- ===== the five practices ===== -->
+      <section>
+        <h2>Five practices, and the evidence each leaves behind</h2>
+
+        <h3>1 · Oracle before implementation</h3>
+        <p>
+          A new grammar feature starts with a case added to the oracle generator and a tree
+          produced by Python Lark — a test that <em>fails first</em>. Only then is the feature
+          written. The oracle JSON and the implementation are committed together. The expected
+          values are Python-derived; hand-authoring them to match the Rust output is forbidden,
+          because a test you tuned to pass proves nothing.
+        </p>
+
+        <h3>2 · Demonstrate before fixing</h3>
+        <p>
+          A bug becomes a failing reproduction before it becomes a fix. A suspected performance
+          pathology becomes a committed, size-parametrised workload that exhibits it before any
+          code changes. This sounds like ordinary discipline until it bites: in the engine's perf
+          history, one hypothesis named the completer as the cost; the profiler found the cost in
+          the forest-to-tree walk instead. The rule that saved it — <em>fix the phase the profiler
+          indicts, not the one the hypothesis names</em> — only works because the demonstration
+          came first. “Couldn't reproduce the pathology” is itself a valid, documented outcome: it
+          closes a suspicion with evidence rather than a guess.
+        </p>
+
+        <h3>3 · Gates over assurances</h3>
+        <p>
+          Correctness and complexity become executable checks, not review opinions. Compliance is
+          a set of banks strip-mined from Python Lark's own test suite and replayed on every
+          build; the build fails only on a <em>regression</em>, and the known-failure lists are
+          allowed to shrink, never grow. Complexity is gated on deterministic work-counters —
+          per-byte Earley work, the CYK cubic envelope, the lexer's linear scan — asserting a flat
+          envelope, <strong>never wall-clock</strong>. Wall-clock on shared runners is too noisy to
+          enforce, and a flaky red gate gets muted; a muted gate is worse than no gate, because it
+          looks like coverage.
+        </p>
+
+        <h3>4 · Human judgement stays explicit</h3>
+        <p>
+          The method does not pretend everything is gateable. Product direction and genuine
+          trade-offs are escalated through a <code>needs-decision</code> queue — the architect's
+          inbox — and an agent that finds <em>only</em> such work surfaces it rather than inventing
+          groundable work to avoid asking. There is a named anti-pattern: never resolve a
+          <code>needs-decision</code> by picking the option that is easiest to implement. And the
+          merge authority follows the same line — an agent may merge a change whose correctness an
+          existing gate fully captures; new public API, new semantics, and every governance change
+          are the architect's to merge.
+        </p>
+
+        <h3>5 · Durable evidence</h3>
+        <p>
+          Tests, decisions, failures, exceptions and rationale live in the repository, not in a
+          chat log. When an agent makes a semi-groundable call, it records an Architecture Decision
+          Record. The architect reads those in arrears — batched, not per-PR — and promotes any
+          correction into the invariants, so every future session is grounded by the sharpened
+          rule. The decision log is the audit trail that lets the human stay in control
+          <em>without</em> being in the loop.
+        </p>
+      </section>
+
+      <!-- ===== honesty by construction ===== -->
+      <section>
+        <h2>The checks check themselves</h2>
+        <p>
+          A gate an agent can quietly weaken is not a gate. So the oracle layer is built to be
+          honest by construction. The generators exit non-zero on any <em>contradiction</em> — a
+          committed case whose declared expectation disagrees with what Python Lark actually did —
+          unless it sits in a reasoned allow-list that, like the known-failure ledgers, is only
+          ever allowed to shrink. Replays hold lark-rs to Python's <em>recorded</em> result, not to
+          the author's annotation, with no silent skips.
+        </p>
+        <p>
+          The sharpest rule is about permissiveness. Being <em>more permissive</em> than the oracle
+          — accepting input Python rejects — is unfalsifiable, so it fails unless a documented
+          reason says otherwise. The same logic generalises to scope: behaviour with no Python
+          counterpart at all is not an autonomous default, because there is nothing to check it
+          against. You cannot earn authority by exceeding the oracle; you earn it by matching one.
+        </p>
+      </section>
+
+      <!-- ===== the limits ===== -->
+      <section>
+        <h2>Where the method stops</h2>
+        <p>
+          A methodology that claimed to dissolve all judgement would be making exactly the
+          unfalsifiable promise it forbids. The honest version names its own gaps. The project's
+          own decision lens marks several dimensions as gated and two as <strong>not</strong>:
+        </p>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Dimension</th><th>Status</th></tr></thead>
+            <tbody>
+              <tr><td>Correctness &amp; Python parity</td><td><span class="pill verified">Gated</span> oracle + compliance/wild banks</td></tr>
+              <tr><td>Performance &amp; complexity class</td><td><span class="pill verified">Gated</span> deterministic work-counters</td></tr>
+              <tr><td>Portability across targets</td><td><span class="pill verified">Gated</span> CI binding jobs</td></tr>
+              <tr><td>Security / resource bounds on untrusted input</td><td><span class="pill open">Largely ungated</span> judgement + a flagged gap</td></tr>
+              <tr><td>Grammar-author ergonomics &amp; error quality</td><td><span class="pill open">Ungated</span> judgement-only</td></tr>
+              <tr><td>What to build next; API design; taste</td><td><span class="pill goal">Human</span> escalated by default</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p style="margin-top:1.2rem">
+          Algorithmic-complexity denial-of-service is caught by the scaling gates, but general
+          resource bounds on adversarial input through the public API are not yet gated. The
+          quality of an error message when a grammar author makes a mistake has no oracle at all —
+          Python Lark's diagnostics are not a specification to match. These are tracked as gaps to
+          turn into gates, not quietly assumed solved.
+        </p>
+        <p class="pullquote">
+          Not every valuable property has an oracle. When the project cannot make a decision
+          falsifiable, it records the uncertainty and keeps the decision human.
+        </p>
+      </section>
+
+      <!-- ===== generalisation ===== -->
+      <section>
+        <h2>Where it generalises — and where it doesn't</h2>
+        <p>
+          Parsing is a fortunate case: a trusted reference implementation already existed. The
+          method transfers to any domain that has, or can cheaply build, an <em>independent</em>
+          check — a compiler against a reference, a numerical kernel against a slow-but-correct
+          version, a protocol implementation against a conformance suite, a data migration against
+          its source. The pattern is always the same: find the asymmetry where the answer is
+          expensive to produce but cheap to verify, and put the agent on the producing side of it.
+        </p>
+        <p>
+          It does <em>not</em> transfer to domains where correctness is a matter of taste, or where
+          no independent check can be built without first solving the very problem you're checking.
+          In those domains the disciplined move is the same one the constitution makes for product
+          direction: don't fabricate a gate to license autonomy you haven't earned — keep the human
+          in the loop and say so. The contribution here is not a way to remove judgement from
+          software. It is a way to be precise about how much of it you have actually replaced.
+        </p>
+      </section>
+
+      <!-- ===== closing ===== -->
+      <section>
+        <h2>The claim, restated</h2>
+        <p class="pullquote">
+          lark-rs is not interesting because an agent wrote a parser. It is interesting because the
+          project systematically turns parser correctness, compatibility and complexity into
+          evidence an agent cannot talk its way around.
+        </p>
+        <p>
+          Every significant claim on this site carries one of four statuses, for exactly this
+          reason:
+        </p>
+        <p>
+          <span class="pill verified">Verified</span> enforced by an oracle, bank or gate &nbsp;
+          <span class="pill measured">Measured</span> observed in a named benchmark &nbsp;
+          <span class="pill goal">Goal</span> a stated direction, not yet shown &nbsp;
+          <span class="pill open">Open</span> a known limitation
+        </p>
+        <p class="note">
+          The full constitution — invariants, the decision taxonomy and lens, the Definition of
+          Done, the merge tiers, and how the document itself evolves — is
+          <a href="https://github.com/okalldal/lark/blob/master/lark-rs/docs/PRINCIPLES.md">PRINCIPLES.md</a>.
+          The dated reasoning behind individual calls lives in
+          <a href="https://github.com/okalldal/lark/tree/master/lark-rs/docs/decisions">docs/decisions/</a>.
+        </p>
+        <p class="backlink" style="margin-top:2rem"><a href="../">← Back to the lark-rs showcase</a></p>
+      </section>
+
+    </div>
+  </article>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="cols">
+      <div>
+        <a class="brand" href="../" style="font-size:1.05rem"><svg width="22" height="22" aria-hidden="true"><use href="#wing"/></svg>lark<span class="rs" style="color:var(--copper)">-rs</span></a>
+        <p style="max-width:24rem;margin-top:.6rem">A ground-up Rust implementation of Lark's parsing core. Python Lark remains the behavioural oracle.</p>
+      </div>
+      <div>
+        <strong style="color:var(--ink)">Read on</strong>
+        <p style="margin:.4rem 0 0">
+          <a href="https://github.com/okalldal/lark/blob/master/lark-rs/docs/PRINCIPLES.md">PRINCIPLES.md</a> ·
+          <a href="https://github.com/okalldal/lark/tree/master/lark-rs/docs/decisions">Decision log</a> ·
+          <a href="https://github.com/okalldal/lark/blob/master/lark-rs/BENCH.md">Benchmarks</a>
+        </p>
+      </div>
+    </div>
+    <div class="legend">
+      <span class="pill verified">Verified</span><span class="pill measured">Measured</span><span class="pill goal">Goal</span><span class="pill open">Open</span>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
