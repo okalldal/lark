@@ -41,7 +41,7 @@
     <nav class="nav-links" aria-label="Sections">
       <a href="#engines">Engines</a>
       <a href="#evidence">Evidence</a>
-      <a href="#fit">Where it fits</a>
+      <a href="#why">Why lark-rs</a>
       <a href="#architecture">Architecture</a>
       <a href="#method">Method</a>
       <a href="#start">Quick start</a>
@@ -58,18 +58,18 @@
       <div>
         <p class="eyebrow">A Rust implementation of the Lark parsing toolkit</p>
         <h1>lark<span class="rs">-rs</span></h1>
-        <p class="tag">Lark grammars, native Rust.</p>
+        <p class="tag">One grammar. Three engines. Native Rust.</p>
         <p class="sub">
-          Use the same EBNF grammar with <strong>LALR</strong>, <strong>Earley</strong> or
-          <strong>CYK</strong>. Build automatic parse trees. Preserve Lark's behaviour through
-          oracle-backed conformance. Run the core from Rust, Python, WebAssembly or C.
+          Use the same Extended Backus–Naur Form grammar with <strong>LALR</strong>,
+          <strong>Earley</strong> or <strong>CYK</strong>. Build automatic parse trees and reuse
+          the core from Rust, Python, WebAssembly or C. Behaviour is checked against Python Lark.
         </p>
         <div class="cta-row">
-          <a class="btn btn-primary" href="playground/">▶ Run it in your browser</a>
+          <a class="btn btn-primary" href="#engines">▶ Run it in your browser</a>
           <a class="btn btn-ghost" href="#method">Read the engineering method</a>
         </div>
         <p class="note">
-          One grammar. Three engines. Evidence at every layer.
+          Lark grammars, native Rust — checked, not claimed.
         </p>
       </div>
 
@@ -100,11 +100,11 @@ object : <span class="tok-str">"{"</span> [pair (<span class="tok-str">","</span
       <p class="eyebrow">Checked, not claimed</p>
       <div class="evidence-grid" id="evidence-grid" aria-label="Conformance evidence">
         <noscript>
-          <a class="ev" data-status="verified"><span class="num">512/512</span><span class="name">LALR compliance</span></a>
-          <a class="ev" data-status="verified"><span class="num">211/211</span><span class="name">Earley basic bank</span></a>
-          <a class="ev" data-status="verified"><span class="num">454/454</span><span class="name">Dynamic-lexer bank</span></a>
-          <a class="ev" data-status="verified"><span class="num">124/124</span><span class="name">CYK bank</span></a>
-          <a class="ev" data-status="verified"><span class="num">293/293</span><span class="name">JSONTestSuite</span></a>
+          <a class="ev" data-status="verified"><span class="ev-status">Verified</span><span class="num">512/512</span><span class="name">LALR compliance</span></a>
+          <a class="ev" data-status="verified"><span class="ev-status">Verified</span><span class="num">211/211</span><span class="name">Earley basic bank</span></a>
+          <a class="ev" data-status="verified"><span class="ev-status">Verified</span><span class="num">454/454</span><span class="name">Dynamic-lexer bank</span></a>
+          <a class="ev" data-status="verified"><span class="ev-status">Verified</span><span class="num">124/124</span><span class="name">CYK bank</span></a>
+          <a class="ev" data-status="verified"><span class="ev-status">Verified</span><span class="num">293/293</span><span class="name">JSONTestSuite</span></a>
         </noscript>
       </div>
       <p class="note" id="evidence-legend"></p>
@@ -128,11 +128,32 @@ object : <span class="tok-str">"{"</span> [pair (<span class="tok-str">","</span
         <pre><code id="engine-code"></code></pre>
       </div>
     </div>
+
+    <!-- the real thing: the WASM playground, embedded. Switch the Parser
+         control inside it (lalr / earley / cyk) on the same grammar — that
+         is "pick the parser, keep the grammar", live, in your browser. -->
+    <div class="demo-frame">
+      <div class="demo-bar">
+        <span class="dot" aria-hidden="true"></span>
+        <span>live · lark-rs compiled to WebAssembly, parsing in your browser</span>
+        <span class="grow"></span>
+        <a href="playground/" target="_blank" rel="noopener">Open full playground ↗</a>
+      </div>
+      <div class="demo-stage" id="demo-stage" data-src="playground/?embed=1">
+        <div class="demo-poster" id="demo-poster">
+          <p class="big">Pick the parser, keep the grammar — for real.</p>
+          <p>Loads the lark-rs WebAssembly engine (~1&nbsp;MB) and parses entirely client-side.
+             Change the <strong>Parser</strong> control between <code>lalr</code>, <code>earley</code>
+             and <code>cyk</code> on the same grammar and watch the tree.</p>
+          <button class="btn btn-primary" id="demo-load" type="button">▶ Load the live parser</button>
+        </div>
+      </div>
+    </div>
   </section>
 
   <!-- ===== WHERE IT FITS ============================================ -->
-  <section id="fit" class="wrap">
-    <p class="eyebrow">Where it fits</p>
+  <section id="why" class="wrap">
+    <p class="eyebrow">Why lark-rs</p>
     <h2>Why this, and not an adjacent Rust parser</h2>
     <p class="lede">
       lark-rs is for people who value <em>Lark's grammar model</em>: one EBNF grammar, a choice of
@@ -171,6 +192,72 @@ object : <span class="tok-str">"{"</span> [pair (<span class="tok-str">","</span
     <p class="note">Full tourist map: <a href="https://github.com/okalldal/lark/blob/master/lark-rs/ARCHITECTURE.md">ARCHITECTURE.md</a>.</p>
   </section>
 
+  <!-- ===== METHOD ==================================================== -->
+  <section id="method" class="wrap">
+    <p class="eyebrow">Evidence-gated development</p>
+    <h2>Autonomy ends where verification ends</h2>
+    <p class="lede">
+      lark-rs is developed with coding agents, but authority follows evidence — not confidence.
+      A change may proceed autonomously when its result can be checked against Python Lark, a
+      compliance bank, a regression test or a deterministic complexity gate. Decisions without an
+      objective basis remain with the human architect.
+    </p>
+
+    <div class="channels" aria-label="Decision boundary — a three-channel routing diagram">
+      <div class="channel c1">
+        <div class="no">01</div>
+        <div>
+          <div class="basis">Oracle · gate · bank</div>
+          <p class="gloss">The result can be independently checked.</p>
+          <div class="act">→ Act autonomously and self-check.</div>
+        </div>
+      </div>
+      <div class="channel c2">
+        <div class="no">02</div>
+        <div>
+          <div class="basis">Written principle + judgement</div>
+          <p class="gloss">Evidence narrows the choice but does not settle it.</p>
+          <div class="act">→ Decide, explain, and record the reasoning (an ADR).</div>
+        </div>
+      </div>
+      <div class="channel c3">
+        <div class="no">03</div>
+        <div>
+          <div class="basis">No falsifiable basis</div>
+          <p class="gloss">The question is product direction, taste or an ungrounded trade-off.</p>
+          <div class="act">→ Keep the decision human.</div>
+        </div>
+      </div>
+    </div>
+
+    <p style="margin-top:1.8rem">Four concrete manifestations in the repository:</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Principle</th><th>In lark-rs</th></tr></thead>
+        <tbody>
+          <tr><td>Oracle before implementation</td><td>Python Lark produces the expected behaviour before a feature is written.</td></tr>
+          <tr><td>Demonstrate before fixing</td><td>Bugs and performance pathologies become failing cases first.</td></tr>
+          <tr><td>Deterministic evidence</td><td>Complexity regressions use work counters, not noisy timing thresholds.</td></tr>
+          <tr><td>Durable decisions</td><td>Important trade-offs and exceptions are recorded in the repository (ADRs).</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p style="margin-top:1.4rem">Every significant claim on this page carries one of four statuses:</p>
+    <p>
+      <span class="pill verified">Verified</span> enforced by an oracle, bank or gate &nbsp;
+      <span class="pill measured">Measured</span> observed in a named benchmark &nbsp;
+      <span class="pill goal">Goal</span> a stated direction, not yet shown &nbsp;
+      <span class="pill open">Open</span> a known limitation
+    </p>
+    <p class="note">
+      Not every valuable property has an oracle. API ergonomics, product direction and some
+      resource-policy questions still require judgement. When the project cannot make a decision
+      falsifiable, it records the uncertainty rather than pretending otherwise. See
+      <a href="https://github.com/okalldal/lark/blob/master/lark-rs/docs/PRINCIPLES.md">PRINCIPLES.md</a>.
+    </p>
+  </section>
+
   <!-- ===== DIFFERENTIATORS ========================================= -->
   <section class="wrap">
     <p class="eyebrow">What you keep from Lark</p>
@@ -183,38 +270,6 @@ object : <span class="tok-str">"{"</span> [pair (<span class="tok-str">","</span
       <div class="card"><span class="mono-tag">imports</span><h3>Grammar composition</h3><p><code>%import</code> pulls terminals and rules from bundled libraries or sibling files — common terminals can't drift from Lark.</p></div>
       <div class="card"><span class="mono-tag">targets</span><h3>Multiple targets</h3><p>One core, reachable from Rust, Python (PyO3), WebAssembly and a C API — plus standalone parser generation.</p></div>
     </div>
-  </section>
-
-  <!-- ===== METHOD ==================================================== -->
-  <section id="method" class="wrap">
-    <p class="eyebrow">Evidence-gated development</p>
-    <h2>Autonomy ends where verification ends</h2>
-    <p class="lede">
-      lark-rs is developed with coding agents, but authority follows evidence — not confidence.
-      A change may proceed autonomously when its result can be checked against Python Lark, a
-      compliance bank, a regression test or a deterministic complexity gate. Product direction,
-      taste and trade-offs without an objective test remain human decisions.
-    </p>
-    <div class="boundary" aria-label="Decision boundary">
-      <div class="lane l1"><div class="basis">Oracle · gate · bank</div><div><span class="arrow">→</span> Act autonomously and self-check.</div></div>
-      <div class="lane l2"><div class="basis">Written principle + judgement</div><div><span class="arrow">→</span> Act, explain, and record the decision (an ADR).</div></div>
-      <div class="lane l3"><div class="basis">No falsifiable basis</div><div><span class="arrow">→</span> Escalate to the human architect.</div></div>
-    </div>
-    <p style="margin-top:1.4rem">
-      The aim is not to remove judgement — it is to turn as much routine judgement as possible into
-      durable, executable evidence. Every significant claim on this page carries one of four statuses:
-    </p>
-    <p>
-      <span class="pill verified">Verified</span> enforced by an oracle, bank or gate &nbsp;
-      <span class="pill measured">Measured</span> observed in a named benchmark &nbsp;
-      <span class="pill goal">Goal</span> a stated direction, not yet shown &nbsp;
-      <span class="pill open">Open</span> a known limitation
-    </p>
-    <p class="note">
-      Not every valuable property has an oracle. When the project cannot make a decision falsifiable,
-      it records the uncertainty and keeps the decision human. See
-      <a href="https://github.com/okalldal/lark/blob/master/lark-rs/docs/PRINCIPLES.md">PRINCIPLES.md</a>.
-    </p>
   </section>
 
   <!-- ===== TARGETS ================================================== -->
@@ -322,6 +377,7 @@ cargo test</code></pre>
 <!-- ===== single source of truth for the figures + picker ===== -->
 <script type="application/json" id="site-data">
 {
+  "updated": "2026-06-26",
   "evidence": [
     { "value": "512/512", "name": "LALR compliance", "status": "verified", "href": "https://github.com/okalldal/lark/blob/master/lark-rs/docs/STATUS.md" },
     { "value": "211/211", "name": "Earley basic bank", "status": "verified", "href": "https://github.com/okalldal/lark/blob/master/lark-rs/docs/STATUS.md" },

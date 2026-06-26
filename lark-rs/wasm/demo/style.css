@@ -45,6 +45,16 @@ h1 { margin: 0; font-size: 1.5rem; }
 h1 .thin { font-weight: 300; color: var(--muted); }
 .sub { margin: 0.25rem 0 0; color: var(--muted); font-size: 0.9rem; }
 .sub a { color: var(--accent); }
+
+/* ---- embed mode (iframed into the showcase, ?embed=1) ------------------ */
+/* Drop our own chrome and tune the accent to the showcase's sky blue so the
+   panel reads as part of the host page rather than a pasted-in app. */
+.embed body { padding: 0 .25rem .25rem; max-width: none; background: transparent; }
+.embed > body { color: #181a1e; }
+.embed header, .embed footer { display: none; }
+.embed main { margin-top: .25rem; }
+.embed { --accent: #3f718f; }
+@media (prefers-color-scheme: dark) { .embed { --accent: #7fb0d6; } }
 .version { white-space: nowrap; }
 
 main {

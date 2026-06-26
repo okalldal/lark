@@ -27,29 +27,54 @@
   const grid = document.getElementById("evidence-grid");
   if (grid && Array.isArray(data.evidence)) {
     grid.innerHTML = "";
-    let allVerified = true;
     data.evidence.forEach((e) => {
-      if (e.status !== "verified") allVerified = false;
       const a = document.createElement("a");
       a.className = "ev";
       a.dataset.status = e.status;
       if (e.href) a.href = e.href;
       a.title = STATUS_LABEL[e.status] || e.status;
+
+      const status = document.createElement("span");
+      status.className = "ev-status";
+      status.textContent = e.status; // styled uppercase via CSS
+      if (e.href) {
+        const arr = document.createElement("span");
+        arr.className = "arr";
+        arr.setAttribute("aria-hidden", "true");
+        arr.textContent = "↗";
+        status.appendChild(arr);
+      }
       const num = document.createElement("span");
       num.className = "num";
       num.textContent = e.value;
       const name = document.createElement("span");
       name.className = "name";
       name.textContent = e.name;
-      a.append(num, name);
+      a.append(status, num, name);
       grid.appendChild(a);
     });
     const legend = document.getElementById("evidence-legend");
     if (legend) {
-      legend.innerHTML = allVerified
-        ? 'Every figure above is <strong>Verified</strong> — enforced by an oracle bank or deterministic gate, sourced from the status ledger.'
-        : "Figures are sourced from the status ledger.";
+      const when = data.updated ? `Current as of ${data.updated}. ` : "";
+      legend.innerHTML =
+        when + "Every figure links to its enforcing bank or gate in the status ledger.";
     }
+  }
+
+  // ---- live demo: lazy-load the WASM playground iframe on demand ----------
+  const stage = document.getElementById("demo-stage");
+  const loadBtn = document.getElementById("demo-load");
+  if (stage && loadBtn) {
+    loadBtn.addEventListener("click", () => {
+      const src = stage.dataset.src;
+      if (!src) return;
+      const iframe = document.createElement("iframe");
+      iframe.src = src;
+      iframe.title = "lark-rs WebAssembly playground";
+      iframe.loading = "lazy";
+      stage.innerHTML = "";
+      stage.appendChild(iframe);
+    });
   }
 
   // ---- engine picker ------------------------------------------------------
