@@ -130,6 +130,22 @@ section > p, section > .lede, section > ul { max-width: 42rem; }
 }
 .hero-card .cap { font-family: var(--mono); font-size: .72rem; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-muted); margin-bottom: .5rem; }
 
+/* hero field-guide illustration — the artwork's paper ground matches --paper,
+   so it sits flush in light mode; in dark mode it reads as a framed plate. */
+.hero-fig { margin: 0; text-align: center; }
+.hero-fig img { width: 100%; max-width: 380px; height: auto; border-radius: 8px; }
+.hero-fig figcaption {
+  font-family: var(--mono); font-size: .72rem; letter-spacing: .04em;
+  color: var(--ink-muted); margin-top: .4rem;
+}
+@media (prefers-color-scheme: dark) {
+  .hero-fig img { box-shadow: 0 0 0 1px var(--rule), 0 18px 40px -30px rgba(0,0,0,.6); }
+}
+@media (max-width: 880px) { .hero-fig img { max-width: 300px; } }
+
+/* the canonical grammar, shown above the engine picker + live demo */
+.grammar-card { margin: 1.4rem 0; max-width: 640px; }
+
 /* ---- evidence strip ---------------------------------------------------- */
 .evidence-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .9rem; margin-top: 1.4rem; }
 .ev {

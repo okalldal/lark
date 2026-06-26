@@ -10,10 +10,13 @@
   <meta property="og:type" content="website">
   <meta property="og:title" content="lark-rs — Lark grammars, native Rust">
   <meta property="og:description" content="One grammar. Three engines. Evidence at every layer. Checked against Python Lark.">
-  <!-- Interim SVG placeholder; swap to assets/social-preview.png once commissioned. -->
-  <meta property="og:image" content="assets/social-preview.svg">
+  <meta property="og:image" content="assets/social-preview.png">
+  <meta property="og:image:width" content="1024">
+  <meta property="og:image:height" content="541">
+  <meta property="og:image:alt" content="A field-guide lark in flight; its wing is three colored strokes — LALR, Earley, CYK.">
   <meta property="og:url" content="https://okalldal.github.io/lark/">
   <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:image" content="assets/social-preview.png">
 
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -73,26 +76,11 @@
         </p>
       </div>
 
-      <aside class="hero-card" aria-label="JSON grammar example">
-        <div class="cap">json.lark — the canonical example</div>
-        <div class="code">
-          <div class="code-head"><span>grammar</span></div>
-<pre><code><span class="tok-com">?start: value</span>
-
-?value: object
-      | array
-      | <span class="tok-str">ESCAPED_STRING</span>
-      | <span class="tok-str">SIGNED_NUMBER</span>  -&gt; number
-      | <span class="tok-str">"true"</span>  | <span class="tok-str">"false"</span> | <span class="tok-str">"null"</span>
-
-array  : <span class="tok-str">"["</span> [value (<span class="tok-str">","</span> value)*] <span class="tok-str">"]"</span>
-object : <span class="tok-str">"{"</span> [pair (<span class="tok-str">","</span> pair)*] <span class="tok-str">"}"</span>
-
-<span class="tok-kw">%import</span> common.ESCAPED_STRING
-<span class="tok-kw">%import</span> common.SIGNED_NUMBER
-<span class="tok-kw">%ignore</span> common.WS</code></pre>
-        </div>
-      </aside>
+      <figure class="hero-fig">
+        <img src="assets/hero-bird.png" width="851" height="1024"
+             alt="A field-guide engraving of a lark perched at the root of a parse tree, the tree's nodes tinted copper, sky-blue and green." />
+        <figcaption>A grammar in, a tree out — drawn as a field-guide plate.</figcaption>
+      </figure>
     </div>
 
     <!-- evidence strip, rendered from the single #site-data block -->
@@ -119,6 +107,24 @@ object : <span class="tok-str">"{"</span> [pair (<span class="tok-str">","</span
       The same <code>.lark</code> grammar runs under three algorithms — you change one option,
       not your grammar. Each comes with the lexer that suits it.
     </p>
+
+    <div class="code grammar-card" aria-label="JSON grammar example">
+      <div class="code-head"><span>json.lark — one grammar, used by all three engines below</span></div>
+<pre><code><span class="tok-com">?start: value</span>
+
+?value: object
+      | array
+      | <span class="tok-str">ESCAPED_STRING</span>
+      | <span class="tok-str">SIGNED_NUMBER</span>  -&gt; number
+      | <span class="tok-str">"true"</span>  | <span class="tok-str">"false"</span> | <span class="tok-str">"null"</span>
+
+array  : <span class="tok-str">"["</span> [value (<span class="tok-str">","</span> value)*] <span class="tok-str">"]"</span>
+object : <span class="tok-str">"{"</span> [pair (<span class="tok-str">","</span> pair)*] <span class="tok-str">"}"</span>
+
+<span class="tok-kw">%import</span> common.ESCAPED_STRING
+<span class="tok-kw">%import</span> common.SIGNED_NUMBER
+<span class="tok-kw">%ignore</span> common.WS</code></pre>
+    </div>
 
     <div class="picker-tabs" role="tablist" aria-label="Parser algorithm" id="engine-tabs"></div>
     <div class="picker-body">
