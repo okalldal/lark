@@ -97,12 +97,30 @@ impl GrammarCompiler {
         let by_name: HashMap<&str, &RawTerm> =
             raw_terms.iter().map(|t| (t.name.as_str(), t)).collect();
         // Terminals already known (imports, declares) as inline-ready regex — a
-        // terminal body may reference these too.
-        let imported: HashMap<String, String> = self
+        // terminal body may reference these too. This map is **mutable**: an
+        // imported terminal that is `%extend`ed (the #286 case) has its entry
+        // rewritten to its final, extended regex *before* any local terminal that
+        // references it is resolved, so the whole set — imported terminals, their
+        // pending extensions, and local `RawTerm`s — participates in one
+        // dependency-resolution graph. Mutating after the resolution pass (the
+        // original #286 design) could not give order-independent semantics: a local
+        // terminal `X: WORD` resolved through the pre-extension `WORD` and never saw
+        // a later `%extend WORD` (architect review of PR #450, defect 1).
+        let mut imported: HashMap<String, String> = self
             .terminals
             .iter()
             .map(|t| (t.name.clone(), t.pattern.to_inline_regex()))
             .collect();
+
+        // #286 / PR #450 corrective: fold every pending imported-terminal `%extend`
+        // into `imported` FIRST, in dependency order, so a terminal that references
+        // an extended import (or an extension whose body references another extended
+        // import) resolves through the extended form. Returns the per-name final
+        // regexes to write back onto the `TerminalDef`s after the raw-terminal pass.
+        let pending = std::mem::take(&mut self.pending_term_extends);
+        let extended_regexes = Self::resolve_pending_extends(pending, &by_name, &mut imported)?;
+        // `imported` is now final. Capture the (immutable) view the later passes read.
+        let imported = imported;
 
         let mut memo: HashMap<String, String> = HashMap::new();
         for t in &raw_terms {
@@ -112,11 +130,17 @@ impl GrammarCompiler {
         // Classify each terminal as Python would: `pattern.type == "str"` (a plain
         // string literal) vs `"re"`. lark-rs compiles everything to a regex, so we
         // recover the distinction structurally here — it gates the strict-mode
-        // collision check (issue #35), which only compares the regex terminals.
+        // collision check (issue #35), which only compares the regex terminals. An
+        // extended import is now a multi-arm `Pattern::Re`, so it is regex-typed
+        // (`false`) regardless of its pre-extension type — clear it here so a local
+        // terminal referencing it classifies correctly too.
         let imported_str: HashMap<&str, bool> = self
             .terminals
             .iter()
-            .map(|t| (t.name.as_str(), t.string_type))
+            .map(|t| {
+                let is_str = t.string_type && !extended_regexes.contains_key(&t.name);
+                (t.name.as_str(), is_str)
+            })
             .collect();
         let mut str_memo: HashMap<String, bool> = HashMap::new();
         for t in &raw_terms {
@@ -125,10 +149,12 @@ impl GrammarCompiler {
 
         // The recoverable literal value (and case-insensitivity) of each
         // already-known string terminal, so a reference to an imported
-        // `PatternStr` resolves to a `PatternStr` too.
+        // `PatternStr` resolves to a `PatternStr` too. An extended import is no
+        // longer a lone string literal, so it is excluded (it became a `Pattern::Re`).
         let imported_val: HashMap<String, (String, bool)> = self
             .terminals
             .iter()
+            .filter(|t| !extended_regexes.contains_key(&t.name))
             .filter_map(|t| match &t.pattern {
                 Pattern::Str(p) => Some((t.name.clone(), (p.value.clone(), p.ci))),
                 _ => None,
@@ -179,85 +205,16 @@ impl GrammarCompiler {
                 .push(TerminalDef::new(&t.name, pat, t.priority).with_string_type(string_type));
         }
 
-        // #286: `%extend` of an *imported* (already-compiled) terminal. The new
-        // alternatives could not splice into a `RawTerm` (there is none — the
-        // target is a baked `TerminalDef`), so they were staged in
-        // `pending_term_extends`. Prepend them onto the resolved terminal's regex
-        // here, matching Python's `_extend` (`base.children.insert(0, exp)` on the
-        // still-AST definition tree): the extended terminal becomes an alternation
-        // of the new alternatives and the original body, so both parse. Resolution
-        // reuses the same `by_name` / `imported` / `memo` machinery, so an extend
-        // body may itself reference any terminal. Multiple extends of one name apply
-        // in document order, each inserting at the front (so the last-staged is
-        // outermost-first), exactly as repeated `_extend` calls do.
-        let pending = std::mem::take(&mut self.pending_term_extends);
-        // The pending-extend reference graph, for recursion detection. A terminal
-        // denotes a *regular* language, so it may not reference itself (Python:
-        // `Recursion in terminal 'X'`). The main `resolve_term_regex` pass catches a
-        // cycle among `RawTerm`s, but an imported terminal short-circuits via the
-        // `imported` map *before* that check, so a self/mutually-recursive extend
-        // body would slip through and over-accept. Detect it here over the names a
-        // pending body references, walking on through any `RawTerm` body (`by_name`)
-        // or *other* pending-extend body until either `name` is reached (recursion)
-        // or the walk dead-ends at an already-resolved imported terminal.
-        let pending_refs: HashMap<&str, Vec<&AliasedExpansion>> =
-            pending.iter().fold(HashMap::new(), |mut m, (n, exps)| {
-                m.entry(n.as_str()).or_default().extend(exps.iter());
-                m
-            });
-        for (name, expansions) in &pending {
-            if Self::extend_reaches(name, expansions, &by_name, &pending_refs, &mut Vec::new()) {
-                return Err(GrammarError::Other {
-                    msg: format!(
-                        "Recursion in terminal {name:?} (recursion is only allowed in rules, \
-                         not terminals)"
-                    ),
-                });
-            }
-        }
-        for (name, expansions) in pending {
-            // Resolve each new alternative to a regex, concatenating its exprs —
-            // the same per-alternative build the main resolution loop performs.
-            let mut new_alts = Vec::with_capacity(expansions.len());
-            for alt in &expansions {
-                let mut parts = String::new();
-                for expr in &alt.expansion {
-                    parts.push_str(&Self::term_expr_regex(
-                        expr,
-                        &by_name,
-                        &imported,
-                        &mut memo,
-                        &mut Vec::new(),
-                    )?);
-                }
-                new_alts.push(parts);
-            }
-            // Prepend onto the existing terminal's resolved body, then re-rank ALL
-            // arms by Python Lark's terminal-arm key `(-max_width, -len(value))`
-            // (`TerminalTreeToPattern` sorts the spliced `expansions` tree; mirrors
-            // `lexer/plan.rs::sort_terminals`). The match engine is leftmost-*first*
-            // (`MatchKind::LeftmostFirst`), so arm order is load-bearing: a string-
-            // length sort would put a shorter-source arm ahead of a wider one and the
-            // wider arm would never match (e.g. `%extend LETTER: "abc"` — `abc`
-            // (width 3) must beat the `[A-Z]|[a-z]` body (width 1), else only `a`
-            // matches). The prior body is kept as one unit (its baked regex has no
-            // recoverable per-arm structure); ranking it by its overall max width
-            // matches Python for every case except a new arm whose width falls
-            // *strictly between* two internal arms of a multi-alt imported body —
-            // tracked as #449 (the body's per-arm interleave needs the un-baked
-            // AST, the very thing #286's design avoids). The result is
-            // always a `Pattern::Re` (≥2 arms), so `string_type` clears — an extended
-            // terminal is no longer a lone string literal (Python: `PatternRE`).
+        // #286 / PR #450 corrective: the pending imported-terminal `%extend`s were
+        // already resolved (in dependency order) into `imported` by
+        // `resolve_pending_extends`, BEFORE the raw-terminal pass above — so a local
+        // terminal that references an extended import saw the extended form. Now
+        // write each final extended regex onto its `TerminalDef`. The result is
+        // always a `Pattern::Re` (≥2 arms: the new alternatives plus the original
+        // body), so `string_type` clears — an extended terminal is no longer a lone
+        // string literal (Python's `TerminalTreeToPattern` yields a `PatternRE`).
+        for (name, combined) in extended_regexes {
             if let Some(idx) = self.terminals.iter().position(|td| td.name == name) {
-                let existing = self.terminals[idx].pattern.to_inline_regex();
-                let mut alts = new_alts;
-                alts.push(existing);
-                Self::sort_terminal_arms(&mut alts)?;
-                let combined = alts
-                    .into_iter()
-                    .map(|p| format!("(?:{p})"))
-                    .collect::<Vec<_>>()
-                    .join("|");
                 self.terminals[idx].pattern = Pattern::Re(PatternRe::new(combined.as_str(), 0)?);
                 self.terminals[idx].string_type = false;
             } else {
@@ -270,31 +227,187 @@ impl GrammarCompiler {
         Ok(())
     }
 
-    /// Sort already-resolved alternation arm regexes by Python Lark's terminal
-    /// ordering key `(-max_width, -len(value))` — widest first, then longest source
-    /// first — exactly as [`crate::lexer::plan`]'s `sort_terminals` ranks whole
-    /// terminals. The match engine is leftmost-first, so the widest arm must come
-    /// first to be tried first. An unbounded arm (`max_width == None`) maps to
-    /// `usize::MAX` and sorts ahead of every finite arm (Python's `MAXWIDTH`). Each
-    /// arm is a valid regex (it was just built by the resolver / `to_inline_regex`),
-    /// so re-parsing it through `PatternRe::new` to measure width cannot fail; the
-    /// `?` is a defensive guard, not an expected path.
+    /// Resolve every pending imported-terminal `%extend` (#286) into the `imported`
+    /// regex map, **in dependency order**, returning each extended terminal's final
+    /// combined regex (keyed by name) for the caller to bake onto its `TerminalDef`.
+    ///
+    /// This is the PR #450 corrective for defect 1 (architect review): the original
+    /// design applied the extensions by mutating already-baked `TerminalDef`s *after*
+    /// the whole terminal-resolution pass, so a local terminal `X: WORD` (or an
+    /// extension body `%extend INT: WORD`) that referenced an extended import was
+    /// resolved through the import's PRE-extension regex and never saw the new
+    /// alternative. Folding the extensions into `imported` here — before any
+    /// referencing terminal is memoized — makes imported terminals, their pending
+    /// extensions, and local raw terminals one dependency-resolution graph, giving
+    /// order-independent semantics that match Python's `_extend` (which mutates the
+    /// still-AST `WORD` definition before anything that references it compiles).
+    ///
+    /// Algorithm. The extension graph is a DAG (`extend_reaches` rejects any cycle —
+    /// a terminal denotes a regular language and may not reference itself). Each
+    /// terminal's final body is `sort_terminal_arms(new_alts ++ [original_body])`,
+    /// where `new_alts` are resolved against the *latest* `imported`; a chain like
+    /// `%extend INT: WORD` / `%extend WORD: "@"` needs `WORD` final before `INT`'s
+    /// `WORD` arm is built. We reach the fixpoint by relaxation: each pass rebuilds
+    /// every extended terminal's body **from its pristine original** (so arms never
+    /// compound across passes) against the current `imported`, until a pass changes
+    /// nothing. Monotone propagation along a DAG of depth ≤ k (the number of pending
+    /// extends) converges in ≤ k passes; the change-guarded loop is bounded by
+    /// `k + 1`. A *fresh* `memo` per pass is mandatory: a raw-term resolution cached
+    /// against a not-yet-final `imported` would otherwise leak a stale body forward.
+    /// Multiple extends of one name apply in document order, each prepending onto the
+    /// running body (last-staged outermost-first), exactly as repeated `_extend`s do.
+    fn resolve_pending_extends(
+        pending: Vec<(String, Vec<AliasedExpansion>)>,
+        by_name: &HashMap<&str, &RawTerm>,
+        imported: &mut HashMap<String, String>,
+    ) -> Result<HashMap<String, String>, GrammarError> {
+        if pending.is_empty() {
+            return Ok(HashMap::new());
+        }
+        // Recursion detection over the pending-extend reference graph. The main
+        // `resolve_term_regex` pass catches a cycle among `RawTerm`s, but an imported
+        // terminal short-circuits via the `imported` map *before* that check, so a
+        // self/mutually-recursive extend body would slip through and over-accept.
+        // Walk the names a pending body references, on through any `RawTerm` body
+        // (`by_name`) or *other* pending-extend body, until `name` is reached
+        // (recursion) or the walk dead-ends at an already-resolved imported terminal.
+        let pending_refs: HashMap<&str, Vec<&AliasedExpansion>> =
+            pending.iter().fold(HashMap::new(), |mut m, (n, exps)| {
+                m.entry(n.as_str()).or_default().extend(exps.iter());
+                m
+            });
+        for (name, expansions) in &pending {
+            if Self::extend_reaches(name, expansions, by_name, &pending_refs, &mut Vec::new()) {
+                return Err(GrammarError::Other {
+                    msg: format!(
+                        "Recursion in terminal {name:?} (recursion is only allowed in rules, \
+                         not terminals)"
+                    ),
+                });
+            }
+        }
+
+        // The pristine pre-extension body of every extended import — each pass
+        // prepends onto THIS, never onto an already-extended body, so arms cannot
+        // compound across passes.
+        let original: HashMap<&str, String> = pending
+            .iter()
+            .filter_map(|(name, _)| {
+                imported
+                    .get(name.as_str())
+                    .map(|body| (name.as_str(), body.clone()))
+            })
+            .collect();
+        // Distinct extended names in first-seen (document) order, for deterministic
+        // per-pass iteration.
+        let mut names: Vec<&str> = Vec::new();
+        for (name, _) in &pending {
+            if !names.contains(&name.as_str()) {
+                names.push(name.as_str());
+            }
+        }
+
+        // Relax to a fixpoint: rebuild each extended body from its original against
+        // the current `imported` until a pass changes nothing (≤ k + 1 passes).
+        let max_passes = names.len() + 1;
+        let mut final_regexes: HashMap<String, String> = HashMap::new();
+        for _ in 0..max_passes {
+            let mut changed = false;
+            for &name in &names {
+                let Some(orig_body) = original.get(name) else {
+                    // Unreachable: a pending extend always targets a present import.
+                    debug_assert!(false, "pending extend for unknown terminal {name:?}");
+                    continue;
+                };
+                // Thread the body through every extend staged for this name, in
+                // document order, each prepending its (freshly resolved) alternatives
+                // and re-ranking — mirroring repeated `_extend` `insert(0, exp)`.
+                let mut body = orig_body.clone();
+                let mut memo: HashMap<String, String> = HashMap::new();
+                for (entry_name, expansions) in &pending {
+                    if entry_name != name {
+                        continue;
+                    }
+                    let mut new_alts = Vec::with_capacity(expansions.len());
+                    for alt in expansions {
+                        let mut parts = String::new();
+                        for expr in &alt.expansion {
+                            parts.push_str(&Self::term_expr_regex(
+                                expr,
+                                by_name,
+                                imported,
+                                &mut memo,
+                                &mut Vec::new(),
+                            )?);
+                        }
+                        new_alts.push(parts);
+                    }
+                    let mut alts = new_alts;
+                    alts.push(body);
+                    Self::sort_terminal_arms(&mut alts)?;
+                    body = alts
+                        .into_iter()
+                        .map(|p| format!("(?:{p})"))
+                        .collect::<Vec<_>>()
+                        .join("|");
+                }
+                if imported.get(name) != Some(&body) {
+                    changed = true;
+                    imported.insert(name.to_string(), body.clone());
+                }
+                final_regexes.insert(name.to_string(), body);
+            }
+            if !changed {
+                break;
+            }
+        }
+        Ok(final_regexes)
+    }
+
+    /// Sort already-resolved alternation arm regexes by Python Lark's **full**
+    /// within-terminal expansion key `(-max_width, -min_width, -len(value))` —
+    /// widest first, then (on a max-width tie) largest *minimum* width first, then
+    /// longest source first. This mirrors `TerminalTreeToPattern` in
+    /// `lark/load_grammar.py`, which sorts a terminal's flattened `expansions` by
+    /// `key=(-x.max_width, -x.min_width, -len(x.value))`. The match engine is
+    /// leftmost-first (`MatchKind::LeftmostFirst`), so the arm tried first must be
+    /// the one Python would expand first, or a valid wider match is never taken.
+    ///
+    /// The `min_width` tie-break is load-bearing whenever two arms share a max
+    /// width: e.g. an imported `T: /a|bc/` (max 2, **min 1**) extended with `"ab"`
+    /// (max 2, **min 2**) — both width-2, but Python puts `"ab"` first on its larger
+    /// min width, so `"ab"` matches as one token; ordering by source length instead
+    /// (the old 2nd key) puts `a|bc` first and the engine consumes only `"a"` (#449).
+    ///
+    /// An unbounded arm (`max_width == None`) maps to `usize::MAX` and sorts ahead of
+    /// every finite arm (Python's `MAXWIDTH`); `min_width` is always finite. Each arm
+    /// is a valid regex (it was just built by the resolver / `to_inline_regex`), so
+    /// re-parsing it to measure width cannot fail; the `?` is a defensive guard.
     fn sort_terminal_arms(arms: &mut [String]) -> Result<(), GrammarError> {
-        // Measure each arm once (width + raw length), then sort on the cached keys —
-        // avoids re-parsing the regex inside the comparator.
-        let mut keyed: Vec<(usize, usize, &str)> = Vec::with_capacity(arms.len());
+        // Measure each arm once (max width + min width + raw length), then sort on the
+        // cached keys — avoids re-parsing the regex inside the comparator.
+        let mut keyed: Vec<(usize, usize, usize, &str)> = Vec::with_capacity(arms.len());
         for arm in arms.iter() {
             let pat = Pattern::Re(PatternRe::new(arm.as_str(), 0)?);
             keyed.push((
                 pat.max_width().unwrap_or(usize::MAX),
+                arm_min_width(arm.as_str()),
                 pat.raw_value_len(),
                 arm.as_str(),
             ));
         }
-        // Descending max_width, then descending raw length; ties keep input order
-        // (stable sort) so equal-rank arms preserve their prepend sequence.
-        keyed.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
-        let order: Vec<String> = keyed.into_iter().map(|(_, _, s)| s.to_string()).collect();
+        // Descending max_width, then descending min_width, then descending raw length;
+        // ties keep input order (stable sort) so equal-rank arms preserve their
+        // prepend sequence — Python's `(-max_width, -min_width, -len(value))`.
+        keyed.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| b.1.cmp(&a.1))
+                .then_with(|| b.2.cmp(&a.2))
+        });
+        let order: Vec<String> = keyed
+            .into_iter()
+            .map(|(_, _, _, s)| s.to_string())
+            .collect();
         arms.clone_from_slice(&order);
         Ok(())
     }
@@ -780,6 +893,54 @@ impl GrammarCompiler {
                 msg: format!("Cannot convert {:?} to pattern", expr),
             }),
         }
+    }
+}
+
+/// The **minimum** match width of an alternation-arm regex string, in characters —
+/// the lark-rs equivalent of Python's `Pattern.min_width` (`sre_parse.getwidth()[0]`),
+/// the second key of `TerminalTreeToPattern`'s within-terminal arm sort
+/// (`(-max_width, -min_width, -len(value))`). It is the companion of
+/// [`Pattern::max_width`](crate::grammar::terminal::Pattern::max_width) and is computed
+/// the *same* way per arm so the two keys can never disagree on which engine sized a
+/// given arm: parse the source to a `regex-syntax` HIR and walk it; only a pattern that
+/// front-end cannot parse — a lowerable-lookaround idiom (`(?=…)`, `(?<=…)`, `\b`) — is
+/// sized through the shared assertion-aware [`width_range`](crate::lookaround::lower::width_range)
+/// walk instead (assertions are zero-width, matching `sre_parse`). A genuine
+/// backreference (which never builds a lexer) is the only residue; it falls back to `0`,
+/// the conservative "smallest min" that sorts such an arm last on this key. Min width is
+/// always finite (unlike max, there is no `MAXWIDTH`/∞ case).
+fn arm_min_width(arm: &str) -> usize {
+    match regex_syntax::parse(arm) {
+        // The `regex` crate parses it (no lookaround/backref): walk the HIR.
+        Ok(hir) => hir_min_width_chars(&hir),
+        // The `regex` crate rejects it — size it the assertion-aware way, exactly as
+        // `Pattern::max_width` falls back for the max side. `parse` failing here means a
+        // real backref the analyzer also cannot size, so use `0`.
+        Err(_) => crate::lookaround::parse(arm)
+            .map(|node| crate::lookaround::lower::width_range(&node).0)
+            .unwrap_or(0),
+    }
+}
+
+/// Minimum match width of a `regex-syntax` HIR, counted in **characters**. Mirrors
+/// Python's `sre_parse.getwidth()[0]`: an empty / lookaround assertion is zero-width;
+/// a literal counts its code points; a class is exactly one char; a repetition's min is
+/// its lower bound times the sub-pattern's min (so `a*`/`a?` contribute 0); concatenation
+/// sums, and alternation takes the **minimum** over branches. Counterpart of
+/// [`hir_max_width_chars`](crate::grammar::terminal) — same structure, min where that
+/// takes max and the repetition lower bound where that takes the upper.
+fn hir_min_width_chars(hir: &regex_syntax::hir::Hir) -> usize {
+    use regex_syntax::hir::HirKind;
+    match hir.kind() {
+        HirKind::Empty | HirKind::Look(_) => 0,
+        HirKind::Literal(lit) => std::str::from_utf8(&lit.0)
+            .map(|s| s.chars().count())
+            .unwrap_or(lit.0.len()),
+        HirKind::Class(_) => 1,
+        HirKind::Repetition(r) => hir_min_width_chars(&r.sub).saturating_mul(r.min as usize),
+        HirKind::Capture(c) => hir_min_width_chars(&c.sub),
+        HirKind::Concat(subs) => subs.iter().map(hir_min_width_chars).sum(),
+        HirKind::Alternation(subs) => subs.iter().map(hir_min_width_chars).min().unwrap_or(0),
     }
 }
 
