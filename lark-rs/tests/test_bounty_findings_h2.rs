@@ -199,6 +199,103 @@ fn extend_imported_terminal_self_recursion_rejected() {
     );
 }
 
+// ───────────────────────────────────────────────────────────────────────────────
+// #286 CORRECTIVE (PR #450 review findings) — the imported-terminal `%extend`
+// fix had two defects the architect caught on the omnibus:
+//   D1 (HIGH): a local/imported terminal that *references* an extended import was
+//       resolved against the PRE-extension pattern (the extension mutated the
+//       imported terminal only AFTER all dependents were memoized), so the new
+//       alternative never reached the dependent — order-dependent semantics.
+//   D2 (MAJOR): the new arm sorter omitted Python's `min_width` tie-break, so an
+//       equal-max-width arm pair was ordered by source length and the leftmost-
+//       first engine matched the wrong (narrower-min-width) arm.
+// All three cases are Python Lark 1.3.1 oracle-verified.
+// ───────────────────────────────────────────────────────────────────────────────
+
+/// #286 D1 (HIGH). A *local* terminal `X: WORD` references an imported terminal
+/// that is then extended (`%extend WORD: "@"`). Python's `_extend` mutates the
+/// imported `WORD` definition *before* any terminal that references it is compiled,
+/// so `X` (which is just `WORD`) gains the `"@"` alternative too: both `"hello"`
+/// and `"@"` parse as `X`. On the pre-fix branch `resolve_terminals` snapshotted
+/// `WORD`'s regex into `imported` and memoized `X` against it *before* applying the
+/// pending extend, so `X` kept the old `WORD` and `"@"` was rejected.
+#[test]
+fn extend_imported_terminal_rebuilds_dependent_local_terminal() {
+    let g = "%import common.WORD\nX: WORD\n%extend WORD: \"@\"\nstart: X\n";
+    let lark =
+        Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).expect("grammar builds");
+    assert!(
+        lark.parse("hello").is_ok(),
+        "the original WORD body still parses through X"
+    );
+    assert!(
+        lark.parse("@").is_ok(),
+        "X: WORD must pick up the `%extend WORD: \"@\"` alternative (Python accepts it)"
+    );
+}
+
+/// #286 D1 (HIGH). Extension-to-extension dependency: one imported terminal's
+/// extension *body references another imported terminal that is itself extended
+/// later*. `%extend INT: WORD` then `%extend WORD: "@"` — Python resolves the whole
+/// graph, so `INT` ends up accepting `"@"` (via `WORD`, which gained `"@"`). On the
+/// pre-fix branch the first extension resolved `WORD` through its pre-extension
+/// snapshot, so `INT`'s `WORD` arm never saw `"@"`.
+#[test]
+fn extend_imported_terminal_resolves_extension_to_extension_dependency() {
+    let g = "%import common.INT\n%import common.WORD\nstart: INT\n\
+             %extend INT: WORD\n%extend WORD: \"@\"\n";
+    let lark =
+        Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).expect("grammar builds");
+    assert!(
+        lark.parse("123").is_ok(),
+        "the original INT body still parses"
+    );
+    assert!(
+        lark.parse("@").is_ok(),
+        "INT extended with WORD, WORD extended with \"@\" → \"@\" parses as INT \
+         (Python accepts it)"
+    );
+}
+
+/// #286 D2 (MAJOR). Equal-max-width arms must break ties by `min_width` before
+/// source length, matching Python's `TerminalTreeToPattern` key
+/// `(-max_width, -min_width, -len(value))`. Imported `T: /a|bc/` (max_width 2,
+/// min_width 1, source length 4) is extended with `"ab"` (max_width 2, min_width 2,
+/// source length 2). Both have max_width 2; Python's `min_width` tie-break puts the
+/// `"ab"` arm first, so the leftmost-first engine matches `"ab"` as ONE `T` token.
+/// The pre-fix branch sorted by source length as the 2nd key, placed `a|bc` first,
+/// and matched only `"a"` — leaving `"b"` unconsumed (a parse error).
+#[test]
+fn extend_imported_terminal_min_width_breaks_equal_max_width_tie() {
+    let sources: std::collections::HashMap<String, String> =
+        [("tokens.lark".to_string(), "T: /a|bc/\n".to_string())].into();
+    let g = "%import .tokens (T)\n%extend T: \"ab\"\nstart: T\n";
+    let lark = Lark::new(
+        g,
+        LarkOptions {
+            parser: ParserAlgorithm::Lalr,
+            lexer: LexerType::Contextual,
+            start: vec!["start".to_string()],
+            import_sources: Some(std::sync::Arc::new(sources)),
+            ..Default::default()
+        },
+    )
+    .expect("grammar builds");
+    let tree = lark
+        .parse("ab")
+        .expect("\"ab\" parses (the `\"ab\"` arm has the larger min_width, sorts first)");
+    let tree = tree.as_tree().expect("tree root");
+    // Exactly one child: the single `T=\"ab\"` token. Two tokens would mean the
+    // narrow `a|bc` arm won and matched only `\"a\"`, then `\"b\"` as a second T.
+    assert_eq!(
+        tree.children.len(),
+        1,
+        "\"ab\" must be ONE T token (min_width tie-break), got {} children: {:?}",
+        tree.children.len(),
+        tree.children
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Lexer / regex dialect.
 // ─────────────────────────────────────────────────────────────────────────────
