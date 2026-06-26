@@ -497,6 +497,142 @@ fn h5_6_angle_named_group_rejected() {
     }
 }
 
+/// H5-6/H5-5 CORRECTIVE pin (#364, corrects the staged PR #463 `(?#…)`-comment defect).
+/// Both new dialect screens — `reject_regex_crate_angle_named_group` (H5-6) and
+/// `reject_named_unicode_escape` (H5-5) — used to run on the **raw** pattern source
+/// *before* `(?#…)` comments were stripped. They are escape- and class-aware but were
+/// **not comment-aware**, so a `(?<x>` or `\N{…}` appearing *inside* an inline `(?#…)`
+/// comment tripped them and the terminal was wrongly rejected.
+///
+/// Python `re` removes a `(?#…)` comment before any other interpretation, so both bodies
+/// below are equivalent to `/ab/` and match `ab` (oracle-verified vs Python Lark 1.3.1:
+/// `re.compile(r'a(?#(?<x>)b')` and `re.compile(r'a(?#\N{BULLET})b')` both match `'ab'`,
+/// and Lark builds + parses `ab` → `Token('A', 'ab')`). The `(?<x>` / `\N{…}` text is
+/// comment content, not regex syntax — it must NOT be screened. Driven end-to-end through
+/// `Lark::new` (the full `PatternRe::new` screen path), not the scanner helpers directly.
+///
+/// NB the comment span ends at the first unescaped `)` (Python's `sre_parse`), so in
+/// grammar 1 the comment is `(?#(?<x>)` and the tail is the bare `b` — exactly `/ab/`.
+#[test]
+fn h5_corrective_screens_skip_text_inside_inline_comments() {
+    for (body, label) in [
+        // H5-6: the `(?<x>` inside the comment must not trip the angle-group reject.
+        (r"a(?#(?<x>)b", "angle-group text in (?#…) comment"),
+        // H5-5: the `\N{…}` inside the comment must not trip the named-unicode re-bucket.
+        (r"a(?#\N{BULLET})b", "named-unicode text in (?#…) comment"),
+    ] {
+        let g = format!("start: A\nA: /{body}/\n");
+        let lark =
+            Lark::new(&g, opts(ParserAlgorithm::Lalr, LexerType::Basic)).unwrap_or_else(|e| {
+                panic!(
+                    "H5 corrective ({label}, body={body:?}): Python strips the `(?#…)` comment \
+                     and the terminal is `/ab/`; lark-rs must build it, got build error: {e}"
+                )
+            });
+        let tree = lark.parse("ab").unwrap_or_else(|e| {
+            panic!("H5 corrective ({label}, body={body:?}): must parse `ab`, got: {e}")
+        });
+        let mut types = Vec::new();
+        collect_token_types(&tree, &mut types);
+        assert_eq!(
+            types,
+            vec!["A"],
+            "H5 corrective ({label}, body={body:?}): expected the single token `A` over `ab`"
+        );
+    }
+}
+
+/// H5-6/H5-5 CORRECTIVE pin (#364) — **verbose mode**. The architect flagged that a
+/// verbose-mode `# …` comment line can contain text resembling `(?<x>` or `\N{…}` and must
+/// not be mis-screened either. Confirmed against Python Lark 1.3.1: the grammar uses the
+/// **terminal-level verbose flag** `/…/x` (Lark allows a newline inside a `/…/` literal
+/// only when the `x` flag is present — `loader/tokenizer.rs`), and both forms below build
+/// and parse `ab`:
+///   * a `(?#…)` comment under `x` (`re.compile('a (?#(?<x>) b', re.VERBOSE)` matches `ab`),
+///   * a verbose `# …`-to-end-of-line comment whose body holds `(?<x>` and `\N{BULLET}`
+///     (`re.compile('a # … (?<x> … \N{BULLET}\n b', re.VERBOSE)` matches `ab`).
+/// Verbose mode strips the `# …` comment (and ignores unescaped whitespace), so the
+/// resembling text is comment content. The screens stay contiguous-token based: Python
+/// does NOT collapse whitespace into a group (`( ?<x>)` is "nothing to repeat", `(?< x>)`
+/// is still rejected) so a real `(?<`/`\N{` is detected exactly where Python sees one;
+/// only the comment spans need skipping.
+#[test]
+fn h5_corrective_screens_skip_text_inside_verbose_comments() {
+    for (body, label) in [
+        // A `(?#…)` comment under the verbose flag (whitespace ignored → `ab`).
+        (r"a (?#(?<x>) b", "(?#…) angle text under /…/x"),
+        (r"a (?#\N{BULLET}) b", "(?#…) named-unicode text under /…/x"),
+        // A verbose `# …` comment LINE (newline allowed under `x`) holding both shapes.
+        (
+            "a # looks like (?<x> and \\N{BULLET} but is a comment\n   b",
+            "verbose # … comment line with both shapes",
+        ),
+    ] {
+        let g = format!("start: A\nA: /{body}/x\n");
+        let lark =
+            Lark::new(&g, opts(ParserAlgorithm::Lalr, LexerType::Basic)).unwrap_or_else(|e| {
+                panic!(
+                    "H5 corrective verbose ({label}): Python (verbose) strips the comment and \
+                     the terminal matches `ab`; lark-rs must build it, got build error: {e}"
+                )
+            });
+        let tree = lark.parse("ab").unwrap_or_else(|e| {
+            panic!("H5 corrective verbose ({label}): must parse `ab`, got: {e}")
+        });
+        let mut types = Vec::new();
+        collect_token_types(&tree, &mut types);
+        assert_eq!(
+            types,
+            vec!["A"],
+            "H5 corrective verbose ({label}): expected the single token `A` over `ab`"
+        );
+    }
+}
+
+/// H5-6/H5-5 CORRECTIVE pin (#364) — the corrective fix must NOT weaken the real
+/// rejections. A genuine angle named-group `(?<name>…)` and a genuine `\N{NAME}` escape
+/// that appear in *regex position* (not inside a comment) still reject as
+/// `GrammarError::InvalidRegex`; and the Python-accepted exemptions still build. This
+/// re-pins the #463 contract through the comment-aware screens so a regression in either
+/// direction (comment-skip swallowing real syntax, or the screens stopping skipping) trips.
+#[test]
+fn h5_corrective_real_constructs_still_reject() {
+    // Still rejected (Python rejects / the crate cannot host) — outside any comment.
+    for body in [r"(?<x>a)", r"a(?<name>b)c", r"\N{BULLET}", r"a\N{BULLET}b"] {
+        let g = format!("start: A\nA: /{body}/\n");
+        match Lark::new(&g, opts(ParserAlgorithm::Lalr, LexerType::Basic)) {
+            Err(LarkError::Grammar(GrammarError::InvalidRegex { .. })) => {}
+            Err(LarkError::Grammar(GrammarError::LookaroundScope { .. })) => panic!(
+                "H5 corrective ({body:?}): must reject as InvalidRegex, not mislabelled \
+                 LookaroundScope (#364)"
+            ),
+            Ok(_) => panic!(
+                "H5 corrective ({body:?}): a real dialect divergence built — the corrective \
+                 comment-skip must not swallow regex-position syntax"
+            ),
+            Err(other) => {
+                panic!(
+                    "H5 corrective ({body:?}): expected a categorized InvalidRegex, got {other:?}"
+                )
+            }
+        }
+    }
+    // Still accepted (Python accepts) — the screens' existing exemptions are intact.
+    for body in [
+        r"(?P<x>a)",
+        r"(?<=a)b",
+        r"(?<!a)b",
+        r"[(?<x>]",
+        r"\(?<x>a\)",
+    ] {
+        let g = format!("start: A\nA: /{body}/\n");
+        assert!(
+            Lark::new(&g, opts(ParserAlgorithm::Lalr, LexerType::Basic)).is_ok(),
+            "H5 corrective control ({body:?}): Python accepts this; the screens must NOT reject it"
+        );
+    }
+}
+
 /// H5-7 (LOW, lexer dialect — NEEDS-DECISION contract). Under `/i`, Python `re` folds
 /// ASCII `I`/`i` together with the Turkish dotted/dotless pair `İ`(U+0130)/`ı`(U+0131);
 /// the Rust `regex` crate uses Unicode *simple* case folding, whose `I`/`i` class
