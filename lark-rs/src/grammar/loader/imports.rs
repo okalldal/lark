@@ -5,7 +5,7 @@
 use super::ast::{ImportSpec, Item};
 use super::compiler::GrammarCompiler;
 use super::parser::GrammarParser;
-use super::{load_grammar, load_grammar_with_base, load_grammar_with_sources};
+use super::{load_grammar_with_probe, ProbeSpec, IMPORT_PROBE_RULE};
 use crate::error::GrammarError;
 use crate::grammar::rule::Rule;
 use crate::grammar::symbol::{NonTerminal, Symbol, Terminal};
@@ -14,15 +14,6 @@ use crate::grammar::Grammar;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
-
-/// Synthetic start rule appended to an imported file so the requested terminals
-/// survive dead-terminal pruning while the file is compiled. Never copied out.
-///
-/// A single leading underscore (transparent rule), not `__`: a `__`-leading name is a
-/// build error in both Python Lark and lark-rs (#361), and this synthetic probe rule is
-/// re-lexed through the loader, so a `__` prefix would reject every `%import`. One leading
-/// underscore is still a valid name and vanishingly unlikely to collide with user content.
-const IMPORT_PROBE_RULE: &str = "_lark_import_probe";
 
 /// Canonical key for a virtual path in the in-memory `import_sources` map:
 /// components joined with `/`, regardless of the host's path separator, so map
@@ -233,23 +224,27 @@ impl GrammarCompiler {
         names_to_import: &[(String, Option<String>)],
     ) -> Result<(), GrammarError> {
         // A pure-terminal source (e.g. `tokens.lark`, `unicode.lark`) has no rule
-        // referencing its terminals, so dead-terminal pruning would drop them.
-        // Append a probe rule that references every requested name so they survive
-        // compilation — the same trick `common_terminals()` uses. The probe is
-        // never copied out.
-        let probe_body = names_to_import
-            .iter()
-            .map(|(n, _)| n.as_str())
-            .collect::<Vec<_>>()
-            .join(" ");
-        let probe = format!("{text}\n{IMPORT_PROBE_RULE}: {probe_body}\n");
-        let imported = load_grammar_with_sources(
-            &probe,
+        // referencing its terminals, so dead-terminal pruning would drop them. Inject
+        // a probe rule (into the AST, after parsing) that references every requested
+        // name so they survive compilation — the same trick `common_terminals()` uses.
+        // The probe is never copied out.
+        //
+        // The probe name is injected post-parse precisely so it cannot collide with a
+        // rule the imported `text` itself defines: an earlier approach appended the
+        // probe as *source* under the valid name `_lark_import_probe`, which a legal
+        // imported grammar could already define — a duplicate-definition
+        // reject-where-Python-accepts regression (#361/#446). See `IMPORT_PROBE_RULE`.
+        let probe_names: Vec<String> = names_to_import.iter().map(|(n, _)| n.clone()).collect();
+        let imported = load_grammar_with_probe(
+            text,
             &[IMPORT_PROBE_RULE.to_string()],
             self.maybe_placeholders,
             self.global_keep_all,
             sub_base,
             self.import_sources.clone(),
+            ProbeSpec {
+                names: &probe_names,
+            },
         )?;
         self.copy_imported(&imported, module_path, names_to_import)
     }
@@ -585,7 +580,9 @@ fn bundled_cache() -> &'static Mutex<HashMap<(String, bool, bool), Arc<Grammar>>
 /// rules and no anonymous terminals: every compiled rule and terminal is
 /// byte-identical to what the old per-request probe produced; the only
 /// difference is that *more* terminals survive pruning, and `copy_requested`
-/// copies only the requested closure anyway.
+/// copies only the requested closure anyway. The probe rule is injected into the
+/// AST under the un-lexable [`IMPORT_PROBE_RULE`] name (#361/#446), so it cannot
+/// collide with any name the bundled library defines.
 ///
 /// The lock is never held across a compile, so a library re-importing another
 /// module cannot deadlock. Consequently two threads *can* race the first
@@ -623,13 +620,14 @@ fn compile_bundled_grammar(
             Item::IgnoreItem(_) => {}
         }
     }
-    let probe = format!("{src}\n{IMPORT_PROBE_RULE}: {}\n", names.join(" "));
-    let grammar = Arc::new(load_grammar_with_base(
-        &probe,
+    let grammar = Arc::new(load_grammar_with_probe(
+        src,
         &[IMPORT_PROBE_RULE.to_string()],
         maybe_placeholders,
         keep_all_tokens,
         None,
+        None,
+        ProbeSpec { names: &names },
     )?);
     // Re-check under the lock: if another thread won the compile race, its
     // entry is canonical — never overwrite it (an overwrite would break the
@@ -663,7 +661,7 @@ pub(super) fn common_terminals() -> &'static HashMap<String, String> {
         // Collect every terminal name so a probe rule keeps them all alive through
         // dead-terminal pruning (a terminal only referenced by another terminal is
         // otherwise inlined away and would not be importable).
-        let names: Vec<&str> = COMMON_LARK
+        let names: Vec<String> = COMMON_LARK
             .lines()
             .filter_map(|line| {
                 let line = line.trim_start();
@@ -673,15 +671,22 @@ pub(super) fn common_terminals() -> &'static HashMap<String, String> {
                     && name
                         .chars()
                         .all(|c| c == '_' || c.is_ascii_uppercase() || c.is_ascii_digit());
-                is_term_name.then_some(name)
+                is_term_name.then(|| name.to_string())
             })
             .collect();
-        // One leading underscore, not `__`: a `__`-leading name is a build error (#361)
-        // and this probe is re-lexed through the loader. `_common_probe` is a valid
-        // transparent rule name and is never copied out (only `grammar.terminals` is read).
-        let probe = format!("{COMMON_LARK}\n_common_probe: {}\n", names.join(" "));
-        let grammar = load_grammar(&probe, &["_common_probe".to_string()], false, false)
-            .expect("bundled common.lark must compile");
+        // Inject the probe rule into the AST under the un-lexable `IMPORT_PROBE_RULE`
+        // name (#361/#446), so it can never collide with a name `common.lark` defines.
+        // The probe rule is never copied out (only `grammar.terminals` is read).
+        let grammar = load_grammar_with_probe(
+            COMMON_LARK,
+            &[IMPORT_PROBE_RULE.to_string()],
+            false,
+            false,
+            None,
+            None,
+            ProbeSpec { names: &names },
+        )
+        .expect("bundled common.lark must compile");
         grammar
             .terminals
             .into_iter()
