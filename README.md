@@ -1,5 +1,12 @@
 # Lark - a parsing toolkit for Python
 
+> **lark-rs — a Rust implementation of Lark**
+>
+> This fork contains an active, ground-up Rust implementation of Lark under
+> [`lark-rs/`](lark-rs/) — the same EBNF grammar language behind LALR, Earley and CYK,
+> checked against Python Lark as the behavioural oracle. Showcase & live playground:
+> <https://okalldal.github.io/lark/>. Python Lark (below) remains in-tree as that oracle.
+
 Lark is a parsing toolkit for Python, built with a focus on ergonomics, performance and modularity.
 
 Lark can parse all context-free languages. To put it simply, it means that it is capable of parsing almost any programming language out there, and to some degree most natural languages too.

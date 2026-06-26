@@ -1,0 +1,362 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>lark-rs — Lark grammars, native Rust</title>
+  <meta name="description" content="A ground-up Rust implementation of Lark's parsing core: LALR, Earley and CYK behind one EBNF grammar and one API, checked against Python Lark.">
+
+  <!-- Open Graph / social preview -->
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="lark-rs — Lark grammars, native Rust">
+  <meta property="og:description" content="One grammar. Three engines. Evidence at every layer. Checked against Python Lark.">
+  <!-- Interim SVG placeholder; swap to assets/social-preview.png once commissioned. -->
+  <meta property="og:image" content="assets/social-preview.svg">
+  <meta property="og:url" content="https://okalldal.github.io/lark/">
+  <meta name="twitter:card" content="summary_large_image">
+
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<!-- shared lark-wing mark: a wing built from three branching strokes
+     (LALR · Earley · CYK) — reduces to three feathers at small sizes. -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="wing" viewBox="0 0 32 32">
+    <g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+      <path d="M5 24 C 12 22, 20 18, 28 7"/>
+      <path d="M7 25 C 13 24, 19 21, 25 13"/>
+      <path d="M9 26 C 14 26, 18 24, 22 19"/>
+    </g>
+  </symbol>
+</svg>
+
+<header class="nav">
+  <div class="wrap nav-inner">
+    <a class="brand" href="#top"><svg aria-hidden="true"><use href="#wing"/></svg>lark<span class="rs">-rs</span></a>
+    <nav class="nav-links" aria-label="Sections">
+      <a href="#engines">Engines</a>
+      <a href="#evidence">Evidence</a>
+      <a href="#fit">Where it fits</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#method">Method</a>
+      <a href="#start">Quick start</a>
+    </nav>
+    <a class="nav-cta" href="https://github.com/okalldal/lark/tree/master/lark-rs">GitHub ↗</a>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- ===== HERO ===================================================== -->
+  <section class="hero wrap">
+    <div class="grid">
+      <div>
+        <p class="eyebrow">A Rust implementation of the Lark parsing toolkit</p>
+        <h1>lark<span class="rs">-rs</span></h1>
+        <p class="tag">Lark grammars, native Rust.</p>
+        <p class="sub">
+          Use the same EBNF grammar with <strong>LALR</strong>, <strong>Earley</strong> or
+          <strong>CYK</strong>. Build automatic parse trees. Preserve Lark's behaviour through
+          oracle-backed conformance. Run the core from Rust, Python, WebAssembly or C.
+        </p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="playground/">▶ Run it in your browser</a>
+          <a class="btn btn-ghost" href="#method">Read the engineering method</a>
+        </div>
+        <p class="note">
+          One grammar. Three engines. Evidence at every layer.
+        </p>
+      </div>
+
+      <aside class="hero-card" aria-label="JSON grammar example">
+        <div class="cap">json.lark — the canonical example</div>
+        <div class="code">
+          <div class="code-head"><span>grammar</span></div>
+<pre><code><span class="tok-com">?start: value</span>
+
+?value: object
+      | array
+      | <span class="tok-str">ESCAPED_STRING</span>
+      | <span class="tok-str">SIGNED_NUMBER</span>  -&gt; number
+      | <span class="tok-str">"true"</span>  | <span class="tok-str">"false"</span> | <span class="tok-str">"null"</span>
+
+array  : <span class="tok-str">"["</span> [value (<span class="tok-str">","</span> value)*] <span class="tok-str">"]"</span>
+object : <span class="tok-str">"{"</span> [pair (<span class="tok-str">","</span> pair)*] <span class="tok-str">"}"</span>
+
+<span class="tok-kw">%import</span> common.ESCAPED_STRING
+<span class="tok-kw">%import</span> common.SIGNED_NUMBER
+<span class="tok-kw">%ignore</span> common.WS</code></pre>
+        </div>
+      </aside>
+    </div>
+
+    <!-- evidence strip, rendered from the single #site-data block -->
+    <div id="evidence" style="margin-top:2.4rem">
+      <p class="eyebrow">Checked, not claimed</p>
+      <div class="evidence-grid" id="evidence-grid" aria-label="Conformance evidence">
+        <noscript>
+          <a class="ev" data-status="verified"><span class="num">512/512</span><span class="name">LALR compliance</span></a>
+          <a class="ev" data-status="verified"><span class="num">211/211</span><span class="name">Earley basic bank</span></a>
+          <a class="ev" data-status="verified"><span class="num">454/454</span><span class="name">Dynamic-lexer bank</span></a>
+          <a class="ev" data-status="verified"><span class="num">124/124</span><span class="name">CYK bank</span></a>
+          <a class="ev" data-status="verified"><span class="num">293/293</span><span class="name">JSONTestSuite</span></a>
+        </noscript>
+      </div>
+      <p class="note" id="evidence-legend"></p>
+    </div>
+  </section>
+
+  <!-- ===== ENGINES (interactive picker) ============================= -->
+  <section id="engines" class="wrap">
+    <p class="eyebrow">One grammar, three engines</p>
+    <h2>Pick the parser, keep the grammar</h2>
+    <p class="lede">
+      The same <code>.lark</code> grammar runs under three algorithms — you change one option,
+      not your grammar. Each comes with the lexer that suits it.
+    </p>
+
+    <div class="picker-tabs" role="tablist" aria-label="Parser algorithm" id="engine-tabs"></div>
+    <div class="picker-body">
+      <div class="picker-desc" id="engine-desc"></div>
+      <div class="code" id="engine-code-wrap">
+        <div class="code-head"><span>main.rs</span><button class="copy-btn" data-copy="engine-code">Copy</button></div>
+        <pre><code id="engine-code"></code></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== WHERE IT FITS ============================================ -->
+  <section id="fit" class="wrap">
+    <p class="eyebrow">Where it fits</p>
+    <h2>Why this, and not an adjacent Rust parser</h2>
+    <p class="lede">
+      lark-rs is for people who value <em>Lark's grammar model</em>: one EBNF grammar, a choice of
+      parsing algorithm, contextual lexing, automatic trees and explicit ambiguity. It is not trying
+      to be an incremental editor parser — that is a different problem.
+    </p>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Tool</th><th>Its focus</th><th>How lark-rs differs</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><strong>tree-sitter</strong></td><td>Incremental, error-tolerant parsing for editors</td><td>lark-rs targets batch grammar-driven parsing with automatic trees and a choice of algorithm — not incremental editor reparsing.</td></tr>
+          <tr><td><strong>pest</strong></td><td>Accessible PEG grammars</td><td>lark-rs uses EBNF/CFG with explicit ambiguity (Earley/CYK), contextual lexing and Lark-compatible semantics.</td></tr>
+          <tr><td><strong>chumsky</strong></td><td>Parser combinators with error recovery</td><td>lark-rs is grammar-first: you write a <code>.lark</code> file, not Rust combinators.</td></tr>
+          <tr><td><strong>LALRPOP</strong></td><td>LR(1) parser generation</td><td>lark-rs keeps LALR but adds Earley + CYK behind the same grammar, plus contextual lexing.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="note">The wedge: if you already have a <code>.lark</code> grammar, keep it — change the runtime, not the grammar.</p>
+  </section>
+
+  <!-- ===== ARCHITECTURE ============================================= -->
+  <section id="architecture" class="wrap">
+    <p class="eyebrow">Architecture</p>
+    <h2>Four stages, one pipeline</h2>
+    <p class="lede">A grammar becomes a parser in four clear stages. The engine never inspects a
+      symbol name — everything is interned to integer ids first.</p>
+    <div class="pipe">
+      <div class="stage"><div class="step">01 · load</div><h3>Load</h3><p>Hand-written lexer + recursive-descent parser turn <code>.lark</code> text into a surface grammar (rules, terminals, imports).</p></div>
+      <div class="stage"><div class="step">02 · lower</div><h3>Lower</h3><p>Every symbol is interned to a <code>Copy</code> id; tree-shaping flags and augmented start rules are precomputed.</p></div>
+      <div class="stage"><div class="step">03 · build</div><h3>Build</h3><p>The chosen engine builds its tables: dense LALR action/goto, the Earley recognizer + SPPF, or CYK's CNF.</p></div>
+      <div class="stage"><div class="step">04 · parse</div><h3>Parse</h3><p>Tokens drive the engine; automatic tree shaping yields <code>Tree</code> / <code>Token</code> with no user action code.</p></div>
+    </div>
+    <p class="flow"><b>.lark grammar</b> → load → lower → build → parse → <b>Tree / Token</b></p>
+    <p class="note">Full tourist map: <a href="https://github.com/okalldal/lark/blob/master/lark-rs/ARCHITECTURE.md">ARCHITECTURE.md</a>.</p>
+  </section>
+
+  <!-- ===== DIFFERENTIATORS ========================================= -->
+  <section class="wrap">
+    <p class="eyebrow">What you keep from Lark</p>
+    <h2>The differentiators, preserved</h2>
+    <div class="cards">
+      <div class="card"><span class="mono-tag">lexing</span><h3>Contextual lexer</h3><p>Parser state narrows which terminals the lexer tries — resolving most LALR terminal conflicts with no user intervention.</p></div>
+      <div class="card"><span class="mono-tag">ambiguity</span><h3>Explicit ambiguity</h3><p>SPPF-based Earley handles any CFG and can emit <code>_ambig</code> forests when a grammar is genuinely ambiguous.</p></div>
+      <div class="card"><span class="mono-tag">grammar</span><h3>Rich EBNF</h3><p><code>+ * ?</code>, alternation, char ranges, priorities, aliases, and parameterized templates.</p></div>
+      <div class="card"><span class="mono-tag">trees</span><h3>Automatic trees</h3><p><code>Tree</code> / <code>Token</code> without action code, with <code>?rule</code>, <code>_rule</code> and <code>!rule</code> shaping modifiers.</p></div>
+      <div class="card"><span class="mono-tag">imports</span><h3>Grammar composition</h3><p><code>%import</code> pulls terminals and rules from bundled libraries or sibling files — common terminals can't drift from Lark.</p></div>
+      <div class="card"><span class="mono-tag">targets</span><h3>Multiple targets</h3><p>One core, reachable from Rust, Python (PyO3), WebAssembly and a C API — plus standalone parser generation.</p></div>
+    </div>
+  </section>
+
+  <!-- ===== METHOD ==================================================== -->
+  <section id="method" class="wrap">
+    <p class="eyebrow">Evidence-gated development</p>
+    <h2>Autonomy ends where verification ends</h2>
+    <p class="lede">
+      lark-rs is developed with coding agents, but authority follows evidence — not confidence.
+      A change may proceed autonomously when its result can be checked against Python Lark, a
+      compliance bank, a regression test or a deterministic complexity gate. Product direction,
+      taste and trade-offs without an objective test remain human decisions.
+    </p>
+    <div class="boundary" aria-label="Decision boundary">
+      <div class="lane l1"><div class="basis">Oracle · gate · bank</div><div><span class="arrow">→</span> Act autonomously and self-check.</div></div>
+      <div class="lane l2"><div class="basis">Written principle + judgement</div><div><span class="arrow">→</span> Act, explain, and record the decision (an ADR).</div></div>
+      <div class="lane l3"><div class="basis">No falsifiable basis</div><div><span class="arrow">→</span> Escalate to the human architect.</div></div>
+    </div>
+    <p style="margin-top:1.4rem">
+      The aim is not to remove judgement — it is to turn as much routine judgement as possible into
+      durable, executable evidence. Every significant claim on this page carries one of four statuses:
+    </p>
+    <p>
+      <span class="pill verified">Verified</span> enforced by an oracle, bank or gate &nbsp;
+      <span class="pill measured">Measured</span> observed in a named benchmark &nbsp;
+      <span class="pill goal">Goal</span> a stated direction, not yet shown &nbsp;
+      <span class="pill open">Open</span> a known limitation
+    </p>
+    <p class="note">
+      Not every valuable property has an oracle. When the project cannot make a decision falsifiable,
+      it records the uncertainty and keeps the decision human. See
+      <a href="https://github.com/okalldal/lark/blob/master/lark-rs/docs/PRINCIPLES.md">PRINCIPLES.md</a>.
+    </p>
+  </section>
+
+  <!-- ===== TARGETS ================================================== -->
+  <section class="wrap">
+    <p class="eyebrow">Targets</p>
+    <h2>One core, many runtimes</h2>
+    <div class="cards">
+      <div class="card"><span class="mono-tag">rust</span><h3>Rust crate</h3><p>The native API: <code>Lark</code>, <code>LarkOptions</code>, <code>ParserAlgorithm</code>, <code>LexerType</code>.</p></div>
+      <div class="card"><span class="mono-tag">python</span><h3>Python (PyO3)</h3><p>Native bindings, so a Lark grammar can run on the Rust core from Python.</p></div>
+      <div class="card"><span class="mono-tag">wasm</span><h3>WebAssembly</h3><p>The whole engine in the browser — the live <a href="playground/">playground</a> is this build.</p></div>
+      <div class="card"><span class="mono-tag">c-api</span><h3>C API</h3><p>A C-callable surface for embedding in native applications.</p></div>
+      <div class="card"><span class="mono-tag">standalone</span><h3>Generated parser</h3><p>Emit a self-contained Rust LALR parser that depends only on <code>regex</code> + std.</p></div>
+    </div>
+  </section>
+
+  <!-- ===== PERFORMANCE ============================================== -->
+  <section class="wrap">
+    <p class="eyebrow">Performance</p>
+    <h2>Measured first, honestly</h2>
+    <p class="lede">
+      Lead with measured compatibility; treat performance as a documented snapshot, not a slogan.
+    </p>
+    <div class="cards">
+      <div class="card" data-status="measured" style="border-left:3px solid var(--measured)">
+        <span class="pill measured">Measured</span>
+        <h3 style="margin-top:.5rem">~4–5× Python Lark (LALR)</h3>
+        <p>On the reference JSON workloads: ~4.8× small, ~4.7× medium, ~4.4× large, vs in-tree Python Lark's LALR engine.</p>
+      </div>
+      <div class="card" data-status="goal" style="border-left:3px solid var(--goal)">
+        <span class="pill goal">Goal</span>
+        <h3 style="margin-top:.5rem">10–100× on suitable workloads</h3>
+        <p>The project's stated direction — explicitly a goal, not the present general result.</p>
+      </div>
+      <div class="card" data-status="verified" style="border-left:3px solid var(--verified)">
+        <span class="pill verified">Verified</span>
+        <h3 style="margin-top:.5rem">Deterministic scaling gates</h3>
+        <p>Earley super-linearity, the CYK cubic envelope and lexer scans are gated on work counters, never wall-clock.</p>
+      </div>
+    </div>
+    <p class="note">Methodology and the full trend: <a href="https://github.com/okalldal/lark/blob/master/lark-rs/BENCH.md">BENCH.md</a>.</p>
+  </section>
+
+  <!-- ===== KNOWN LIMITS ============================================= -->
+  <section class="wrap">
+    <p class="eyebrow">Known limits</p>
+    <h2>What is still open</h2>
+    <p class="lede">lark-rs is pre-user: backward compatibility is still free because there are no real
+      dependants yet. A clearly labelled open gap is more useful than an unsupported "production-ready" badge.</p>
+    <ul class="limits">
+      <li><span class="pill open">Open</span><span class="what">Public API stability — not yet pinned ahead of first dependants.</span></li>
+      <li><span class="pill open">Open</span><span class="what">Packaging &amp; release cadence — install from source for now, not a published crate version.</span></li>
+      <li><span class="pill open">Open</span><span class="what">Some lookaround terminal shapes are refused by design or not yet implemented (categorized, not silent).</span></li>
+      <li><span class="pill open">Open</span><span class="what">Grammar-author ergonomics &amp; diagnostics are judgement-heavy and only partly gated.</span></li>
+    </ul>
+  </section>
+
+  <!-- ===== QUICK START ============================================== -->
+  <section id="start" class="wrap">
+    <p class="eyebrow">Quick start</p>
+    <h2>Run an example, then read the source</h2>
+    <p class="lede">Until packaging is settled, start from source — the JSON example is the canonical entry point.</p>
+    <div class="code">
+      <div class="code-head"><span>shell</span><button class="copy-btn" data-copy="start-code">Copy</button></div>
+<pre><code id="start-code"><span class="tok-com"># clone the fork and run the canonical JSON example</span>
+git clone https://github.com/okalldal/lark.git
+<span class="tok-fn">cd</span> lark/lark-rs
+cargo run --release --example json_parser
+cargo test</code></pre>
+    </div>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="playground/">▶ Try the browser playground</a>
+      <a class="btn btn-ghost" href="https://github.com/okalldal/lark/tree/master/lark-rs">Browse the source</a>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <div class="cols">
+      <div>
+        <a class="brand" href="#top" style="font-size:1.05rem"><svg width="22" height="22" aria-hidden="true"><use href="#wing"/></svg>lark<span class="rs" style="color:var(--copper)">-rs</span></a>
+        <p style="max-width:24rem;margin-top:.6rem">A ground-up Rust implementation of Lark's parsing core. Python Lark remains the behavioural oracle.</p>
+      </div>
+      <div>
+        <strong style="color:var(--ink)">Project</strong>
+        <p style="margin:.4rem 0 0">
+          <a href="https://github.com/okalldal/lark/tree/master/lark-rs">Source</a> ·
+          <a href="https://github.com/okalldal/lark/blob/master/lark-rs/ARCHITECTURE.md">Architecture</a> ·
+          <a href="https://github.com/okalldal/lark/blob/master/lark-rs/BENCH.md">Benchmarks</a> ·
+          <a href="https://github.com/okalldal/lark/blob/master/lark-rs/docs/PRINCIPLES.md">Method</a>
+        </p>
+      </div>
+      <div>
+        <strong style="color:var(--ink)">Upstream</strong>
+        <p style="margin:.4rem 0 0"><a href="https://github.com/lark-parser/lark">Python Lark</a> — the reference implementation &amp; oracle.</p>
+      </div>
+    </div>
+    <div class="legend">
+      <span class="pill verified">Verified</span><span class="pill measured">Measured</span><span class="pill goal">Goal</span><span class="pill open">Open</span>
+    </div>
+  </div>
+</footer>
+
+<!-- ===== single source of truth for the figures + picker ===== -->
+<script type="application/json" id="site-data">
+{
+  "evidence": [
+    { "value": "512/512", "name": "LALR compliance", "status": "verified", "href": "https://github.com/okalldal/lark/blob/master/lark-rs/docs/STATUS.md" },
+    { "value": "211/211", "name": "Earley basic bank", "status": "verified", "href": "https://github.com/okalldal/lark/blob/master/lark-rs/docs/STATUS.md" },
+    { "value": "454/454", "name": "Dynamic-lexer bank", "status": "verified", "href": "https://github.com/okalldal/lark/blob/master/lark-rs/docs/STATUS.md" },
+    { "value": "124/124", "name": "CYK bank", "status": "verified", "href": "https://github.com/okalldal/lark/blob/master/lark-rs/docs/STATUS.md" },
+    { "value": "293/293", "name": "JSONTestSuite corpus", "status": "verified", "href": "https://github.com/okalldal/lark/blob/master/lark-rs/docs/STATUS.md" }
+  ],
+  "engines": [
+    {
+      "id": "lalr",
+      "label": "LALR(1) + contextual lexer",
+      "title": "LALR(1)",
+      "use": "The default. Fast, linear, deterministic — the right choice for most unambiguous grammars (JSON, config, DSLs).",
+      "facts": { "lexer": "contextual", "complexity": "O(n)", "ambiguity": "rejected as a conflict" },
+      "code": "use lark_rs::{Lark, LarkOptions, ParserAlgorithm, LexerType};\n\nlet opts = LarkOptions {\n    parser: ParserAlgorithm::Lalr,\n    lexer: LexerType::Contextual,\n    ..LarkOptions::default()\n};\nlet parser = Lark::new(grammar, opts)?;\nlet tree = parser.parse(input)?;"
+    },
+    {
+      "id": "earley",
+      "label": "Earley + dynamic lexer",
+      "title": "Earley",
+      "use": "Handles any context-free grammar, including ambiguous ones. Can emit explicit `_ambig` forests. The dynamic lexer scans exactly the terminals the parser predicts.",
+      "facts": { "lexer": "dynamic", "complexity": "O(n³) worst case", "ambiguity": "resolve or explicit" },
+      "code": "use lark_rs::{Lark, LarkOptions, ParserAlgorithm, LexerType};\n\nlet opts = LarkOptions {\n    parser: ParserAlgorithm::Earley,\n    lexer: LexerType::Dynamic,\n    ..LarkOptions::default()\n};\nlet parser = Lark::new(grammar, opts)?;\nlet tree = parser.parse(input)?;"
+    },
+    {
+      "id": "cyk",
+      "label": "CYK + basic lexer",
+      "title": "CYK",
+      "use": "A CNF-based dynamic-programming parser for any CFG — useful as an independent cross-check of the other engines. An unambiguous parse is byte-identical to LALR/Earley.",
+      "facts": { "lexer": "basic", "complexity": "O(n³)", "ambiguity": "resolved (lightest derivation)" },
+      "code": "use lark_rs::{Lark, LarkOptions, ParserAlgorithm, LexerType};\n\nlet opts = LarkOptions {\n    parser: ParserAlgorithm::Cyk,\n    lexer: LexerType::Basic,\n    ..LarkOptions::default()\n};\nlet parser = Lark::new(grammar, opts)?;\nlet tree = parser.parse(input)?;"
+    }
+  ]
+}
+</script>
+<script src="assets/site.js" defer></script>
+</body>
+</html>
