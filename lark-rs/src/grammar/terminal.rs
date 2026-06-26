@@ -277,12 +277,7 @@ fn normalize_python_escapes(pattern: &str) -> String {
         // so only honor it outside one.
         if !in_class && c == '(' && chars.get(i + 1) == Some(&'?') && chars.get(i + 2) == Some(&'#')
         {
-            // Skip to the matching `)`, honoring `\)` inside the comment body.
-            let mut j = i + 3;
-            while j < chars.len() && chars[j] != ')' {
-                j += if chars[j] == '\\' { 2 } else { 1 };
-            }
-            i = j + 1; // past the ')' (or end of input on an unterminated comment)
+            i = end_of_inline_comment(&chars, i);
             continue;
         }
         if c == '\\' {
@@ -372,6 +367,21 @@ fn normalize_python_escapes(pattern: &str) -> String {
         i += 1;
     }
     out
+}
+
+/// The index just past the closing `)` of an inline `(?#…)` comment that opens at
+/// `chars[start] == '('` (the caller having confirmed `chars[start..start+3] == "(?#"`),
+/// honoring `\)` inside the comment body exactly as Python's `sre_parse` does. Returns
+/// `chars.len()` for an unterminated comment (no closing `)`). This is the single
+/// comment-span rule shared by [`normalize_python_escapes`] (which strips the comment)
+/// and [`strip_screening_comments`] (which strips it before the dialect screens), so the
+/// two never drift on what a `(?#…)` span covers.
+fn end_of_inline_comment(chars: &[char], start: usize) -> usize {
+    let mut j = start + 3; // past "(?#"
+    while j < chars.len() && chars[j] != ')' {
+        j += if chars[j] == '\\' { 2 } else { 1 };
+    }
+    j + 1 // past the ')' (or one past the end on an unterminated comment)
 }
 
 /// Parse a Python `re` octal escape starting at `chars[start] == '\\'` with the digit
@@ -782,6 +792,198 @@ fn reject_regex_crate_only_dialect(pattern: &str) -> Result<(), GrammarError> {
     Ok(())
 }
 
+/// Produce the view of a terminal's regex source that the *semantic* dialect screens
+/// ([`reject_regex_crate_angle_named_group`], [`reject_named_unicode_escape`]) must run
+/// against: the raw source with every **comment span removed**, so a construct that only
+/// *appears* inside a comment (`(?#…(?<x>…)` or `\N{…}` in comment text) is not mistaken
+/// for real regex syntax. Python `re` strips comments before interpreting the pattern, so
+/// these screens must see the post-comment view to match the oracle (#364 corrective: the
+/// staged H5-5/H5-6 screens ran on the raw source and wrongly rejected comment content).
+///
+/// Two comment forms are removed, both **outside a character class** (in a class `(?#`,
+/// `#`, and whitespace are all literal members — Python treats `[#(?<x>]` as plain chars)
+/// and both **escape-aware** (a `\#` / `\(` is literal):
+///
+/// * **`(?#…)` inline comments** — always, regardless of flags; the span is the shared
+///   [`end_of_inline_comment`] rule (`normalize_python_escapes` strips the same span).
+/// * **`# …`-to-end-of-line comments** — only where the **VERBOSE** flag is in effect. In
+///   verbose mode Python ignores an unescaped `#` and everything to the next `\n`.
+///
+/// VERBOSE reaches a terminal two ways and **both** are tracked: the bitset (`flags` here
+/// — the terminal-level `/…/x` flag on a *single-element* body, or a global
+/// `g_regex_flags`), and a **scoped inline flag group** `(?x:…)` / `(?x)` baked into the
+/// source (a *composite* terminal body has its `/…/x` flag re-emitted as a `(?x:…)`
+/// wrapper by `to_inline_regex`, then re-parsed with `flags == 0`). So this walk maintains
+/// a verbose **scope stack**: every group push inherits the enclosing verbose bit, a
+/// `(?flags)` bodiless group mutates the current scope for its remainder, and a
+/// `(?flags:…)` / `(?flags-flags:…)` scoped group applies its (possibly `-x`-cleared)
+/// verbose only within its own parentheses (Python's `(?x:(?-x: # not a comment )…)`
+/// semantics).
+///
+/// **Whitespace is preserved verbatim** (not collapsed): under VERBOSE Python does *not*
+/// fuse whitespace-separated tokens into a group — `( ?<x>)` is "nothing to repeat" and
+/// `(?< x>)` is still the rejected angle form — so a real `(?<`/`\N{` sits exactly where
+/// Python sees one, and the contiguous-token screens already match the oracle without any
+/// whitespace rewrite. Replaced comment spans collapse to nothing; flag-group syntax, class
+/// bodies, and all other characters are copied byte-for-byte. Run on the **raw** source
+/// (before `normalize_python_escapes`), the same point the screens already ran.
+fn strip_screening_comments(pattern: &str, flags: u32) -> String {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut out = String::with_capacity(chars.len());
+    let mut i = 0usize;
+    let mut in_class = false;
+    // Verbose-scope stack: `verbose[last]` is the flag in effect at the cursor. A `(`
+    // pushes (inheriting), a `)` pops; a scoped `(?flags:…)` pushes its own adjusted bit,
+    // a bodiless `(?flags)` mutates the top in place.
+    let mut verbose: Vec<bool> = vec![flags & flags::VERBOSE != 0];
+    while i < chars.len() {
+        let c = chars[i];
+        // An escape pair is copied verbatim (a `\#`/`\(` is a literal, never a comment
+        // start, group open, or close) — this also keeps the screens' own escape-awareness
+        // intact.
+        if c == '\\' {
+            out.push(c);
+            if let Some(&n) = chars.get(i + 1) {
+                out.push(n);
+                i += 2;
+            } else {
+                i += 1; // trailing backslash
+            }
+            continue;
+        }
+        if in_class {
+            // Inside `[...]`, `#`/`(?#`/whitespace are literal; only the close matters.
+            if c == ']' {
+                in_class = false;
+            }
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        // `(?#…)` inline comment — dropped wholesale (shared span rule), in any scope.
+        if c == '(' && chars.get(i + 1) == Some(&'?') && chars.get(i + 2) == Some(&'#') {
+            i = end_of_inline_comment(&chars, i);
+            continue;
+        }
+        // Verbose `# …` comment to end-of-line — dropped where verbose is in effect (the
+        // `\n`, if any, is kept on the next pass; it is whitespace either way).
+        if *verbose.last().unwrap() && c == '#' {
+            let mut j = i + 1;
+            while j < chars.len() && chars[j] != '\n' {
+                j += 1;
+            }
+            i = j; // resume at the newline (copied next pass) or end of input
+            continue;
+        }
+        if c == '[' {
+            in_class = true;
+            out.push(c);
+            i += 1;
+            // A leading `]` (optionally after `^`) is a literal class member, not the
+            // close — copy it through so close-tracking doesn't end the class early.
+            if chars.get(i) == Some(&'^') {
+                out.push('^');
+                i += 1;
+            }
+            if chars.get(i) == Some(&']') {
+                out.push(']');
+                i += 1;
+            }
+            continue;
+        }
+        if c == '(' {
+            // An inline flag group `(?…)` / `(?…:…)` adjusts verbose; any other group
+            // `(`, `(?:`, `(?=`, `(?<=`, `(?P<…>`, … just inherits the current scope.
+            let cur = *verbose.last().unwrap();
+            if let Some((new_verbose, bodiless, consumed)) = parse_inline_flag_group(&chars, i, cur)
+            {
+                if bodiless {
+                    // `(?flags)` — mutate the current scope for its remainder, no push.
+                    *verbose.last_mut().unwrap() = new_verbose;
+                } else {
+                    // `(?flags:…)` — a new scope with the adjusted verbose bit.
+                    verbose.push(new_verbose);
+                }
+                for &ch in &chars[i..i + consumed] {
+                    out.push(ch);
+                }
+                i += consumed;
+                continue;
+            }
+            verbose.push(cur); // ordinary group — inherit
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == ')' {
+            if verbose.len() > 1 {
+                verbose.pop();
+            }
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// If `chars[start] == '('` opens an **inline flag group** — `(?flags)` (bodiless),
+/// `(?flags:` or `(?flags-flags:` or `(?-flags:` (scoped) — return
+/// `(verbose_after, bodiless, consumed_chars)`: the VERBOSE bit this group establishes
+/// (derived from `current` verbose by applying the group's `+`/`-` flag letters), whether
+/// it is the bodiless form (so the caller mutates the current scope rather than pushing a
+/// new one), and how many chars the `(?flags…` opener spans (up to and including the `)`
+/// for bodiless, or the `:` for scoped). Returns `None` for anything that is not a
+/// flag group (`(?:`, `(?=`, `(?<=`, `(?P<…`, `(?<name>`, a bare `(`, …) so the caller
+/// treats it as an ordinary inheriting group. The recognized flag letters are `imsxaLu`
+/// (Python's set); only `x` is consulted, the rest are accepted-and-ignored.
+fn parse_inline_flag_group(
+    chars: &[char],
+    start: usize,
+    current: bool,
+) -> Option<(bool, bool, usize)> {
+    if chars.get(start) != Some(&'(') || chars.get(start + 1) != Some(&'?') {
+        return None;
+    }
+    let mut j = start + 2;
+    let mut verbose = current;
+    let mut sign_neg = false;
+    let mut saw_letter = false;
+    while let Some(&c) = chars.get(j) {
+        match c {
+            '-' => {
+                sign_neg = true;
+                j += 1;
+            }
+            'i' | 'm' | 's' | 'x' | 'a' | 'L' | 'u' => {
+                saw_letter = true;
+                if c == 'x' {
+                    verbose = !sign_neg;
+                }
+                j += 1;
+            }
+            ')' => {
+                // Bodiless `(?flags)` — requires at least one flag letter; an empty
+                // `(?)` is not a flag group (and is a Python error anyway).
+                return saw_letter.then_some((verbose, true, j + 1 - start));
+            }
+            ':' => {
+                // Scoped `(?flags:…)` — a `-` with no following letter is still scoped
+                // (`(?-x:…)`), but a bare `(?:` (no letters, no sign) is an ordinary
+                // non-capturing group, not a flag group.
+                if saw_letter || sign_neg {
+                    return Some((verbose, false, j + 1 - start));
+                }
+                return None;
+            }
+            _ => return None, // not a flag group (`(?=`, `(?<`, `(?P`, `(?'`, …)
+        }
+    }
+    None // ran off the end without closing — not a well-formed flag group
+}
+
 /// Reject the Rust `regex`-crate-only **angle named-group** spelling `(?<name>…)` —
 /// Python `re` has no such syntax (it spells a named capture only `(?P<name>…)`) and
 /// raises `unknown extension ?<n` at build, but the crate accepts the angle form
@@ -799,8 +1001,10 @@ fn reject_regex_crate_only_dialect(pattern: &str) -> Result<(), GrammarError> {
 ///
 /// The scan is **escape-aware** (a literal `\(` is not a group open) and
 /// **character-class-aware** (`[(?<x>]` is a literal class — Python reads `(?<` inside
-/// `[…]` as plain members, so we must not reject it). Runs on the **raw** source before
-/// [`normalize_python_escapes`] (which does not touch `(?<…`).
+/// `[…]` as plain members, so we must not reject it). Runs on the
+/// [`strip_screening_comments`] view of the raw source (before `normalize_python_escapes`)
+/// so a `(?<` appearing *inside* a `(?#…)` or verbose `# …` comment — comment text, not a
+/// group — is already gone and is not mis-rejected (#364 corrective).
 fn reject_regex_crate_angle_named_group(pattern: &str) -> Result<(), GrammarError> {
     let chars: Vec<char> = pattern.chars().collect();
     let mut i = 0usize;
@@ -882,9 +1086,13 @@ fn reject_regex_crate_angle_named_group(pattern: &str) -> Result<(), GrammarErro
 /// then a literal `N{…}`, *not* a named-character escape) immediately followed by `{` —
 /// the braced form. A bare `\N` without a brace is a *different* construct (Python `re`
 /// raises "missing {"; the crate reads `\N` as "any char except newline") and is left for
-/// the existing validation to handle. Class context is irrelevant: Python accepts
-/// `[\N{…}]` too, and the crate rejects it identically, so we re-bucket both. Runs on the
-/// **raw** source before [`normalize_python_escapes`] (which does not touch `\N{…}`).
+/// the existing validation to handle. Class context is irrelevant *to this screen*:
+/// Python accepts `[\N{…}]` too and the crate rejects it identically, so we re-bucket
+/// both (the class-awareness needed to keep a `#` inside `[…]` from looking like a verbose
+/// comment lives in [`strip_screening_comments`]). Runs on the [`strip_screening_comments`]
+/// view of the raw source (before `normalize_python_escapes`) so a `\N{…}` appearing
+/// *inside* a `(?#…)` or verbose `# …` comment — comment text, not an escape — is already
+/// gone and is not mis-rebucketed (#364 corrective).
 fn reject_named_unicode_escape(pattern: &str) -> Result<(), GrammarError> {
     let chars: Vec<char> = pattern.chars().collect();
     let mut i = 0usize;
@@ -1004,12 +1212,22 @@ impl PatternRe {
         // (`\p`/`\P` unicode-property, `\x{…}` braced hex, `\z` end-of-text) — the crate
         // accepts each, so `Regex::new` below would let them through (#342, H4-2).
         reject_regex_crate_only_dialect(&raw)?;
+        // The two *semantic* dialect screens below must not be fooled by a construct that
+        // only appears inside a comment, so they run on the **comment-stripped** view of
+        // the raw source — Python `re` removes `(?#…)` (and, under VERBOSE, `# …`) comments
+        // before interpreting the pattern, so the screens match the oracle only on the
+        // post-comment view (#364 corrective: the screens used to run on `raw` and wrongly
+        // rejected `(?<x>` / `\N{…}` text inside a `(?#…)` comment). `strip_screening_comments`
+        // is class- and escape-aware and preserves whitespace verbatim (Python does not
+        // fuse whitespace-separated tokens into a group, so the contiguous-token screens
+        // still see a real `(?<`/`\N{` exactly where Python does).
+        let screen_src = strip_screening_comments(&raw, flags);
         // Reject the regex-crate-only *angle* named-group spelling `(?<name>…)` — Python
         // `re` has only `(?P<name>…)` and errors "unknown extension ?<n", but the crate
         // accepts the angle form, so `Regex::new` below would let it through (H5-6, #364).
         // The lookbehind spellings `(?<=`/`(?<!` stay exempt; only `(?<` + a name char is
         // the divergent capture form.
-        reject_regex_crate_angle_named_group(&raw)?;
+        reject_regex_crate_angle_named_group(&screen_src)?;
         // Re-bucket the `\N{NAME}` named-character escape: the crate has no `\N{}`, so
         // `Regex::new` fails and — because the lookaround analyzer parses `\N{…}` as a
         // plain escape — the failure would otherwise route through the lookaround seam and
@@ -1018,7 +1236,7 @@ impl PatternRe {
         // `\N{NAME}` (named-character escape → codepoint); full support needs a vendored
         // Unicode-name→codepoint table (138k+ named codepoints) and is tracked in #461
         // (H5-5, #364). The opposite contract to H4-2's reject set.
-        reject_named_unicode_escape(&raw)?;
+        reject_named_unicode_escape(&screen_src)?;
         let pattern = normalize_python_escapes(&raw);
         let flag_prefix = build_flag_prefix(flags);
         let full = format!("{}{}", flag_prefix, pattern);
@@ -1588,5 +1806,120 @@ mod tests {
                 "{p:?} is not the `\\N{{NAME}}` escape — must NOT be re-bucketed by this screen"
             );
         }
+    }
+
+    /// #364 corrective: `strip_screening_comments` removes the comment spans the semantic
+    /// dialect screens must not see, mirroring Python `re`'s comment removal — `(?#…)`
+    /// always, `# …`-to-EOL only under VERBOSE — both **outside a class** and
+    /// **escape-aware**, while preserving whitespace and class bodies verbatim.
+    #[test]
+    fn strip_screening_comments_removes_only_comments() {
+        use flags::VERBOSE;
+        // `(?#…)` is stripped regardless of flags; the span ends at the first unescaped
+        // `)` (the shared `end_of_inline_comment` rule), so `a(?#(?<x>)b` → `ab`.
+        assert_eq!(strip_screening_comments("a(?#c)b", 0), "ab");
+        assert_eq!(strip_screening_comments(r"a(?#(?<x>)b", 0), "ab");
+        assert_eq!(strip_screening_comments(r"a(?#\N{BULLET})b", 0), "ab");
+        // `\)` inside the comment body does not end it.
+        assert_eq!(strip_screening_comments(r"a(?#x\)y)b", 0), "ab");
+        // An unterminated `(?#…` swallows the rest (Python build-errors on it; the
+        // quantifier screen on `raw` is what reports that — here we just don't choke).
+        assert_eq!(strip_screening_comments("a(?#noend", 0), "a");
+        // Inside a character class, `(?#` and `#` are literal members — NOT a comment.
+        assert_eq!(strip_screening_comments("[a(?#)]z", 0), "[a(?#)]z");
+        assert_eq!(strip_screening_comments("[#(?<x>]z", VERBOSE), "[#(?<x>]z");
+        // An escaped `\(` is not a comment open; an escaped `\#` is a literal, not a
+        // verbose comment — both copied verbatim (escape pair preserved).
+        assert_eq!(strip_screening_comments(r"a\(?#c)b", 0), r"a\(?#c)b");
+        assert_eq!(strip_screening_comments(r"a\#b", VERBOSE), r"a\#b");
+        // Verbose `# …` to end-of-line is stripped ONLY under VERBOSE; the newline is kept.
+        assert_eq!(
+            strip_screening_comments("a # cmt (?<x>\nb", VERBOSE),
+            "a \nb"
+        );
+        // …and is a LITERAL `#` (kept) when VERBOSE is off.
+        assert_eq!(strip_screening_comments("a # cmt\nb", 0), "a # cmt\nb");
+        // Whitespace is preserved verbatim (NOT collapsed): Python does not fuse
+        // whitespace-separated tokens into a group under VERBOSE.
+        assert_eq!(strip_screening_comments("a   b", VERBOSE), "a   b");
+        assert_eq!(strip_screening_comments("( ?<x>)", VERBOSE), "( ?<x>)");
+        // A real `(?#…)` comment is still stripped even under VERBOSE.
+        assert_eq!(strip_screening_comments("a (?#c) b", VERBOSE), "a  b");
+
+        // ── Scoped inline verbose `(?x:…)` (the composite-terminal bake path, flags == 0).
+        // The `#` comment inside the wrapper is verbose-stripped even though the bitset is 0;
+        // the wrapper syntax itself is copied through.
+        assert_eq!(
+            strip_screening_comments("(?x:a # cmt (?<x>\nb)", 0),
+            "(?x:a \nb)"
+        );
+        // `(?x)` bodiless turns verbose on for the remainder of its scope.
+        assert_eq!(
+            strip_screening_comments("(?x)a # c (?<x>\nb", 0),
+            "(?x)a \nb"
+        );
+        // `(?-x:…)` nested inside `(?x:…)` turns verbose OFF in its scope — the `#` there is
+        // a literal again; outside that inner scope verbose is still on.
+        assert_eq!(
+            strip_screening_comments("(?x:a (?-x: #lit )b # c\n)", 0),
+            "(?x:a (?-x: #lit )b \n)"
+        );
+        // Verbose does NOT leak out of a scoped group: after `(?x:…)` closes, a later `#` is
+        // literal again (the bitset stays 0).
+        assert_eq!(
+            strip_screening_comments("(?x:a #c\n)b # not stripped", 0),
+            "(?x:a \n)b # not stripped"
+        );
+        // A bare `(?:…)` / lookbehind `(?<=…)` are ordinary groups, not flag groups — copied
+        // verbatim, and they do not enable verbose (the `#` after stays literal at bitset 0).
+        assert_eq!(strip_screening_comments("(?:a)#c\n", 0), "(?:a)#c\n");
+    }
+
+    /// #364 corrective: the two semantic screens, run on the
+    /// [`strip_screening_comments`] view, no longer fire on a `(?<x>` / `\N{…}` that lives
+    /// *inside* a comment, while a real one in regex position still trips them. This pins
+    /// the helper composition at the unit level (the end-to-end pins live in
+    /// `tests/test_bounty_findings_h5.rs`).
+    #[test]
+    fn screens_skip_comment_text_on_stripped_view() {
+        use flags::VERBOSE;
+        let angle_ok = |src: &str, flags: u32| {
+            reject_regex_crate_angle_named_group(&strip_screening_comments(src, flags)).is_ok()
+        };
+        let nuni_ok = |src: &str, flags: u32| {
+            reject_named_unicode_escape(&strip_screening_comments(src, flags)).is_ok()
+        };
+        // Comment text — must pass (not screened).
+        assert!(
+            angle_ok(r"a(?#(?<x>)b", 0),
+            "(?<x> inside (?#…) is comment text"
+        );
+        assert!(
+            nuni_ok(r"a(?#\N{BULLET})b", 0),
+            "named-unicode escape inside (?#…) is comment text"
+        );
+        assert!(
+            angle_ok("a # (?<x>\nb", VERBOSE),
+            "(?<x> inside verbose # … is comment text"
+        );
+        assert!(
+            nuni_ok("a # \\N{BULLET}\nb", VERBOSE),
+            "named-unicode escape inside verbose # … is comment text"
+        );
+        // Real constructs in regex position — must still be caught.
+        assert!(
+            !angle_ok(r"a(?<x>)b", 0),
+            "a real angle group must still reject"
+        );
+        assert!(
+            !nuni_ok(r"a\N{BULLET}b", 0),
+            "a real named-unicode escape must still re-bucket"
+        );
+        // A verbose `#` is literal when VERBOSE is off, so a real `(?<x>` after it is still
+        // a real group (the `#` does not hide it).
+        assert!(
+            !angle_ok("a#(?<x>)b", 0),
+            "no VERBOSE: # is literal, the (?<x> is real"
+        );
     }
 }
