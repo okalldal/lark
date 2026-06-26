@@ -99,8 +99,132 @@ pub fn load_grammar_with_sources(
     base_path: Option<PathBuf>,
     import_sources: Option<Arc<HashMap<String, String>>>,
 ) -> Result<Grammar, GrammarError> {
+    load_grammar_inner(
+        grammar_text,
+        start,
+        maybe_placeholders,
+        keep_all_tokens,
+        base_path,
+        import_sources,
+        None,
+    )
+}
+
+/// The synthetic name the import/terminal-table probe rule is injected under.
+///
+/// It is **deliberately a `__`-leading name** — a name token the grammar
+/// tokenizer *rejects* at parse (`reject_double_underscore_name`, #361, matching
+/// Python Lark's `RULE`/`TERMINAL` = `_?[a-z]…`/`_?[A-Z]…`). Because no user
+/// grammar *source* can lex a `__`-leading name, this name can never collide with
+/// a rule a user authored — and the probe is therefore injected straight into the
+/// **AST** (see [`ProbeSpec`] / [`load_grammar_with_probe`]), bypassing the
+/// tokenizer that would otherwise reject its own name. Appending it as *source*
+/// text instead (the pre-correction approach) reserved the valid, user-authorable
+/// `_lark_import_probe`, which a legal imported grammar could already define — a
+/// duplicate-definition reject-where-Python-accepts regression (#361/#446).
+pub(super) const IMPORT_PROBE_RULE: &str = "__lark_import_probe";
+
+/// A synthetic probe rule to inject into a grammar's AST after parsing, so the
+/// listed names survive dead-rule/dead-terminal pruning while the grammar is
+/// compiled — without writing a user-authorable rule into the grammar *source*.
+///
+/// The rule is built directly as AST (never lexed), so its [`IMPORT_PROBE_RULE`]
+/// name — which the tokenizer would reject — is safe, and it can never collide
+/// with any user-authored name (user source cannot spell a `__`-leading name).
+/// Each listed name is referenced as a terminal or a rule by the *same* case rule
+/// the tokenizer uses (an uppercase first letter, optionally behind a single `_`,
+/// is a terminal; otherwise a rule), so the injected body classifies identically
+/// to the old appended-source probe. The probe rule is never copied out of the
+/// compiled grammar — only the explicitly requested names are.
+pub(super) struct ProbeSpec<'a> {
+    pub(super) names: &'a [String],
+}
+
+/// Like [`load_grammar_with_sources`], but injects a [`ProbeSpec`] probe rule into
+/// the parsed AST under [`IMPORT_PROBE_RULE`] before compiling. The caller passes
+/// that same name as the `start` symbol so the probe rule (and thus every name it
+/// references) survives pruning. Used by `%import` resolution and the bundled
+/// terminal-table compile (`imports.rs`).
+pub(super) fn load_grammar_with_probe(
+    grammar_text: &str,
+    start: &[String],
+    maybe_placeholders: bool,
+    keep_all_tokens: bool,
+    base_path: Option<PathBuf>,
+    import_sources: Option<Arc<HashMap<String, String>>>,
+    probe: ProbeSpec<'_>,
+) -> Result<Grammar, GrammarError> {
+    load_grammar_inner(
+        grammar_text,
+        start,
+        maybe_placeholders,
+        keep_all_tokens,
+        base_path,
+        import_sources,
+        Some(probe),
+    )
+}
+
+/// Build the synthetic probe [`ast::Item`] (a `RawRule` named [`IMPORT_PROBE_RULE`])
+/// whose single alternative references every name in `names`. A name is classified
+/// terminal-vs-rule exactly as the grammar tokenizer's dispatch does: an uppercase
+/// first letter — optionally behind a single leading `_` — is a terminal; anything
+/// else (lowercase, or `_` followed by a non-uppercase) is a rule. This reproduces
+/// the classification the old appended-source probe got from the lexer, so the only
+/// behavioral change is that the probe's *name* is now un-lexable (and thus
+/// collision-proof) rather than a valid name a user could also define.
+fn make_probe_item(names: &[String]) -> ast::Item {
+    fn is_terminal_name(name: &str) -> bool {
+        let mut bytes = name.bytes();
+        match bytes.next() {
+            Some(b) if b.is_ascii_uppercase() => true,
+            Some(b'_') => matches!(bytes.next(), Some(b) if b.is_ascii_uppercase()),
+            _ => false,
+        }
+    }
+    let expansion = names
+        .iter()
+        .map(|n| {
+            let value = if is_terminal_name(n) {
+                ast::Value::Terminal(n.clone())
+            } else {
+                ast::Value::Rule(n.clone())
+            };
+            ast::Expr::Value(value)
+        })
+        .collect();
+    ast::Item::RuleItem(ast::RawRule {
+        name: IMPORT_PROBE_RULE.to_string(),
+        modifiers: String::new(),
+        params: Vec::new(),
+        priority: 0,
+        expansions: vec![ast::AliasedExpansion {
+            expansion,
+            alias: None,
+        }],
+        directive: ast::Directive::Plain,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn load_grammar_inner(
+    grammar_text: &str,
+    start: &[String],
+    maybe_placeholders: bool,
+    keep_all_tokens: bool,
+    base_path: Option<PathBuf>,
+    import_sources: Option<Arc<HashMap<String, String>>>,
+    probe: Option<ProbeSpec<'_>>,
+) -> Result<Grammar, GrammarError> {
     let mut parser = GrammarParser::new(grammar_text);
-    let items = parser.parse_start()?;
+    let mut items = parser.parse_start()?;
+    // Inject the probe rule into the AST *after* parsing, so its un-lexable
+    // `__`-leading name (see `IMPORT_PROBE_RULE`) bypasses the name-token lexer that
+    // would reject it — and can never collide with a user-authored rule of the same
+    // name (user source cannot lex a `__`-leading name).
+    if let Some(probe) = probe {
+        items.push(make_probe_item(probe.names));
+    }
 
     let mut compiler = GrammarCompiler::new(
         start.to_vec(),

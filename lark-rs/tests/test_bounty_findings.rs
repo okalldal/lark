@@ -1172,3 +1172,105 @@ fn rc1_dropped_alias_of_mangled_shape_still_builds() {
         "#428 dropped-alias: tree mismatch vs Python oracle"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #361/#446 corrective — the synthetic import probe must not reserve a
+// user-authorable rule name. PR #446 (issue #361) renamed the probe from the
+// now-invalid `__lark_import_probe` to the VALID `_lark_import_probe`, then
+// appended that as a source-level rule to every imported file. A legal imported
+// grammar can already DEFINE that exact name, so the appended second definition
+// collided in the single-definition ledger → reject-where-Python-accepts. The
+// correction injects an *impossible* `__`-leading internal name into the AST
+// after parsing (bypassing the name-token lexer that rejects `__`-leading), so
+// the probe name can never collide with any user source — which cannot spell it.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// #361/#446 (HIGH, import-probe collision). A user-imported grammar may DEFINE a
+/// rule whose name equals the synthetic import probe's name. The architect's
+/// repro: `tokens.lark` defines `_lark_import_probe: "x"` beside the imported
+/// `A: "a"`; `main.lark` does `%import .tokens (A)` / `start: A`. Python Lark 1.3.1
+/// BUILDS this and parses `a` → `Tree(start, [Token(A, 'a')])` (oracle-verified).
+/// Staged PR #446 appended a SECOND source-level `_lark_import_probe` definition
+/// to the imported file before compiling it, which the single-definition ledger
+/// (#270) rejected as a duplicate — a new reject-where-Python-accepts regression.
+/// The probe is now injected post-parse under an impossible `__`-leading name, so
+/// no user-authorable source can collide with it.
+#[test]
+fn rc_import_probe_name_collides_with_user_rule() {
+    let files = [
+        ("tokens.lark", "_lark_import_probe: \"x\"\nA: \"a\"\n"),
+        ("main.lark", "%import .tokens (A)\nstart: A\n"),
+    ];
+    let lark = build_with_imports(&files).unwrap_or_else(|e| {
+        panic!(
+            "#361/#446: Python builds + parses this; lark-rs rejected at build: {e:?} \
+             (the synthetic probe must not reserve a user-authorable rule name)"
+        )
+    });
+    let tree = lark
+        .parse("a")
+        .unwrap_or_else(|e| panic!("#361/#446: parse failed: {e:?}"));
+    assert_eq!(
+        tree.to_string(),
+        "Tree(start, [Token(A, \"a\")])",
+        "#361/#446: tree mismatch vs Python oracle"
+    );
+}
+
+/// #361/#446 — robustness against ANY user probe-named rule, not just the one in
+/// the architect's repro. The post-parse-injection approach uses an internal name
+/// the name-token lexer cannot produce (`__`-leading), so even a user grammar that
+/// *defines and uses* the old single-underscore probe name parses correctly. Here
+/// `_lark_import_probe` is a live transparent rule in the imported file, exercised
+/// by the importing grammar; Python Lark 1.3.1 builds + parses `a x` to
+/// `Tree(start, [Token(A, 'a'), Tree(thing, [])])` (oracle-verified below).
+#[test]
+fn rc_import_probe_name_usable_as_live_imported_rule() {
+    let files = [
+        (
+            "tokens.lark",
+            "A: \"a\"\nthing: _lark_import_probe\n_lark_import_probe: \"x\"\n",
+        ),
+        ("main.lark", "%import .tokens (A, thing)\nstart: A thing\n"),
+    ];
+    let lark = build_with_imports(&files).unwrap_or_else(|e| {
+        panic!("#361/#446 live-probe-name: Python builds this; lark-rs rejected: {e:?}")
+    });
+    let tree = lark
+        .parse("ax")
+        .unwrap_or_else(|e| panic!("#361/#446 live-probe-name: parse failed: {e:?}"));
+    // `_lark_import_probe` is transparent (single leading underscore), so `thing`'s
+    // child token is filtered; matches the Python oracle for input `ax`.
+    assert_eq!(
+        tree.to_string(),
+        "Tree(start, [Token(A, \"a\"), Tree(thing, [])])",
+        "#361/#446 live-probe-name: tree mismatch vs Python oracle"
+    );
+}
+
+/// #361/#446 — the internal probe name's collision-proofness rests on it being
+/// **un-lexable from source**: `__lark_import_probe` is a `__`-leading name, which
+/// Python Lark 1.3.1 and lark-rs both reject at grammar-parse (#361). This pins
+/// that property so the impossible-name guarantee stays falsifiable — if a future
+/// change ever made `__`-leading names lexable, this test (and #361's
+/// `h5_2_double_underscore_name_rejected`) would fail, flagging that the probe name
+/// is no longer safe to reuse without colliding with user source.
+#[test]
+fn rc_import_probe_name_is_unlexable_from_user_source() {
+    // A user authoring the exact probe name in their OWN grammar is rejected at the
+    // tokenizer, in both definition + reference positions — exactly as Python rejects
+    // a `__`-leading name token (oracle-verified).
+    for g in [
+        "start: __lark_import_probe\n__lark_import_probe: \"a\"\n",
+        "start: x\nx: __lark_import_probe\n__lark_import_probe: \"a\"\n",
+    ] {
+        assert_build_rejected(
+            g,
+            ParserAlgorithm::Lalr,
+            LexerType::Contextual,
+            "#361/#446: a user-authored `__lark_import_probe` is a `__`-leading name token \
+             and must be rejected at the tokenizer (Python parity), keeping the synthetic \
+             probe name impossible for user source to collide with",
+        );
+    }
+}
