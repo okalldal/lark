@@ -681,7 +681,16 @@ impl GrammarCompiler {
         let combined = if alts.len() == 1 {
             alts.pop().unwrap()
         } else {
-            alts.sort_by(|a, b| b.len().cmp(&a.len()));
+            // Sort the arms by Python Lark's within-terminal expansion key
+            // `(-max_width, -min_width, -len(value))` — NOT source-string length
+            // (#449). The engine is leftmost-first (`MatchKind::LeftmostFirst`), so
+            // the arm tried first must be the one Python's `TerminalTreeToPattern`
+            // expands first; a wider arm with a *shorter source* (e.g. `"ab"` beside
+            // `/[A-Za-z]/`) would never be tried under the old `b.len().cmp(&a.len())`
+            // source-length sort. This is the same key `sort_terminal_arms` already
+            // applies on the `%extend` path, so the two within-terminal sorts can
+            // never disagree on which arm Python would try first.
+            Self::sort_terminal_arms(&mut alts)?;
             alts.into_iter()
                 .map(|p| format!("(?:{p})"))
                 .collect::<Vec<_>>()
