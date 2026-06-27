@@ -95,18 +95,7 @@ impl GrammarCompiler {
         // (a leading nullable fanned out), so `order` runs over the flattened
         // result rather than the raw alternatives — after the cross-alternative
         // dedup + collision check (Python numbers post-dedup too).
-        let mut compiled: Vec<(CompiledAlt, Option<String>)> = Vec::new();
-        for alt in raw.expansions.into_iter() {
-            let alias = alt.alias.clone();
-            // A nested alias (inside a `(...)`/`[...]`) is not a tree label — Python
-            // reads it as a rule reference and rejects (RC4c). The rule-top-level
-            // alias above is the legitimate one and is kept.
-            Self::reject_nested_aliases(&alt.expansion)?;
-            for alt_c in self.compile_expansion(alt.expansion, &origin.name, true)? {
-                compiled.push((alt_c, alias.clone()));
-            }
-        }
-        let compiled = Self::dedup_and_check_alts(&origin.name, compiled)?;
+        let compiled = self.compile_alternatives(raw.expansions, &origin.name, true)?;
         for (order, ((expansion_syms, gaps), alias)) in compiled.into_iter().enumerate() {
             let options = RuleOptions {
                 expand1,
@@ -124,6 +113,43 @@ impl GrammarCompiler {
             ));
         }
         Ok(())
+    }
+
+    /// Compile a list of source alternatives (`AliasedExpansion`s) into the deduped,
+    /// collision-checked set of BNF `(CompiledAlt, alias)` pairs — the shared prefix
+    /// of every rule-body emitter (`compile_rule` / `compile_group` / `compile_maybe`
+    /// / template instantiation). Each source alternative may distribute into several
+    /// BNF alternatives (a leading nullable fanned out), so `order` runs over the
+    /// flattened result; the per-alternative top-level `alias` is carried through,
+    /// while [`dedup_and_check_alts`](GrammarCompiler::dedup_and_check_alts) collapses
+    /// byte-identical arms and raises Python's "Rules defined twice" on a genuine
+    /// collision (Python numbers post-dedup too).
+    ///
+    /// `reject_nested` rejects a *nested* alias (inside a `(...)`/`[...]`) up front, as
+    /// Python does for a rule body / template (RC4c). The group/`[...]` helper callers
+    /// pass `false`: their own enclosing rule already ran the rejection, and a group's
+    /// inner alias is the legitimate helper-naming case (`distributable_alternatives`
+    /// handles it), so re-rejecting here would be wrong.
+    pub(super) fn compile_alternatives(
+        &mut self,
+        expansions: Vec<AliasedExpansion>,
+        parent: &str,
+        reject_nested: bool,
+    ) -> Result<Vec<(CompiledAlt, Option<String>)>, GrammarError> {
+        let mut compiled: Vec<(CompiledAlt, Option<String>)> = Vec::with_capacity(expansions.len());
+        for alt in expansions.into_iter() {
+            let alias = alt.alias.clone();
+            if reject_nested {
+                // A nested alias (inside a `(...)`/`[...]`) is not a tree label —
+                // Python reads it as a rule reference and rejects (RC4c). The
+                // alternative's top-level `alias` is the legitimate one and is kept.
+                Self::reject_nested_aliases(&alt.expansion)?;
+            }
+            for alt_c in self.compile_expansion(alt.expansion, parent, true)? {
+                compiled.push((alt_c, alias.clone()));
+            }
+        }
+        Self::dedup_and_check_alts(parent, compiled)
     }
 
     /// Reject the two inlined-rule placements Python Lark rejects at build
@@ -792,19 +818,14 @@ impl GrammarCompiler {
         // alternatives. (The `parent` name is inert below the top level — only
         // template usage reads it, and that path ignores it — so lowering before
         // the helper is named is behaviourally identical to the old numbering.)
-        let mut compiled: Vec<(CompiledAlt, Option<String>)> = Vec::with_capacity(alts.len());
-        for alt in alts {
-            let alias = alt.alias.clone();
-            for alt_c in self.compile_expansion(alt.expansion, parent, true)? {
-                compiled.push((alt_c, alias.clone()));
-            }
-        }
         // Same dedup + collision check as a named rule's alternatives: Python
         // inlines groups into the parent, where its `expansions` dedup and
         // "Rules defined twice" check run — so `(X | X)` collapses (and then
         // takes the single-symbol shortcut below, like Python's inlined `X`),
-        // and `([A] [A] B)` is rejected at load.
-        let compiled = Self::dedup_and_check_alts(parent, compiled)?;
+        // and `([A] [A] B)` is rejected at load. A group's inner alias is the
+        // legitimate helper-naming case, so nested aliases are *not* re-rejected
+        // here (the enclosing rule already ran that check).
+        let compiled = self.compile_alternatives(alts, parent, false)?;
         // A plain single non-aliased alternative that compiles to exactly one
         // symbol *is* that symbol — skip the wrapper rule. Besides dropping a
         // redundant transparent node, this lets `(X)+` share `X`'s recurse helper
@@ -928,6 +949,36 @@ impl GrammarCompiler {
         // their lone `+`-recurse child is already 0, so recording `max_size` here
         // is a no-op for them and keeps the bookkeeping uniform.
         self.helper_sizes.insert(name.clone(), max_size);
+        self.emit_helper_empty_arm(&kind, &origin, &name, has_empty_arm, max_size);
+        if cacheable {
+            self.helper_cache.insert(key, name);
+        }
+        Symbol::NonTerminal(origin)
+    }
+
+    /// Emit the kind-specific *empty / nullable* arm of an anonymous helper, after
+    /// its present alternatives have already been pushed by
+    /// [`intern_helper`](Self::intern_helper). Each `HelperKind` differs only in
+    /// whether (and how) it produces an ε production:
+    ///
+    ///   * `Group` — `(...)` spliced inline, no empty arm.
+    ///   * `GroupOptional` — a placeholder-less optional: a bare empty arm.
+    ///   * `Maybe` — `[...]` under `maybe_placeholders`: an empty arm emitting one
+    ///     `None` per kept slot of the widest alternative (`max_size`).
+    ///   * `Opt` / `Star` — `x?` / `x*`: a single-arm nullable wrapper `P: inner | ε`.
+    ///
+    /// `GroupOptional` / `Maybe` skip the synthetic empty when `has_empty_arm` (a
+    /// nested bare nullable already distributed one — #401, H6-4), keeping that first
+    /// arm's own placeholder gaps rather than minting a second byte-identical `ε`
+    /// production (the self reduce/reduce Python never reports).
+    fn emit_helper_empty_arm(
+        &mut self,
+        kind: &HelperKind,
+        origin: &NonTerminal,
+        name: &str,
+        has_empty_arm: bool,
+        max_size: usize,
+    ) {
         match kind {
             // `(...)` is spliced inline with no empty arm.
             HelperKind::Group => {}
@@ -957,15 +1008,11 @@ impl GrammarCompiler {
             HelperKind::Maybe => {}
             // `x?` / `x*`: a single-arm nullable wrapper `P: inner | ε`.
             HelperKind::Opt | HelperKind::Star => {
-                self.nullable_opts.insert(name.clone());
+                self.nullable_opts.insert(name.to_string());
                 self.rules
                     .push(Rule::new(origin.clone(), vec![], None, self.anon_opts(), 1));
             }
         }
-        if cacheable {
-            self.helper_cache.insert(key, name);
-        }
-        Symbol::NonTerminal(origin)
     }
 
     fn compile_maybe(
@@ -982,17 +1029,12 @@ impl GrammarCompiler {
         // A kept slot is a kept token *or* the inlined size of a nested maybe/group,
         // so nested optionals compose (Lark `FindRuleSize`); `intern_helper` records
         // the widest alternative's size and threads it into the empty production.
-        let mut compiled: Vec<(CompiledAlt, Option<String>)> = Vec::with_capacity(alts.len());
-        for alt in alts {
-            let alias = alt.alias.clone();
-            for alt_c in self.compile_expansion(alt.expansion, parent, true)? {
-                compiled.push((alt_c, alias.clone()));
-            }
-        }
         // Same dedup + collision check as a named rule's alternatives (Python
         // distributes `[...]` into the parent, where they run; see
-        // `dedup_and_check_alts`).
-        let compiled = Self::dedup_and_check_alts(parent, compiled)?;
+        // `dedup_and_check_alts`). Nested aliases are not re-rejected here (the
+        // enclosing rule already ran that check, and a group's inner alias is the
+        // legitimate helper-naming case).
+        let compiled = self.compile_alternatives(alts, parent, false)?;
         Ok(self.intern_helper(HelperKind::Maybe, compiled))
     }
 
