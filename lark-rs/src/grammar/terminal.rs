@@ -1742,12 +1742,19 @@ mod tests {
         assert_eq!(crate::lookaround::pattern_max_width("a+(?=b)"), Some(None));
     }
 
-    /// #467: `Pattern` equality/hash gate on the **variant first**, so a string literal
-    /// is never equal to (nor hash-collides with) a regex of the same source — matching
-    /// Python Lark's type-first `Pattern.__eq__` and the `patterns_equivalent` unification
-    /// gate (#403/#440). Before the fix the `_ => as_regex_str() == as_regex_str()` arm and
-    /// the `as_regex_str().hash()` impl reported `PatternStr("ab") == PatternRe(/ab/)` true
-    /// and hashed them equal.
+    /// #467: `Pattern` equality gates on the **variant first**, so a string literal is
+    /// never equal to a regex of the same source — matching Python Lark's type-first
+    /// `Pattern.__eq__` and the `patterns_equivalent` unification gate (#403/#440). Before
+    /// the fix the `_ => as_regex_str() == as_regex_str()` arm reported
+    /// `PatternStr("ab") == PatternRe(/ab/)` true (and the `as_regex_str().hash()` impl
+    /// hashed them equal).
+    ///
+    /// This test asserts the real `Eq`/`Hash` contract — `a == b ⇒ hash(a) == hash(b)`,
+    /// i.e. *equal* patterns hash equal — not the stronger (and uncontracted) claim that
+    /// *unequal* patterns never collide. Rust's `Hash` makes no such no-collision promise
+    /// (#528). Mixing the variant discriminant into the hash makes a collision between these
+    /// two cross-kind patterns *practically* impossible under the default hasher, but that
+    /// is a quality-of-implementation property, not a guarantee, so we do not assert it.
     #[test]
     fn pattern_eq_hash_gate_on_kind() {
         use std::collections::hash_map::DefaultHasher;
@@ -1762,19 +1769,17 @@ mod tests {
         let str_ab = Pattern::Str(PatternStr::new("ab"));
         let re_ab = Pattern::Re(PatternRe::new("ab", 0).expect("regex builds"));
 
-        // Cross-kind, same source: never equal, must not hash-collide.
+        // Cross-kind, same source: never equal (both directions). We deliberately do NOT
+        // assert their hashes differ — that would over-claim a no-collision guarantee the
+        // `Hash` contract does not make (see the doc comment above).
         assert_ne!(
             str_ab, re_ab,
             "PatternStr(\"ab\") must not equal PatternRe(/ab/)"
         );
         assert_ne!(re_ab, str_ab, "equality is symmetric across kinds");
-        assert_ne!(
-            h(&str_ab),
-            h(&re_ab),
-            "a string literal and a same-source regex must not hash equal"
-        );
 
-        // Same-kind equality still holds (and stays hash-consistent).
+        // The actual contract: equal patterns hash equal. Same-kind equality still holds
+        // (and stays hash-consistent).
         let str_ab2 = Pattern::Str(PatternStr::new("ab"));
         let re_ab2 = Pattern::Re(PatternRe::new("ab", 0).expect("regex builds"));
         assert_eq!(str_ab, str_ab2);
