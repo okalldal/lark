@@ -711,6 +711,26 @@ pub fn build_frontend(
     Ok(ParsingFrontend { driver })
 }
 
+/// Build a contextual lexer for an LALR parse table. The `always_accept` set is
+/// the grammar's `%ignore` terminals plus any `extra_always_accept` ids (e.g. a
+/// postlex hook's newline terminal, Python Lark's `PostLex.always_accept`),
+/// deduplicated against the base set. Shared by `build_lalr`'s plain and postlex
+/// contextual branches so they can't diverge on how the scanner is wired.
+fn build_contextual_lexer(
+    lexer_conf: &LexerConf,
+    state_terminals: &std::collections::HashMap<usize, Vec<SymbolId>>,
+    base_always_accept: &[SymbolId],
+    extra_always_accept: Option<SymbolId>,
+) -> Result<ContextualLexer, GrammarError> {
+    let mut always_accept = base_always_accept.to_vec();
+    if let Some(extra) = extra_always_accept {
+        if !always_accept.contains(&extra) {
+            always_accept.push(extra);
+        }
+    }
+    ContextualLexer::new(lexer_conf, state_terminals, always_accept)
+}
+
 /// Build the LALR driver: the parse table, then one of the four lexer/postlex
 /// wirings (basic / contextual × plain / postlex).
 fn build_lalr(
@@ -753,13 +773,12 @@ fn build_lalr(
                 // scanner (Python Lark's `PostLex.always_accept`) so the
                 // lazy lexer still emits the newlines the indenter measures
                 // indentation from. `validate` already proved it resolves.
-                let mut always_accept = cg.ignore.clone();
-                if let Some(nl_id) = cg.symbols.id(&postlex.nl_type) {
-                    if !always_accept.contains(&nl_id) {
-                        always_accept.push(nl_id);
-                    }
-                }
-                let lexer = ContextualLexer::new(&lexer_conf, &state_terminals, always_accept)?;
+                let lexer = build_contextual_lexer(
+                    &lexer_conf,
+                    &state_terminals,
+                    &cg.ignore,
+                    cg.symbols.id(&postlex.nl_type),
+                )?;
                 Ok(Box::new(LalrContextualPostlex {
                     parser,
                     lexer,
@@ -786,8 +805,7 @@ fn build_lalr(
             // The contextual driver recovers over its own contextual lexer (issue
             // #166, via its root-lexer fallback), so it needs no stored basic lexer.
             let state_terminals = parser.state_terminals();
-            let always_accept = cg.ignore.clone();
-            let lexer = ContextualLexer::new(&lexer_conf, &state_terminals, always_accept)?;
+            let lexer = build_contextual_lexer(&lexer_conf, &state_terminals, &cg.ignore, None)?;
             Ok(Box::new(LalrContextual { parser, lexer }))
         }
         // `Basic`, and any other explicit choice, takes the basic lexer.

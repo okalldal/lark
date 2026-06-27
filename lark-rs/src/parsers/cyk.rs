@@ -286,25 +286,28 @@ impl CykParser {
         let value = assemble_rev(rev, &builder, &self.cnf, &self.grammar);
         let start_name = self.grammar.symbols.name(start_id).to_string();
 
-        Ok(match value {
-            NodeValue::Tree(t) => ParseTree::Tree(t),
-            NodeValue::Token(t) => ParseTree::Token(t),
-            // A start rule is never transparent, so its value is never Inline. The
-            // lone-`None` root collapse (`?start: [A]` on `""`, #289) also cannot
-            // reach here: both lark-rs and Python's CYK reject a nullable start at
-            // *build* time ("CYK doesn't support empty rules", verified byte-identical
-            // by the CYK compliance bank), so this arm is unreachable for that case.
-            // Mapping `Child::None` to `ParseTree::None` is therefore not a
-            // more-permissive divergence (ADR-0017) — the grammar was already
-            // rejected before any parse — and keeps the three root-assembly sites
-            // symmetric rather than panicking.
-            NodeValue::Inline(mut cs) if cs.len() == 1 => match cs.pop().unwrap() {
-                Child::Tree(t) => ParseTree::Tree(t),
-                Child::Token(t) => ParseTree::Token(t),
-                Child::None => ParseTree::None,
+        // `Tree`/`Token`, plus the lone-`None` root collapse (`Inline([None])` →
+        // `ParseTree::None`), go through the shared root converter so the carve-out
+        // has one definition across backends. That collapse cannot actually reach
+        // here: both lark-rs and Python's CYK reject a nullable start at *build* time
+        // ("CYK doesn't support empty rules", verified byte-identical by the CYK
+        // compliance bank), so mapping it is not a more-permissive divergence
+        // (ADR-0017) — the grammar was already rejected before any parse — and keeps
+        // the root-assembly sites symmetric. A start rule is never transparent, so an
+        // `Inline` residual is otherwise structurally impossible; the residual arms
+        // below preserve CYK's existing wrap-as-node fallback byte-for-byte.
+        Ok(
+            match crate::parsers::tree_builder::root_slot_to_parse_tree(value) {
+                Ok(parse_tree) => parse_tree,
+                Err(mut cs) if cs.len() == 1 => match cs.pop().unwrap() {
+                    Child::Tree(t) => ParseTree::Tree(t),
+                    Child::Token(t) => ParseTree::Token(t),
+                    // A lone `Child::None` is already handled by the shared converter.
+                    Child::None => ParseTree::None,
+                },
+                Err(cs) => ParseTree::Tree(Tree::new(start_name, cs)),
             },
-            NodeValue::Inline(cs) => ParseTree::Tree(Tree::new(start_name, cs)),
-        })
+        )
     }
 }
 

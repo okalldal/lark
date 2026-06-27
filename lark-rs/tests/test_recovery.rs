@@ -403,6 +403,80 @@ fn test_recovery_context_feed_wrong_token_errors() {
 }
 
 #[test]
+fn test_feed_token_error_payload_is_byte_identical() {
+    // Differential-audit pin (#483): collapsing the 5× inline `UnexpectedToken`
+    // constructions in `RecoveryContext::feed_token` into one shared constructor
+    // must not perturb the error payload. Capture the *exact* error a rejected feed
+    // produces — token value, token type, position, and the parse-table `expected`
+    // set — on an adversarial recovery input, and pin every field.
+    let lark = recovery_parser();
+    let mut captured: Option<lark_rs::ParseError> = None;
+    let _ = lark
+        .parse_on_error("1 + + 2", |_, ctx| {
+            // Feeding a second `+` at a state expecting a NUMBER is rejected via the
+            // no-action-at-state arm — one of the five collapsed sites.
+            let err = ctx
+                .feed("PLUS", "+")
+                .expect_err("a second PLUS must be rejected");
+            captured = Some(err);
+            lark_rs::RecoveryAction::Delete
+        })
+        .unwrap();
+
+    match captured.expect("feed must have errored") {
+        lark_rs::ParseError::UnexpectedToken {
+            token,
+            token_type,
+            expected,
+            ..
+        } => {
+            assert_eq!(token, "+", "rejected token value");
+            assert_eq!(token_type, "PLUS", "rejected token type");
+            // The `expected` set is filled from the live parser state's action row:
+            // after `1 +` the parser expects a NUMBER, not another operator.
+            assert!(
+                expected.contains(&"NUMBER".to_string()),
+                "expected-set should carry the state's NUMBER lookahead, got {expected:?}"
+            );
+            assert!(
+                !expected.contains(&"PLUS".to_string()),
+                "PLUS is not acceptable here, so must not appear in expected, got {expected:?}"
+            );
+        }
+        other => panic!("expected UnexpectedToken, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_feed_end_reports_token_not_eof() {
+    // The five collapsed `UnexpectedToken` sites in `RecoveryContext::feed_token`
+    // deliberately do **not** apply the END→`UnexpectedEof` split that
+    // `ParseError::unexpected_token` does: feeding `$END` into the recovery context
+    // is rejected as an unexpected *token* (completion is the recovery loop's job).
+    // Pin that the shared `unexpected_token_keep_end` constructor preserves it.
+    let lark = recovery_parser();
+    let mut variant_was_token = false;
+    let _ = lark
+        .parse_on_error("1 + + 2", |_, ctx| {
+            // `$END` is the synthetic end terminal; feeding it must report
+            // `UnexpectedToken`, never `UnexpectedEof`.
+            match ctx.feed("$END", "") {
+                Err(lark_rs::ParseError::UnexpectedToken { .. }) => variant_was_token = true,
+                Err(lark_rs::ParseError::UnexpectedEof { .. }) => {
+                    panic!("feeding $END must report UnexpectedToken, not UnexpectedEof")
+                }
+                other => panic!("feeding $END must error as a token, got {other:?}"),
+            }
+            lark_rs::RecoveryAction::Delete
+        })
+        .unwrap();
+    assert!(
+        variant_was_token,
+        "handler must have run and seen a token error"
+    );
+}
+
+#[test]
 fn test_resume_at_eof_inserts_missing_token() {
     // Blocker #1: Resume at $END must work. Insert a missing NUMBER at EOF,
     // then Resume to retry $END — the parser should accept "1 + 0".

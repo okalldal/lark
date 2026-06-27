@@ -20,7 +20,7 @@ use crate::error::{GrammarError, ParseError, RecoveryAction};
 use crate::grammar::analysis::GrammarAnalysis;
 use crate::grammar::intern::{CompiledGrammar, CompiledRule, SymbolId, SymbolTable};
 use crate::lexer::{BasicLexer, ContextualLexer};
-use crate::tree::{Child, ParseTree, Token};
+use crate::tree::{ParseTree, Token};
 
 use super::token_source::{
     postlex_basic_recovering_source, postlex_contextual_recovering_source,
@@ -724,20 +724,15 @@ impl ParserStack {
     /// collapse to a bare token or a bare `None`, hence [`ParseTree`]).
     fn accept(&mut self) -> Result<ParseTree, ParseError> {
         match self.value_stack.pop() {
-            Some(Slot::Tree(t)) => Ok(ParseTree::Tree(t)),
-            Some(Slot::Token(tok)) => Ok(ParseTree::Token(tok)),
-            // A start rule is never transparent. The one way its value can be
-            // `Inline` is a top-level `?start` collapsing a lone-`None` placeholder
-            // (RC9 in tree_builder: lone-`None` expand1 → `Inline([None])`). Python
-            // Lark returns a bare `None` there (`?start: [A]` on `""`), so emit
-            // `ParseTree::None` to match the oracle on every backend (#289).
-            Some(Slot::Inline(cs)) if cs.len() == 1 && matches!(cs[0], Child::None) => {
-                Ok(ParseTree::None)
-            }
-            // Any other `Inline` shape on a start rule is structurally impossible
-            // (a start rule never inlines); treat it, like an empty stack, as no
-            // parse result rather than panicking.
-            Some(Slot::Inline(_)) | None => Err(ParseError::unexpected_eof(0, 0, vec![])),
+            // `Slot::Tree`/`Token`, plus the top-level `?start` lone-`None` collapse
+            // (`Inline([None])` → `ParseTree::None`, RC9/#289/ADR-0033), go through
+            // the shared root converter so the carve-out has one definition across
+            // backends. Any *other* `Inline` shape on a start rule is structurally
+            // impossible (a start rule never inlines); treat it, like an empty stack,
+            // as no parse result rather than panicking.
+            Some(value) => super::tree_builder::root_slot_to_parse_tree(value)
+                .map_err(|_| ParseError::unexpected_eof(0, 0, vec![])),
+            None => Err(ParseError::unexpected_eof(0, 0, vec![])),
         }
     }
 
@@ -847,47 +842,25 @@ impl<'a> RecoveryContext<'a> {
     /// [`RecoveryAction::Resume`]: crate::error::RecoveryAction::Resume
     pub fn feed_token(&mut self, mut token: Token) -> Result<Option<ParseTree>, ParseError> {
         if self.accepted_tree.is_some() {
-            return Err(ParseError::UnexpectedToken {
-                token: token.value,
-                token_type: token.type_,
-                line: token.line,
-                col: token.column,
-                expected: vec![],
-            });
+            return Err(ParseError::unexpected_token_keep_end(&token, vec![]));
         }
         match self.table.symbols.id(&token.type_) {
             Some(id) => {
                 if id == SymbolId::END {
-                    return Err(ParseError::UnexpectedToken {
-                        token: token.value,
-                        token_type: token.type_,
-                        line: token.line,
-                        col: token.column,
-                        expected: self.accepts(),
-                    });
+                    let expected = self.accepts();
+                    return Err(ParseError::unexpected_token_keep_end(&token, expected));
                 }
                 token.type_id = id;
             }
             None => {
-                return Err(ParseError::UnexpectedToken {
-                    token: token.value.clone(),
-                    token_type: token.type_.clone(),
-                    line: token.line,
-                    col: token.column,
-                    expected: self.accepts(),
-                })
+                let expected = self.accepts();
+                return Err(ParseError::unexpected_token_keep_end(&token, expected));
             }
         }
         let state = self.stack.position();
         if self.table.action_at(state, token.type_id).is_none() {
             let expected = self.accepts();
-            return Err(ParseError::UnexpectedToken {
-                token: token.value,
-                token_type: token.type_,
-                line: token.line,
-                col: token.column,
-                expected,
-            });
+            return Err(ParseError::unexpected_token_keep_end(&token, expected));
         }
         let snapshot = self.stack.clone();
         match self.stack.feed_token(self.table, &token) {
@@ -908,13 +881,7 @@ impl<'a> RecoveryContext<'a> {
             Feed::NoAction => {
                 *self.stack = snapshot;
                 let expected = self.accepts();
-                Err(ParseError::UnexpectedToken {
-                    token: token.value,
-                    token_type: token.type_,
-                    line: token.line,
-                    col: token.column,
-                    expected,
-                })
+                Err(ParseError::unexpected_token_keep_end(&token, expected))
             }
         }
     }
