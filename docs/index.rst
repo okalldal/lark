@@ -12,6 +12,7 @@ Welcome to Lark's documentation!
    :hidden:
 
    philosophy
+   verifiability
    features
    parsers
 
@@ -77,6 +78,7 @@ Resources
 ---------
 
 -  :doc:`philosophy`
+-  :doc:`verifiability`
 -  :doc:`features`
 -  `Examples`_
 -  `Third-party examples`_
