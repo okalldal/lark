@@ -129,7 +129,7 @@ pub enum Child {
 /// positioned child stays `empty=true` with `None` fields). Under
 /// `propagate_positions` the span is widened to the rule's pre-filter children,
 /// byte-identical to the in-process LALR engine (#402).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct Meta {
     pub line: Option<usize>,
     pub column: Option<usize>,
@@ -139,6 +139,29 @@ pub struct Meta {
     pub end_pos: Option<usize>,
     /// True when no child contributed a position (an empty match).
     pub empty: bool,
+}
+
+impl Default for Meta {
+    /// A position-less default `Meta` is `empty: true`: with no positioned child
+    /// there is no span, so the node is empty — the semantic convention Python Lark
+    /// follows (`Meta.empty` defaults `True`) and that `from_children` enforces. The
+    /// *derived* `Default` would give `empty: false`, which is semantically wrong for
+    /// a hand-constructed/default value. Parser construction is unaffected: every
+    /// engine-built `Meta` sets `empty` explicitly afterwards (`from_children`
+    /// recomputes it from the children; `observe_token` builds a positioned `Meta`
+    /// directly), so this only matters for default/hand-built values. Position fields
+    /// default to their natural zero (`None`).
+    fn default() -> Self {
+        Meta {
+            line: None,
+            column: None,
+            end_line: None,
+            end_column: None,
+            start_pos: None,
+            end_pos: None,
+            empty: true,
+        }
+    }
 }
 
 impl Meta {
