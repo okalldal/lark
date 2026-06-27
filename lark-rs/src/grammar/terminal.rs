@@ -256,19 +256,43 @@ fn hir_max_width_chars(hir: &regex_syntax::hir::Hir) -> Option<usize> {
 }
 
 impl PartialEq for Pattern {
+    /// Equality gates on the `Pattern` **variant first** — a `Str` is never equal to a
+    /// `Re`, even when they share a regex source (`PatternStr("ab") != PatternRe(/ab/)`).
+    /// This mirrors Python Lark's `Pattern.__eq__` (`type(self) == type(other) and …`)
+    /// and the active `patterns_equivalent` unification gate (#403/#440): both require a
+    /// matching kind. Comparing across kinds through `as_regex_str()` (#467) was a latent
+    /// trap — a future `HashMap`/`==` would silently mis-merge a string literal onto a
+    /// same-source regex terminal.
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             // `"a"` and `"a"i` share an escaped form but are distinct patterns.
             (Pattern::Str(a), Pattern::Str(b)) => a.value == b.value && a.ci == b.ci,
-            _ => self.as_regex_str() == other.as_regex_str(),
+            (Pattern::Re(a), Pattern::Re(b)) => a.pattern == b.pattern,
+            // Cross-kind (`Str` vs `Re`) is never equal.
+            (Pattern::Str(_), Pattern::Re(_)) | (Pattern::Re(_), Pattern::Str(_)) => false,
         }
     }
 }
 impl Eq for Pattern {}
 
 impl std::hash::Hash for Pattern {
+    /// Hashing mixes in a per-variant discriminant **before** the body so a `Str` and a
+    /// `Re` with the same regex source land in different buckets — keeping `Hash`
+    /// consistent with the variant-first `PartialEq` above (`a == b ⇒ hash(a) == hash(b)`,
+    /// and never the reverse collision across kinds). #467.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.as_regex_str().hash(state);
+        match self {
+            // `ci` distinguishes `"a"` from `"a"i` in `eq`, so it must feed the hash too.
+            Pattern::Str(p) => {
+                0u8.hash(state);
+                p.value.hash(state);
+                p.ci.hash(state);
+            }
+            Pattern::Re(p) => {
+                1u8.hash(state);
+                p.pattern.hash(state);
+            }
+        }
     }
 }
 
@@ -1714,6 +1738,54 @@ mod tests {
         );
         // A parseable but genuinely-unbounded pattern reports inner None (unbounded).
         assert_eq!(crate::lookaround::pattern_max_width("a+(?=b)"), Some(None));
+    }
+
+    /// #467: `Pattern` equality/hash gate on the **variant first**, so a string literal
+    /// is never equal to (nor hash-collides with) a regex of the same source — matching
+    /// Python Lark's type-first `Pattern.__eq__` and the `patterns_equivalent` unification
+    /// gate (#403/#440). Before the fix the `_ => as_regex_str() == as_regex_str()` arm and
+    /// the `as_regex_str().hash()` impl reported `PatternStr("ab") == PatternRe(/ab/)` true
+    /// and hashed them equal.
+    #[test]
+    fn pattern_eq_hash_gate_on_kind() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let h = |p: &Pattern| {
+            let mut s = DefaultHasher::new();
+            p.hash(&mut s);
+            s.finish()
+        };
+
+        let str_ab = Pattern::Str(PatternStr::new("ab"));
+        let re_ab = Pattern::Re(PatternRe::new("ab", 0).expect("regex builds"));
+
+        // Cross-kind, same source: never equal, must not hash-collide.
+        assert_ne!(
+            str_ab, re_ab,
+            "PatternStr(\"ab\") must not equal PatternRe(/ab/)"
+        );
+        assert_ne!(re_ab, str_ab, "equality is symmetric across kinds");
+        assert_ne!(
+            h(&str_ab),
+            h(&re_ab),
+            "a string literal and a same-source regex must not hash equal"
+        );
+
+        // Same-kind equality still holds (and stays hash-consistent).
+        let str_ab2 = Pattern::Str(PatternStr::new("ab"));
+        let re_ab2 = Pattern::Re(PatternRe::new("ab", 0).expect("regex builds"));
+        assert_eq!(str_ab, str_ab2);
+        assert_eq!(h(&str_ab), h(&str_ab2));
+        assert_eq!(re_ab, re_ab2);
+        assert_eq!(h(&re_ab), h(&re_ab2));
+
+        // `"ab"` and `"ab"i` are distinct string patterns (the pre-existing `ci` gate).
+        let str_ab_ci = Pattern::Str(PatternStr::new_ci("ab"));
+        assert_ne!(
+            str_ab, str_ab_ci,
+            "case-sensitivity distinguishes string patterns"
+        );
     }
 
     /// N3: a *global* (bodiless) inline flag group is detected anywhere — leading or
