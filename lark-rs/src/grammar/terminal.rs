@@ -677,6 +677,12 @@ fn reject_quantifier_dialect_divergence(pattern: &str) -> Result<(), GrammarErro
 ///   code point; Python `re`'s `\x` takes *exactly two* hex digits (`\x41`), so `\x{` is an
 ///   `incomplete escape \x` to it. We reject `\x` followed by `{` (the braced form). A
 ///   two-digit `\xHH` is left untouched — Python supports it (the negative control).
+/// * **bare `\N`** — Python `re` reserves `\N` for named Unicode escapes and requires
+///   the braced `\N{NAME}` form. A bare `\N`, including prefixes like `a\Nb` or `\Nx`,
+///   raises "missing {" at build. The Rust `regex` crate also rejects it, but without an
+///   early dialect screen the error falls through the lookaround/backtracking taxonomy.
+///   We reject it here as an ordinary Python-dialect `InvalidRegex` gap while leaving the
+///   braced form to the existing named-Unicode handling path.
 /// * **`\z` lowercase end-of-text anchor** — the regex crate's `\z` matches end-of-text;
 ///   Python `re` spells that `\Z` (uppercase) and raises `bad escape \z` for the lowercase
 ///   form. Python rejects `\z` in and out of a class, so we reject it unconditionally.
@@ -684,8 +690,8 @@ fn reject_quantifier_dialect_divergence(pattern: &str) -> Result<(), GrammarErro
 ///   are deliberately left alone here.)
 ///
 /// The scan is **escape-aware** (it only triggers on a real `\`-escape, never a literal
-/// `p`/`x`/`z`) and walks `\…` pairs so a `\\` does not mask the following char. It does
-/// **not** otherwise distinguish class context, because all three constructs are rejected
+/// `p`/`x`/`z`/`N`) and walks `\…` pairs so a `\\` does not mask the following char. It does
+/// **not** otherwise distinguish class context, because these constructs are rejected
 /// by Python identically in and out of `[…]`. Runs on the **raw** source before
 /// [`normalize_python_escapes`] (which would not touch these — they are not in its
 /// translation set).
@@ -726,6 +732,17 @@ fn reject_regex_crate_only_dialect(pattern: &str) -> Result<(), GrammarError> {
                                  `\\x{` is an \"incomplete escape \\x\" at build. Use `\\xHH` (or \
                                  `\\uHHHH`) instead. lark-rs matches Python's rejection (ADR-0017)."
                                 .to_string(),
+                    });
+                }
+                Some('N') if chars.get(i + 2) != Some(&'{') => {
+                    return Err(GrammarError::InvalidRegex {
+                        pattern: pattern.to_string(),
+                        reason: "bare `\\N` named-Unicode escape is missing `{...}` — \
+                                 Python `re` reserves `\\N` for `\\N{name}` and raises \
+                                 \"missing {\" when the brace is absent. lark-rs matches \
+                                 that rejection as a regex-dialect build error instead of \
+                                 mis-categorizing it as lookaround/backtracking syntax."
+                            .to_string(),
                     });
                 }
                 Some(_) => i += 2, // an ordinary escape pair — skip both chars

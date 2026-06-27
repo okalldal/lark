@@ -31,7 +31,9 @@
 //! re-confirmed but does **not** re-count — `\b`/`\B` (RC6/#275), `\Z` (N10), POSIX
 //! classes (H5/#332), `(?#)`/octal (H8/H9) — are documented in the catalog, not here.
 
-use lark_rs::{Child, Lark, LarkOptions, LexerType, ParseTree, ParserAlgorithm};
+use lark_rs::{
+    Child, GrammarError, Lark, LarkError, LarkOptions, LexerType, ParseTree, ParserAlgorithm,
+};
 
 fn opts(parser: ParserAlgorithm, lexer: LexerType) -> LarkOptions {
     LarkOptions {
@@ -207,6 +209,44 @@ fn h5_5_named_unicode_escape_supported() {
     assert!(
         lark.parse("\u{2022}").is_ok(),
         "H5-5: `\\N{{BULLET}}` matches the bullet character under Python"
+    );
+}
+
+/// H5-5 follow-up (#469, LOW, lexer dialect / taxonomy). Python rejects a bare `\\N`
+/// (not followed by `{`) as a plain regex build error: `missing {`. lark-rs already
+/// rejects it, but previously routed the Rust-regex parser error through the lookaround
+/// refusal seam, mis-categorizing `\\N` as unsupported backtracking/lookaround syntax.
+/// The bare form should be caught by the Python-dialect screen and reported as
+/// `GrammarError::InvalidRegex`, while an escaped backslash before `N` remains a literal.
+#[test]
+fn h5_5_bare_named_unicode_escape_rebucketed_to_invalid_regex() {
+    for g in [
+        "start: A\nA: /\\N/\n",
+        "start: A\nA: /a\\Nb/\n",
+        "start: A\nA: /\\Nx/\n",
+    ] {
+        match Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Basic)) {
+            Err(LarkError::Grammar(GrammarError::InvalidRegex { reason, .. })) => {
+                assert!(
+                    reason.contains("missing") && reason.contains("\\N"),
+                    "#469: bare \\N should be an InvalidRegex `missing {{` dialect error; got reason={reason:?}"
+                );
+            }
+            Ok(_) => panic!(
+                "#469: bare \\N must be rejected as GrammarError::InvalidRegex, but the grammar was accepted. grammar={g:?}"
+            ),
+            Err(other) => panic!(
+                "#469: bare \\N must be rejected as GrammarError::InvalidRegex, not classified as lookaround/backtracking. grammar={g:?}, got {other:?}"
+            ),
+        }
+    }
+
+    let escaped = "start: A\nA: /\\\\N/\n";
+    let lark = Lark::new(escaped, opts(ParserAlgorithm::Lalr, LexerType::Basic))
+        .expect("#469 control: an escaped backslash before N is a literal \\N, not a bare named-Unicode escape");
+    assert!(
+        lark.parse("\\N").is_ok(),
+        "#469 control: /\\\\N/ should match the literal two-character string \\N"
     );
 }
 
