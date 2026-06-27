@@ -642,6 +642,78 @@ fn h6_8_letterless_names_rejected() {
     }
 }
 
+/// #445 (LOW, grammar-loader) — **FIXED**. The **third** name-shape class, falling between
+/// #361 (`__`-leading WITH a letter) and #405 (letterless): a single leading underscore
+/// followed by a non-letter that still contains a letter further along (`_9x`, `_9A`).
+/// Python's name tokens are `RULE = _?[a-z][_a-z0-9]*` / `TERMINAL = _?[A-Z][_A-Z0-9]*` —
+/// the char immediately after the (at most one) optional leading underscore must be a
+/// letter, so `_9x` (one underscore, then a digit, then a letter) fails the shape and
+/// Python rejects the grammar at grammar-lex (`GrammarError: Unexpected input`,
+/// oracle-confirmed lark 1.3.1). Neither sibling predicate fires on it: #361 needs `>= 2`
+/// leading underscores; #405 needs no letter at all (`_9x` has `x`). lark-rs accepted it
+/// (more-permissive → unfalsifiable, ADR-0017). Fix: `reject_nonletter_after_underscore_name`
+/// in the tokenizer, composing with the other two.
+///
+/// This is the **differential audit** for the three composing classes: every adversarial
+/// name is pinned to Python Lark's accept/reject (oracle, lark 1.3.1):
+///   `_9x` REJECT, `_9A` REJECT, `_9a` REJECT, `_0_a` REJECT (this fix);
+///   `_` REJECT, `__` REJECT, `_9` REJECT (#405, letterless);
+///   `__foo` REJECT (#361, `__`-leading);
+///   `_a` ACCEPT, `_A` ACCEPT, `_x9` ACCEPT, `a9` ACCEPT, `_a9` ACCEPT (boundary).
+#[test]
+fn h_445_nonletter_after_single_underscore_name_rejected() {
+    // The new third class (oracle: REJECT at build) — single leading underscore, then a
+    // non-letter, still containing a letter. Rule-name and terminal-name analogs.
+    for g in [
+        "start: _9x\n_9x: \"a\"\n", // single-underscore + digit + letter (rule)
+        "start: A\nA: _9X\n_9X: \"a\"\n", // terminal-name analog reached via a rule body
+        "start: _9a\n_9a: \"a\"\n",
+        "start: _0_a\n_0_a: \"a\"\n", // underscore, digit, underscore, then a letter
+    ] {
+        for lexer in [LexerType::Basic, LexerType::Contextual] {
+            assert!(
+                Lark::new(g, opts(ParserAlgorithm::Lalr, lexer.clone())).is_err(),
+                "#445 ({lexer:?}): Python rejects `_<non-letter>…<letter>` at grammar-lex; \
+                 lark-rs accepted it. grammar={g:?}"
+            );
+        }
+    }
+
+    // Boundary — still accepted by both (oracle: BUILD + parse `a`). The fix must leave a
+    // single leading underscore + letter, a letter-first name, and an interior digit alone.
+    for (label, g) in [
+        ("single-underscore + letter", "start: _a\n_a: \"a\"\n"),
+        ("single-underscore + upper", "start: _A\n_A: \"a\"\n"),
+        ("interior digit after letter", "start: _x9\n_x9: \"a\"\n"),
+        ("letter-first with digit", "start: a9\na9: \"a\"\n"),
+        ("underscore + letter + digit", "start: _a9\n_a9: \"a\"\n"),
+    ] {
+        for lexer in [LexerType::Basic, LexerType::Contextual] {
+            let lark =
+                Lark::new(g, opts(ParserAlgorithm::Lalr, lexer.clone())).unwrap_or_else(|e| {
+                    panic!("#445 boundary ({label}, {lexer:?}): must still build. {g:?} err={e:?}")
+                });
+            assert!(
+                lark.parse("a").is_ok(),
+                "#445 boundary ({label}, {lexer:?}): must still parse `a`. grammar={g:?}"
+            );
+        }
+    }
+
+    // Composition with #405 (letterless) and #361 (`__`-leading): both still reject, and
+    // the new predicate must not have widened to swallow or mis-message those classes.
+    for g in [
+        "_: \"a\"\nstart: _\n",         // letterless (#405)
+        "_9: \"a\"\nstart: _9\n",       // letterless (#405)
+        "start: __foo\n__foo: \"a\"\n", // `__`-leading with a letter (#361)
+    ] {
+        assert!(
+            Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).is_err(),
+            "#445 (composes with #361/#405): sibling class must still reject. grammar={g:?}"
+        );
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Deterministic resource bounds (grammar build).
 // ─────────────────────────────────────────────────────────────────────────────
