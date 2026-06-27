@@ -1441,6 +1441,228 @@ fn rc_extend_interior_origin_prepends_in_resolve_order() {
     );
 }
 
+/// #505 — the `%extend`-of-imported-interior-origin prepend must hold for a body with
+/// *many* (≥1000) alternatives. The original implementation realized the prepend by
+/// bumping every pre-existing imported alternative's `rule.order` by a **fixed**
+/// `EXTEND_ORDER_OFFSET = 1_000_000`; that is a hidden bound, not an invariant — once
+/// an extend produced ≥1_000_000 alternatives the bumped imported orders would overlap
+/// the extend's `0..k` range and the prepend would silently break. The fix computes the
+/// shift from the actual alternative count `k`, so the prepend holds for any `k`.
+///
+/// The pin is constructed so the prepend invariant is observable *only at scale*: the
+/// imported original `inner: ORIG` (`ORIG: "x"`) is made ambiguous on input `"x"` with
+/// the **last** of 1001 extend alternatives (`last: "x"`, order 1000); the first 1000
+/// extend alternatives `z0..z999` are distinct non-matching rules. Python's `_extend`
+/// prepends the *whole* body, so the imported original must sort behind **every** extend
+/// alternative — including `last` at order 1000 — and the resolve picks `last`
+/// (oracle-verified, `lark==1.3.1`, earley/dynamic/resolve: `mod__inner -> last`).
+///
+/// This is exactly where the old fixed `EXTEND_ORDER_OFFSET` was a hidden bound: with a
+/// constant offset `< 1001` the imported original would sort *ahead* of `last` and
+/// wrongly win the resolve. (Verified failed-first by transiently setting the old
+/// constant to 100: the assertion flipped to `mod__inner -> ORIG`.) The computed offset
+/// = the actual alternative count (1001), so the prepend holds for any body size.
+#[test]
+fn rc505_extend_interior_origin_prepends_with_many_alts() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    const N: usize = 1000;
+    let mut main = String::new();
+    main.push_str("%import .mod (outer)\n");
+    // The extend body: z0..z(N-1) (non-matching), then `last` (ambiguous with the
+    // imported original on "x") at order N — N+1 alternatives total.
+    main.push_str("%extend mod__inner:");
+    for i in 0..N {
+        main.push_str(&format!(" z{i} |"));
+    }
+    main.push_str(" last\n");
+    for i in 0..N {
+        // Distinct literals so each zi is a real, non-ambiguous alternative.
+        main.push_str(&format!("z{i}: \"q{i} \"\n"));
+    }
+    main.push_str("last: \"x\"\n");
+    main.push_str("start: outer\n");
+
+    let mod_src = "outer: inner\ninner: ORIG\nORIG: \"x\"\n";
+    let mut sources = HashMap::new();
+    sources.insert("mod.lark".to_string(), mod_src.to_string());
+    sources.insert("main.lark".to_string(), main.clone());
+
+    let lark = Lark::new(
+        &main,
+        LarkOptions {
+            parser: ParserAlgorithm::Earley,
+            lexer: LexerType::Dynamic,
+            ambiguity: Ambiguity::Resolve,
+            start: vec!["start".to_string()],
+            maybe_placeholders: false,
+            import_sources: Some(Arc::new(sources)),
+            ..Default::default()
+        },
+    )
+    .unwrap_or_else(|e| panic!("#505: Python builds the 1000-alt extend; lark-rs rejected: {e:?}"));
+
+    let tree = lark
+        .parse("x")
+        .unwrap_or_else(|e| panic!("#505: parse 'x' failed: {e:?}"))
+        .to_string();
+    assert_eq!(
+        tree, "Tree(start, [Tree(outer, [Tree(mod__inner, [Tree(last, [])])])])",
+        "#505: with ≥1000 extend alternatives the imported original must sort behind \
+         ALL of them — the last extend alt wins the resolve (computed offset, not a bound)"
+    );
+}
+
+/// #505 — dedicated import-hoist reorder regression. PR #495 hoisted all `%import`
+/// resolution ahead of statement staging (Python's "definitions-first, directives-
+/// after" model). "Hoisting changes nothing else" was previously defended only via the
+/// standing banks; this pins it **directly** over a non-#442 import/directive mixture:
+/// `%ignore`, `%declare`, a locally-defined terminal, and a plain rule referencing a
+/// mangled interior import origin — each still resolving as before the hoist, with the
+/// `%import` deliberately placed *after* several directives in document order. All trees
+/// are Python-oracle-verified (`lark==1.3.1`, lalr, `maybe_placeholders=False`).
+#[test]
+fn rc505_import_hoist_reorder_regression() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let mod_src = "shared: A B\nA: \"a\"\nB: \"b\"\n";
+    let build = |main: &str| -> Result<Lark, LarkError> {
+        let mut sources = HashMap::new();
+        sources.insert("mod.lark".to_string(), mod_src.to_string());
+        sources.insert("main.lark".to_string(), main.to_string());
+        Lark::new(
+            main,
+            LarkOptions {
+                parser: ParserAlgorithm::Lalr,
+                start: vec!["start".to_string()],
+                maybe_placeholders: false,
+                import_sources: Some(Arc::new(sources)),
+                ..Default::default()
+            },
+        )
+    };
+
+    // Case A — %ignore, %declare, a local terminal, and a plain rule all appear
+    // *before* the %import in document order. The hoist resolves the import first;
+    // the directives then stage in document order exactly as Python does.
+    let main_a = "%ignore \" \"\n\
+                  %declare DECLARED\n\
+                  C: \"c\"\n\
+                  %import .mod (shared)\n\
+                  start: shared C? maybe\n\
+                  maybe: DECLARED?\n";
+    let lark_a = build(main_a).unwrap_or_else(|e| panic!("#505 hoist-A: build failed: {e:?}"));
+    assert_eq!(
+        lark_a
+            .parse("a b c")
+            .unwrap_or_else(|e| panic!("#505 hoist-A: parse 'a b c' failed: {e:?}"))
+            .to_string(),
+        "Tree(start, [Tree(shared, [Token(mod__A, \"a\"), Token(mod__B, \"b\")]), \
+         Token(C, \"c\"), Tree(maybe, [])])",
+        "#505 hoist-A: import + %declare/%ignore/terminal mixture must resolve as before the hoist"
+    );
+    assert_eq!(
+        lark_a
+            .parse("a b")
+            .unwrap_or_else(|e| panic!("#505 hoist-A: parse 'a b' failed: {e:?}"))
+            .to_string(),
+        "Tree(start, [Tree(shared, [Token(mod__A, \"a\"), Token(mod__B, \"b\")]), Tree(maybe, [])])",
+        "#505 hoist-A: optional C absent must still parse"
+    );
+
+    // Case B — last-alias-wins across an interleaved import (#388). common.WORD is
+    // imported under two aliases straddling the `start` rule; only the LAST alias is
+    // usable. The hoist must preserve the relative order *among* imports.
+    let last_alias = "%import common.WORD -> FIRST\n\
+                      start: SECOND\n\
+                      %import common.WORD -> SECOND\n";
+    let lark_b = build(last_alias).unwrap_or_else(|e| panic!("#505 hoist-B: build failed: {e:?}"));
+    assert_eq!(
+        lark_b
+            .parse("hello")
+            .unwrap_or_else(|e| panic!("#505 hoist-B: parse 'hello' failed: {e:?}"))
+            .to_string(),
+        "Tree(start, [Token(SECOND, \"hello\")])",
+        "#505 hoist-B: last-alias-wins must survive the import hoist"
+    );
+    // Using the *dropped* first alias must be rejected (Python: GrammarError).
+    let dropped_alias = "%import common.WORD -> FIRST\n\
+                         start: FIRST\n\
+                         %import common.WORD -> SECOND\n";
+    assert!(
+        build(dropped_alias).is_err(),
+        "#505 hoist-B: a dropped (non-last) import alias must stay undefined/rejected"
+    );
+
+    // Case C — a plain rule colliding with an imported final name is rejected by the
+    // single-definition ledger, unchanged by the hoist (Python: GrammarError).
+    let collision = "%import .mod (shared)\nshared: \"z\"\nstart: shared\n";
+    assert!(
+        build(collision).is_err(),
+        "#505 hoist-C: plain rule vs imported-final-name collision must still reject"
+    );
+}
+
+/// #505 review finding — `%extend` *then* `%override` of the *same* imported interior
+/// origin. The deferred prepend (`pending_interior_extends`) snapshots the pre-existing
+/// imported alternatives at `%extend` stage time; a later `%override` of that origin
+/// then `self.rules.retain`s those snapshotted rules away. Python's `_extend` followed
+/// by `_define(override=True)` replaces the whole definition — the prior extend's
+/// prepend is discarded — so the override branch must also drop the pending prepend.
+/// Before the fix the stale snapshot made `apply_pending_interior_extends` compute
+/// `k = total - preexisting.len()` with `total < preexisting.len()`, panicking with
+/// "attempt to subtract with overflow". The imported `inner: P | Q` has two
+/// alternatives (so the snapshot length 2 exceeds the override body's 1 alternative,
+/// triggering the underflow). Python oracle (`lark==1.3.1`, earley/dynamic/resolve):
+/// the override replaces everything — only `c: "w"` survives, `mod__inner -> c` on `w`
+/// and `x`/`y`/`z` are rejected.
+#[test]
+fn rc505_override_after_extend_of_interior_origin() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    let mod_src = "outer: inner\ninner: P | Q\nP: \"x\"\nQ: \"y\"\n";
+    let main = "%import .mod (outer)\n\
+                %extend mod__inner: b\nb: \"z\"\n\
+                %override mod__inner: c\nc: \"w\"\n\
+                start: outer\n";
+    let mut sources = HashMap::new();
+    sources.insert("mod.lark".to_string(), mod_src.to_string());
+    sources.insert("main.lark".to_string(), main.to_string());
+    let lark = Lark::new(
+        main,
+        LarkOptions {
+            parser: ParserAlgorithm::Earley,
+            lexer: LexerType::Dynamic,
+            ambiguity: Ambiguity::Resolve,
+            start: vec!["start".to_string()],
+            maybe_placeholders: false,
+            import_sources: Some(Arc::new(sources)),
+            ..Default::default()
+        },
+    )
+    .unwrap_or_else(|e| {
+        panic!("#505 override-after-extend: Python builds this; lark-rs rejected: {e:?}")
+    });
+
+    assert_eq!(
+        lark.parse("w")
+            .unwrap_or_else(|e| panic!("#505 override-after-extend: parse 'w' failed: {e:?}"))
+            .to_string(),
+        "Tree(start, [Tree(outer, [Tree(mod__inner, [Tree(c, [])])])])",
+        "#505: %override after %extend must replace the whole definition (only `c` survives)"
+    );
+    // The override dropped the imported P/Q and the extend's b: those inputs reject.
+    for dropped in ["x", "y", "z"] {
+        assert!(
+            lark.parse(dropped).is_err(),
+            "#505 override-after-extend: '{dropped}' must reject (override replaced the body)"
+        );
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // #361/#446 corrective — the synthetic import probe must not reserve a
 // user-authorable rule name. PR #446 (issue #361) renamed the probe from the
