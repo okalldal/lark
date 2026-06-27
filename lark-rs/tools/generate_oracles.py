@@ -171,21 +171,25 @@ ARITHMETIC_CASES = [
 # From test_python_grammar.py — number literals
 # Format: (input, parser_grammar, should_parse)
 #
-# This hand-written test grammar deliberately covers only a SUBSET of CPython's
-# numeric syntax — it is a lexer-ordering / maximal-munch fixture, not a faithful
-# Python number lexer. Two known gaps vs. the Python *language* (both honestly
-# carried in PYTHON_NUMBER_INVALID below, since Python Lark also rejects them under
-# this grammar and lark-rs matches that rejection — #293):
-#   * `3.14j` / `.5j` — IMAG follows FLOAT, so a maximal-munch lexer consumes the
-#     numeric part as FLOAT and orphans the trailing `j` (a terminal-ordering
-#     property of this grammar). A bare-INT imaginary like `3j` IS covered.
-#   * `0x_1A` / `0b_1010` / `0o_17` — the HEX/OCT/BIN terminals require a digit right
-#     after the base prefix, so a prefixed underscore (which CPython 3.6+ accepts) is
-#     rejected here.
-# These are NOT fixed by reordering IMAG / adding `_?`: doing so makes Python accept
-# them but surfaces real lark-rs lexer divergences (IMAG `.2` priority not honored
-# over FLOAT; the prefixed-underscore HEX/OCT/BIN not matched) — engine gaps tracked
-# separately, out of scope for this oracle-honesty housekeeping.
+# This hand-written test grammar is a lexer tie-break / maximal-munch fixture
+# modeled on CPython's numeric syntax. It exercises two lexer behaviors the
+# compliance banks under-sample (#391):
+#   * IMAG-over-FLOAT priority — `3.14j` / `.5j`: IMAG and FLOAT both match a
+#     numeric prefix, but only IMAG also matches the trailing `j`. At *equal*
+#     priority Python's alternation is leftmost-first and FLOAT sorts ahead of
+#     IMAG by `(-priority, -max_width, -len, name)`, so it munches the numeric part
+#     as FLOAT and orphans the `j` (Python then errors). Giving IMAG an explicit
+#     `.2` priority makes the IMAG branch win the same-position tie, so
+#     `3.14j`/`.5j` lex as IMAG — exactly how the Lark authors disambiguate such
+#     conflicts (priority-first, cf. csv.lark's `NON_SEPARATOR_STRING.2`). A
+#     bare-INT imaginary like `3j` and a `3.j` are also covered.
+#   * prefixed-underscore HEX/OCT/BIN — `0x_1A` / `0b_1010` / `0o_17`: the
+#     leading-underscore-after-prefix form CPython 3.6+ accepts. Each base pattern
+#     carries an optional `_?` right after the prefix so the prefixed underscore is
+#     matched. A bare prefix with no following digit (`0o_`, `0x`) is still
+#     rejected, matching CPython.
+# Both classes are oracle-grounded: Python Lark accepts them under this broadened
+# grammar and lark-rs is held to the same accept/reject AND token type (#391).
 PYTHON_NUMBER_GRAMMAR = r"""
 start: number+
 number: INT | FLOAT | HEX | OCT | BIN | IMAG
@@ -194,10 +198,10 @@ FLOAT: /[0-9][0-9_]*\.[0-9_]*/
      | /\.[0-9][0-9_]*/
      | /[0-9][0-9_]*[eE][+-]?[0-9][0-9_]*/
      | /[0-9][0-9_]*\.[0-9_]*[eE][+-]?[0-9][0-9_]*/
-HEX: /0[xX][0-9a-fA-F][0-9a-fA-F_]*/
-OCT: /0[oO][0-7][0-7_]*/
-BIN: /0[bB][01][01_]*/
-IMAG: /[0-9][0-9_]*[jJ]/
+HEX: /0[xX]_?[0-9a-fA-F][0-9a-fA-F_]*/
+OCT: /0[oO]_?[0-7][0-7_]*/
+BIN: /0[bB]_?[01][01_]*/
+IMAG.2: /[0-9][0-9_]*[jJ]/
     | /[0-9][0-9_]*\.[0-9_]*[jJ]/
     | /\.[0-9][0-9_]*[jJ]/
 %ignore /[ \t\n]+/
@@ -211,6 +215,10 @@ PYTHON_NUMBER_VALID = [
     "3.14", "3.", ".14", "3.14e10", "3.14e+10", "3.14e-10",
     "3j",
     "1_000_000", "1_0",
+    # ── #391: IMAG-priority-over-FLOAT (now lex as IMAG via the `.2` priority).
+    "3.14j", ".5j", "3.j",
+    # ── #391: prefixed-underscore HEX/OCT/BIN (now matched via the `_?` after prefix).
+    "0x_1A", "0b_1010", "0o_17", "0X_1a",
 ]
 
 PYTHON_NUMBER_INVALID = [
@@ -219,13 +227,10 @@ PYTHON_NUMBER_INVALID = [
     "0b2",   # invalid binary digit
     "._4",   # leading dot needs digit
     "3e",    # exponent with no digits
-    # ── Outside this test grammar's scope (Python Lark rejects under this grammar;
-    #    lark-rs matches the rejection). See the grammar comment above (#293).
-    "3.14j",   # IMAG after FLOAT → numeric part munched as FLOAT, trailing 'j' orphaned
-    ".5j",     # same FLOAT-before-IMAG ordering gap
-    "0x_1A",   # prefixed underscore: HEX requires a hex digit right after 0x
-    "0b_1010", # prefixed underscore: BIN requires a bit right after 0b
-    "0o_17",   # prefixed underscore: OCT requires an octal digit right after 0o
+    # ── #391 neighbors: a bare prefix + underscore with no following digit is
+    #    still rejected (the `_?` is optional, not a digit) — matches CPython.
+    "0o_",   # octal prefix + underscore, no octal digit
+    "0x_",   # hex prefix + underscore, no hex digit
 ]
 
 # CSV cases. These exercise transparent `_rule` inlining: `_anything` is a
