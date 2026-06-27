@@ -2649,6 +2649,23 @@ PROPAGATE_POSITIONS_CASES = [
      'start: "(" x~0 ")"\nx: "z"\n%import common.WS\n%ignore WS\n', "( )"),
     ("nullable_star_empty_between_punct",
      'start: "(" item* ")"\nitem: "a"\n%import common.WS\n%ignore WS\n', "( )"),
+    # ── Multi-line empty/nullable span (#543) ──────────────────────────────────
+    # The cases above are all single-line: the parent span never crosses a line
+    # boundary, so its `line`/`column`/`end_line`/`end_column` are indistinguishable
+    # from a correct value (`end_line` is always 1). These two put the surrounding
+    # tokens on *different* lines, so the parent must widen to `end_line = 2` — a
+    # line/column metadata regression on the explicit/assemble path that keeps the
+    # byte offsets correct is now observable, not theoretical. The empty/nullable
+    # child stays positionless (no own line/column to compare); the line/column axis
+    # lives on the parent it widens.
+    # (a) directly-ε rule `e:` between newline-separated tokens — carries an actual
+    #     positionless empty *node*; LALR + Earley (both walk paths), CYK rejects ε.
+    ("empty_rule_between_tokens_multiline",
+     'start: "a" e "b"\ne:\n%import common.WS\n%ignore WS\n', "a\nb"),
+    # (b) nullable `*` that derives ε by ε-removal — reaches CYK too, so the
+    #     multi-line parent span is held across all three engines.
+    ("nullable_star_empty_multiline",
+     'start: "(" item* ")"\nitem: "a"\n%import common.WS\n%ignore WS\n', "(\n)"),
 ]
 
 # Every legal (parser, lexer) pairing — propagate_positions is engine-agnostic, so
