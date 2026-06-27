@@ -744,18 +744,95 @@ fn h4_9_literal_vs_named_dedup_differential() {
 /// fix: enumerate every distinct derivation Python does; the dedup may only ever collapse
 /// byte-identical trees.
 #[test]
-#[ignore = "XFAIL (bounty H4-10): nullable+recursive Earley under-reports distinct derivations (6 vs Python's 8 on 'bbb')"]
 fn h4_10_nullable_recursive_earley_enumerates_all_derivations() {
+    // FIXED (#348): the explicit forest→tree walk now mirrors Python's per-packed-node
+    // `_cache` + cycle-retreat reuse (`packed_cache` + `is_cycle_node` gating of the
+    // per-node memos in `parsers/earley/tree_walk.rs`), so a derivation a cyclic
+    // re-descent used to discard is recovered. Python (oracle): 1,1,2,8,48 distinct
+    // derivations of ""/"b"/"bb"/"bbb"/"bbbb". Pin every length, on BOTH lexers — the
+    // bug was identical on basic and dynamic.
     let g = "start: z\nz: | \"b\" z | z z\n";
-    let mut eopts = opts(ParserAlgorithm::Earley, LexerType::Dynamic);
-    eopts.ambiguity = Ambiguity::Explicit;
-    let lark = Lark::new(g, eopts).expect("H4-10: builds");
-    let tree = lark.parse("bbb").expect("H4-10: parses");
-    let n = derivation_count(&tree);
-    assert_eq!(
-        n, 8,
-        "H4-10: Python enumerates 8 distinct derivations of 'bbb'; lark-rs lost some (got {n})"
-    );
+    let expected = [("", 1), ("b", 1), ("bb", 2), ("bbb", 8), ("bbbb", 48)];
+    for lexer in [LexerType::Dynamic, LexerType::Basic] {
+        let mut eopts = opts(ParserAlgorithm::Earley, lexer.clone());
+        eopts.ambiguity = Ambiguity::Explicit;
+        let lark = Lark::new(g, eopts).expect("H4-10: builds");
+        for (inp, want) in expected {
+            let tree = lark.parse(inp).expect("H4-10: parses");
+            let n = derivation_count(&tree);
+            assert_eq!(
+                n, want,
+                "H4-10 ({lexer:?}): {inp:?} — Python enumerates {want} distinct derivations, got {n}"
+            );
+        }
+    }
+}
+
+/// H4-10 differential audit (#348): the fix is forest-walk cycle handling, an area the
+/// banks under-sample. Pin lark-rs's distinct-derivation count against Python Lark 1.3.1
+/// over a spread of *adversarial* nullable + recursive ambiguous grammars (left-, right-,
+/// and binary-recursive, with a nullable arm), on BOTH lexers. Counts are Python-derived
+/// (the oracle). The last case is the #159 byte-identical-collapse pin: distinct SPPF
+/// derivations that assemble identically (filtered tokens) must still collapse to ONE tree
+/// — the cycle fix must not turn that into spurious `_ambig` alternatives (ADR-0017).
+#[test]
+fn h4_10_differential_audit_nullable_recursive_ambiguous() {
+    // (grammar, [(input, python_distinct_derivation_count)])
+    let cases: &[(&str, &[(&str, usize)])] = &[
+        // nullable + binary-recursive (the H4-10 root)
+        (
+            "start: z\nz: | \"b\" z | z z\n",
+            &[("", 1), ("b", 1), ("bb", 2), ("bbb", 8), ("bbbb", 48)],
+        ),
+        // nullable + both-recursive single symbol
+        (
+            "start: a\na: | a a | \"x\"\n",
+            &[("", 1), ("x", 1), ("xx", 1), ("xxx", 2), ("xxxx", 5)],
+        ),
+        // nullable + binary-recursive with a left-token arm
+        (
+            "start: p\np: p p | \"a\" p | \n",
+            &[("", 1), ("a", 1), ("aa", 2), ("aaa", 6)],
+        ),
+        // nullable middle, binary-recursive
+        (
+            "start: e\ne: e e | \"n\" | \n",
+            &[("", 1), ("n", 1), ("nn", 1), ("nnn", 2)],
+        ),
+        // *interacting* cycles: `e` and `f` are mutually recursive and each
+        // nullable, so their SPPF cycles share nodes (one SCC). This is the case a
+        // single-pass back-edge DFS mis-classified (false-negative → under-report);
+        // SCC-based cycle detection (`ensure_cycle_nodes`) is what gets it right.
+        (
+            "start: e\ne: e e | f | \nf: e | \"d\" f | \n",
+            &[("", 2), ("d", 2), ("dd", 8), ("ddd", 44)],
+        ),
+        // #159 byte-identical collapse: every derivation assembles identically (the
+        // distinguishing "x" tokens are filtered), so the dedup must yield ONE tree.
+        (
+            "start: \"x\" start | start \"x\" | \"x\"\n",
+            &[("x", 1), ("xx", 1), ("xxx", 1)],
+        ),
+    ];
+    for lexer in [LexerType::Dynamic, LexerType::Basic] {
+        for (g, inputs) in cases {
+            let mut eopts = opts(ParserAlgorithm::Earley, lexer.clone());
+            eopts.ambiguity = Ambiguity::Explicit;
+            let lark = Lark::new(g, eopts)
+                .unwrap_or_else(|e| panic!("audit: builds {g:?} ({lexer:?}): {e:?}"));
+            for (inp, want) in *inputs {
+                let tree = lark.parse(inp).unwrap_or_else(|e| {
+                    panic!("audit: parses {g:?} on {inp:?} ({lexer:?}): {e:?}")
+                });
+                let n = derivation_count(&tree);
+                assert_eq!(
+                    n, *want,
+                    "audit ({lexer:?}): {g:?} on {inp:?} — Python yields {want} distinct \
+                     derivations, lark-rs got {n}"
+                );
+            }
+        }
+    }
 }
 
 /// H4-11 (LOW, loader). `%declare` of a lowercase (rule-cased) name is accepted by
