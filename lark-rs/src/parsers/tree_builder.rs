@@ -27,7 +27,45 @@
 //! issue #231.
 
 use crate::grammar::intern::CompiledRule;
-use crate::tree::{Child, Meta, Token, Tree};
+use crate::tree::{Child, Meta, ParseTree, Token, Tree};
+
+// ─── Root Slot → ParseTree ──────────────────────────────────────────────────
+
+/// Convert the final root [`Slot`] off an engine's value stack into the public
+/// [`ParseTree`] result, handling the three shapes every backend agrees on:
+///
+/// - `Slot::Tree` → [`ParseTree::Tree`], `Slot::Token` → [`ParseTree::Token`].
+/// - A **lone-`None`** `Slot::Inline([Child::None])` → [`ParseTree::None`]. A root
+///   `?start` rule whose sole alternative is an absent `maybe_placeholders` `[...]`
+///   collapses its placeholder `None` through `?`-expand1 to `Inline([None])` (RC9
+///   in [`shape`](TreeOutputBuilder::shape)); Python Lark returns a bare `None`
+///   there (`?start: [A]` on `""`), so all three backends must too (#289, ADR-0033).
+///   A non-`?` start rule never reaches `Inline`, so this stays *not*-more-permissive
+///   (ADR-0017).
+///
+/// Centralized here so the lone-`None` carve-out has **one** definition shared by
+/// the LALR and CYK roots, rather than hand-kept copies that could drift. Any
+/// **other** `Inline` shape (a non-lone-`None` collapse) is structurally impossible
+/// at a start root, so its children are returned as `Err(children)` for the caller
+/// to resolve under its own residual policy — LALR rejects it as no-parse, while CYK
+/// wraps it in a start-named node — keeping each backend's existing behaviour
+/// byte-for-byte.
+///
+/// Two copies of this carve-out remain *un*-migrated by design: `standalone/runtime.rs`
+/// keeps its own (ADR-0008 — it can't share in-tree code), and Earley's
+/// `earley::forest_to_tree` root match (`parsers/earley/mod.rs`) is the same shape but
+/// was out of scope for the dedup that introduced this helper (#483 scoped LALR + CYK;
+/// Earley had just been split into its own module). Routing Earley through here is a
+/// clean follow-up; until then a change to the lone-`None` contract (#289/ADR-0033)
+/// must be mirrored there too.
+pub(crate) fn root_slot_to_parse_tree(value: Slot) -> Result<ParseTree, Vec<Child>> {
+    match value {
+        Slot::Tree(t) => Ok(ParseTree::Tree(t)),
+        Slot::Token(tok) => Ok(ParseTree::Token(tok)),
+        Slot::Inline(cs) if cs.len() == 1 && matches!(cs[0], Child::None) => Ok(ParseTree::None),
+        Slot::Inline(cs) => Err(cs),
+    }
+}
 
 // ─── Slot: the engine's internal stack currency ─────────────────────────────
 
@@ -153,7 +191,11 @@ impl<'g> TreeOutputBuilder<'g> {
                         container.observe_token(&t);
                     }
                     if self.keep_token(rule_idx, i) {
-                        children.push(Child::Token(t));
+                        // Materialize the kept terminal through the seam
+                        // (`Value = Child` → `Child::Token`), the same call the
+                        // engine's shift path uses, so token construction has a
+                        // single definition (ADR-0027).
+                        children.push(self.build_token(t));
                     }
                 }
                 Slot::Tree(t) => {
@@ -258,7 +300,17 @@ impl<'g> TreeOutputBuilder<'g> {
                 Child::None => Slot::Inline(vec![Child::None]),
             }
         } else {
-            let mut tree = Tree::new(rule.tree_name.clone(), children);
+            // Build the node through the seam (`Value = Child` → a `Child::Tree`),
+            // so node construction has a single definition shared with every future
+            // backend (ADR-0027). `propagate_positions` then widens the freshly
+            // built node's `meta` to its pre-filter container span (#402); the
+            // widen is a property of *this* tree backend, applied after the seam
+            // hands back the node.
+            let mut tree = match self.build_node(&rule.tree_name, children) {
+                Child::Tree(tree) => tree,
+                // `TreeOutputBuilder::build_node` always returns `Child::Tree`.
+                other => unreachable!("build_node must produce a tree node, got {other:?}"),
+            };
             if self.propagate_positions {
                 container.widen_meta(&mut tree.meta);
             }

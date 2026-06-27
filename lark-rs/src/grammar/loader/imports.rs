@@ -444,6 +444,15 @@ impl GrammarCompiler {
         // This is orthogonal to the `imported_origins` dedup below (two sibling imports
         // sharing an interior origin, #372): those copies are *import*-provenanced and
         // never enter `claimed_rule_names`, so they dedup rather than collide.
+        //
+        // An `%override`/`%extend` target is likewise excluded (#442): the compiler's
+        // first pass routes such a name into `override_extend_rule_targets` rather than
+        // `claimed_rule_names`, precisely so this guard does *not* fire for it. The
+        // interior origin is therefore copied here (the target pre-exists), and the
+        // directive — staged after every import resolves — then replaces its body
+        // (override) or prepends new alternatives (extend), exactly as Python applies
+        // `_define(override=True)` / `_extend` to the already-imported `_definitions`
+        // key.
         for rule in imported
             .rules
             .iter()
@@ -489,7 +498,7 @@ impl GrammarCompiler {
             // CYK empty-rule guard (#101, ADR-0024) would reclassify it as a
             // user-written rule and wrongly reject an oracle-accepted import.
             if let Some(kind) = imported.anon_kinds.get(&rule.origin.name).copied() {
-                self.anon_kinds.insert(origin.name.clone(), kind);
+                self.minter.anon_kinds.insert(origin.name.clone(), kind);
             }
             let expansion = rule
                 .expansion

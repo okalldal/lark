@@ -182,6 +182,29 @@ impl ParseError {
         }
     }
 
+    /// Build an [`UnexpectedToken`] from a token and `expected` set, with **no**
+    /// END→[`UnexpectedEof`] split. Unlike [`unexpected_token`](Self::unexpected_token),
+    /// this always reports `UnexpectedToken` even for the synthetic end-of-input
+    /// terminal — the recovery driver's `RecoveryContext::feed_token` rejects a fed
+    /// `$END` as an unexpected *token* (completion is the recovery loop's job, not
+    /// the handler's), so its bad-token reports must not collapse to `UnexpectedEof`.
+    /// Centralizes the five identical constructions that path used to inline.
+    ///
+    /// [`UnexpectedToken`]: ParseError::UnexpectedToken
+    /// [`UnexpectedEof`]: ParseError::UnexpectedEof
+    pub(crate) fn unexpected_token_keep_end(
+        token: &crate::tree::Token,
+        expected: Vec<String>,
+    ) -> ParseError {
+        ParseError::UnexpectedToken {
+            token: token.value.clone(),
+            token_type: token.type_.clone(),
+            line: token.line,
+            col: token.column,
+            expected,
+        }
+    }
+
     /// Unexpected end of input at a position (`0, 0` when no position is known —
     /// e.g. an unresolvable start symbol or CYK's uniform "parsing failed").
     pub(crate) fn unexpected_eof(line: usize, col: usize, expected: Vec<String>) -> ParseError {

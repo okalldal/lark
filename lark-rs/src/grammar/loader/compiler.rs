@@ -56,6 +56,132 @@ impl AnonKind {
     }
 }
 
+/// The single auditable home of every generated-name decision — the #101/#144
+/// namespace invariants in one place. Owns the two monotonic counters
+/// (`__anon_{tag}_{n}` rules, `__ANON_{n}` terminals), the literal→terminal-name
+/// memo, the up-front user-name reservations in *both* namespaces, and the
+/// generated-helper provenance map (`anon_kinds`).
+///
+/// **Mint-time provenance (#101/ADR-0024, #144).** [`fresh_anon_rule`](NameMinter::fresh_anon_rule)
+/// records each helper's [`AnonKind`] into `anon_kinds` **at mint time** — never
+/// re-derived downstream from the `__anon_` spelling (a user can author that exact
+/// name). [`anon_terminal_name_free`](NameMinter::anon_terminal_name_free) checks
+/// **both** namespaces (terminal *and* rule reservations) plus the live output
+/// vectors, which the caller passes in (the minter never holds the output vectors,
+/// per #480's seam note).
+pub(super) struct NameMinter {
+    /// Counter for generating unique anonymous rule names.
+    pub(super) anon_counter: usize,
+    /// Counter for generating unique terminal names for literals.
+    pub(super) term_counter: usize,
+    /// Cache: literal string/regex → auto-generated terminal name.
+    pub(super) literal_cache: HashMap<String, String>,
+    /// User-authored rule names (rules, templates, import targets), collected up
+    /// front so [`fresh_anon_rule`](Self::fresh_anon_rule) never hands out a name
+    /// the grammar already claims — `__anon_group_0` is a *valid* user rule name,
+    /// and a generated duplicate would silently merge two unrelated origins.
+    /// Generated names never collide with each other (one monotonic counter), and
+    /// import-mangled dependencies (`mod__name` / `_mod__name`) cannot take the
+    /// `__anon_{tag}_{n}` shape, so user-authored names are the only hazard.
+    ///
+    /// This set is deliberately *over-inclusive* for the anon-name guard: it reserves
+    /// **every** import final name from [`spec_final_names`], including a non-surviving
+    /// last-alias-wins binding (#388). That is harmless for dodging generated names,
+    /// but it is **not** the right discriminator for the #428 user-vs-import-origin
+    /// collision — see [`GrammarCompiler::claimed_rule_names`].
+    pub(super) reserved_rule_names: HashSet<String>,
+    /// User-authored terminal names (terminals, declares, import targets), the
+    /// same guard for [`fresh_terminal`](Self::fresh_terminal)'s `__ANON_{n}`.
+    /// Unlike rules, generated terminal names must *also* dodge live state: a
+    /// literal `"__anon_5"` interns under the hint `__ANON_5` (its uppercase
+    /// form), which no up-front scan can see.
+    pub(super) reserved_term_names: HashSet<String>,
+    /// Provenance of every generated anonymous EBNF helper rule, keyed by the name
+    /// [`fresh_anon_rule`](Self::fresh_anon_rule) minted for it. This is the
+    /// *source-provenance* discriminator the engine needs (#101): a nullable
+    /// `Nt::Orig` that is a generated helper (`(B*)~2`'s `__anon_rep_*`) is
+    /// accepted by CYK, but a user-written nullable rule (`_a: B?`, or a user rule
+    /// the author *named* `__anon_star_0`) is rejected — exactly Python Lark's CYK
+    /// behavior. The discriminator is whether the name was generated here, never
+    /// the `__anon_` spelling (a user can author that exact name, #144), so it is
+    /// recorded at mint time rather than sniffed downstream.
+    pub(super) anon_kinds: HashMap<String, AnonKind>,
+}
+
+impl NameMinter {
+    fn new() -> Self {
+        NameMinter {
+            anon_counter: 0,
+            term_counter: 0,
+            literal_cache: HashMap::new(),
+            reserved_rule_names: HashSet::new(),
+            reserved_term_names: HashSet::new(),
+            anon_kinds: HashMap::new(),
+        }
+    }
+
+    /// A fresh `__anon_{tag}_{n}` helper-rule name, skipping any name the user's
+    /// grammar already claims (see [`reserved_rule_names`](Self::reserved_rule_names)).
+    fn fresh_anon_rule(&mut self, kind: AnonKind) -> String {
+        loop {
+            let name = format!("__anon_{}_{}", kind.tag(), self.anon_counter);
+            self.anon_counter += 1;
+            if !self.reserved_rule_names.contains(&name) {
+                // Record the generated-helper provenance so the engine can tell a
+                // generated nullable helper from a user rule by *source*, never by
+                // the `__anon_` spelling (#101 / #144).
+                self.anon_kinds.insert(name.clone(), kind);
+                return name;
+            }
+        }
+    }
+
+    /// Whether `name` is free to assign to an anonymous (generated or
+    /// hint-named) terminal. Checks **both** namespaces, not just terminals:
+    /// the lowerer interns every symbol into one `by_name` table, so a terminal
+    /// that shadows a *rule* name corrupts the id space — `intern_nonterminal`
+    /// would hand back the terminal's id (guarded only by a `debug_assert` in
+    /// release builds). `__ANON_0` is a valid user *rule* name (a leading `__`
+    /// lexes as a rule token), so the rule namespace is reachable. Reservations
+    /// cover user-authored names known up front; the live lists (`terminals` /
+    /// `rules`, passed in by the caller, since the minter never holds them) are
+    /// the defensive backstop for names minted mid-compile (uppercase literal
+    /// hints) and anything reservation cannot see.
+    fn anon_terminal_name_free(
+        &self,
+        name: &str,
+        terminals: &[TerminalDef],
+        rules: &[Rule],
+    ) -> bool {
+        !self.reserved_term_names.contains(name)
+            && !self.reserved_rule_names.contains(name)
+            && !terminals.iter().any(|t| t.name == name)
+            && !rules.iter().any(|r| r.origin.name == name)
+    }
+
+    /// A fresh `__ANON_{n}` terminal name, skipping names the user's grammar
+    /// claims in either namespace (see
+    /// [`anon_terminal_name_free`](Self::anon_terminal_name_free)).
+    fn fresh_terminal(&mut self, terminals: &[TerminalDef], rules: &[Rule]) -> String {
+        loop {
+            let name = format!("__ANON_{}", self.term_counter);
+            self.term_counter += 1;
+            if self.anon_terminal_name_free(&name, terminals, rules) {
+                return name;
+            }
+        }
+    }
+
+    /// Whether a literal's human-readable name *hint* (`","` → `COMMA`,
+    /// `"kw"` → `KW`) may be used as the terminal's name. Same availability
+    /// rule as a generated name (a hint like `__ANON_5` — the uppercase form of
+    /// `"__anon_5"` — must dodge both namespaces too); on rejection the caller
+    /// falls back to [`fresh_terminal`](Self::fresh_terminal).
+    fn hint_name_free(&self, name: &str, terminals: &[TerminalDef], rules: &[Rule]) -> bool {
+        self.anon_terminal_name_free(name, terminals, rules)
+    }
+}
+
 /// Converts the parsed AST into flat BNF rules and terminal definitions.
 /// One resolved `%ignore` directive (see [`GrammarCompiler::ignore_patterns`]).
 pub(super) enum IgnoreEntry {
@@ -93,12 +219,11 @@ pub(super) struct GrammarCompiler {
     /// definition"); any other (inline) directive carries a synthesized
     /// [`IgnoreEntry::Pattern`] that mints a fresh `__IGNORE_n` terminal.
     pub(super) ignore_patterns: Vec<IgnoreEntry>,
-    /// Counter for generating unique anonymous rule names.
-    pub(super) anon_counter: usize,
-    /// Counter for generating unique terminal names for literals.
-    pub(super) term_counter: usize,
-    /// Cache: literal string/regex → auto-generated terminal name.
-    pub(super) literal_cache: HashMap<String, String>,
+    /// The single auditable home of every generated-name decision (#101/#144):
+    /// the `__anon_*` / `__ANON_*` counters, the literal→name memo, the up-front
+    /// user-name reservations in both namespaces, and the generated-helper
+    /// provenance map. See [`NameMinter`].
+    pub(super) minter: NameMinter,
     /// Template definitions: name → (params, expansions, modifiers, priority).
     /// The modifiers (`!` keep-all, `?` expand1) and priority are kept so each
     /// instantiation inherits the template's rule options, exactly as Python Lark
@@ -203,20 +328,6 @@ pub(super) struct GrammarCompiler {
     /// — the filesystem is never consulted — with `base_path` acting as a virtual
     /// prefix (default: the map root). Shared down nested imports via `Arc`.
     pub(super) import_sources: Option<Arc<HashMap<String, String>>>,
-    /// User-authored rule names (rules, templates, import targets), collected up
-    /// front so [`fresh_anon_rule`](Self::fresh_anon_rule) never hands out a name
-    /// the grammar already claims — `__anon_group_0` is a *valid* user rule name,
-    /// and a generated duplicate would silently merge two unrelated origins.
-    /// Generated names never collide with each other (one monotonic counter), and
-    /// import-mangled dependencies (`mod__name` / `_mod__name`) cannot take the
-    /// `__anon_{tag}_{n}` shape, so user-authored names are the only hazard.
-    ///
-    /// This set is deliberately *over-inclusive* for the anon-name guard: it reserves
-    /// **every** import final name from [`spec_final_names`], including a non-surviving
-    /// last-alias-wins binding (#388). That is harmless for dodging generated names,
-    /// but it is **not** the right discriminator for the #428 user-vs-import-origin
-    /// collision — see [`claimed_rule_names`](Self::claimed_rule_names).
-    reserved_rule_names: HashSet<String>,
     /// Rule names the importing grammar will **actually define as a distinct origin**:
     /// every user-authored rule/template name, plus every import final name that
     /// *survives* last-alias-wins (#388). This is the precise discriminator for the
@@ -230,25 +341,20 @@ pub(super) struct GrammarCompiler {
     ///
     /// `pub(super)` so the sibling `imports` module reads it from `import_rule_closure`.
     pub(super) claimed_rule_names: HashSet<String>,
-    /// Provenance of every generated anonymous EBNF helper rule, keyed by the name
-    /// [`fresh_anon_rule`](Self::fresh_anon_rule) minted for it. This is the
-    /// *source-provenance* discriminator the engine needs (#101): a nullable
-    /// `Nt::Orig` that is a generated helper (`(B*)~2`'s `__anon_rep_*`) is
-    /// accepted by CYK, but a user-written nullable rule (`_a: B?`, or a user rule
-    /// the author *named* `__anon_star_0`) is rejected — exactly Python Lark's CYK
-    /// behavior. The discriminator is whether the name was generated here, never
-    /// the `__anon_` spelling (a user can author that exact name, #144), so it is
-    /// recorded at mint time rather than sniffed downstream.
+    /// Rule names that an `%override` / `%extend` directive targets (#442). A
+    /// directive legitimately *redefines* its target, so such a name must be
+    /// excluded from the #428 user-rule-vs-mangled-interior-import-origin collision
+    /// guard (`import_rule_closure`): `%override python__name` beside `%import
+    /// python (decorator)` must let the interior `python__name` origin be **copied**
+    /// (so the override has something to replace / the extend has something to
+    /// prepend to), exactly as Python — which resolves the import into
+    /// `_definitions` first, then applies `_define(override=True)` / `_extend` on
+    /// the now-present key. Unlike a plain user rule (which is in
+    /// [`claimed_rule_names`](Self::claimed_rule_names) and *does* collide, #428), an
+    /// override/extend target is deliberately kept out of that set.
     ///
-    /// `pub(super)` so the sibling `imports` module can carry an imported helper's
-    /// provenance across `import_rule_closure`'s rename (#101 import path).
-    pub(super) anon_kinds: HashMap<String, AnonKind>,
-    /// User-authored terminal names (terminals, declares, import targets), the
-    /// same guard for [`fresh_terminal`](Self::fresh_terminal)'s `__ANON_{n}`.
-    /// Unlike rules, generated terminal names must *also* dodge live state: a
-    /// literal `"__anon_5"` interns under the hint `__ANON_5` (its uppercase
-    /// form), which no up-front scan can see.
-    reserved_term_names: HashSet<String>,
+    /// `pub(super)` so the sibling `imports` module reads it from `import_rule_closure`.
+    pub(super) override_extend_rule_targets: HashSet<String>,
     /// Per-module merged import-alias map, keyed by the resolved module path
     /// (e.g. `["python"]`), mapping each *independently imported* original name
     /// to its registered (aliased) final name. Mirrors Python Lark's per-dotted-
@@ -286,9 +392,7 @@ impl GrammarCompiler {
             raw_terms: Vec::new(),
             pending_term_extends: Vec::new(),
             ignore_patterns: Vec::new(),
-            anon_counter: 0,
-            term_counter: 0,
-            literal_cache: HashMap::new(),
+            minter: NameMinter::new(),
             templates: HashMap::new(),
             template_instances: HashMap::new(),
             maybe_placeholders,
@@ -305,29 +409,18 @@ impl GrammarCompiler {
             repeat_cache: HashMap::new(),
             base_path,
             import_sources,
-            reserved_rule_names: HashSet::new(),
             claimed_rule_names: HashSet::new(),
-            anon_kinds: HashMap::new(),
-            reserved_term_names: HashSet::new(),
+            override_extend_rule_targets: HashSet::new(),
             import_alias_map: HashMap::new(),
             imported_origins: HashSet::new(),
         }
     }
 
-    /// A fresh `__anon_{tag}_{n}` helper-rule name, skipping any name the user's
-    /// grammar already claims (see [`reserved_rule_names`](Self::reserved_rule_names)).
+    /// A fresh `__anon_{tag}_{n}` helper-rule name (delegates to the
+    /// [`NameMinter`]). The mint-time `anon_kinds` recording lives in the minter —
+    /// the #101/#144 invariant is preserved there.
     pub(super) fn fresh_anon_rule(&mut self, kind: AnonKind) -> String {
-        loop {
-            let name = format!("__anon_{}_{}", kind.tag(), self.anon_counter);
-            self.anon_counter += 1;
-            if !self.reserved_rule_names.contains(&name) {
-                // Record the generated-helper provenance so the engine can tell a
-                // generated nullable helper from a user rule by *source*, never by
-                // the `__anon_` spelling (#101 / #144).
-                self.anon_kinds.insert(name.clone(), kind);
-                return name;
-            }
-        }
+        self.minter.fresh_anon_rule(kind)
     }
 
     /// Options for anonymous EBNF helper rules (groups, optionals, repetition).
@@ -340,43 +433,30 @@ impl GrammarCompiler {
         }
     }
 
-    /// Whether `name` is free to assign to an anonymous (generated or
-    /// hint-named) terminal. Checks **both** namespaces, not just terminals:
-    /// the lowerer interns every symbol into one `by_name` table, so a terminal
-    /// that shadows a *rule* name corrupts the id space — `intern_nonterminal`
-    /// would hand back the terminal's id (guarded only by a `debug_assert` in
-    /// release builds). `__ANON_0` is a valid user *rule* name (a leading `__`
-    /// lexes as a rule token), so the rule namespace is reachable. Reservations
-    /// cover user-authored names known up front; the live lists are the
-    /// defensive backstop for names minted mid-compile (uppercase literal
-    /// hints) and anything reservation cannot see.
+    /// Whether `name` is free to assign to an anonymous (generated or hint-named)
+    /// terminal (delegates to the [`NameMinter`], handing it the live output
+    /// vectors per #480's seam note). The dual-namespace + live-vector check lives
+    /// in [`NameMinter::anon_terminal_name_free`].
     fn anon_terminal_name_free(&self, name: &str) -> bool {
-        !self.reserved_term_names.contains(name)
-            && !self.reserved_rule_names.contains(name)
-            && !self.terminals.iter().any(|t| t.name == name)
-            && !self.rules.iter().any(|r| r.origin.name == name)
+        self.minter
+            .anon_terminal_name_free(name, &self.terminals, &self.rules)
     }
 
-    /// A fresh `__ANON_{n}` terminal name, skipping names the user's grammar
-    /// claims in either namespace (see
-    /// [`anon_terminal_name_free`](Self::anon_terminal_name_free)).
+    /// A fresh `__ANON_{n}` terminal name (delegates to the [`NameMinter`], handing
+    /// it the live output vectors). Skips names the user's grammar claims in either
+    /// namespace.
     pub(super) fn fresh_terminal(&mut self) -> String {
-        loop {
-            let name = format!("__ANON_{}", self.term_counter);
-            self.term_counter += 1;
-            if self.anon_terminal_name_free(&name) {
-                return name;
-            }
-        }
+        self.minter.fresh_terminal(&self.terminals, &self.rules)
     }
 
     /// Whether a literal's human-readable name *hint* (`","` → `COMMA`,
-    /// `"kw"` → `KW`) may be used as the terminal's name. Same availability
-    /// rule as a generated name (a hint like `__ANON_5` — the uppercase form of
-    /// `"__anon_5"` — must dodge both namespaces too); on rejection the caller
-    /// falls back to [`fresh_terminal`](Self::fresh_terminal).
+    /// `"kw"` → `KW`) may be used as the terminal's name (delegates to the
+    /// [`NameMinter`], handing it the live output vectors). Same availability rule
+    /// as a generated name; on rejection the caller falls back to
+    /// [`fresh_terminal`](Self::fresh_terminal).
     pub(super) fn hint_name_free(&self, name: &str) -> bool {
-        self.anon_terminal_name_free(name)
+        self.minter
+            .hint_name_free(name, &self.terminals, &self.rules)
     }
 
     /// Whether `(module, original) -> final_name` is the **surviving** alias for
@@ -415,131 +495,59 @@ impl GrammarCompiler {
         }
     }
 
-    pub(super) fn process_items(&mut self, items: Vec<Item>) -> Result<(), GrammarError> {
-        // First pass: register templates, and reserve every user-authored name so
-        // generated `__anon_*` / `__ANON_*` names can never shadow one. An import's
-        // target may be a rule or a terminal — unknowable before resolution — so it
-        // reserves in both namespaces (harmless: the namespaces cannot overlap).
-        for item in &items {
-            match item {
-                Item::RuleItem(r) => {
-                    self.reserved_rule_names.insert(r.name.clone());
-                    // A user-authored rule/template name is unconditionally a name the
-                    // grammar defines — the precise discriminator for the #428
-                    // user-vs-import-origin collision (a *surviving* import final name
-                    // is added after this loop, once the alias map is complete).
-                    self.claimed_rule_names.insert(r.name.clone());
-                    // Register *plain* templates here; `%override`/`%extend` of a
-                    // template are resolved (with their pre-existence gate) during
-                    // the staging pass, so they must not pre-seed `self.templates`
-                    // ahead of that gate.
-                    if !r.params.is_empty() && r.directive == Directive::Plain {
-                        self.templates.insert(
-                            r.name.clone(),
-                            (
-                                r.params.clone(),
-                                r.expansions.clone(),
-                                r.modifiers.clone(),
-                                r.priority,
-                            ),
-                        );
-                    }
-                }
-                Item::TermItem(t) => {
-                    self.reserved_term_names.insert(t.name.clone());
-                }
-                Item::DeclareItem(syms) => {
-                    for sym in syms {
-                        if let Symbol::Terminal(t) = sym {
-                            self.reserved_term_names.insert(t.name.clone());
-                        }
-                    }
-                }
-                Item::ImportItem(spec) => {
-                    for name in spec_final_names(spec) {
-                        self.reserved_rule_names.insert(name.clone());
-                        self.reserved_term_names.insert(name);
-                    }
-                    // Pre-build the per-module merged alias map (#343). Python
-                    // merges every `%import` of one dotted path into a single
-                    // `aliases` dict *before* any closure is copied, so an
-                    // imported rule's dependency that is independently imported
-                    // from the same module stays unmangled. Collect it up front,
-                    // across all directives, so directive order does not matter.
-                    if let Some((module_path, pairs)) = split_import_directive(spec) {
-                        let entry = self.import_alias_map.entry(module_path).or_default();
-                        for (original, final_name) in pairs {
-                            entry.insert(original, final_name);
-                        }
-                    }
-                }
-                Item::IgnoreItem(_) => {}
-            }
-        }
-
-        // Now that the per-module alias map is complete, fold each import's
-        // *surviving* final name into `claimed_rule_names` (the #428 discriminator).
-        // A name dropped by last-alias-wins (#388) is never defined, so it is
-        // excluded — `alias_survives` is the exact filter the rest of the loader uses.
-        // Done in a second pass over the imports because `alias_survives` reads the
-        // merged `import_alias_map`, which the loop above only finishes building on its
-        // last iteration.
-        for item in &items {
-            if let Item::ImportItem(spec) = item {
-                if let Some((module, pairs)) = split_import_directive(spec) {
-                    for (original, final_name) in pairs {
-                        if self.alias_survives(&module, &original, &final_name) {
-                            self.claimed_rule_names.insert(final_name);
-                        }
-                    }
-                }
-            }
-        }
-
-        // `%import`s populate the unified definition namespace *before* any
-        // statement runs in Python Lark (`load_grammar.py` resolves all imports,
-        // then walks the statements). So an `%override`/`%extend` may target an
-        // imported symbol regardless of where the directive sits — collect the
-        // imported names up front, classified rule vs terminal by the leading-case
-        // convention the loader uses everywhere, so the pre-existence gate below
-        // sees them.
-        //
-        // These same sets are the *single-definition-per-origin* ledger (#270):
-        // every plain definition (rule, terminal, `%declare`) records its origin
-        // here as it is staged, and a second plain definition of an
-        // already-defined name is rejected — matching Python's `_define`, which
-        // raises `"{Type} '{name}' defined more than once"` when a statement names
-        // a key already in `_definitions` (imports included). `%declare`s are
-        // *not* pre-seeded: like every other statement they are processed in
-        // document order, so two `%declare`s of one name collide just as Python's
-        // two `_define(name, …, None)` calls do.
+    /// Import-vs-import collision pre-pass + ledger seeding, the second
+    /// load-bearing step of [`process_items`](Self::process_items)'s staging order
+    /// (it runs after the per-module alias map's first pass, which it reads via
+    /// [`alias_survives`](Self::alias_survives)). Returns the
+    /// `(defined_rule_names, defined_term_names)` ledger seeded with **only the
+    /// surviving** import final names.
+    ///
+    /// `%import`s populate the unified definition namespace *before* any statement
+    /// runs in Python Lark (`load_grammar.py` resolves all imports, then walks the
+    /// statements). So an `%override`/`%extend` may target an imported symbol
+    /// regardless of where the directive sits — the returned sets collect the
+    /// imported names up front, classified rule vs terminal by the leading-case
+    /// convention the loader uses everywhere, so the pre-existence gate sees them.
+    ///
+    /// These same sets are the *single-definition-per-origin* ledger (#270): every
+    /// plain definition (rule, terminal, `%declare`) records its origin here as it
+    /// is staged, and a second plain definition of an already-defined name is
+    /// rejected — matching Python's `_define`, which raises `"{Type} '{name}'
+    /// defined more than once"` when a statement names a key already in
+    /// `_definitions` (imports included). `%declare`s are *not* pre-seeded: like
+    /// every other statement they are processed in document order, so two
+    /// `%declare`s of one name collide just as Python's two `_define(name, …, None)`
+    /// calls do.
+    ///
+    /// Import-vs-import collision detection (#299, spun out of #270). Python merges
+    /// all aliases per *module* (`load_grammar`: `import_aliases.update`) keyed by
+    /// the *original* name, then mangles each definition to its final name; two
+    /// distinct originals (in one module) mangling to the same final name collide
+    /// inside the imported grammar's `_define` (`Terminal 'X' defined more than
+    /// once`). An identical re-import of one `(module, original) -> final` triple is
+    /// idempotent (the alias dict dedups it). So we key the source by `(module_path,
+    /// original)`: registering the same final name from a *different* source is a
+    /// duplicate; re-registering the same source is benign. `final_source` maps a
+    /// final name to the source that first claimed it.
+    ///
+    /// **Last-alias-wins (#388).** When the *same* source is imported under
+    /// *different* aliases (`%import common.INT -> X` then `-> Y`), Python's
+    /// `import_aliases.update` keeps only the **last** binding: only `Y` is defined,
+    /// `X` is dropped. So the collision pre-pass considers only the **surviving**
+    /// alias per source (`alias_survives`, backed by the merged `import_alias_map`):
+    /// an earlier, shadowed alias is neither registered as a final name nor checked
+    /// for collision — it simply never exists. (This is distinct from #299's
+    /// *different*-source/same-final-name collision, which still rejects, and from
+    /// idempotent same-source/*same*-alias re-import, which stays benign because its
+    /// single surviving alias is registered exactly once.)
+    fn precheck_import_collisions(
+        &self,
+        items: &[Item],
+    ) -> Result<(HashSet<String>, HashSet<String>), GrammarError> {
         let mut defined_rule_names: HashSet<String> = HashSet::new();
         let mut defined_term_names: HashSet<String> = HashSet::new();
-        // Import-vs-import collision detection (#299, spun out of #270). Python
-        // merges all aliases per *module* (`load_grammar`: `import_aliases.update`)
-        // keyed by the *original* name, then mangles each definition to its final
-        // name; two distinct originals (in one module) mangling to the same final
-        // name collide inside the imported grammar's `_define`
-        // (`Terminal 'X' defined more than once`). An identical re-import of one
-        // `(module, original) -> final` triple is idempotent (the alias dict dedups
-        // it). So we key the source by `(module_path, original)`: registering the
-        // same final name from a *different* source is a duplicate; re-registering
-        // the same source is benign. `final_source` maps a final name to the source
-        // that first claimed it.
-        //
-        // **Last-alias-wins (#388).** When the *same* source is imported under
-        // *different* aliases (`%import common.INT -> X` then `-> Y`), Python's
-        // `import_aliases.update` keeps only the **last** binding: only `Y` is
-        // defined, `X` is dropped. So the collision pre-pass considers only the
-        // **surviving** alias per source (`alias_survives`, backed by the merged
-        // `import_alias_map`): an earlier, shadowed alias is neither registered as a
-        // final name nor checked for collision — it simply never exists. (This is
-        // distinct from #299's *different*-source/same-final-name collision, which
-        // still rejects below, and from idempotent same-source/*same*-alias
-        // re-import, which stays benign because its single surviving alias is
-        // registered exactly once.)
         let mut final_source: HashMap<(Vec<String>, String), String> = HashMap::new();
-        for item in &items {
+        for item in items {
             if let Item::ImportItem(spec) = item {
                 if let Some((module, pairs)) = split_import_directive(spec) {
                     for (original, final_name) in pairs {
@@ -587,6 +595,108 @@ impl GrammarCompiler {
                 }
             }
         }
+        Ok((defined_rule_names, defined_term_names))
+    }
+
+    pub(super) fn process_items(&mut self, items: Vec<Item>) -> Result<(), GrammarError> {
+        // First pass: register templates, and reserve every user-authored name so
+        // generated `__anon_*` / `__ANON_*` names can never shadow one. An import's
+        // target may be a rule or a terminal — unknowable before resolution — so it
+        // reserves in both namespaces (harmless: the namespaces cannot overlap).
+        for item in &items {
+            match item {
+                Item::RuleItem(r) => {
+                    self.minter.reserved_rule_names.insert(r.name.clone());
+                    // A *plain* user-authored rule/template name is unconditionally a
+                    // name the grammar defines — the precise discriminator for the
+                    // #428 user-vs-import-origin collision (a *surviving* import final
+                    // name is added after this loop, once the alias map is complete).
+                    //
+                    // An `%override`/`%extend` directive (#442) is the exception: it
+                    // *redefines* an existing origin rather than introducing a new one,
+                    // so its target must NOT enter `claimed_rule_names` — otherwise the
+                    // #428 guard would reject `%override python__name` beside `%import
+                    // python (decorator)` as a collision with the very interior origin
+                    // the override means to replace. Record it as an override/extend
+                    // target instead, so the import-closure copy is allowed to proceed.
+                    if r.directive == Directive::Plain {
+                        self.claimed_rule_names.insert(r.name.clone());
+                    } else {
+                        self.override_extend_rule_targets.insert(r.name.clone());
+                    }
+                    // Register *plain* templates here; `%override`/`%extend` of a
+                    // template are resolved (with their pre-existence gate) during
+                    // the staging pass, so they must not pre-seed `self.templates`
+                    // ahead of that gate.
+                    if !r.params.is_empty() && r.directive == Directive::Plain {
+                        self.templates.insert(
+                            r.name.clone(),
+                            (
+                                r.params.clone(),
+                                r.expansions.clone(),
+                                r.modifiers.clone(),
+                                r.priority,
+                            ),
+                        );
+                    }
+                }
+                Item::TermItem(t) => {
+                    self.minter.reserved_term_names.insert(t.name.clone());
+                }
+                Item::DeclareItem(syms) => {
+                    for sym in syms {
+                        if let Symbol::Terminal(t) = sym {
+                            self.minter.reserved_term_names.insert(t.name.clone());
+                        }
+                    }
+                }
+                Item::ImportItem(spec) => {
+                    for name in spec_final_names(spec) {
+                        self.minter.reserved_rule_names.insert(name.clone());
+                        self.minter.reserved_term_names.insert(name);
+                    }
+                    // Pre-build the per-module merged alias map (#343). Python
+                    // merges every `%import` of one dotted path into a single
+                    // `aliases` dict *before* any closure is copied, so an
+                    // imported rule's dependency that is independently imported
+                    // from the same module stays unmangled. Collect it up front,
+                    // across all directives, so directive order does not matter.
+                    if let Some((module_path, pairs)) = split_import_directive(spec) {
+                        let entry = self.import_alias_map.entry(module_path).or_default();
+                        for (original, final_name) in pairs {
+                            entry.insert(original, final_name);
+                        }
+                    }
+                }
+                Item::IgnoreItem(_) => {}
+            }
+        }
+
+        // Now that the per-module alias map is complete, fold each import's
+        // *surviving* final name into `claimed_rule_names` (the #428 discriminator).
+        // A name dropped by last-alias-wins (#388) is never defined, so it is
+        // excluded — `alias_survives` is the exact filter the rest of the loader uses.
+        // Done in a second pass over the imports because `alias_survives` reads the
+        // merged `import_alias_map`, which the loop above only finishes building on its
+        // last iteration.
+        for item in &items {
+            if let Item::ImportItem(spec) = item {
+                if let Some((module, pairs)) = split_import_directive(spec) {
+                    for (original, final_name) in pairs {
+                        if self.alias_survives(&module, &original, &final_name) {
+                            self.claimed_rule_names.insert(final_name);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Detect import-vs-import collisions and seed the running definition
+        // ledger with the surviving import final names. This is the staging order's
+        // **second** load-bearing step (after the per-module alias map's first pass
+        // above): the ledger is seeded with *surviving* names only (#388/#299).
+        let (mut defined_rule_names, mut defined_term_names) =
+            self.precheck_import_collisions(&items)?;
 
         // Staged compilation. Terminals are resolved as a whole *before* rule bodies
         // so that (a) a string literal in a rule can unify with an already-known
@@ -601,9 +711,42 @@ impl GrammarCompiler {
         // extend *prepends* new alternatives to it.
         let mut rule_items: Vec<RawRule> = Vec::new();
         let mut ignore_items = Vec::new();
+
+        // Resolve every `%import` *before* staging any rule/terminal directive,
+        // mirroring Python Lark (`load_grammar.py` resolves all imports into
+        // `_definitions`, then walks the statements). This makes an `%override` /
+        // `%extend` of a mangled interior import origin (#442) order-independent: the
+        // interior origin (`python__name` under `%import python (decorator)`) is
+        // already copied into `self.rules` when the directive is staged, whichever
+        // document order the directive and the `%import` appear in. Imports stage into
+        // `self.rules` / `self.terminals` and never into `rule_items` / `raw_terms`,
+        // and terminal *resolution* runs later in `resolve_terminals`, so hoisting the
+        // imports ahead of the other directives changes nothing else (the relative
+        // order *among* imports, which last-alias-wins depends on, is preserved).
+        for item in &items {
+            if let Item::ImportItem(spec) = item {
+                self.resolve_import(spec.clone())?;
+            }
+        }
+        // Now that every interior import origin is present, any `%override`/`%extend`
+        // whose target is such an origin (#442) sees a pre-existing rule: seed the
+        // override/extend pre-existence ledger with the interior origins now in
+        // `self.rules` that a directive targets. Import *final* names are already in
+        // `defined_rule_names` (seeded by `precheck_import_collisions`); this adds the
+        // *interior* origins, which never reach that ledger.
+        for rule in &self.rules {
+            if self
+                .override_extend_rule_targets
+                .contains(&rule.origin.name)
+            {
+                defined_rule_names.insert(rule.origin.name.clone());
+            }
+        }
+
         for item in items {
             match item {
-                Item::ImportItem(spec) => self.resolve_import(spec)?,
+                // Imports already resolved above (hoisted, #442).
+                Item::ImportItem(_) => {}
                 Item::DeclareItem(syms) => self.declare_terminals(syms, &mut defined_term_names)?,
                 Item::TermItem(t) => {
                     self.stage_term_directive(t, &mut defined_term_names)?;
@@ -710,16 +853,39 @@ impl GrammarCompiler {
                         msg: format!("Can't extend rule {} as it wasn't defined before", r.name),
                     });
                 }
-                // Prepend the new alternatives to the existing definition. For a
-                // same-grammar target, splice them onto the front of the staged
-                // `RawRule` so they compile as one rule (Python's
-                // `base.children.insert(0, exp)`). For an imported target, stage
-                // them as an additional definition at the same origin.
+                // Prepend the new alternatives to the existing definition (Python's
+                // `_extend`: `base.children.insert(0, exp)`). For a same-grammar
+                // target, splice them onto the front of the staged `RawRule` so they
+                // compile as one rule — and a *second* `%extend` of the same origin
+                // finds that staged `RawRule` here and prepends onto it in turn, so
+                // the later extend ends up frontmost, exactly as Python's repeated
+                // `insert(0, …)`.
                 if let Some(existing) = rule_items.iter_mut().find(|prev| prev.name == r.name) {
                     let mut merged = r.expansions;
                     merged.append(&mut existing.expansions);
                     existing.expansions = merged;
                 } else {
+                    // No staged same-grammar `RawRule`: the target is an *imported
+                    // interior origin* (#442), already compiled into `self.rules` with
+                    // its alternatives' preserved `rule.order`. Stage the extend body
+                    // as a deferred definition at the same origin — but it must
+                    // *prepend*: Python's `_extend` gives the new alternative the
+                    // lowest `order` and shifts the originals down. `compile_rule`
+                    // numbers a fresh definition's alternatives from 0, and `order` is
+                    // used only as a *relative* tie-break in resolve disambiguation
+                    // (Earley `(is_empty, -priority, order)`; LALR same-reduction
+                    // collapse "first arm wins"), never as an index. So bump every
+                    // existing alternative of this origin by a large offset, leaving
+                    // the deferred extend's `0..k` orders strictly ahead of them —
+                    // making the extend win the resolve/reduce tie exactly as Python's
+                    // prepend does. Without this the extend was *appended* (its `0..k`
+                    // tied with the originals' low orders but lost insertion order), a
+                    // resolve divergence the named-terminal differential never surfaced
+                    // because a distinct terminal disambiguates at the lexer instead.
+                    const EXTEND_ORDER_OFFSET: usize = 1_000_000;
+                    for rule in self.rules.iter_mut().filter(|x| x.origin.name == r.name) {
+                        rule.order += EXTEND_ORDER_OFFSET;
+                    }
                     rule_items.push(RawRule {
                         directive: Directive::Plain,
                         ..r
@@ -1102,12 +1268,35 @@ impl GrammarCompiler {
             // $END is synthetic and handled by the parser, not the lexer.
         }
 
-        // Add ignore terminals (one terminal per ignore pattern). `__IGNORE_{n}`
-        // is the third generated-name family, and the import-alias route reaches
-        // it like the others (`%import common.WS -> __IGNORE_0`), so it skips
-        // user-claimed names via the same availability check. `%ignore` tokens
-        // never reach the tree (the parse loop skips them), so they need no
-        // per-occurrence filter — they appear in no rule body.
+        // Final assembly is four named phases, run in order: synthesize the
+        // `%ignore` terminals, reject use-before-definition, prune unreferenced
+        // terminals, then sort the survivors into the lexer/intern order. The
+        // phase boundaries are load-bearing — the undefined-reference check must
+        // run on the *full* terminal set (before pruning), and the sort feeds
+        // SymbolId assignment last.
+        let ignore_names = self.synthesize_ignore_terminals()?;
+        self.check_undefined_references()?;
+        self.prune_unused_terminals(&ignore_names);
+        self.sort_terminals();
+
+        Ok(Grammar {
+            rules: self.rules,
+            terminals: self.terminals,
+            ignore: ignore_names,
+            start: self.start,
+            anon_kinds: self.minter.anon_kinds,
+            lalr_audit: None,
+        })
+    }
+
+    /// Synthesize the `%ignore` terminals (one terminal per ignore pattern) and
+    /// return their names in document order. `__IGNORE_{n}` is the third
+    /// generated-name family, and the import-alias route reaches it like the
+    /// others (`%import common.WS -> __IGNORE_0`), so it skips user-claimed names
+    /// via the same availability check. `%ignore` tokens never reach the tree (the
+    /// parse loop skips them), so they need no per-occurrence filter — they appear
+    /// in no rule body.
+    fn synthesize_ignore_terminals(&mut self) -> Result<Vec<String>, GrammarError> {
         let ignore_patterns = std::mem::take(&mut self.ignore_patterns);
         let mut ignore_names: Vec<String> = Vec::with_capacity(ignore_patterns.len());
         for entry in ignore_patterns {
@@ -1157,14 +1346,17 @@ impl GrammarCompiler {
                 }
             }
         }
+        Ok(ignore_names)
+    }
 
-        // Reject use-before-definition: a rule body that references a symbol which
-        // is neither a defined rule nor a defined terminal is a grammar error, as in
-        // Python Lark (`GrammarError("Rule 'X' used but not defined")`). We check
-        // *before* pruning so the full terminal set is visible. Template parameters
-        // never reach here — templates are instantiated on demand and only their
-        // (fully substituted) instances live in `self.rules` — and anonymous literal
-        // terminals are interned as they are compiled, so they are always defined.
+    /// Reject use-before-definition: a rule body that references a symbol which
+    /// is neither a defined rule nor a defined terminal is a grammar error, as in
+    /// Python Lark (`GrammarError("Rule 'X' used but not defined")`). Run *before*
+    /// pruning so the full terminal set is visible. Template parameters never reach
+    /// here — templates are instantiated on demand and only their (fully
+    /// substituted) instances live in `self.rules` — and anonymous literal
+    /// terminals are interned as they are compiled, so they are always defined.
+    fn check_undefined_references(&self) -> Result<(), GrammarError> {
         let defined_rules: std::collections::HashSet<&str> =
             self.rules.iter().map(|r| r.origin.name.as_str()).collect();
         let defined_terms: std::collections::HashSet<&str> =
@@ -1201,11 +1393,14 @@ impl GrammarCompiler {
                 }
             }
         }
+        Ok(())
+    }
 
-        // Prune terminals that no rule (or `%ignore`) references. A terminal used
-        // only inside another terminal (`C: "C" | D` — `D` is inlined into `C`)
-        // has no token of its own, exactly as Python Lark drops it. Terminals
-        // referenced by a rule body, and the synthetic `%ignore` terminals, stay.
+    /// Prune terminals that no rule (or `%ignore`) references. A terminal used
+    /// only inside another terminal (`C: "C" | D` — `D` is inlined into `C`)
+    /// has no token of its own, exactly as Python Lark drops it. Terminals
+    /// referenced by a rule body, and the synthetic `%ignore` terminals, stay.
+    fn prune_unused_terminals(&mut self, ignore_names: &[String]) {
         let mut used: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for rule in &self.rules {
             for sym in &rule.expansion {
@@ -1214,17 +1409,19 @@ impl GrammarCompiler {
                 }
             }
         }
-        for name in &ignore_names {
+        for name in ignore_names {
             used.insert(name.as_str());
         }
         self.terminals.retain(|t| used.contains(t.name.as_str()));
+    }
 
-        // Sort terminals by (priority desc, max_width desc, raw_value_len desc,
-        // name asc) — the same total order the lexer plan uses
-        // (`lexer/plan.rs::sort_terminals`, Python `lark/lexer.py:583`). This sort
-        // feeds SymbolId assignment, so keeping the two in lockstep means the raw
-        // pattern-length tiebreak (#268, N2: flags stored separately, not baked into
-        // the length) can never diverge between interning order and lexer order.
+    /// Sort terminals by (priority desc, max_width desc, raw_value_len desc,
+    /// name asc) — the same total order the lexer plan uses
+    /// (`lexer/plan.rs::sort_terminals`, Python `lark/lexer.py:583`). This sort
+    /// feeds SymbolId assignment, so keeping the two in lockstep means the raw
+    /// pattern-length tiebreak (#268, N2: flags stored separately, not baked into
+    /// the length) can never diverge between interning order and lexer order.
+    fn sort_terminals(&mut self) {
         self.terminals.sort_by(|a, b| {
             b.priority
                 .cmp(&a.priority)
@@ -1236,15 +1433,6 @@ impl GrammarCompiler {
                 .then_with(|| b.pattern.raw_value_len().cmp(&a.pattern.raw_value_len()))
                 .then_with(|| a.name.cmp(&b.name))
         });
-
-        Ok(Grammar {
-            rules: self.rules,
-            terminals: self.terminals,
-            ignore: ignore_names,
-            start: self.start,
-            anon_kinds: self.anon_kinds,
-            lalr_audit: None,
-        })
     }
 }
 

@@ -2,7 +2,6 @@
 
 use super::ast::*;
 use super::compiler::GrammarCompiler;
-use super::ebnf::CompiledAlt;
 use crate::error::GrammarError;
 use crate::grammar::rule::{Rule, RuleOptions};
 use crate::grammar::symbol::{NonTerminal, Symbol};
@@ -48,8 +47,8 @@ impl GrammarCompiler {
         // a transparent rule while `expr` does not. The counter keeps distinct
         // arg-sets distinct. Registered *before* compiling the body so a
         // self-reference resolves to the rule being built.
-        let inst_name = format!("{}{{{}}}", name, self.anon_counter);
-        self.anon_counter += 1;
+        let inst_name = format!("{}{{{}}}", name, self.minter.anon_counter);
+        self.minter.anon_counter += 1;
         self.template_instances.insert(key, inst_name.clone());
 
         // Build substitution map
@@ -78,17 +77,9 @@ impl GrammarCompiler {
         // Substitute template params in expansions
         let expansions = Self::substitute_template(&expansions, &subst);
         let origin = NonTerminal::new(&inst_name);
-        let mut compiled: Vec<(CompiledAlt, Option<String>)> = Vec::new();
-        for alt in expansions.into_iter() {
-            let alias = alt.alias.clone();
-            // RC4c: a group-internal alias is rejected (a rule reference, not a tree
-            // label).
-            Self::reject_nested_aliases(&alt.expansion)?;
-            for alt_c in self.compile_expansion(alt.expansion, &inst_name, true)? {
-                compiled.push((alt_c, alias.clone()));
-            }
-        }
-        let compiled = Self::dedup_and_check_alts(&inst_name, compiled)?;
+        // RC4c: a group-internal alias is rejected (a rule reference, not a tree
+        // label) — `reject_nested: true`, exactly as for a named rule body.
+        let compiled = self.compile_alternatives(expansions, &inst_name, true)?;
         for (order, ((syms, gaps), alias)) in compiled.into_iter().enumerate() {
             let options = RuleOptions {
                 nones_before: self.stored_output_gaps(gaps),

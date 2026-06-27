@@ -1174,6 +1174,274 @@ fn rc1_dropped_alias_of_mangled_shape_still_builds() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// #442 — `%override` / `%extend` of a mangled interior import origin. Python Lark
+// resolves the import into `_definitions` (copying the interior origin), then
+// applies `_define(override=True)` / `_extend` to the now-present key, so it BUILDS
+// these grammars; lark-rs used to REJECT them (`Rule 'python__name' defined more
+// than once` after #428, or `Cannot override a nonexisting rule …` before it) — a
+// reject-where-Python-accepts divergence, the opposite direction from #428.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// #442. `%override` / `%extend` of a mangled interior import origin must BUILD
+/// (matching Python) and parse tree-identically to the oracle. The interior origin
+/// `python__name` is the prefix-mangled `name` that `%import python (decorator)`
+/// pulls in transitively; it is no `%import` *final* name, so before this fix it hit
+/// the override/extend pre-existence gate (or, after #428, the user-vs-import-origin
+/// collision guard) and was rejected. The fix copies the interior origin first (so the
+/// target pre-exists), then the override **replaces** its body / the extend
+/// **prepends** the new alternative — exactly as Python applies the directive to the
+/// already-imported definition.
+///
+/// The differential is pinned with a *named* terminal `Z` so the directive body keeps
+/// a visible token, and exercised on two inputs that separate the semantics:
+///   * `@z\nz` matches the new `Z` alternative (present under both directives);
+///   * `@w\nw` matches the *original* `python__NAME` alternative, which only
+///     `%extend` keeps — `%override` drops it, so `%override` rejects `@w\nw`.
+/// Both definition orders (`%import` before / after the directive) are covered:
+/// Python resolves imports first regardless of document order, and so must lark-rs.
+#[test]
+fn rc_override_extend_of_interior_import_origin_builds() {
+    // Oracle trees (maybe_placeholders=false), rendered in lark-rs's Display form.
+    // `@z\nz` → the `Z` alternative wins under both override and extend.
+    let tree_z = "Tree(start, [Tree(decorator, [Tree(python__dotted_name, \
+        [Tree(python__name, [Token(Z, \"z\")])])]), Tree(python__name, [Token(Z, \"z\")])])";
+    // `@w\nw` → the original `python__NAME` alternative, kept only by extend.
+    let tree_w = "Tree(start, [Tree(decorator, [Tree(python__dotted_name, \
+        [Tree(python__name, [Token(python__NAME, \"w\")])])]), \
+        Tree(python__name, [Token(python__NAME, \"w\")])])";
+
+    // %override — both orders. Replaces the body: only `Z` matches; `@w\nw` rejected.
+    for (label, g) in [
+        (
+            "override import-then-directive",
+            "start: decorator python__name\n%import python (decorator)\n%override python__name: Z\nZ: \"z\"\n%ignore \" \"\n",
+        ),
+        (
+            "override directive-then-import",
+            "start: decorator python__name\n%override python__name: Z\n%import python (decorator)\nZ: \"z\"\n%ignore \" \"\n",
+        ),
+    ] {
+        let lark = build(g, ParserAlgorithm::Lalr, LexerType::Contextual, false)
+            .unwrap_or_else(|e| panic!("#442 {label}: Python builds this; lark-rs rejected: {e:?}"));
+        let t = lark
+            .parse("@z\nz")
+            .unwrap_or_else(|e| panic!("#442 {label}: parse '@z\\nz' failed: {e:?}"));
+        assert_eq!(t.to_string(), tree_z, "#442 {label}: tree mismatch vs Python oracle");
+        // The override dropped the original `python__NAME` alternative, so `@w\nw` is
+        // rejected at parse — exactly as Python (UnexpectedCharacters), not built.
+        assert!(
+            lark.parse("@w\nw").is_err(),
+            "#442 {label}: override must DROP the original NAME alternative (Python rejects '@w\\nw')"
+        );
+    }
+
+    // %extend — both orders. Prepends `Z`, keeps the original `python__NAME` arm:
+    // `@z\nz` matches `Z`, `@w\nw` matches the original alternative.
+    for (label, g) in [
+        (
+            "extend import-then-directive",
+            "start: decorator python__name\n%import python (decorator)\n%extend python__name: Z\nZ: \"z\"\n%ignore \" \"\n",
+        ),
+        (
+            "extend directive-then-import",
+            "start: decorator python__name\n%extend python__name: Z\n%import python (decorator)\nZ: \"z\"\n%ignore \" \"\n",
+        ),
+    ] {
+        let lark = build(g, ParserAlgorithm::Lalr, LexerType::Contextual, false)
+            .unwrap_or_else(|e| panic!("#442 {label}: Python builds this; lark-rs rejected: {e:?}"));
+        let tz = lark
+            .parse("@z\nz")
+            .unwrap_or_else(|e| panic!("#442 {label}: parse '@z\\nz' failed: {e:?}"));
+        assert_eq!(tz.to_string(), tree_z, "#442 {label}: '@z\\nz' tree mismatch vs Python oracle");
+        let tw = lark
+            .parse("@w\nw")
+            .unwrap_or_else(|e| panic!("#442 {label}: parse '@w\\nw' failed (extend must keep the original NAME arm): {e:?}"));
+        assert_eq!(tw.to_string(), tree_w, "#442 {label}: '@w\\nw' tree mismatch vs Python oracle");
+    }
+}
+
+/// #442 — the verbatim issue repro (bare string-literal body, not a named terminal).
+/// `%override python__name: "z"` / `%extend python__name: "z"` beside `%import python
+/// (decorator)`. Python BUILDS both (this is the exact grammar the issue reports
+/// lark-rs rejecting); pinned here so the issue's literal repro is a live build
+/// regression guard.
+///
+/// The `%override` tree is pinned tree-identically: the override body's literal token
+/// is filtered, so `python__name` is empty — matching the Python oracle for `@z\nz`.
+///
+/// The `%extend` case is asserted to BUILD and PARSE only, *not* tree-compared: with a
+/// bare keyword-cased literal `"z"` the imported-extend path keeps the auto-named
+/// `Token(Z, "z")` in Python but filters it in lark-rs. That literal-token-keeping
+/// divergence is **orthogonal to #442** — it is purely about how an anonymous
+/// literal terminal is filtered in the imported-`%extend` path, and reproduces only
+/// for a bare literal, never for a *named* terminal body (the named-`Z` differential
+/// in `rc_override_extend_of_interior_import_origin_builds`, which IS tree-pinned,
+/// passes). Filed as a separate out-of-scope find (PRINCIPLES §7); not silently
+/// asserted against a value lark-rs does not produce.
+#[test]
+fn rc_override_extend_interior_origin_issue_repro() {
+    let g_override = "start: decorator python__name\n%import python (decorator)\n%override python__name: \"z\"\n%ignore \" \"\n";
+    let g_extend = "start: decorator python__name\n%import python (decorator)\n%extend python__name: \"z\"\n%ignore \" \"\n";
+
+    let lark = build(
+        g_override,
+        ParserAlgorithm::Lalr,
+        LexerType::Contextual,
+        false,
+    )
+    .unwrap_or_else(|e| {
+        panic!("#442 issue-repro override: Python builds this; lark-rs rejected: {e:?}")
+    });
+    let t = lark
+        .parse("@z\nz")
+        .unwrap_or_else(|e| panic!("#442 issue-repro override: parse failed: {e:?}"));
+    assert_eq!(
+        t.to_string(),
+        "Tree(start, [Tree(decorator, [Tree(python__dotted_name, [Tree(python__name, [])])]), Tree(python__name, [])])",
+        "#442 issue-repro override: tree mismatch vs Python oracle"
+    );
+
+    // #442's contract for the literal extend is *acceptance* (Python builds it; lark-rs
+    // used to reject). Assert it builds and parses; the literal-token-keeping nuance is
+    // the separate out-of-scope find noted above.
+    let lark = build(
+        g_extend,
+        ParserAlgorithm::Lalr,
+        LexerType::Contextual,
+        false,
+    )
+    .unwrap_or_else(|e| {
+        panic!("#442 issue-repro extend: Python builds this; lark-rs rejected: {e:?}")
+    });
+    lark.parse("@z\nz")
+        .unwrap_or_else(|e| panic!("#442 issue-repro extend: parse failed: {e:?}"));
+}
+
+/// #442 NEGATIVE CONTROL — the #428 collision must STILL reject. A *plain* user rule
+/// `python__name` beside `%import python (decorator)` is a genuine duplicate of the
+/// interior origin (Python: `Rule 'python__name' defined more than once`). The #442
+/// fix excludes only `%override`/`%extend` targets from the collision guard, so a
+/// plain definition must remain rejected — both orders, as in the #428 test.
+#[test]
+fn rc_override_extend_does_not_weaken_428_collision() {
+    for (label, g) in [
+        (
+            "plain rule-before-import",
+            "start: decorator python__name\npython__name: \"z\"\n%import python (decorator)\n%ignore \" \"\n",
+        ),
+        (
+            "plain import-before-rule",
+            "start: decorator python__name\n%import python (decorator)\npython__name: \"z\"\n%ignore \" \"\n",
+        ),
+    ] {
+        assert_duplicate_definition_rejected(
+            g,
+            ParserAlgorithm::Lalr,
+            LexerType::Contextual,
+            "python__name",
+            label,
+        );
+    }
+}
+
+/// #442 NEGATIVE CONTROL — `%override`/`%extend` of a non-imported (same-grammar)
+/// rule is unchanged: override replaces, extend prepends, both build. Guards against
+/// the fix accidentally widening or breaking the ordinary directive path.
+#[test]
+fn rc_override_extend_non_imported_rule_unchanged() {
+    let ov = build(
+        "start: A\n%override start: B\nA: \"a\"\nB: \"b\"\n",
+        ParserAlgorithm::Lalr,
+        LexerType::Contextual,
+        false,
+    )
+    .expect("#442: override of a non-imported rule must still build");
+    assert_eq!(
+        ov.parse("b").unwrap().to_string(),
+        "Tree(start, [Token(B, \"b\")])",
+        "#442: override replaces the same-grammar body"
+    );
+    let ex = build(
+        "start: A\n%extend start: B\nA: \"a\"\nB: \"b\"\n",
+        ParserAlgorithm::Lalr,
+        LexerType::Contextual,
+        false,
+    )
+    .expect("#442: extend of a non-imported rule must still build");
+    // Both arms parse after extend (original A kept, B prepended).
+    assert_eq!(
+        ex.parse("a").unwrap().to_string(),
+        "Tree(start, [Token(A, \"a\")])"
+    );
+    assert_eq!(
+        ex.parse("b").unwrap().to_string(),
+        "Tree(start, [Token(B, \"b\")])"
+    );
+}
+
+/// #442 — `%extend` of an imported interior origin must **prepend** (Python's
+/// `_extend` does `base.children.insert(0, exp)`), giving the new alternative the
+/// lowest `rule.order` so it wins the resolve/reduce tie over the original. This is
+/// only observable when the extend alternative is *ambiguous* with an original at the
+/// rule level — same input, different tree shape — so a distinct terminal does not
+/// disambiguate it at the lexer. `mod__inner` has the imported original `inner: a`
+/// (`a: "x"`); the extend prepends `inner: b` (`b: "x"`). On input `x`, both derive
+/// `x`, and Python's Earley `resolve` picks the **prepended** `b` (order 0). A second
+/// `%extend` (`c`) lands frontmost in turn, exactly as Python's repeated `insert(0,…)`.
+/// Before the fix lark-rs *appended* the extend alternative, so it lost the `rule.order`
+/// tie and wrongly resolved to the original `a` (caught by the review's order audit).
+#[test]
+fn rc_extend_interior_origin_prepends_in_resolve_order() {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    let earley_resolve = |main: &str, mod_src: &str, input: &str| -> String {
+        let mut sources = HashMap::new();
+        sources.insert("mod.lark".to_string(), mod_src.to_string());
+        sources.insert("main.lark".to_string(), main.to_string());
+        let lark = Lark::new(
+            main,
+            LarkOptions {
+                parser: ParserAlgorithm::Earley,
+                lexer: LexerType::Dynamic,
+                ambiguity: Ambiguity::Resolve,
+                start: vec!["start".to_string()],
+                maybe_placeholders: false,
+                import_sources: Some(Arc::new(sources)),
+                ..Default::default()
+            },
+        )
+        .unwrap_or_else(|e| {
+            panic!("#442 extend-order: Python builds this; lark-rs rejected: {e:?}")
+        });
+        lark.parse(input)
+            .unwrap_or_else(|e| panic!("#442 extend-order: parse failed: {e:?}"))
+            .to_string()
+    };
+
+    let mod_src = "outer: inner\ninner: a\na: \"x\"\n";
+    // Single extend prepends `b`: Python's resolve picks `b` over the original `a`.
+    assert_eq!(
+        earley_resolve(
+            "%import .mod (outer)\n%extend mod__inner: b\nb: \"x\"\nstart: outer\n",
+            mod_src,
+            "x",
+        ),
+        "Tree(start, [Tree(outer, [Tree(mod__inner, [Tree(b, [])])])])",
+        "#442: a single %extend of an interior origin must PREPEND (win the resolve tie)"
+    );
+    // Two extends: the *later* (`c`) lands frontmost, matching Python's repeated insert(0).
+    assert_eq!(
+        earley_resolve(
+            "%import .mod (outer)\n%extend mod__inner: b\n%extend mod__inner: c\nb: \"x\"\nc: \"x\"\nstart: outer\n",
+            mod_src,
+            "x",
+        ),
+        "Tree(start, [Tree(outer, [Tree(mod__inner, [Tree(c, [])])])])",
+        "#442: the later of two %extends of one interior origin must be frontmost"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // #361/#446 corrective — the synthetic import probe must not reserve a
 // user-authorable rule name. PR #446 (issue #361) renamed the probe from the
 // now-invalid `__lark_import_probe` to the VALID `_lark_import_probe`, then

@@ -1,6 +1,127 @@
 use crate::error::GrammarError;
 use regex::Regex;
 
+/// One structural step of a regex-source scan, as produced by [`RegexCursor::step`].
+/// The cursor has already consumed the step's characters and updated its in-class
+/// state by the time it returns, so a caller reacts to the step and loops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Step {
+    /// A `[` (plus an optional leading `^`, plus an optional literal `]` first
+    /// member) that *opened* a character class. `span` is the chars consumed (`1`
+    /// for a bare `[`, up to `3` for `[^]`). The cursor is now in-class.
+    ClassOpen { span: usize },
+    /// A `]` that *closed* the current character class. The cursor is now out-of-class.
+    ClassClose,
+    /// A `\`-escape pair: the backslash plus the escaped char `esc` (`None` for a
+    /// lone trailing `\` at end of input). Two chars consumed (one for the trailing
+    /// `\`). Emitted in **both** class and out-of-class context — the single place
+    /// every screen treats `\x` as a literal pair, never structure.
+    Escape { esc: Option<char> },
+    /// An ordinary single char (`c`), one char consumed. A consumer that needs the
+    /// class context reads [`RegexCursor::in_class`] (unchanged by this step).
+    Char { c: char },
+}
+
+/// A shared, character-class-aware cursor over a terminal's regex source — the single
+/// implementation of the `\`-escape / `[...]` / `[^...]` / leading-`]` tracking the five
+/// Python-`re`-dialect *screens* (`normalize_python_escapes`, `reject_out_of_range_octal`,
+/// `find_global_inline_flag_group`, `reject_quantifier_dialect_divergence`,
+/// `reject_regex_crate_only_dialect`) used to hand-roll five times (issue #481).
+/// Centralizing it makes the class-tracking semantics **identical** across all five — the
+/// whole point, since the five copies were the drift surface.
+///
+/// Two further walkers in this file deliberately stay separate (out of #481's scope):
+/// `strip_screening_comments` additionally carries a verbose **scope stack** the cursor
+/// does not model (per-`(` push/pop), and `reject_regex_crate_angle_named_group` inspects
+/// `(?<` openers — neither is a drop-in for this single-char/escape/class cursor.
+///
+/// The cursor advances over `chars` one structural [`Step`] at a time, maintaining the
+/// in-class flag with Python's class-boundary rules (a `[` opens a class; a leading `^`
+/// and/or a leading `]` are literal class members, not the close; a later `]` closes;
+/// `\x` is always a literal pair). A screen that needs to look at a *multi-char*
+/// construct (a `(?#…)` comment, a `(?flags)` group, a `{,n}` quantifier, an octal run)
+/// peeks at its own backing slice from [`pos`](Self::pos) **before** stepping and, when
+/// it consumes the span itself, calls [`seek`](Self::seek) to resume past it — the cursor
+/// keeps the in-class flag consistent because such constructs are only honored
+/// out-of-class (where the flag is unchanged by the skip).
+struct RegexCursor<'a> {
+    chars: &'a [char],
+    i: usize,
+    in_class: bool,
+}
+
+impl<'a> RegexCursor<'a> {
+    fn new(chars: &'a [char]) -> Self {
+        RegexCursor {
+            chars,
+            i: 0,
+            in_class: false,
+        }
+    }
+
+    /// The current scan index (the position the next [`step`](Self::step) reads from).
+    fn pos(&self) -> usize {
+        self.i
+    }
+
+    /// Whether the cursor is currently inside an unclosed `[...]` character class.
+    fn in_class(&self) -> bool {
+        self.in_class
+    }
+
+    /// Whether any input remains.
+    fn at_end(&self) -> bool {
+        self.i >= self.chars.len()
+    }
+
+    /// Jump the scan index to `i` (a caller having consumed a multi-char span — a
+    /// comment, flag group, or quantifier — itself). The in-class flag is unchanged:
+    /// such spans are only recognized out-of-class, so skipping them never crosses a
+    /// class boundary.
+    fn seek(&mut self, i: usize) {
+        self.i = i;
+    }
+
+    /// Advance one structural step, updating the in-class flag, and return what was
+    /// consumed. Caller must ensure `!at_end()`.
+    fn step(&mut self) -> Step {
+        let c = self.chars[self.i];
+        if c == '\\' {
+            // An escape pair is a literal in every context — never a class boundary.
+            let esc = self.chars.get(self.i + 1).copied();
+            self.i += if esc.is_some() { 2 } else { 1 };
+            return Step::Escape { esc };
+        }
+        if self.in_class {
+            if c == ']' {
+                self.in_class = false;
+                self.i += 1;
+                return Step::ClassClose;
+            }
+            self.i += 1;
+            return Step::Char { c };
+        }
+        if c == '[' {
+            // Enter a class, consuming the optional leading `^` and the optional
+            // literal `]` first member so the close-tracking does not end early.
+            self.in_class = true;
+            let start = self.i;
+            self.i += 1;
+            if self.chars.get(self.i) == Some(&'^') {
+                self.i += 1;
+            }
+            if self.chars.get(self.i) == Some(&']') {
+                self.i += 1;
+            }
+            return Step::ClassOpen {
+                span: self.i - start,
+            };
+        }
+        self.i += 1;
+        Step::Char { c }
+    }
+}
+
 /// Pattern for matching a terminal — either a fixed string or a regex.
 #[derive(Debug, Clone)]
 pub enum Pattern {
@@ -266,72 +387,36 @@ pub struct PatternRe {
 fn normalize_python_escapes(pattern: &str) -> String {
     let mut out = String::with_capacity(pattern.len());
     let chars: Vec<char> = pattern.chars().collect();
-    let mut i = 0usize;
-    // Whether the scan cursor is inside an unclosed `[...]` character class. Escape
-    // semantics (and the very meaning of `\b`, `\1`) differ in and out of a class.
-    let mut in_class = false;
-    while i < chars.len() {
+    // The shared class-aware cursor (#481): one implementation of the `\`-escape /
+    // `[...]` / `[^...]` / leading-`]` tracking. The two out-of-class multi-char
+    // constructs this screen rewrites — a `(?#…)` comment and a `{,n}` quantifier — are
+    // peeked-and-consumed via `seek` *before* stepping, then the cursor handles the
+    // escape pairs and class spans.
+    let mut cur = RegexCursor::new(&chars);
+    while !cur.at_end() {
+        let i = cur.pos();
         let c = chars[i];
         // An unescaped `(?#…)` comment group is dropped wholesale (Python `re`). A
         // comment cannot appear inside a character class (`[(?#)]` is a literal class),
         // so only honor it outside one.
-        if !in_class && c == '(' && chars.get(i + 1) == Some(&'?') && chars.get(i + 2) == Some(&'#')
+        if !cur.in_class()
+            && c == '('
+            && chars.get(i + 1) == Some(&'?')
+            && chars.get(i + 2) == Some(&'#')
         {
-            i = end_of_inline_comment(&chars, i);
+            cur.seek(end_of_inline_comment(&chars, i));
             continue;
         }
-        if c == '\\' {
-            let next = chars.get(i + 1).copied();
-            match next {
-                Some(n @ ('<' | '>')) => {
-                    out.push(n); // drop the divergent boundary escape → bare literal
-                    i += 2;
-                }
-                // `[\b]` — backspace inside a class (Python); the crate rejects `\b`
-                // here. Outside a class `\b` is the (parked) word-boundary anchor: leave
-                // it.
-                Some('b') if in_class => {
-                    out.push_str("\\x08");
-                    i += 2;
-                }
-                // Octal escape. Outside a class `\0…` is always octal; `\1`–`\7` is
-                // octal only as a full 3-octal-digit run (else a backreference, left
-                // as-is). Inside a class every `\0`–`\7` is octal.
-                Some(d @ '0'..='7') => {
-                    if let Some((value, consumed)) = python_octal_escape(&chars, i, in_class, d) {
-                        // Emit as the crate's two-hex-digit escape (octal ≤ 0o377 < 256).
-                        out.push_str(&format!("\\x{value:02X}"));
-                        i += consumed;
-                    } else {
-                        // A backreference (`\1`, `\12`) — not octal; leave byte-exact for
-                        // the existing categorized refusal to reject.
-                        out.push('\\');
-                        out.push(d);
-                        i += 2;
-                    }
-                }
-                Some(n) => {
-                    out.push('\\');
-                    out.push(n);
-                    i += 2;
-                }
-                None => {
-                    out.push('\\');
-                    i += 1;
-                }
-            }
-            continue;
-        }
-        // Empty-lower-bound quantifier `{,n}` → `{0,n}` (#400, H6-2). Python `re` reads
-        // `{,n}` (n ≥ 1 upper digits) as `{0,n}`, but the regex crate requires a decimal
-        // lower bound and rejects the bare form. We supply the implicit `0` so the crate
-        // sees the equivalent pattern. Outside a class only (inside `[...]` a `{` is a
-        // literal), and only on a `base_quantifier_len`-valid `{,n}` — a `{,x}` with a
-        // non-digit upper / unterminated `{,3` stays a literal brace run, as Python reads
-        // it. The fully-empty `{,}` (which Python reads as `{0,}` == `*`, not a literal) is
-        // out of scope here and tracked in #447. (A `\{` never reaches this branch: the
-        // `\\` branch above consumes the escape pair first.)
-        if c == '{' && !in_class {
+        // Empty-lower-bound quantifier `{,n}` / fully-empty `{,}` → `{0,n}` / `{0,}`
+        // (#400 H6-2; #447). Python `re` reads `{,n}` (n ≥ 0 upper digits) as `{0,n}` — and
+        // the fully-empty `{,}` as `{0,}` (== `*`), *not* a literal brace — but the regex
+        // crate requires a decimal lower bound and rejects the bare form. We supply the
+        // implicit `0` so the crate sees the equivalent pattern. Outside a class only
+        // (inside `[...]` a `{` is a literal), and only on a `base_quantifier_len`-valid
+        // `{,…}` — a `{,x}` with a non-digit upper / unterminated `{,3` stays a literal
+        // brace run, as Python reads it. (A `\{` never reaches this branch: the cursor's
+        // escape step consumes the escape pair first.)
+        if c == '{' && !cur.in_class() {
             if let Some(upper_len) = empty_lower_bound_quantifier_upper_len(&chars, i) {
                 out.push_str("{0,");
                 // Copy the `n}` verbatim (upper digits + closing brace).
@@ -339,32 +424,52 @@ fn normalize_python_escapes(pattern: &str) -> String {
                 for &d in &chars[rest_start..rest_start + upper_len + 1] {
                     out.push(d);
                 }
-                i = rest_start + upper_len + 1; // past the `}`
+                cur.seek(rest_start + upper_len + 1); // past the `}`
                 continue;
             }
         }
-        if c == '[' && !in_class {
-            in_class = true;
-            out.push(c);
-            i += 1;
-            // A `]` as the first class member (or first after `^`) is a literal, not the
-            // close — copy it through so the close-tracking below doesn't end the class
-            // early.
-            if chars.get(i) == Some(&'^') {
-                out.push('^');
-                i += 1;
+        match cur.step() {
+            Step::Escape { esc } => match esc {
+                Some(n @ ('<' | '>')) => out.push(n), // divergent boundary escape → bare literal
+                // `[\b]` — backspace inside a class (Python); the crate rejects `\b`
+                // here. Outside a class `\b` is the (parked) word-boundary anchor: leave
+                // it. (`in_class` was true *before* the step, but the cursor only clears
+                // it on a `]` — an escape never changes it — so reading it now is safe.)
+                Some('b') if cur.in_class() => out.push_str("\\x08"),
+                // Octal escape. Outside a class `\0…` is always octal; `\1`–`\7` is
+                // octal only as a full 3-octal-digit run (else a backreference, left
+                // as-is). Inside a class every `\0`–`\7` is octal.
+                Some(d @ '0'..='7') => {
+                    if let Some((value, consumed)) =
+                        python_octal_escape(&chars, i, cur.in_class(), d)
+                    {
+                        // Emit as the crate's two-hex-digit escape (octal ≤ 0o377 < 256).
+                        // The cursor's escape step consumed only `\` + the first digit;
+                        // advance past the rest of the octal run it did not eat.
+                        out.push_str(&format!("\\x{value:02X}"));
+                        cur.seek(i + consumed);
+                    } else {
+                        // A backreference (`\1`, `\12`) — not octal; leave byte-exact for
+                        // the existing categorized refusal to reject.
+                        out.push('\\');
+                        out.push(d);
+                    }
+                }
+                Some(n) => {
+                    out.push('\\');
+                    out.push(n);
+                }
+                None => out.push('\\'),
+            },
+            Step::ClassOpen { span } => {
+                // Copy the `[`, optional `^`, optional literal `]` verbatim.
+                for &ch in &chars[i..i + span] {
+                    out.push(ch);
+                }
             }
-            if chars.get(i) == Some(&']') {
-                out.push(']');
-                i += 1;
-            }
-            continue;
+            Step::ClassClose => out.push(']'),
+            Step::Char { c } => out.push(c),
         }
-        if c == ']' && in_class {
-            in_class = false;
-        }
-        out.push(c);
-        i += 1;
     }
     out
 }
@@ -456,12 +561,14 @@ fn python_octal_run(
 /// translates the in-range octals.
 fn reject_out_of_range_octal(pattern: &str) -> Result<(), GrammarError> {
     let chars: Vec<char> = pattern.chars().collect();
-    let mut i = 0usize;
-    let mut in_class = false;
-    while i < chars.len() {
-        let c = chars[i];
-        if c == '\\' {
-            if let Some(d @ '0'..='7') = chars.get(i + 1).copied() {
+    let mut cur = RegexCursor::new(&chars);
+    while !cur.at_end() {
+        let i = cur.pos();
+        let in_class = cur.in_class();
+        match cur.step() {
+            Step::Escape {
+                esc: Some(d @ '0'..='7'),
+            } => {
                 if let Some((value, consumed)) = python_octal_run(&chars, i, in_class, d) {
                     if value > 0o377 {
                         return Err(GrammarError::InvalidRegex {
@@ -474,32 +581,15 @@ fn reject_out_of_range_octal(pattern: &str) -> Result<(), GrammarError> {
                             ),
                         });
                     }
-                    i += consumed;
-                    continue;
+                    // The escape step consumed only `\` + the first digit; skip the rest
+                    // of the octal run it did not eat (a backref `\1`/`\12` returns `None`
+                    // here and the 2-char escape step already covered it).
+                    cur.seek(i + consumed);
                 }
             }
-            i += 2; // an ordinary escape pair (or `\` at EOF) — never structure
-            continue;
+            // Any other escape pair, class span, or ordinary char — already advanced.
+            _ => {}
         }
-        if in_class {
-            if c == ']' {
-                in_class = false;
-            }
-            i += 1;
-            continue;
-        }
-        if c == '[' {
-            in_class = true;
-            i += 1;
-            if chars.get(i) == Some(&'^') {
-                i += 1;
-            }
-            if chars.get(i) == Some(&']') {
-                i += 1;
-            }
-            continue;
-        }
-        i += 1;
     }
     Ok(())
 }
@@ -519,49 +609,35 @@ fn reject_out_of_range_octal(pattern: &str) -> Result<(), GrammarError> {
 /// classes (`[(?i)]` is a class, not a flag group).
 fn find_global_inline_flag_group(pattern: &str) -> Option<String> {
     let chars: Vec<char> = pattern.chars().collect();
-    let mut i = 0usize;
-    while i < chars.len() {
-        match chars[i] {
-            '\\' => {
-                i += 2; // skip the escape pair (a literal metachar, never structure)
+    let mut cur = RegexCursor::new(&chars);
+    while !cur.at_end() {
+        let i = cur.pos();
+        // A `(?flags)` group is only meaningful out-of-class (inside `[…]` a `(` is a
+        // literal member). Detect it before stepping; the cursor otherwise skips the
+        // escape pairs and class spans uniformly.
+        if !cur.in_class() && chars[i] == '(' && chars.get(i + 1) == Some(&'?') {
+            // Read flag letters / `-` after "(?". A bodiless flag group ends in
+            // ')' with no ':' body; a scoped `(?flags:…)` has a ':' and is fine,
+            // and an assertion (`(?=`, `(?!`, `(?<`) or a named group (`(?P<`,
+            // `(?<name>`) is not flags-only either (none reach the ')' below).
+            let mut j = i + 2;
+            let mut saw_flag = false;
+            while let Some(&c) = chars.get(j) {
+                if c.is_ascii_alphabetic() || c == '-' {
+                    saw_flag = true;
+                    j += 1;
+                } else {
+                    break;
+                }
             }
-            '[' => {
-                // Skip a character class verbatim, honoring `\]`, `[^…]`, and a
-                // literal `]` as the first member.
-                i += 1;
-                if chars.get(i) == Some(&'^') {
-                    i += 1;
-                }
-                if chars.get(i) == Some(&']') {
-                    i += 1;
-                }
-                while i < chars.len() && chars[i] != ']' {
-                    i += if chars[i] == '\\' { 2 } else { 1 };
-                }
-                i += 1; // past the closing ']' (or end of input)
+            if saw_flag && chars.get(j) == Some(&')') {
+                return Some(chars[i..=j].iter().collect());
             }
-            '(' if chars.get(i + 1) == Some(&'?') => {
-                // Read flag letters / `-` after "(?". A bodiless flag group ends in
-                // ')' with no ':' body; a scoped `(?flags:…)` has a ':' and is fine,
-                // and an assertion (`(?=`, `(?!`, `(?<`) or a named group (`(?P<`,
-                // `(?<name>`) is not flags-only either (none reach the ')' below).
-                let mut j = i + 2;
-                let mut saw_flag = false;
-                while let Some(&c) = chars.get(j) {
-                    if c.is_ascii_alphabetic() || c == '-' {
-                        saw_flag = true;
-                        j += 1;
-                    } else {
-                        break;
-                    }
-                }
-                if saw_flag && chars.get(j) == Some(&')') {
-                    return Some(chars[i..=j].iter().collect());
-                }
-                i += 1;
-            }
-            _ => i += 1,
+            // Not a flag group — advance one char (the `(`) and rescan.
+            cur.seek(i + 1);
+            continue;
         }
+        cur.step();
     }
     None
 }
@@ -608,13 +684,13 @@ pub(crate) fn reject_global_inline_flags(pattern: &str) -> Result<(), GrammarErr
 /// `{x}` as literal braces (so `a{2}{x}` is *not* a stacked repeat), and we match that.
 fn reject_quantifier_dialect_divergence(pattern: &str) -> Result<(), GrammarError> {
     let chars: Vec<char> = pattern.chars().collect();
-    let mut i = 0usize;
-    let mut in_class = false;
+    let mut cur = RegexCursor::new(&chars);
     // True immediately after a complete base quantifier (`*`/`+`/`?`/`{m,n}`) plus its
     // optional single lazy/possessive modifier — i.e. when the *next* base quantifier
     // would be a "multiple repeat".
     let mut after_quantifier = false;
-    while i < chars.len() {
+    while !cur.at_end() {
+        let i = cur.pos();
         let c = chars[i];
         // A `(?#…)` comment group is *transparent* to the quantifier-stacking check —
         // Python `re` rejects `a+(?#c)?` as "multiple repeat" exactly as it rejects
@@ -623,13 +699,13 @@ fn reject_quantifier_dialect_divergence(pattern: &str) -> Result<(), GrammarErro
         // (before the comment is stripped) and skip the comment span *without* touching
         // `after_quantifier`, so the across-comment stacking is still caught. An
         // unterminated `(?#…` (no closing `)`) is a Python build error.
-        if !in_class && c == '(' && chars.get(i + 1) == Some(&'?') && chars.get(i + 2) == Some(&'#')
+        if !cur.in_class()
+            && c == '('
+            && chars.get(i + 1) == Some(&'?')
+            && chars.get(i + 2) == Some(&'#')
         {
-            let mut j = i + 3;
-            while j < chars.len() && chars[j] != ')' {
-                j += if chars[j] == '\\' { 2 } else { 1 };
-            }
-            if j >= chars.len() {
+            let end = end_of_inline_comment(&chars, i);
+            if end > chars.len() {
                 return Err(GrammarError::InvalidRegex {
                     pattern: pattern.to_string(),
                     reason: "missing ), unterminated comment — an inline `(?#…)` comment \
@@ -638,80 +714,61 @@ fn reject_quantifier_dialect_divergence(pattern: &str) -> Result<(), GrammarErro
                         .to_string(),
                 });
             }
-            i = j + 1; // past the ')' — leave `after_quantifier` unchanged (transparent)
+            cur.seek(end); // past the ')' — leave `after_quantifier` unchanged (transparent)
             continue;
         }
-        if c == '\\' {
-            i += 2;
-            after_quantifier = false;
-            continue;
-        }
-        if in_class {
-            if c == ']' {
-                in_class = false;
-            }
-            i += 1;
-            continue;
-        }
-        if c == '[' {
-            in_class = true;
-            i += 1;
-            // A leading `]` (optionally after `^`) is a class member, not the close.
-            if chars.get(i) == Some(&'^') {
-                i += 1;
-            }
-            if chars.get(i) == Some(&']') {
-                i += 1;
-            }
-            after_quantifier = false;
-            continue;
-        }
-        // A base quantifier?
-        let quant_len = base_quantifier_len(&chars, i);
-        if let Some(len) = quant_len {
-            if after_quantifier {
-                // A base quantifier applied directly to a quantifier → Python "multiple
-                // repeat" build error (H7).
-                return Err(GrammarError::InvalidRegex {
-                    pattern: pattern.to_string(),
-                    reason: "multiple repeat — a quantifier is applied directly to another \
-                             quantifier (e.g. `a{2}{3}` or `a**`). Python `re` (sre_parse) \
-                             rejects this as \"multiple repeat\"; lark-rs matches that \
-                             rejection (ADR-0017)."
-                        .to_string(),
-                });
-            }
-            i += len;
-            // At most one trailing modifier: `?` (lazy) or `+` (possessive). A possessive
-            // `+` is the documented backtracking-only non-goal (H6).
-            match chars.get(i).copied() {
-                Some('+') => {
+        // A base quantifier? (Only out-of-class — a `+`/`{2}` in `[…]` is a literal.)
+        if !cur.in_class() {
+            if let Some(len) = base_quantifier_len(&chars, i) {
+                if after_quantifier {
+                    // A base quantifier applied directly to a quantifier → Python "multiple
+                    // repeat" build error (H7).
                     return Err(GrammarError::InvalidRegex {
                         pattern: pattern.to_string(),
-                        reason: "possessive quantifier (`*+`/`++`/`?+`/`{m,n}+`) is not \
-                                 supported — it is a backtracking-only construct, a \
-                                 by-design non-goal (docs/LOOKAROUND_SCOPE.md). Python 3.11 \
-                                 `re` *accepts* a possessive (no give-back), but the Rust \
-                                 regex crate has no possessive and would silently \
-                                 reinterpret it as greedy nested repetition `(a+)+` — a \
-                                 different match. lark-rs refuses it (a documented \
-                                 diverge-and-document narrowing, ADR-0017) rather than \
-                                 silently mis-lex."
+                        reason: "multiple repeat — a quantifier is applied directly to another \
+                                 quantifier (e.g. `a{2}{3}` or `a**`). Python `re` (sre_parse) \
+                                 rejects this as \"multiple repeat\"; lark-rs matches that \
+                                 rejection (ADR-0017)."
                             .to_string(),
                     });
                 }
-                Some('?') => {
-                    // Lazy modifier — consume it; a following base quantifier is then a
-                    // multiple repeat.
-                    i += 1;
+                let mut j = i + len;
+                // At most one trailing modifier: `?` (lazy) or `+` (possessive). A possessive
+                // `+` is the documented backtracking-only non-goal (H6).
+                match chars.get(j).copied() {
+                    Some('+') => {
+                        return Err(GrammarError::InvalidRegex {
+                            pattern: pattern.to_string(),
+                            reason: "possessive quantifier (`*+`/`++`/`?+`/`{m,n}+`) is not \
+                                     supported — it is a backtracking-only construct, a \
+                                     by-design non-goal (docs/LOOKAROUND_SCOPE.md). Python 3.11 \
+                                     `re` *accepts* a possessive (no give-back), but the Rust \
+                                     regex crate has no possessive and would silently \
+                                     reinterpret it as greedy nested repetition `(a+)+` — a \
+                                     different match. lark-rs refuses it (a documented \
+                                     diverge-and-document narrowing, ADR-0017) rather than \
+                                     silently mis-lex."
+                                .to_string(),
+                        });
+                    }
+                    Some('?') => {
+                        // Lazy modifier — consume it; a following base quantifier is then a
+                        // multiple repeat.
+                        j += 1;
+                    }
+                    _ => {}
                 }
-                _ => {}
+                cur.seek(j);
+                after_quantifier = true;
+                continue;
             }
-            after_quantifier = true;
-            continue;
         }
+        // Not a comment or quantifier: let the cursor consume the escape pair, class
+        // span, or ordinary char. Every such step resets `after_quantifier` (an
+        // intervening literal / `\`-escape / class breaks the directly-applied chain;
+        // inside a class it is already false, having been cleared on the class open).
+        cur.step();
         after_quantifier = false;
-        i += 1;
     }
     Ok(())
 }
@@ -745,10 +802,16 @@ fn reject_quantifier_dialect_divergence(pattern: &str) -> Result<(), GrammarErro
 /// translation set).
 fn reject_regex_crate_only_dialect(pattern: &str) -> Result<(), GrammarError> {
     let chars: Vec<char> = pattern.chars().collect();
-    let mut i = 0usize;
-    while i < chars.len() {
-        if chars[i] == '\\' {
-            match chars.get(i + 1).copied() {
+    // The cursor's class tracking is inert for this screen (all three escapes are
+    // rejected identically in and out of `[…]`); we react only to its `Escape` steps,
+    // so the `\`-pair walk is the single shared one. The `\x{` check peeks the char
+    // *after* the escaped `x` (`pos()` is past the pair once the step returns, so the
+    // braced `{` is `chars[i+2]`).
+    let mut cur = RegexCursor::new(&chars);
+    while !cur.at_end() {
+        let i = cur.pos();
+        if let Step::Escape { esc } = cur.step() {
+            match esc {
                 Some(esc @ ('p' | 'P')) => {
                     return Err(GrammarError::InvalidRegex {
                         pattern: pattern.to_string(),
@@ -782,12 +845,9 @@ fn reject_regex_crate_only_dialect(pattern: &str) -> Result<(), GrammarError> {
                                 .to_string(),
                     });
                 }
-                Some(_) => i += 2, // an ordinary escape pair — skip both chars
-                None => i += 1,    // a trailing backslash
+                _ => {} // an ordinary escape pair (or trailing `\`) — already consumed
             }
-            continue;
         }
-        i += 1;
     }
     Ok(())
 }
@@ -1140,10 +1200,13 @@ fn base_quantifier_len(chars: &[char], i: usize) -> Option<usize> {
                     j += 1;
                 }
             }
-            // Valid forms: `{m}`, `{m,}`, `{m,n}`, `{,n}`. Always needs at least one
-            // digit (`{}` and `{,}` are literal braces in Python).
-            let has_digit = had_lower || (had_comma && j > i + 2);
-            if has_digit && chars.get(j) == Some(&'}') {
+            // Valid forms: `{m}`, `{m,}`, `{m,n}`, `{,n}`, and the fully-empty `{,}`.
+            // Python `re` reads `{,}` as `{0,}` (== `*`), so the comma alone — with no
+            // digit on either side — is a well-formed quantifier (#447, sibling of #400's
+            // `{,n}`). The bare `{}` (no comma, no digit) stays a literal brace, as Python
+            // reads it. So a `{…}` is a quantifier iff it carries a digit *or* a comma.
+            let is_quantifier = had_lower || had_comma;
+            if is_quantifier && chars.get(j) == Some(&'}') {
                 Some(j - i + 1)
             } else {
                 None // a literal `{` (e.g. `{x}`, `{}`, `{`) — not a quantifier
@@ -1154,39 +1217,36 @@ fn base_quantifier_len(chars: &[char], i: usize) -> Option<usize> {
 }
 
 /// If `chars[i]` opens a Python-`re` **empty-lower-bound quantifier** `{,n}` (no lower
-/// bound, `≥1` upper digit, e.g. the `{,3}` in `a{,3}b`), return the length of the
-/// upper-bound digit run `n` (so `{,3}` ⇒ `1`); else `None`. Python `re` reads `{,n}` as
-/// `{0,n}` (`re.match(r'a{,3}b','aaab')` matches), but the Rust `regex` crate requires a
-/// decimal lower bound and rejects the bare form ("repetition quantifier expects a valid
-/// decimal"), so `normalize_python_escapes` inserts the implicit `0` to feed the crate
-/// the equivalent `{0,n}` (#400, H6-2).
+/// bound, `≥0` upper digits — including the fully-empty `{,}`, e.g. the `{,3}` in `a{,3}b`
+/// or the `{,}` in `a{,}b`), return the length of the upper-bound digit run `n` (so `{,3}`
+/// ⇒ `1`, `{,}` ⇒ `0`); else `None`. Python `re` reads `{,n}` as `{0,n}`
+/// (`re.match(r'a{,3}b','aaab')` matches) and `{,}` as `{0,}` (== `*`,
+/// `re.match(r'a{,}b','aaab')` matches), but the Rust `regex` crate requires a decimal
+/// lower bound and rejects the bare form ("repetition quantifier expects a valid
+/// decimal"), so `normalize_python_escapes` inserts the implicit `0` to feed the crate the
+/// equivalent `{0,n}` / `{0,}` (#400 H6-2; #447).
 ///
-/// This is precisely the **`{,n}` (n ≥ 1) subcase** of [`base_quantifier_len`]: it
+/// This is precisely the **empty-lower-bound subcase** of [`base_quantifier_len`]: it
 /// returns `Some` iff `base_quantifier_len` would accept this `{…}` *and* the lower bound
-/// is empty with the comma present and ≥1 upper digit. So the rewrite fires exactly on
-/// the well-formed empty-lower-bound form and never on a literal `{` (`{x}`, `{`), an
-/// `{m,n}` carrying a lower bound, or an open `{m,}`. The caller guarantees we are outside
-/// a character class and not after a `\` (a `\{` is a literal brace), matching the
-/// class-/escape-awareness the rest of `normalize_python_escapes` enforces.
-///
-/// **`{,}` is deliberately excluded** (returns `None`): Python reads the fully-empty `{,}`
-/// as `{0,}` (== `*`), *not* as a literal brace, but `base_quantifier_len` does not yet
-/// recognize it, so rewriting it here would be inconsistent with the rest of the
-/// quantifier machinery. That distinct divergence is tracked in #447.
+/// is empty with the comma present (`≥0` upper digits). So the rewrite fires exactly on the
+/// well-formed empty-lower-bound forms `{,n}` / `{,}` and never on a literal `{` (`{x}`,
+/// `{}`, `{`), an `{m,n}` carrying a lower bound, or an open `{m,}`. The caller guarantees
+/// we are outside a character class and not after a `\` (a `\{` is a literal brace),
+/// matching the class-/escape-awareness the rest of `normalize_python_escapes` enforces.
 fn empty_lower_bound_quantifier_upper_len(chars: &[char], i: usize) -> Option<usize> {
     if chars.get(i).copied()? != '{' || chars.get(i + 1).copied()? != ',' {
         return None;
     }
-    // `{,` — count the upper-bound digits; in scope iff `≥1` digit then `}`. (A `{,}` with
-    // zero upper digits is Python's `{0,}` == `*`, but is out of this rewrite's scope —
-    // #447; a non-digit upper `{,x}` / unterminated `{,3` is a literal brace run.)
+    // `{,` — count the upper-bound digits; in scope iff (`≥0` digits) then `}`. A `{,}` with
+    // zero upper digits is Python's `{0,}` == `*` (#447); a `{,n}` is `{0,n}` (#400). A
+    // non-digit upper `{,x}` / unterminated `{,3` is a literal brace run (returns `None`).
     let upper_start = i + 2;
     let mut j = upper_start;
     while chars.get(j).is_some_and(|c| c.is_ascii_digit()) {
         j += 1;
     }
     let upper_len = j - upper_start;
-    if upper_len > 0 && chars.get(j) == Some(&'}') {
+    if chars.get(j) == Some(&'}') {
         Some(upper_len)
     } else {
         None
@@ -1251,6 +1311,35 @@ impl PatternRe {
         // grammar-load outcomes are identical with and without the `fancy-oracle`
         // test feature.
         if let Err(e) = Regex::new(&full) {
+            // **"Nothing to repeat" pre-screen (#448).** A leading/dangling quantifier
+            // with nothing to repeat before it (`*a`, `+a`, `?a`, `{0,3}`, the
+            // post-normalization `{,3}`/`{,}` of #400/#447, `(?#c)*a` after a stripped
+            // zero-width comment, `(?:*a)`, …) is a Python `re` "nothing to repeat" build
+            // error — a *malformed quantifier*, NOT lookaround or backtracking. The regex
+            // crate raises a distinct, dedicated error for exactly this shape —
+            // "repetition operator missing expression" — which is **disjoint** from the
+            // messages it gives real lookaround ("look-around … is not supported") and
+            // backreferences ("backreferences are not supported"). So leaning on that
+            // message (as the issue suggests) routes only the genuine nothing-to-repeat
+            // cases here and never re-buckets a real lookaround/backref input. The build
+            // still *rejects* (parity with Python is unchanged); only the category/message
+            // is corrected from the misleading `LookaroundScope`/`OutOfScope`
+            // "backtracking-only syntax" refusal to a truthful `InvalidRegex`. Runs BEFORE
+            // the lookaround-analyzer fallback below for that reason.
+            if e.to_string()
+                .contains("repetition operator missing expression")
+            {
+                return Err(GrammarError::InvalidRegex {
+                    pattern: pattern.clone(),
+                    reason: format!(
+                        "nothing to repeat — a quantifier (`*`/`+`/`?`/`{{m,n}}`) has no \
+                         preceding expression to repeat (e.g. a leading `*a`/`+a`/`?a`/\
+                         `{{0,3}}`, or a quantifier right after `(`, `(?:`, or a stripped \
+                         `(?#…)` comment). Python `re` rejects this as \"nothing to \
+                         repeat\"; lark-rs matches that rejection (ADR-0017). ({e})"
+                    ),
+                });
+            }
             // Parse the raw pattern (not `full`): the analyzer models the loader's
             // baked flag wrapper via the same parse the routing strip uses.
             // Also accept fence-idiom patterns (named backreferences): the lookaround
@@ -1541,15 +1630,15 @@ mod tests {
         assert_eq!(normalize_python_escapes("[^\\/]"), "[^\\/]");
     }
 
-    /// H6-2 (#400): `normalize_python_escapes` rewrites the Python-`re` empty-lower-bound
-    /// quantifier `{,n}` (n ≥ 1) → `{0,n}` (Python reads `{,n}` as `{0,n}`; the regex
-    /// crate rejects the bare form). The rewrite is class-aware (a `{` inside `[...]` is a
-    /// literal), escape-aware (a `\{` is a literal brace), and fires only on a
-    /// `base_quantifier_len`-valid `{,n}` — a `{,x}` with a non-digit upper, an
-    /// unterminated `{,3`, or a lower-bounded `{m,n}` is left byte-exact. The inverted
-    /// bound `{3,2}` is left untouched (it has a lower bound, so it never matches this
-    /// shape and stays rejected downstream). The fully-empty `{,}` (Python's `{0,}` == `*`)
-    /// is out of scope (#447) and currently passes through unchanged.
+    /// H6-2 (#400) + #447: `normalize_python_escapes` rewrites the Python-`re`
+    /// empty-lower-bound quantifier `{,n}` (n ≥ 0, including the fully-empty `{,}`) →
+    /// `{0,n}` / `{0,}` (Python reads `{,n}` as `{0,n}` and `{,}` as `{0,}` == `*`; the
+    /// regex crate rejects the bare form). The rewrite is class-aware (a `{` inside `[...]`
+    /// is a literal), escape-aware (a `\{` is a literal brace), and fires only on a
+    /// `base_quantifier_len`-valid `{,…}` — a `{,x}` with a non-digit upper, an
+    /// unterminated `{,3`, a bare `{}` (no comma), or a lower-bounded `{m,n}` is left
+    /// byte-exact. The inverted bound `{3,2}` is left untouched (it has a lower bound, so it
+    /// never matches this shape and stays rejected downstream).
     #[test]
     fn normalize_rewrites_empty_lower_bound_quantifier() {
         // The bug repro and minimal forms.
@@ -1579,11 +1668,18 @@ mod tests {
         // Python — left untouched.
         assert_eq!(normalize_python_escapes("a{,x}b"), "a{,x}b"); // non-digit upper
         assert_eq!(normalize_python_escapes("a{,3"), "a{,3"); // unterminated (no `}`)
-                                                              // `{,}` is OUT OF SCOPE here (#447): Python reads it as `{0,}` (== `*`), NOT a
-                                                              // literal — but `base_quantifier_len` doesn't yet recognize it, so this rewrite
-                                                              // leaves it unchanged (lark-rs then still rejects it; the parity fix is #447).
-                                                              // This pins only the *current* normalize pass-through, not an oracle claim.
-        assert_eq!(normalize_python_escapes("a{,}b"), "a{,}b");
+                                                              // The fully-empty `{,}` is Python's `{0,}` (== `*`), NOT a literal brace run
+                                                              // (#447): it is now recognized and rewritten exactly like `{,n}` (zero upper
+                                                              // digits). `re.match(r'a{,}b','aaab')` matches, so `/a{,}b/` must build as `a*b`.
+        assert_eq!(normalize_python_escapes("a{,}b"), "a{0,}b");
+        assert_eq!(normalize_python_escapes("{,}"), "{0,}");
+        // Class-aware / escape-aware for `{,}` too: a `{,}` inside `[...]` or after `\`
+        // is a literal brace run in Python, never a quantifier — left untouched.
+        assert_eq!(normalize_python_escapes("[a{,}]"), "[a{,}]");
+        assert_eq!(normalize_python_escapes("a\\{,}"), "a\\{,}");
+        // The bare `{}` (no comma, no digit) stays a literal brace pair — the widening
+        // keys on "digit *or* comma", and `{}` has neither.
+        assert_eq!(normalize_python_escapes("a{}b"), "a{}b");
     }
 
     /// H6/H7 (#333): the quantifier-shape dialect screen refuses possessive (`a++`) and
@@ -1604,6 +1700,15 @@ mod tests {
             assert!(
                 reject_quantifier_dialect_divergence(p).is_err(),
                 "{p:?} is a multiple repeat — must be refused"
+            );
+        }
+        // #447: `{,}` is now a base quantifier (Python's `{0,}`), so two adjacent `{,}`
+        // (or a `{,}` stacked on another quantifier) is a multiple repeat Python rejects.
+        for p in ["a{,}{,}", "a{,}{,}b", "a{,}*", "a*{,}", "a{,}{2}"] {
+            assert!(
+                reject_quantifier_dialect_divergence(p).is_err(),
+                "{p:?} stacks `{{,}}` (== `{{0,}}`) on a quantifier — must be refused as a \
+                 multiple repeat"
             );
         }
         // Possessive on a *group* is refused too (the trailing `+` after `)…` quantifier).
@@ -1643,6 +1748,10 @@ mod tests {
             "a{2}",
             "a{2,3}",
             "a{2,}",
+            "a{,}",   // #447: a single `{,}` (== `{0,}`) is a valid quantifier, not stacked
+            "a{,}b",  // #447: `{,}` followed by a literal is fine (one repeat on `a`)
+            "[a{,}]", // #447: `{,}` inside a class is literal — never a quantifier
+            "a\\{,}", // #447: `\{,}` is a literal brace run
             "a{2}a{3}",
             "[a+]",
             "[a{2}]",
@@ -1662,6 +1771,57 @@ mod tests {
                 reject_quantifier_dialect_divergence(p).is_ok(),
                 "{p:?} is a regular/Python-accepted construct — must NOT be refused"
             );
+        }
+    }
+
+    /// #448: a leading/dangling quantifier with **nothing to repeat** (`*a`, `+a`, `?a`,
+    /// `{0,3}`, the post-normalization `{,3}`/`{,}` of #400/#447, `(?#c)*a` after a
+    /// stripped zero-width comment, `(?:*a)`) is a Python `re` "nothing to repeat" build
+    /// error — a malformed quantifier, *not* lookaround. `PatternRe::new` must reject each
+    /// with the corrected `InvalidRegex` "nothing to repeat" category, NOT the misleading
+    /// `LookaroundScope`/`OutOfScope` "backtracking-only syntax" message it emitted before
+    /// the fix. The reject decision itself is unchanged (parity with Python preserved) —
+    /// this is an error-taxonomy correction only.
+    #[test]
+    fn nothing_to_repeat_is_invalid_regex_not_lookaround_scope() {
+        for p in [
+            "*a", "+a", "?a", "{0,3}", "{,3}", "{,}", "(?#c)*a", "(?:*a)",
+        ] {
+            let err =
+                PatternRe::new(p, 0).expect_err("a nothing-to-repeat quantifier must still reject");
+            match &err {
+                GrammarError::InvalidRegex { reason, .. } => assert!(
+                    reason.contains("nothing to repeat"),
+                    "{p:?}: InvalidRegex reason must name \"nothing to repeat\", got: {reason}"
+                ),
+                other => panic!(
+                    "{p:?}: must be InvalidRegex \"nothing to repeat\", not {other:?} \
+                     (a LookaroundScope here is the #448 mis-categorization)"
+                ),
+            }
+        }
+    }
+
+    /// #448 differential-audit: the nothing-to-repeat pre-screen leans on the regex
+    /// crate's dedicated "repetition operator missing expression" message, which is
+    /// disjoint from the messages for real lookaround/backref — so it must NOT re-bucket a
+    /// genuine `LookaroundScope` input. These constructs (zero-width lookahead, the
+    /// general-internal-lookahead `(?:…)` form, a backreference) are routed to the
+    /// lookaround analyzer / refusal seam and must stay there (or build, for a lowerable
+    /// lookbehind). `PatternRe::new` itself does NOT gate lowerable lookaround — it
+    /// constructs cleanly and the verdict is deferred to the lexer-build routing — so the
+    /// assertion here is only that these do NOT come back as an `InvalidRegex` "nothing to
+    /// repeat" (the re-bucketing failure mode).
+    #[test]
+    fn real_lookaround_not_rebucketed_as_nothing_to_repeat() {
+        for p in ["(?=ab)", "(?<=ab)c", "a(?=b)", r"(a)\1", r"(?P<x>a)(?P=x)"] {
+            if let Err(GrammarError::InvalidRegex { reason, .. }) = PatternRe::new(p, 0) {
+                assert!(
+                    !reason.contains("nothing to repeat"),
+                    "{p:?}: a real lookaround/backref input must NOT be re-bucketed as a \
+                     nothing-to-repeat malformed quantifier (#448 re-bucketing regression)"
+                );
+            }
         }
     }
 
@@ -1921,5 +2081,120 @@ mod tests {
             !angle_ok("a#(?<x>)b", 0),
             "no VERBOSE: # is literal, the (?<x> is real"
         );
+    }
+
+    /// #481 differential audit: the five dialect screens now all drive ONE shared
+    /// class-aware cursor ([`RegexCursor`]), so they must agree on the class-boundary
+    /// semantics exactly as the five hand-rolled copies did — no accept/reject decision
+    /// may widen. This pins the adversarial class/escape edges the standing scanner
+    /// banks under-sample (leading `]`/`^` class members, escapes in and out of a class,
+    /// octal runs straddling a class boundary, a flag-group / quantifier-looking
+    /// construct *inside* `[…]` where it is a literal). Each expectation matches the
+    /// pre-unification behavior verbatim; `test_scanner_differential` is the 3-way oracle
+    /// that the *match outcome* is unchanged.
+    #[test]
+    fn unified_class_cursor_preserves_screen_decisions() {
+        // The cursor itself: a `[`, optional `^`, optional leading literal `]`, then
+        // close — and an escape pair is never a class boundary.
+        let steps = |src: &str| -> Vec<(bool, Step)> {
+            let chars: Vec<char> = src.chars().collect();
+            let mut cur = RegexCursor::new(&chars);
+            let mut out = Vec::new();
+            while !cur.at_end() {
+                let before = cur.in_class();
+                out.push((before, cur.step()));
+            }
+            out
+        };
+        // `[]a]` — the leading `]` is a literal member, so the class spans `[]a]` and the
+        // FIRST `]` does NOT close it; the SECOND `]` does.
+        let s = steps("[]a]");
+        assert_eq!(
+            s[0].1,
+            Step::ClassOpen { span: 2 },
+            "`[]` opens, `]` literal"
+        );
+        assert!(s[1].0, "`a` is in-class");
+        assert_eq!(s.last().unwrap().1, Step::ClassClose, "second `]` closes");
+        // `[^]b]` — `^` then leading literal `]`, class spans the whole thing.
+        assert_eq!(
+            steps("[^]b]")[0].1,
+            Step::ClassOpen { span: 3 },
+            "`[^]` opens with negation + literal `]`"
+        );
+        // An escaped `\]` inside a class is a literal, not the close (escape step).
+        let s = steps(r"[\]]");
+        assert!(
+            matches!(s[1].1, Step::Escape { esc: Some(']') }),
+            "`\\]` is an escape pair, not the class close"
+        );
+        assert_eq!(s[2].1, Step::ClassClose, "the real `]` closes");
+
+        // ── Cross-screen accept/reject parity on class-context edges. Inside `[…]` a
+        // `+`/`{2}`/`(?i)` is a literal member, never a quantifier/flag group; an octal
+        // run is octal in BOTH contexts; `\<`/`\>` and in-class `\b` normalize the same.
+        // (rejected, accepted) per screen, grounded to the pre-#481 behavior.
+
+        // Quantifier screen: literal `+`/`{2}` in a class accepted; real stacked/possessive
+        // out-of-class rejected; comment transparency unchanged.
+        for ok in ["[a+]", "[a{2}]", "[+*?]", "a[+]+", "[]+]"] {
+            assert!(
+                reject_quantifier_dialect_divergence(ok).is_ok(),
+                "{ok:?}: a `+`/`{{}}` inside a class is a literal — must not be a multiple repeat"
+            );
+        }
+        for bad in ["a++", "a{2}{3}", "[a]++", "[a]{2}{3}", "a+(?#c)?"] {
+            assert!(
+                reject_quantifier_dialect_divergence(bad).is_err(),
+                "{bad:?}: a real possessive/stacked quantifier (out of class) must be refused"
+            );
+        }
+
+        // Global-flag-group screen: `(?i)` inside a class is a literal; a real one (even
+        // right after a class) is detected.
+        assert!(
+            find_global_inline_flag_group("[(?i)]").is_none(),
+            "`(?i)` inside `[…]` is a literal class, not a flag group"
+        );
+        assert!(
+            find_global_inline_flag_group("[abc](?i)x").is_some(),
+            "a real `(?i)` after a class must still be detected"
+        );
+
+        // Out-of-range octal: rejected identically in and out of a class; a class
+        // boundary does not hide a following out-of-range run.
+        for bad in [r"\401", r"[\401]", r"[a]\500", r"[\477x]"] {
+            assert!(
+                reject_out_of_range_octal(bad).is_err(),
+                "{bad:?}: an out-of-range octal must be refused in or out of a class"
+            );
+        }
+        for ok in [r"\101", r"[\377]", r"[a\1b]"] {
+            assert!(
+                reject_out_of_range_octal(ok).is_ok(),
+                "{ok:?}: an in-range octal / in-class backref must pass"
+            );
+        }
+
+        // regex-crate-only escapes: class context is irrelevant (rejected both ways) — the
+        // shared escape-pair walk must catch `\p`/`\z`/`\x{` inside `[…]` too.
+        for bad in [r"[\p{L}]", r"[\za-z]", r"[\x{41}]", r"a\pLb"] {
+            assert!(
+                reject_regex_crate_only_dialect(bad).is_err(),
+                "{bad:?}: a regex-crate-only escape is rejected in and out of a class"
+            );
+        }
+
+        // normalize: in-class octal/`\b`, the `\<`/`\>` rewrite (ADR-0004), and a leading
+        // literal `]` are all byte-identical to the pre-#481 output.
+        assert_eq!(normalize_python_escapes(r"[\b\101]"), r"[\x08\x41]");
+        assert_eq!(normalize_python_escapes(r"\<\>"), "<>");
+        assert_eq!(
+            normalize_python_escapes(r"[]\1<]"),
+            r"[]\x01<]",
+            "leading `]` literal, in-class octal, and a bare `<` preserved"
+        );
+        // `\<` INSIDE a class also normalizes to the bare char (ADR-0004 dotmotif case).
+        assert_eq!(normalize_python_escapes(r"[\<\>]"), "[<>]");
     }
 }
