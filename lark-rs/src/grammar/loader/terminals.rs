@@ -709,6 +709,20 @@ impl GrammarCompiler {
         }
     }
 
+    /// The `[from-to]` character-class regex for an EBNF range `from..to`, with the
+    /// single-character validation Python Lark requires (a range endpoint is one char).
+    /// Shared by both terminal-regex paths ([`term_expr_regex`](Self::term_expr_regex)
+    /// and [`expr_to_pattern`](Self::expr_to_pattern)) — the literal/range lowering the
+    /// two `Expr` matches duplicated verbatim (#481).
+    fn range_class_regex(from: &str, to: &str) -> Result<String, GrammarError> {
+        if from.chars().count() != 1 || to.chars().count() != 1 {
+            return Err(GrammarError::Other {
+                msg: "Range requires single characters".to_string(),
+            });
+        }
+        Ok(format!("[{}-{}]", regex::escape(from), regex::escape(to)))
+    }
+
     /// Regex for a single `Expr` appearing in a *terminal* body. Unlike
     /// `expr_to_pattern`, a terminal reference is resolved (and inlined) rather
     /// than looked up after the fact, and flags are applied as scoped groups.
@@ -734,14 +748,7 @@ impl GrammarCompiler {
                 reject_global_inline_flags(pattern.as_str())?;
                 Pattern::Re(PatternRe::new(pattern.as_str(), *flags)?).to_inline_regex()
             }
-            Expr::Value(Value::Range(from, to)) => {
-                if from.chars().count() != 1 || to.chars().count() != 1 {
-                    return Err(GrammarError::Other {
-                        msg: "Range requires single characters".to_string(),
-                    });
-                }
-                format!("[{}-{}]", regex::escape(from), regex::escape(to))
-            }
+            Expr::Value(Value::Range(from, to)) => Self::range_class_regex(from, to)?,
             Expr::Value(Value::Terminal(referenced)) => {
                 let inner = Self::resolve_term_regex(referenced, by_name, imported, memo, stack)?;
                 format!("(?:{inner})")
@@ -828,19 +835,10 @@ impl GrammarCompiler {
                 reject_global_inline_flags(p.as_str())?;
                 Ok(Pattern::Re(PatternRe::new(p.as_str(), *f)?))
             }
-            Expr::Value(Value::Range(from, to)) => {
-                let chars: Vec<char> = from.chars().collect();
-                let chare: Vec<char> = to.chars().collect();
-                if chars.len() != 1 || chare.len() != 1 {
-                    return Err(GrammarError::Other {
-                        msg: "Range requires single characters".to_string(),
-                    });
-                }
-                Ok(Pattern::Re(PatternRe::new(
-                    &format!("[{}-{}]", regex::escape(from), regex::escape(to)),
-                    0,
-                )?))
-            }
+            Expr::Value(Value::Range(from, to)) => Ok(Pattern::Re(PatternRe::new(
+                &Self::range_class_regex(from, to)?,
+                0,
+            )?)),
             Expr::Repeat {
                 inner, min, max, ..
             } => {
