@@ -1311,6 +1311,35 @@ impl PatternRe {
         // grammar-load outcomes are identical with and without the `fancy-oracle`
         // test feature.
         if let Err(e) = Regex::new(&full) {
+            // **"Nothing to repeat" pre-screen (#448).** A leading/dangling quantifier
+            // with nothing to repeat before it (`*a`, `+a`, `?a`, `{0,3}`, the
+            // post-normalization `{,3}`/`{,}` of #400/#447, `(?#c)*a` after a stripped
+            // zero-width comment, `(?:*a)`, …) is a Python `re` "nothing to repeat" build
+            // error — a *malformed quantifier*, NOT lookaround or backtracking. The regex
+            // crate raises a distinct, dedicated error for exactly this shape —
+            // "repetition operator missing expression" — which is **disjoint** from the
+            // messages it gives real lookaround ("look-around … is not supported") and
+            // backreferences ("backreferences are not supported"). So leaning on that
+            // message (as the issue suggests) routes only the genuine nothing-to-repeat
+            // cases here and never re-buckets a real lookaround/backref input. The build
+            // still *rejects* (parity with Python is unchanged); only the category/message
+            // is corrected from the misleading `LookaroundScope`/`OutOfScope`
+            // "backtracking-only syntax" refusal to a truthful `InvalidRegex`. Runs BEFORE
+            // the lookaround-analyzer fallback below for that reason.
+            if e.to_string()
+                .contains("repetition operator missing expression")
+            {
+                return Err(GrammarError::InvalidRegex {
+                    pattern: pattern.clone(),
+                    reason: format!(
+                        "nothing to repeat — a quantifier (`*`/`+`/`?`/`{{m,n}}`) has no \
+                         preceding expression to repeat (e.g. a leading `*a`/`+a`/`?a`/\
+                         `{{0,3}}`, or a quantifier right after `(`, `(?:`, or a stripped \
+                         `(?#…)` comment). Python `re` rejects this as \"nothing to \
+                         repeat\"; lark-rs matches that rejection (ADR-0017). ({e})"
+                    ),
+                });
+            }
             // Parse the raw pattern (not `full`): the analyzer models the loader's
             // baked flag wrapper via the same parse the routing strip uses.
             // Also accept fence-idiom patterns (named backreferences): the lookaround
@@ -1742,6 +1771,57 @@ mod tests {
                 reject_quantifier_dialect_divergence(p).is_ok(),
                 "{p:?} is a regular/Python-accepted construct — must NOT be refused"
             );
+        }
+    }
+
+    /// #448: a leading/dangling quantifier with **nothing to repeat** (`*a`, `+a`, `?a`,
+    /// `{0,3}`, the post-normalization `{,3}`/`{,}` of #400/#447, `(?#c)*a` after a
+    /// stripped zero-width comment, `(?:*a)`) is a Python `re` "nothing to repeat" build
+    /// error — a malformed quantifier, *not* lookaround. `PatternRe::new` must reject each
+    /// with the corrected `InvalidRegex` "nothing to repeat" category, NOT the misleading
+    /// `LookaroundScope`/`OutOfScope` "backtracking-only syntax" message it emitted before
+    /// the fix. The reject decision itself is unchanged (parity with Python preserved) —
+    /// this is an error-taxonomy correction only.
+    #[test]
+    fn nothing_to_repeat_is_invalid_regex_not_lookaround_scope() {
+        for p in [
+            "*a", "+a", "?a", "{0,3}", "{,3}", "{,}", "(?#c)*a", "(?:*a)",
+        ] {
+            let err =
+                PatternRe::new(p, 0).expect_err("a nothing-to-repeat quantifier must still reject");
+            match &err {
+                GrammarError::InvalidRegex { reason, .. } => assert!(
+                    reason.contains("nothing to repeat"),
+                    "{p:?}: InvalidRegex reason must name \"nothing to repeat\", got: {reason}"
+                ),
+                other => panic!(
+                    "{p:?}: must be InvalidRegex \"nothing to repeat\", not {other:?} \
+                     (a LookaroundScope here is the #448 mis-categorization)"
+                ),
+            }
+        }
+    }
+
+    /// #448 differential-audit: the nothing-to-repeat pre-screen leans on the regex
+    /// crate's dedicated "repetition operator missing expression" message, which is
+    /// disjoint from the messages for real lookaround/backref — so it must NOT re-bucket a
+    /// genuine `LookaroundScope` input. These constructs (zero-width lookahead, the
+    /// general-internal-lookahead `(?:…)` form, a backreference) are routed to the
+    /// lookaround analyzer / refusal seam and must stay there (or build, for a lowerable
+    /// lookbehind). `PatternRe::new` itself does NOT gate lowerable lookaround — it
+    /// constructs cleanly and the verdict is deferred to the lexer-build routing — so the
+    /// assertion here is only that these do NOT come back as an `InvalidRegex` "nothing to
+    /// repeat" (the re-bucketing failure mode).
+    #[test]
+    fn real_lookaround_not_rebucketed_as_nothing_to_repeat() {
+        for p in ["(?=ab)", "(?<=ab)c", "a(?=b)", r"(a)\1", r"(?P<x>a)(?P=x)"] {
+            if let Err(GrammarError::InvalidRegex { reason, .. }) = PatternRe::new(p, 0) {
+                assert!(
+                    !reason.contains("nothing to repeat"),
+                    "{p:?}: a real lookaround/backref input must NOT be re-bucketed as a \
+                     nothing-to-repeat malformed quantifier (#448 re-bucketing regression)"
+                );
+            }
         }
     }
 
