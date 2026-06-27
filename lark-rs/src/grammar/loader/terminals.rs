@@ -17,7 +17,7 @@ impl GrammarCompiler {
         lit: LiteralVal,
     ) -> Result<String, GrammarError> {
         let key = format!("{:?}", lit);
-        if let Some(name) = self.literal_cache.get(&key) {
+        if let Some(name) = self.minter.literal_cache.get(&key) {
             return Ok(name.clone());
         }
         // `string_type` mirrors Python's `pattern.type`: a string literal is a
@@ -47,7 +47,7 @@ impl GrammarCompiler {
             }
         };
         let name = self.intern_anon_pattern(pat, name_hint, string_type);
-        self.literal_cache.insert(key, name.clone());
+        self.minter.literal_cache.insert(key, name.clone());
         Ok(name)
     }
 

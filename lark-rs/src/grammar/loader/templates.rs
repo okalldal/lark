@@ -47,8 +47,8 @@ impl GrammarCompiler {
         // a transparent rule while `expr` does not. The counter keeps distinct
         // arg-sets distinct. Registered *before* compiling the body so a
         // self-reference resolves to the rule being built.
-        let inst_name = format!("{}{{{}}}", name, self.anon_counter);
-        self.anon_counter += 1;
+        let inst_name = format!("{}{{{}}}", name, self.minter.anon_counter);
+        self.minter.anon_counter += 1;
         self.template_instances.insert(key, inst_name.clone());
 
         // Build substitution map
