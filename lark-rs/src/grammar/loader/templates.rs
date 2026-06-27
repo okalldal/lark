@@ -2,7 +2,6 @@
 
 use super::ast::*;
 use super::compiler::GrammarCompiler;
-use super::ebnf::CompiledAlt;
 use crate::error::GrammarError;
 use crate::grammar::rule::{Rule, RuleOptions};
 use crate::grammar::symbol::{NonTerminal, Symbol};
@@ -78,17 +77,9 @@ impl GrammarCompiler {
         // Substitute template params in expansions
         let expansions = Self::substitute_template(&expansions, &subst);
         let origin = NonTerminal::new(&inst_name);
-        let mut compiled: Vec<(CompiledAlt, Option<String>)> = Vec::new();
-        for alt in expansions.into_iter() {
-            let alias = alt.alias.clone();
-            // RC4c: a group-internal alias is rejected (a rule reference, not a tree
-            // label).
-            Self::reject_nested_aliases(&alt.expansion)?;
-            for alt_c in self.compile_expansion(alt.expansion, &inst_name, true)? {
-                compiled.push((alt_c, alias.clone()));
-            }
-        }
-        let compiled = Self::dedup_and_check_alts(&inst_name, compiled)?;
+        // RC4c: a group-internal alias is rejected (a rule reference, not a tree
+        // label) — `reject_nested: true`, exactly as for a named rule body.
+        let compiled = self.compile_alternatives(expansions, &inst_name, true)?;
         for (order, ((syms, gaps), alias)) in compiled.into_iter().enumerate() {
             let options = RuleOptions {
                 nones_before: self.stored_output_gaps(gaps),
