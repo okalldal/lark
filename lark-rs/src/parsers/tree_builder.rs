@@ -153,7 +153,11 @@ impl<'g> TreeOutputBuilder<'g> {
                         container.observe_token(&t);
                     }
                     if self.keep_token(rule_idx, i) {
-                        children.push(Child::Token(t));
+                        // Materialize the kept terminal through the seam
+                        // (`Value = Child` → `Child::Token`), the same call the
+                        // engine's shift path uses, so token construction has a
+                        // single definition (ADR-0027).
+                        children.push(self.build_token(t));
                     }
                 }
                 Slot::Tree(t) => {
@@ -258,7 +262,17 @@ impl<'g> TreeOutputBuilder<'g> {
                 Child::None => Slot::Inline(vec![Child::None]),
             }
         } else {
-            let mut tree = Tree::new(rule.tree_name.clone(), children);
+            // Build the node through the seam (`Value = Child` → a `Child::Tree`),
+            // so node construction has a single definition shared with every future
+            // backend (ADR-0027). `propagate_positions` then widens the freshly
+            // built node's `meta` to its pre-filter container span (#402); the
+            // widen is a property of *this* tree backend, applied after the seam
+            // hands back the node.
+            let mut tree = match self.build_node(&rule.tree_name, children) {
+                Child::Tree(tree) => tree,
+                // `TreeOutputBuilder::build_node` always returns `Child::Tree`.
+                other => unreachable!("build_node must produce a tree node, got {other:?}"),
+            };
             if self.propagate_positions {
                 container.widen_meta(&mut tree.meta);
             }
