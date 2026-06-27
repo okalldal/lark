@@ -52,6 +52,27 @@
 //! by `tests/test_standalone.rs` (committed fixtures compiled + run vs the live
 //! oracle, plus a determinism/freshness gate).
 //!
+//! ## Generated-code API surface — struct-shape change (#457/#522)
+//!
+//! The generated parser exposes its own `Tree` / `Token` / `Meta` types (the
+//! [`runtime`] shapes, emitted verbatim into each file). **#522 grew that public
+//! surface** to carry source positions; downstream code that *destructures* or
+//! *constructs* these values must update. The additions are:
+//!
+//!   * `Token`: `end_line`, `end_column`, `start_pos`, `end_pos` position fields;
+//!   * `Tree`: a `meta: Meta` field;
+//!   * `Meta` (new): `line`/`column`/`end_line`/`end_column`/`start_pos`/`end_pos`
+//!     (all `Option<usize>`) + `empty: bool`. Its `Default` is **hand-written**, not
+//!     derived — a position-less default `Meta` is `empty: true` (see
+//!     [`runtime::Meta`]);
+//!   * `ContainerSpan` (internal) + `GrammarData::propagate_positions`, threaded so a
+//!     baked parser honors `propagate_positions` byte-identically to the in-process
+//!     engine (#402).
+//!
+//! Older generated parsers (pre-#522) have none of these; regenerate the fixture to
+//! pick them up (`LARK_STANDALONE_WRITE=1`). This is a generated-code API change, not
+//! a lark-rs library-API change.
+//!
 //! ## Limitations (documented parity gaps)
 //!
 //!   * **LALR only** — the baked artifact is a `ParseTable`; Earley/CYK are not
@@ -628,6 +649,25 @@ mod tests {
         drop(copy);
     }
 
+    /// #529: a default standalone `Meta` is `empty: true` with no position fields —
+    /// a position-less default has no span, the semantic convention Python Lark
+    /// follows (`Meta.empty` defaults `True`). The derived `Default` would (wrongly)
+    /// give `empty: false`.
+    #[test]
+    fn runtime_meta_default_is_empty_with_no_position() {
+        let m = super::runtime::Meta::default();
+        assert!(
+            m.empty,
+            "a default Meta must be empty (no positioned child)"
+        );
+        assert_eq!(m.line, None);
+        assert_eq!(m.column, None);
+        assert_eq!(m.end_line, None);
+        assert_eq!(m.end_column, None);
+        assert_eq!(m.start_pos, None);
+        assert_eq!(m.end_pos, None);
+    }
+
     // ─── Standalone compliance bank (#86) ─────────────────────────────────────
     //
     // `runtime.rs` is a parallel re-expression of the in-process LALR reduce /
@@ -1016,9 +1056,13 @@ mod tests {
     // `propagate_positions=true` (the standalone runtime *is* the basic lexer, so
     // comparing against the contextual lexer would conflate the two). The standalone
     // runtime's `Tree.meta` must be byte-identical to it — the #402 semantics (a
-    // node's `meta` spans its rule's *pre-filter* children, so filtered punctuation /
-    // `%ignore` whitespace still bound a container) — and `Token` spans must be
-    // **character** indices (#278), not byte offsets, on non-ASCII input.
+    // node's `meta` spans its rule's *pre-filter* children, so rule-filtered
+    // punctuation — e.g. a `"("`/`")"` terminal shifted onto the value stream and
+    // dropped by token-filtering — still bounds a container) — and `Token` spans
+    // must be **character** indices (#278), not byte offsets, on non-ASCII input.
+    // Note: `%ignore` tokens are *not* shifted onto the parser's value stream, so
+    // ignored whitespace generally does not bound a node's meta; only the inter-token
+    // span absorbed into a filtered terminal's own start/end participates.
 
     /// Recursively assert the standalone runtime tree's `meta` equals the oracle's.
     fn assert_meta_eq(oracle: &crate::tree::Tree, mine: &super::runtime::Tree, input: &str) {
@@ -1088,9 +1132,13 @@ mod tests {
 
     #[test]
     fn standalone_meta_matches_in_process_lalr() {
-        // (grammar, inputs). Each grammar's container nodes span filtered punctuation
-        // / `%ignore` whitespace, so the #402 pre-filter widening is load-bearing; the
-        // last case is non-ASCII to pin char-index (#278) `start_pos`/`end_pos`.
+        // (grammar, inputs). Each grammar's container nodes span its rule-filtered
+        // punctuation (the `"("`/`")"`/`"["`/`","`/`"]"` terminals dropped by
+        // token-filtering after being shifted), so the #402 pre-filter widening is
+        // load-bearing. The grammars also carry `%ignore` whitespace, but those
+        // tokens never reach the value stream and so do not bound a node's meta; they
+        // only exercise that the widening still matches the oracle in their presence.
+        // The last case is non-ASCII to pin char-index (#278) `start_pos`/`end_pos`.
         let cases: &[(&str, &[&str])] = &[
             (
                 "start: \"(\" NUMBER \")\"\nNUMBER: /[0-9]+/\n%ignore \" \"\n",
