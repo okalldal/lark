@@ -28,6 +28,31 @@
 //!   helper (Inlines of size 1,2,…,n); the streaming fix that would flatten it is a
 //!   tracked follow-up (the explicit analog of #55's resolve-mode fix).
 //!
+//! Two more counters back the **cyclic explicit-Earley re-assembly** gate (#518).
+//! `ambiguity='explicit'` over a *cyclic* (nullable+recursive) grammar disables the
+//! per-symbol `deriv_memo`/`memo` for cycle nodes and governs them via the
+//! per-packed-node `packed_cache` (Python's `_cache` model, #348). `packed_cache`
+//! bounds re-*descent*, but a cyclic symbol node's derivation list is still
+//! re-`assemble`d on each reach (its `deriv_memo` is never written). Cyclic
+//! ambiguous grammars have an inherently exponential *distinct-derivation* count
+//! (the true answer, not an artifact — `1,1,2,8,48,352` for `z: | "b" z | z z`), so
+//! the gate keys on *per-materialized-derivation* work, never raw total work
+//! (BENCH.md / §2.5):
+//!
+//! * [`explicit_assemble_children`] — every child *slot* the explicit walk feeds to
+//!   `TreeOutputBuilder::assemble` while re-building a packed node's derivation
+//!   values (`DerivsNext`). This is the re-assembly work the cyclic path repeats on
+//!   each reach of a cycle node. On its own it grows with the (exponential)
+//!   derivation count, so it is only meaningful *per derivation*.
+//! * [`explicit_derivations`] — every materialized derivation value the walk admits
+//!   into a node's deduped list (`DerivsNext`'s `push_deduped`). The denominator: the
+//!   count of materialized output derivations. A flat `assemble_children /
+//!   derivations` envelope says each materialized derivation costs a bounded amount
+//!   of re-assembly regardless of how many times its cyclic node is reached; a future
+//!   super-linearity in the re-assembly path (e.g. dropping `packed_cache`, or
+//!   re-assembling a memoizable subtree per reach) makes the ratio climb and trips the
+//!   gate (`tests/test_earley_scaling.rs`, the cyclic arm).
+//!
 //! A fourth counter backs the CYK scaling gate (#87):
 //!
 //! * [`cyk_table_steps`] — every `(split, left-nt, right-nt)` combination the CYK
@@ -72,6 +97,8 @@ mod imp {
     static COMPLETER_SCAN_STEPS: AtomicU64 = AtomicU64::new(0);
     static EXPLICIT_PREFIX_COPIES: AtomicU64 = AtomicU64::new(0);
     static EXPLICIT_NODE_CHILDREN: AtomicU64 = AtomicU64::new(0);
+    static EXPLICIT_ASSEMBLE_CHILDREN: AtomicU64 = AtomicU64::new(0);
+    static EXPLICIT_DERIVATIONS: AtomicU64 = AtomicU64::new(0);
     static FOREST_NODES: AtomicU64 = AtomicU64::new(0);
     static CYK_TABLE_STEPS: AtomicU64 = AtomicU64::new(0);
     static LEXER_SCAN_STEPS: AtomicU64 = AtomicU64::new(0);
@@ -92,6 +119,24 @@ mod imp {
     #[inline]
     pub fn add_explicit_node_children(n: u64) {
         EXPLICIT_NODE_CHILDREN.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Count the child slots fed to one `TreeOutputBuilder::assemble` call in the
+    /// explicit walk's per-packed-node re-assembly (`DerivsNext`) — the re-assembly
+    /// work a cyclic node repeats on each reach (#518). Only meaningful divided by
+    /// [`explicit_derivations`]; on its own it tracks the exponential derivation count.
+    #[inline]
+    pub fn add_explicit_assemble_children(n: u64) {
+        EXPLICIT_ASSEMBLE_CHILDREN.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Count one materialized derivation value admitted into a node's deduped list
+    /// (`DerivsNext`'s `push_deduped`) — the denominator for the #518 per-derivation
+    /// re-assembly envelope. Tracks the true (exponential) distinct-derivation count
+    /// of a cyclic explicit grammar (`1,1,2,8,48,352` for `z: | "b" z | z z`).
+    #[inline]
+    pub fn add_explicit_derivation() {
+        EXPLICIT_DERIVATIONS.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Count one SPPF node creation. This is the mode-neutral size metric used to
@@ -157,6 +202,8 @@ mod imp {
         COMPLETER_SCAN_STEPS.store(0, Ordering::Relaxed);
         EXPLICIT_PREFIX_COPIES.store(0, Ordering::Relaxed);
         EXPLICIT_NODE_CHILDREN.store(0, Ordering::Relaxed);
+        EXPLICIT_ASSEMBLE_CHILDREN.store(0, Ordering::Relaxed);
+        EXPLICIT_DERIVATIONS.store(0, Ordering::Relaxed);
         FOREST_NODES.store(0, Ordering::Relaxed);
         CYK_TABLE_STEPS.store(0, Ordering::Relaxed);
         LEXER_SCAN_STEPS.store(0, Ordering::Relaxed);
@@ -174,6 +221,14 @@ mod imp {
 
     pub fn explicit_node_children() -> u64 {
         EXPLICIT_NODE_CHILDREN.load(Ordering::Relaxed)
+    }
+
+    pub fn explicit_assemble_children() -> u64 {
+        EXPLICIT_ASSEMBLE_CHILDREN.load(Ordering::Relaxed)
+    }
+
+    pub fn explicit_derivations() -> u64 {
+        EXPLICIT_DERIVATIONS.load(Ordering::Relaxed)
     }
 
     pub fn forest_nodes() -> u64 {
@@ -226,6 +281,12 @@ mod imp {
     pub fn add_explicit_node_children(_n: u64) {}
 
     #[inline]
+    pub fn add_explicit_assemble_children(_n: u64) {}
+
+    #[inline]
+    pub fn add_explicit_derivation() {}
+
+    #[inline]
     pub fn add_forest_node() {}
 
     #[inline]
@@ -251,6 +312,14 @@ mod imp {
     }
 
     pub fn explicit_node_children() -> u64 {
+        0
+    }
+
+    pub fn explicit_assemble_children() -> u64 {
+        0
+    }
+
+    pub fn explicit_derivations() -> u64 {
         0
     }
 

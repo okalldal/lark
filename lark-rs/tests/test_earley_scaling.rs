@@ -42,6 +42,28 @@
 //! (the committed disproof) and the real cost is now flat per byte (the #59 fix);
 //! the cartesian product is preserved for genuine ambiguity, which the unchanged
 //! `_ambig` oracles + compliance bank pin byte-for-byte.
+//!
+//! ## Arm 3 — cyclic explicit-mode forest→tree re-assembly (#518)
+//!
+//! The Arm-2 sweeps above are all *acyclic* (`x*`/`x+`). The #348 fix made
+//! explicit-mode enumeration over a **cyclic** (nullable+recursive) grammar faithful
+//! to Python by disabling the per-symbol `deriv_memo`/`memo` for cycle nodes and
+//! governing them via the per-packed-node `packed_cache` (Python's `_cache` model).
+//! `packed_cache` bounds re-*descent*, but a cyclic symbol node's derivation list is
+//! still re-`assemble`d on each reach (its `deriv_memo` is never written), so a future
+//! super-linearity could creep into the re-assembly path. Cyclic ambiguous grammars
+//! have an *inherently exponential* distinct-derivation count (`1,1,2,8,48,352` for
+//! `z: | "b" z | z z` — the true answer, not an artifact), so the gate cannot key on
+//! raw total work; it keys on **per-materialized-derivation** re-assembly work
+//! (`perf::explicit_assemble_children / perf::explicit_derivations`, §2.5 / BENCH.md)
+//! and asserts that envelope stays flat across a size sweep — concretely, that the
+//! step-over-step *growth* of the per-derivation ratio keeps decelerating (converging)
+//! rather than staying large. Demonstrated to have teeth: an injected regression
+//! re-assembling the accumulated derivation set on each reach (O(reaches × derivs ×
+//! size)) keeps the ratio's last step high (last-step `z`=1.25, `e/f`=1.34 over the
+//! `[4,6,8]` sweep) where the current bounded path converges (last-step `z`=1.04,
+//! `e/f`=1.10) — the denominator is identical in both, so the rise is purely
+//! re-assembly work per derivation. See [`assert_flat_per_derivation`] for the band.
 
 use lark_rs::{Ambiguity, Lark, LarkOptions, LexerType, ParserAlgorithm};
 
@@ -112,6 +134,20 @@ const NESTED_GRAMMAR: &str = "start: e\ne: \"(\" e \")\" | \"x\"\n";
 /// loop is, contrary to the issue's guess, only linear).
 const LIST_GRAMMAR: &str = "start: X+\nX: \"x\"\n";
 
+/// **Arm 3 — the canonical cyclic (nullable + recursive) grammar (#518/#348).**
+/// `z` is nullable (the empty first alternative) and self-recursive both linearly
+/// (`"b" z`) and via a binary split (`z z`), so its SPPF has genuine cycles. Its
+/// distinct-derivation count is exponential (`1,1,2,8,48,352`) — the textbook
+/// shape the #348 cycle-governed enumeration targets. Input is `"b"×n`.
+const CYCLIC_Z_GRAMMAR: &str = "z: | \"b\" z | z z\n";
+
+/// **Arm 3 — interacting cycles (#518/#348).** Two mutually recursive nullable
+/// rules whose cycles *share* SPPF nodes (the H4-10 audit case): a one-root
+/// back-edge DFS mis-settles a shared node as acyclic, which is why #348 uses SCC
+/// membership. Exercising the re-assembly gate over this shape pins the harder
+/// cycle topology too. Input is `"d"×n`.
+const CYCLIC_EF_GRAMMAR: &str = "e: e e | f | \nf: e | \"d\" f |\n";
+
 fn gen_json(records: usize, fields: usize) -> String {
     let mut s = String::from("[");
     for r in 0..records {
@@ -155,10 +191,16 @@ fn gen_x(n: usize) -> String {
 }
 
 fn earley(grammar: &str, ambiguity: Ambiguity) -> Lark {
+    earley_start(grammar, ambiguity, "start")
+}
+
+/// Like [`earley`] but with an explicit start rule — the cyclic Arm-3 grammars use
+/// `z`/`e` as their start, not `start`.
+fn earley_start(grammar: &str, ambiguity: Ambiguity, start: &str) -> Lark {
     Lark::new(
         grammar,
         LarkOptions {
-            start: vec!["start".to_string()],
+            start: vec![start.to_string()],
             parser: ParserAlgorithm::Earley,
             lexer: LexerType::Basic,
             ambiguity,
@@ -302,6 +344,19 @@ fn earley_scaling_is_pinned() {
              derivation rebuild is super-linear again (the streaming splice broke)"
         );
     }
+
+    // ── Arm 3 (#518): cyclic explicit re-assembly is FLAT per materialized
+    //    derivation ─────────────────────────────────────────────────────────────
+    // A cyclic explicit node's derivation list is re-`assemble`d on each reach
+    // (its `deriv_memo` is never written; #348 governs cycles via `packed_cache`).
+    // The distinct-derivation count is exponential, so we gate the re-assembly work
+    // *per materialized derivation* (`explicit_assemble_children /
+    // explicit_derivations`) — an envelope over the output size, never raw work.
+    // The current bounded path plateaus; a future regression that re-assembles a
+    // memoizable subtree per reach (O(reaches × derivs × size)) makes the ratio
+    // climb (demonstrated: 0.67→4.7 vs the current 0.67→1.85 over the same sweep).
+    assert_flat_per_derivation("cyclic_z", CYCLIC_Z_GRAMMAR, "z", &|n| "b".repeat(n));
+    assert_flat_per_derivation("cyclic_ef", CYCLIC_EF_GRAMMAR, "e", &|n| "d".repeat(n));
 }
 
 /// Assert the completer scan stays flat per byte across a size sweep: the largest
@@ -327,6 +382,76 @@ fn assert_flat_per_byte(label: &str, parser: &Lark, inputs: &[String]) {
         "Arm 1 regression: {label} completer scan is NOT flat per byte — \
          grew from {first:.3} to {last:.3} scan/byte across the sweep \
          (per-byte rows: {per_byte:?}); the origin-column rescan is super-linear again"
+    );
+}
+
+/// Arm 3 (#518): assert cyclic explicit-mode forest→tree **re-assembly** stays flat
+/// *per materialized derivation*. The metric is `explicit_assemble_children /
+/// explicit_derivations` — the child slots fed to `TreeOutputBuilder::assemble` in
+/// the per-packed-node re-build (`DerivsNext`), amortized over the materialized
+/// derivation count. A cyclic node is re-`assemble`d on each reach (no `deriv_memo`,
+/// #348), and its distinct-derivation count is exponential, so only the *per-
+/// derivation* ratio is meaningful (raw work is exponential by construction, §2.5).
+///
+/// The current bounded path makes this ratio *converge* (a flat plateau with a small
+/// additive constant): the step-over-step growth of the ratio **decelerates** toward
+/// 1. A future regression that re-assembles a memoizable subtree per reach
+/// (O(reaches × derivs × size)) keeps the step growth high. We gate on the *last*
+/// step's growth with the threshold `1.15`. Measured at the `[4, 6, 8]` sweep (debug):
+/// baseline last-step `z`=1.04, `e/f`=1.10; the injected super-linear teeth last-step
+/// `z`=1.25, `e/f`=1.34. So `1.15` sits between them — ~5% above the worst baseline
+/// (`e/f`=1.10) and ~9% below the nearest regression (`z`=1.25). The margin is real but
+/// not huge, so the full per-step trace is in the panic message to diagnose a trip; a
+/// benign assemble/dedup refactor that nudges the ratio up should still land well under
+/// the regression band. Sizes stay modest on purpose: the exponential derivation count
+/// materializes large forests (n=8 already builds a ~870ms/8s debug parse on `z`/`e/f`,
+/// n≳12 OOMs on `z`), which is exactly *why* the gate must be per-derivation, not raw.
+#[cfg(feature = "perf-counters")]
+fn assert_flat_per_derivation(
+    label: &str,
+    grammar: &str,
+    start: &str,
+    mk: &dyn Fn(usize) -> String,
+) {
+    use lark_rs::perf;
+
+    let parser = earley_start(grammar, Ambiguity::Explicit, start);
+    let sizes = [4usize, 6, 8];
+    let mut ratios: Vec<(usize, f64)> = Vec::new();
+    for &n in &sizes {
+        let input = mk(n);
+        perf::reset();
+        parser
+            .parse(&input)
+            .unwrap_or_else(|e| panic!("{label} must parse (explicit): {e:?}"));
+        let assemble = perf::explicit_assemble_children();
+        let derivs = perf::explicit_derivations();
+        // Both must be positive: `derivs == 0` means the cyclic grammar didn't fan
+        // out (the gate would measure nothing), and `assemble == 0` would make this
+        // point's ratio 0.0 — which the next step-over-step division would turn into
+        // a divide-by-zero (`inf`/`NaN`, and `NaN <= 1.15` is false → spurious trip).
+        // Guard both so a trip always means a real super-linearity, never a 0/0.
+        assert!(
+            derivs > 0 && assemble > 0,
+            "{label}: degenerate measurement at n={n} (assemble={assemble}, \
+             derivs={derivs}) — the cyclic grammar must actually fan out and feed \
+             `assemble`, else the per-derivation ratio is undefined; check grammar/start"
+        );
+        ratios.push((n, assemble as f64 / derivs as f64));
+    }
+    // Step-over-step growth of the per-derivation ratio. A converging (flat) envelope
+    // decelerates toward 1; a super-linear re-assembly keeps the steps large. Every
+    // ratio is > 0 (guarded above), so the division is always well-defined.
+    let steps: Vec<f64> = ratios.windows(2).map(|w| w[1].1 / w[0].1).collect();
+    let last_step = *steps.last().unwrap();
+    assert!(
+        last_step <= 1.15,
+        "Arm 3 (#518) regression: {label} cyclic explicit re-assembly is NOT flat \
+         per materialized derivation — the per-derivation ratio's last step grew \
+         {last_step:.4}× (envelope ≤ 1.15). Per-derivation ratios (n, asm/deriv): \
+         {ratios:?}; step growths: {steps:?}. The forest→tree re-assembly path went \
+         super-linear in reaches (a cyclic node is being re-assembled per reach \
+         without the per-derivation bound — e.g. `packed_cache`/cycle-memo broke)."
     );
 }
 
