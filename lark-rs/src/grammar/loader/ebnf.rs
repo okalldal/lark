@@ -2,6 +2,7 @@
 //! distribution, and anonymous-helper sharing (AST `Expr`s → flat BNF [`Rule`]s).
 
 use super::ast::*;
+use super::audit::RecurseDecision;
 use super::compiler::{AnonKind, GrammarCompiler};
 use crate::error::GrammarError;
 use crate::grammar::rule::{Rule, RuleOptions};
@@ -1162,13 +1163,13 @@ impl GrammarCompiler {
     /// reduce/reduce conflict.
     ///
     /// `ast_key` is the inner expression's source-AST structural key
-    /// (`Expr::python_recurse_key`). In the audit shadow (`python_keyed_recurse`,
-    /// RC7/#272) the cache is keyed on `ast_key` so the share/split decision matches
-    /// Python Lark's `EBNF_to_BNF._add_recurse_rule` (which keys on the inner `expr`
-    /// Tree) instead of the compiled arms; in the normal pass the load-bearing
-    /// compiled-arms sharing (ADR-0013) is preserved verbatim and `ast_key` only
-    /// records the over-share evidence (`recurse_cache_origin_key`) the loader uses
-    /// to decide whether to build the audit shadow at all.
+    /// (`Expr::python_recurse_key`). The share/split decision is owned by
+    /// [`AuditShadow`](super::audit::AuditShadow): in the audit shadow pass (RC7/#272)
+    /// the cache is keyed on `ast_key` so it matches Python Lark's
+    /// `EBNF_to_BNF._add_recurse_rule` (which keys on the inner `expr` Tree) instead
+    /// of the compiled arms; in the normal pass the load-bearing compiled-arms sharing
+    /// (ADR-0013) is preserved verbatim and `ast_key` only records the over-share
+    /// evidence the loader uses to decide whether to build the audit shadow at all.
     fn recurse_helper_keyed(&mut self, mut arms: Vec<CompiledAlt>, ast_key: &str) -> Symbol {
         // Dedup identical arms (first occurrence wins, order preserved). Python
         // Lark's `EBNF_to_BNF` builds the one-or-more rule from the *set* of inner
@@ -1212,39 +1213,31 @@ impl GrammarCompiler {
         } else {
             self.current_keep_all
         };
-        // Audit shadow (RC7/#272): key on the inner-AST structural key so the
-        // share/split decision matches Python Lark's `_add_recurse_rule`
-        // (`rules_cache[expr]`), reproducing the un-shared helper split. The real
-        // pass keeps the load-bearing compiled-arms key (ADR-0013).
-        if self.python_keyed_recurse {
-            let ast_cache_key = (ast_key.to_string(), effective_keep_all);
-            if let Some(name) = self.recurse_cache_ast.get(&ast_cache_key) {
-                return Symbol::NonTerminal(NonTerminal::new(name));
+        // Audit shadow (RC7/#272): the [`AuditShadow`] owns the share/split decision.
+        // In the shadow pass it keys on the inner-AST structural key so the verdict
+        // matches Python Lark's `_add_recurse_rule` (`rules_cache[expr]`), reproducing
+        // the un-shared helper split; in the real pass it observes the load-bearing
+        // compiled-arms `recurse_cache` (ADR-0013) and records the over-share evidence.
+        match self
+            .audit
+            .lookup(&self.recurse_cache, &arms, effective_keep_all, ast_key)
+        {
+            RecurseDecision::Cached(name) => Symbol::NonTerminal(NonTerminal::new(&name)),
+            RecurseDecision::Mint => {
+                let name = self.emit_recurse_rule(arms.clone(), effective_keep_all);
+                // The audit owns the shadow-pass cache and the over-share origin map;
+                // it returns whether the real pass still owns the compiled-arms entry.
+                let real_pass_owns_cache =
+                    !self
+                        .audit
+                        .record_minted(&arms, effective_keep_all, ast_key, &name);
+                if real_pass_owns_cache {
+                    self.recurse_cache
+                        .insert((arms, effective_keep_all), name.clone());
+                }
+                Symbol::NonTerminal(NonTerminal::new(&name))
             }
-            let name = self.emit_recurse_rule(arms, effective_keep_all);
-            self.recurse_cache_ast.insert(ast_cache_key, name.clone());
-            return Symbol::NonTerminal(NonTerminal::new(&name));
         }
-        let key = (arms.clone(), effective_keep_all);
-        if let Some(name) = self.recurse_cache.get(&key) {
-            // A real (compiled-arms) cache hit. If the inner-AST shape differs from
-            // the one that created this helper, the sharing has fused two helpers
-            // Python Lark would mint distinctly — flag the over-share so the loader
-            // knows an audit shadow (RC7/#272) is worth building.
-            if self
-                .recurse_cache_origin_key
-                .get(&key)
-                .is_some_and(|origin| origin != ast_key)
-            {
-                self.recurse_overshare_seen = true;
-            }
-            return Symbol::NonTerminal(NonTerminal::new(name));
-        }
-        let name = self.emit_recurse_rule(arms.clone(), effective_keep_all);
-        self.recurse_cache.insert(key.clone(), name.clone());
-        self.recurse_cache_origin_key
-            .insert(key, ast_key.to_string());
-        Symbol::NonTerminal(NonTerminal::new(&name))
     }
 
     /// Emit a fresh one-or-more recurse rule for the (already-deduped) inner `arms`

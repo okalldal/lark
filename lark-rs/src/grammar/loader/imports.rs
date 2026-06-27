@@ -260,8 +260,8 @@ impl GrammarCompiler {
     ///  1. **The real (sharing) pass** must learn that an imported grammar over-shares
     ///     internally, so the *parent* loader builds an audit shadow at all. An
     ///     imported grammar carries that signal as `lalr_audit.is_some()` — it built
-    ///     its own shadow because it detected an over-share. Propagate it by flipping
-    ///     [`recurse_overshare_seen`](GrammarCompiler::recurse_overshare_seen); the
+    ///     its own shadow because it detected an over-share. Propagate it via
+    ///     [`AuditShadow::note_imported_audit`](super::audit::AuditShadow::note_imported_audit); the
     ///     real parse table still copies the imported grammar's *shared* rules (the
     ///     load-bearing ADR-0013 sharing is untouched).
     ///
@@ -280,14 +280,14 @@ impl GrammarCompiler {
         names_to_import: &[(String, Option<String>)],
     ) -> Result<(), GrammarError> {
         if imported.lalr_audit.is_some() {
-            if self.python_keyed_recurse {
+            if self.audit.python_keyed() {
                 // Shadow pass: copy the Python-keyed split helpers, not the shared
                 // real rules — so the masked collision reaches the parent's audit.
                 let shadow = imported.lalr_audit.as_deref().unwrap();
                 return self.copy_requested(shadow, module_path, names_to_import);
             }
             // Real pass: keep the shared rules, but remember an audit is now needed.
-            self.recurse_overshare_seen = true;
+            self.audit.note_imported_audit();
         }
         self.copy_requested(imported, module_path, names_to_import)
     }

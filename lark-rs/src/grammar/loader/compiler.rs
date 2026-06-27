@@ -9,6 +9,7 @@
 //! into a [`Grammar`] ([`compile`](GrammarCompiler::compile)).
 
 use super::ast::*;
+use super::audit::AuditShadow;
 use super::ebnf::{CompiledAlt, HelperKey};
 use super::imports::{spec_final_names, split_import_directive};
 use crate::error::GrammarError;
@@ -272,34 +273,15 @@ pub(super) struct GrammarCompiler {
     /// (`(A | B)+` → `_p: A | B | _p A | _p B`), so two `(A|B)+` occurrences share
     /// iff their cartesian-expanded arms coincide.
     pub(super) recurse_cache: HashMap<(Vec<super::ebnf::CompiledAlt>, bool), String>,
-    /// Audit mode (ADR-0013, RC7/#272): when set, [`recurse_helper`] keys its
-    /// `recurse_cache` on the inner expression's **source-AST** structural key
-    /// (Python Lark's `EBNF_to_BNF._add_recurse_rule`, which keys on the inner
-    /// `expr` Tree) instead of the compiled arms. This reproduces Python's
-    /// *un-shared* helper split — `r0*` and `(r0)*` get distinct helpers — so the
-    /// post-lowering reduce/reduce audit can run the real LALR conflict detector
-    /// over a Python-faithful shadow grammar and surface the collision the real
-    /// (shared) grammar masks, **without** un-sharing the real `recurse_cache` (the
-    /// sharing is load-bearing: un-sharing regresses the LALR bank 512→482).
-    /// The shadow grammar is build-gating only; it never parses.
-    pub(super) python_keyed_recurse: bool,
-    /// Audit-only recurse-helper cache keyed on `(inner-AST key, keep_all)`,
-    /// matching Python Lark's `EBNF_to_BNF.rules_cache` (keyed on the inner `expr`
-    /// Tree). Populated only while [`python_keyed_recurse`](Self::python_keyed_recurse)
-    /// is set, so it never affects the real (compiled-arms-keyed) `recurse_cache`.
-    pub(super) recurse_cache_ast: HashMap<(String, bool), String>,
-    /// The inner-AST key that first created each real `recurse_cache` entry, keyed
-    /// by that entry's `(arms, keep_all)`. On a later cache *hit* with a **different**
-    /// inner-AST key, the real (compiled-arms) sharing has collapsed two helpers
-    /// Python Lark would have minted distinctly — exactly the RC7/#272 over-share.
-    /// [`recurse_overshare_seen`](Self::recurse_overshare_seen) flips, telling the
-    /// loader an audit shadow is worth building. Tracked only in the real pass.
-    pub(super) recurse_cache_origin_key: HashMap<(Vec<super::ebnf::CompiledAlt>, bool), String>,
-    /// Set in the real pass when a `recurse_cache` hit fuses two distinct inner-AST
-    /// shapes into one helper (see [`recurse_cache_origin_key`](Self::recurse_cache_origin_key)).
-    /// When `false`, the Python-keyed shadow is byte-identical to the real grammar's
-    /// recurse helpers, so the loader skips building it (no audit needed).
-    pub(super) recurse_overshare_seen: bool,
+    /// The recurse-overshare **audit shadow** mechanism (ADR-0013, RC7/#272),
+    /// concentrated behind one type ([`AuditShadow`]) instead of four scattered
+    /// fields. It owns the "real vs Python-keyed shadow" duality: the mode flag, the
+    /// Python-AST-keyed shadow cache, the over-share evidence drawn from the real
+    /// `recurse_cache`, and the resulting over-share signal the loader reads to
+    /// decide whether to build the shadow (and `imports` propagates across an
+    /// `%import` boundary). The real (compiled-arms) `recurse_cache` above stays the
+    /// load-bearing parse-table sharing — only the audit is Python-AST-keyed.
+    pub(super) audit: AuditShadow,
     /// Cache of every other anonymous EBNF helper — groups, optionals, `?`/`*`
     /// wrappers — keyed by its [`HelperKey`] structural identity. Extends the
     /// single-symbol `recurse_cache` sharing to grouped repetition: Python Lark's
@@ -414,10 +396,7 @@ impl GrammarCompiler {
             current_keep_all: keep_all_tokens,
             helper_sizes: HashMap::new(),
             recurse_cache: HashMap::new(),
-            python_keyed_recurse: false,
-            recurse_cache_ast: HashMap::new(),
-            recurse_cache_origin_key: HashMap::new(),
-            recurse_overshare_seen: false,
+            audit: AuditShadow::new(),
             helper_cache: HashMap::new(),
             nullable_opts: std::collections::HashSet::new(),
             repeat_cache: HashMap::new(),

@@ -200,6 +200,8 @@ src/
       parser.rs         recursive-descent GrammarParser
       compiler.rs       GrammarCompiler state + staging + final Grammar assembly
       ebnf.rs           rule bodies: EBNF expansion, distribution, helper sharing
+      audit.rs          AuditShadow: the recurse-overshare reduce/reduce audit
+                        shadow (RC7/#272, ADR-0013) — build-gating only, never parses
       terminals.rs      terminal algebra → regex; PatternStr classification
       templates.rs      parameterized template instantiation
       imports.rs        %import resolution (bundled libraries + sibling files)
