@@ -96,6 +96,10 @@ fn test_keywords_oracle() {
 
 // ─── Python number literal oracle tests ──────────────────────────────────────
 
+// Kept byte-identical to `PYTHON_NUMBER_GRAMMAR` in `tools/generate_oracles.py`.
+// `IMAG.2` makes the imaginary terminal win the same-position tie over FLOAT
+// (`3.14j`/`.5j`), and the `_?` after each base prefix matches CPython 3.6+'s
+// prefixed-underscore form (`0x_1A`/`0b_1010`/`0o_17`) — see #391.
 const PYTHON_NUMBER_GRAMMAR: &str = r#"
 start: number+
 number: INT | FLOAT | HEX | OCT | BIN | IMAG
@@ -104,10 +108,10 @@ FLOAT: /[0-9][0-9_]*\.[0-9_]*/
      | /\.[0-9][0-9_]*/
      | /[0-9][0-9_]*[eE][+-]?[0-9][0-9_]*/
      | /[0-9][0-9_]*\.[0-9_]*[eE][+-]?[0-9][0-9_]*/
-HEX: /0[xX][0-9a-fA-F][0-9a-fA-F_]*/
-OCT: /0[oO][0-7][0-7_]*/
-BIN: /0[bB][01][01_]*/
-IMAG: /[0-9][0-9_]*[jJ]/
+HEX: /0[xX]_?[0-9a-fA-F][0-9a-fA-F_]*/
+OCT: /0[oO]_?[0-7][0-7_]*/
+BIN: /0[bB]_?[01][01_]*/
+IMAG.2: /[0-9][0-9_]*[jJ]/
     | /[0-9][0-9_]*\.[0-9_]*[jJ]/
     | /\.[0-9][0-9_]*[jJ]/
 %ignore /[ \t\n]+/
@@ -118,12 +122,11 @@ fn test_python_numbers_valid_oracle() {
     let lark = common::make_lalr(PYTHON_NUMBER_GRAMMAR);
     let oracle = load_oracle("python_numbers", "valid");
     let cases = oracle.as_array().expect("oracle must be an array");
-    // `3.14j`, `.5j`, `0x_1A`, `0b_1010`, `0o_17` are labeled "valid" by the case
-    // author but Python Lark rejects them over THIS grammar (terminal ordering /
-    // prefixed underscore). lark-rs matches Python (also rejects), so no
-    // `more_permissive` entry is needed — the generator's allow-list documents the
-    // expectation gap (tools/oracle_contradictions.json). If lark-rs ever started
-    // *accepting* one, this replay would fail loudly rather than log INFO.
+    // #391: `3.14j`/`.5j`/`3.j` (IMAG over FLOAT via the `.2` priority) and
+    // `0x_1A`/`0b_1010`/`0o_17`/`0X_1a` (prefixed underscore via `_?`) are now
+    // accepted by Python Lark under the broadened grammar AND lex to the right
+    // token type; the replay holds lark-rs to Python's recorded tree (token type
+    // included), so a divergence on either class fails here loudly.
     let failures = replay_oracle_cases(&lark, cases, "python_numbers/valid", &[]);
     assert!(
         failures.is_empty(),

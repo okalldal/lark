@@ -35,38 +35,17 @@
     "error": "No terminal matches 'e' in the current parser context, at line 1 col 2\n\n3e\n ^\nExpected one of: \n\t* BIN\n\t* FLOAT\n\t* HEX\n\t* IMAG\n\t* INT\n\t* OCT\n\nPrevious tokens: Token('INT', '3')\n"
   },
   {
-    "input": "3.14j",
+    "input": "0o_",
     "should_pass": false,
     "ok": false,
     "tree": null,
-    "error": "No terminal matches 'j' in the current parser context, at line 1 col 5\n\n3.14j\n    ^\nExpected one of: \n\t* BIN\n\t* FLOAT\n\t* HEX\n\t* IMAG\n\t* INT\n\t* OCT\n\nPrevious tokens: Token('FLOAT', '3.14')\n"
+    "error": "No terminal matches 'o' in the current parser context, at line 1 col 2\n\n0o_\n ^\nExpected one of: \n\t* BIN\n\t* FLOAT\n\t* HEX\n\t* IMAG\n\t* INT\n\t* OCT\n\nPrevious tokens: Token('INT', '0')\n"
   },
   {
-    "input": ".5j",
+    "input": "0x_",
     "should_pass": false,
     "ok": false,
     "tree": null,
-    "error": "No terminal matches 'j' in the current parser context, at line 1 col 3\n\n.5j\n  ^\nExpected one of: \n\t* BIN\n\t* FLOAT\n\t* HEX\n\t* IMAG\n\t* INT\n\t* OCT\n\nPrevious tokens: Token('FLOAT', '.5')\n"
-  },
-  {
-    "input": "0x_1A",
-    "should_pass": false,
-    "ok": false,
-    "tree": null,
-    "error": "No terminal matches 'x' in the current parser context, at line 1 col 2\n\n0x_1A\n ^\nExpected one of: \n\t* BIN\n\t* FLOAT\n\t* HEX\n\t* IMAG\n\t* INT\n\t* OCT\n\nPrevious tokens: Token('INT', '0')\n"
-  },
-  {
-    "input": "0b_1010",
-    "should_pass": false,
-    "ok": false,
-    "tree": null,
-    "error": "No terminal matches 'b' in the current parser context, at line 1 col 2\n\n0b_1010\n ^\nExpected one of: \n\t* BIN\n\t* FLOAT\n\t* HEX\n\t* IMAG\n\t* INT\n\t* OCT\n\nPrevious tokens: Token('INT', '0')\n"
-  },
-  {
-    "input": "0o_17",
-    "should_pass": false,
-    "ok": false,
-    "tree": null,
-    "error": "No terminal matches 'o' in the current parser context, at line 1 col 2\n\n0o_17\n ^\nExpected one of: \n\t* BIN\n\t* FLOAT\n\t* HEX\n\t* IMAG\n\t* INT\n\t* OCT\n\nPrevious tokens: Token('INT', '0')\n"
+    "error": "No terminal matches 'x' in the current parser context, at line 1 col 2\n\n0x_\n ^\nExpected one of: \n\t* BIN\n\t* FLOAT\n\t* HEX\n\t* IMAG\n\t* INT\n\t* OCT\n\nPrevious tokens: Token('INT', '0')\n"
   }
 ]
