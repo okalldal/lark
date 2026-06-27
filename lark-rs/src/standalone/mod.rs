@@ -135,6 +135,7 @@ struct Baked {
     scan_groups: Vec<(u32, String)>,
     unless: Vec<(u32, Vec<(String, bool, u32)>)>,
     ignore: Vec<u32>,
+    propagate_positions: bool,
 }
 
 /// Run the normal pipeline and collect everything a standalone parser needs into
@@ -153,23 +154,15 @@ fn bake(grammar_src: &str, options: &LarkOptions) -> Result<Baked, LarkError> {
             msg: "standalone generation does not support a postlex (Indenter) hook".to_string(),
         }));
     }
-    // Reject `propagate_positions` rather than silently drop spans (#425, option b).
-    // The in-process LALR/Earley/CYK paths thread `cg.propagate_positions` into their
-    // tree builder so a node's `meta` spans its rule's pre-filter children (#402), but
-    // the standalone runtime (`runtime.rs`) has no `Tree.meta`/span tracking at all and
-    // `bake` does not set `cg.propagate_positions`. Baking a parser here would therefore
-    // produce *absent* spans where the in-process engine produces real ones — an
-    // ADR-0017 "more permissive / unfalsifiable" silent asymmetry. Fail loud (ADR-0030
-    // spirit) at the same chokepoint the postlex / illegal-config (#298) / un-hostable-
-    // lookaround (#280) guards use, until the capability gap is closed (option a, #457).
-    if options.propagate_positions {
-        return Err(LarkError::Grammar(GrammarError::Other {
-            msg: "standalone generation does not support propagate_positions \
-                  (the standalone runtime has no Tree.meta/span support yet — see #457); \
-                  build without propagate_positions, or use the in-process parser"
-                .to_string(),
-        }));
-    }
+    // `propagate_positions` is now supported (#457, option a): the standalone runtime
+    // (`runtime.rs`) grew a `Tree.meta` span and the byte-offset fields on `Token` it
+    // derives from, and `bake` threads the flag below so a node's `meta` spans its
+    // rule's **pre-filter** children — byte-identical to the in-process LALR engine's
+    // `TreeOutputBuilder::with_propagate_positions` (#402). The #425 fail-loud
+    // rejection that stood here while the runtime lacked span support is therefore
+    // removed (its guard test in `tests/test_standalone.rs` is retired). When the flag
+    // is false the runtime still populates `meta` from post-filter children, exactly
+    // as the in-process default does.
 
     // Run the same front-door config-legality gate the in-process build runs
     // (`build_frontend` → `validate_config`, bug-bounty N5/N6, #273) so the two
@@ -319,6 +312,7 @@ fn bake(grammar_src: &str, options: &LarkOptions) -> Result<Baked, LarkError> {
         scan_groups,
         unless,
         ignore,
+        propagate_positions: options.propagate_positions,
     })
 }
 
@@ -520,6 +514,12 @@ fn emit_data(out: &mut String, baked: &Baked) {
         .join(", ");
     let _ = writeln!(out, "    ignore: &[{ig_list}],");
 
+    let _ = writeln!(
+        out,
+        "    propagate_positions: {},",
+        baked.propagate_positions
+    );
+
     out.push_str("};\n");
 }
 
@@ -585,6 +585,7 @@ mod tests {
         scan_groups: &[(1, "a")],
         unless: &[],
         ignore: &[],
+        propagate_positions: false,
     };
 
     #[test]
@@ -609,15 +610,17 @@ mod tests {
     /// crash here means the manual worklist impls were lost.
     #[test]
     fn runtime_tree_drop_and_clone_are_iterative() {
-        use super::runtime::{Child, Tree};
+        use super::runtime::{Child, Meta, Tree};
         let mut t = Tree {
             data: "leaf".to_string(),
             children: vec![],
+            meta: Meta::default(),
         };
         for _ in 0..200_000 {
             t = Tree {
                 data: "nest".to_string(),
                 children: vec![Child::Tree(t)],
+                meta: Meta::default(),
             };
         }
         let copy = t.clone();
@@ -782,6 +785,7 @@ mod tests {
             scan_groups: Box::leak(scan_groups.into_boxed_slice()),
             unless: Box::leak(unless.into_boxed_slice()),
             ignore: Box::leak(b.ignore.clone().into_boxed_slice()),
+            propagate_positions: b.propagate_positions,
         }))
     }
 
@@ -1003,6 +1007,138 @@ mod tests {
                  None (expected Ok(ParseTree::None)): {e}"
             ),
             Err(_) => panic!("V-H7-1: standalone panicked on a None-root parse"),
+        }
+    }
+
+    // ─── #457: propagate_positions meta parity with the in-process LALR engine ──
+    //
+    // The oracle is the in-process **basic-lexer** LALR parser with
+    // `propagate_positions=true` (the standalone runtime *is* the basic lexer, so
+    // comparing against the contextual lexer would conflate the two). The standalone
+    // runtime's `Tree.meta` must be byte-identical to it — the #402 semantics (a
+    // node's `meta` spans its rule's *pre-filter* children, so filtered punctuation /
+    // `%ignore` whitespace still bound a container) — and `Token` spans must be
+    // **character** indices (#278), not byte offsets, on non-ASCII input.
+
+    /// Recursively assert the standalone runtime tree's `meta` equals the oracle's.
+    fn assert_meta_eq(oracle: &crate::tree::Tree, mine: &super::runtime::Tree, input: &str) {
+        assert_eq!(oracle.data, mine.data, "{input:?}: node name");
+        let (o, m) = (&oracle.meta, &mine.meta);
+        assert_eq!(o.line, m.line, "{input:?} {}: line", oracle.data);
+        assert_eq!(o.column, m.column, "{input:?} {}: column", oracle.data);
+        assert_eq!(
+            o.end_line, m.end_line,
+            "{input:?} {}: end_line",
+            oracle.data
+        );
+        assert_eq!(
+            o.end_column, m.end_column,
+            "{input:?} {}: end_column",
+            oracle.data
+        );
+        assert_eq!(
+            o.start_pos, m.start_pos,
+            "{input:?} {}: start_pos",
+            oracle.data
+        );
+        assert_eq!(o.end_pos, m.end_pos, "{input:?} {}: end_pos", oracle.data);
+        assert_eq!(o.empty, m.empty, "{input:?} {}: empty", oracle.data);
+        assert_eq!(
+            oracle.children.len(),
+            mine.children.len(),
+            "{input:?} {}: child count",
+            oracle.data
+        );
+        for (oc, mc) in oracle.children.iter().zip(&mine.children) {
+            match (oc, mc) {
+                (crate::tree::Child::Tree(ot), super::runtime::Child::Tree(mt)) => {
+                    assert_meta_eq(ot, mt, input)
+                }
+                (crate::tree::Child::Token(ot), super::runtime::Child::Token(mt)) => {
+                    // Token spans must agree too (the meta widening reads them).
+                    assert_eq!(ot.value, mt.value, "{input:?}: token value");
+                    assert_eq!(ot.line, mt.line, "{input:?} {}: token line", ot.value);
+                    assert_eq!(ot.column, mt.column, "{input:?} {}: token column", ot.value);
+                    assert_eq!(
+                        ot.end_line, mt.end_line,
+                        "{input:?} {}: token end_line",
+                        ot.value
+                    );
+                    assert_eq!(
+                        ot.end_column, mt.end_column,
+                        "{input:?} {}: token end_column",
+                        ot.value
+                    );
+                    assert_eq!(
+                        ot.start_pos, mt.start_pos,
+                        "{input:?} {}: token start_pos",
+                        ot.value
+                    );
+                    assert_eq!(
+                        ot.end_pos, mt.end_pos,
+                        "{input:?} {}: token end_pos",
+                        ot.value
+                    );
+                }
+                (crate::tree::Child::None, super::runtime::Child::None) => {}
+                (oc, mc) => panic!("{input:?}: child shape mismatch {oc:?} vs {mc:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn standalone_meta_matches_in_process_lalr() {
+        // (grammar, inputs). Each grammar's container nodes span filtered punctuation
+        // / `%ignore` whitespace, so the #402 pre-filter widening is load-bearing; the
+        // last case is non-ASCII to pin char-index (#278) `start_pos`/`end_pos`.
+        let cases: &[(&str, &[&str])] = &[
+            (
+                "start: \"(\" NUMBER \")\"\nNUMBER: /[0-9]+/\n%ignore \" \"\n",
+                &["(42)", "( 42 )", "(7)"],
+            ),
+            (
+                "start: pair+\npair: \"[\" NUMBER \",\" NUMBER \"]\"\n\
+                 NUMBER: /[0-9]+/\n%ignore /\\s+/\n",
+                &["[1,2]", "[1, 2] [3, 4]", "[1,\n2]"],
+            ),
+            (
+                "start: \"\u{ab}\" WORD \"\u{bb}\"\nWORD: /\\w+/\n",
+                &["\u{ab}h\u{e9}llo\u{bb}"],
+            ),
+        ];
+
+        for (grammar, inputs) in cases {
+            let opts = LarkOptions {
+                parser: ParserAlgorithm::Lalr,
+                lexer: crate::LexerType::Basic,
+                start: vec!["start".to_string()],
+                propagate_positions: true,
+                ..Default::default()
+            };
+
+            // Oracle: in-process basic-lexer LALR with propagate_positions.
+            let oracle = crate::Lark::new(grammar, opts.clone()).expect("oracle builds");
+
+            // Standalone: bake (now accepts propagate_positions — #457), leak, run.
+            let baked = bake(grammar, &opts).expect("standalone bakes propagate_positions");
+            assert!(
+                baked.propagate_positions,
+                "#457: bake must thread propagate_positions into the baked data"
+            );
+            let data = leak_grammar_data(&baked);
+            let parser = Parser::from_data(data);
+
+            for input in *inputs {
+                let oracle_tree = match oracle.parse(input) {
+                    Ok(crate::ParseTree::Tree(t)) => t,
+                    other => panic!("{input:?}: oracle did not return a Tree: {other:?}"),
+                };
+                let mine = match parser.parse(input) {
+                    Ok(ParseTree::Tree(t)) => t,
+                    other => panic!("{input:?}: standalone did not return a Tree: {other:?}"),
+                };
+                assert_meta_eq(&oracle_tree, &mine, input);
+            }
         }
     }
 
