@@ -24,6 +24,10 @@ untouched.
 
 ## 2. Walk the open issues (`mcp__github__list_issues`, state OPEN)
 
+> A full OPEN page can overflow the MCP token cap and divert to a file; digest it
+> to `#N title [labels]` rather than slicing the raw blob (see the GitHub-MCP
+> token-hygiene note in [`roadmap.md`](roadmap.md)).
+
 For each, determine the intended labels (**apply:** set them; **dry-run:** report
 them):
 

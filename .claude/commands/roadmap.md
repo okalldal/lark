@@ -53,6 +53,24 @@ Report back the filed issue numbers.
 Anything genuinely undecidable (a real product/taste fork) is filed as
 `needs-decision` rather than guessed — that is the correct outcome, not a failure.
 
+### GitHub-MCP token hygiene
+
+The GitHub MCP tools echo large payloads straight into context, so a bulk filing
+pass wastes tokens fast (retro 2026-06-27). Keep it cheap:
+
+- **Link children with a task-list, not bulk `sub_issue_write`.** Put `- [ ] #N`
+  lines in the epic body via one `issue_write` update — each `sub_issue_write`
+  echoes the *entire* parent issue (~2k tokens), so N children cost ≈N× that for
+  no added signal. Reserve `sub_issue_write` for the few links where the formal
+  sub-issue hierarchy is actually read downstream.
+- **Don't broad-`list_issues` just to learn conventions** — `get_label` the
+  specific labels and read one representative issue (or `search_issues` with a
+  tight query). A full OPEN page can blow the token cap and only lands in a file.
+- **Digest any file-diverted overflow** to `#N title [labels]` rather than
+  slicing the raw blob.
+- **Keep bulk issue bodies lean** — put shared context in the epic and link it,
+  not in every child.
+
 ### Decision memo skeleton
 
 Any `needs-decision` issue created by `/roadmap` must include this skeleton so
