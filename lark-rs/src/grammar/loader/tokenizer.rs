@@ -487,6 +487,7 @@ impl<'a> Lexer<'a> {
         let name = rest[..len].to_string();
         self.reject_double_underscore_name(&name)?;
         self.reject_letterless_name(&name)?;
+        self.reject_nonletter_after_underscore_name(&name)?;
         self.advance(len);
         Ok(Some(Tok::Rule(name)))
     }
@@ -500,6 +501,7 @@ impl<'a> Lexer<'a> {
         let name = rest[..len].to_string();
         self.reject_double_underscore_name(&name)?;
         self.reject_letterless_name(&name)?;
+        self.reject_nonletter_after_underscore_name(&name)?;
         self.advance(len);
         Ok(Some(Tok::Terminal(name)))
     }
@@ -564,6 +566,58 @@ impl<'a> Lexer<'a> {
                      terminal name must contain at least one letter"
                 ),
             });
+        }
+        Ok(())
+    }
+
+    /// Reject a name whose first char *after* the (at most one) optional leading underscore
+    /// is not a letter, mirroring Python Lark's `RULE`/`TERMINAL` shape
+    /// (`_?[a-z][_a-z0-9]*` / `_?[A-Z][_A-Z0-9]*`): the char immediately following the
+    /// optional single leading underscore must be a letter. A name like `_9x` — one leading
+    /// underscore, then a digit, then a letter — fails that shape, so Python rejects the
+    /// grammar at grammar-lex (`GrammarError: Unexpected input`). lark-rs's
+    /// `lex_rule`/`lex_terminal` otherwise consume any run of `[A-Za-z0-9_]`, so `_9x`/`_9A`
+    /// were silently accepted. Per ADR-0017's corollary, being more permissive than the
+    /// oracle is unfalsifiable → a bug (#445).
+    ///
+    /// This is the **third** name-shape class, composing with — and deliberately distinct
+    /// from — the two sibling predicates so each fires on its own disjoint set:
+    /// - [`Self::reject_double_underscore_name`] (#361) catches `>= 2` leading underscores
+    ///   *with* a letter (`__foo`). This predicate is scoped to `<= 1` leading underscore,
+    ///   so it never overlaps it.
+    /// - [`Self::reject_letterless_name`] (#405) catches names with **no** letter at all
+    ///   (`_`, `__`, `_9`). This predicate requires a letter present, so it never fires on a
+    ///   letterless name (which would otherwise be reported here as "non-letter after the
+    ///   underscore" — #405 owns that class and emits the clearer message).
+    ///
+    /// So the firing set here is exactly: `<= 1` leading underscore, a letter present, and
+    /// the char right after the underscore run is a non-letter — i.e. `_<digit>…<letter>`
+    /// (`_9x`, `_9A`, `_9a`, `_0_a`). The accepted boundary (`_a`/`_X`/`_x9`/`a9`, a single
+    /// leading underscore + letter or a letter-first name) is untouched, matching Python.
+    ///
+    /// Note: lex_rule/lex_terminal are only reached when the name's first char is a letter
+    /// or `_` (the dispatch routes a digit-first run to `NumberCandidate`), so the char after
+    /// the underscore run is a non-letter only when one or more underscores precede a digit;
+    /// a 0-underscore name therefore never trips this. The check is written generally
+    /// (inspect the char at the underscore-run boundary) to stay faithful to the Python
+    /// shape regardless of dispatch.
+    fn reject_nonletter_after_underscore_name(&self, name: &str) -> Result<(), GrammarError> {
+        let leading_underscores = name.bytes().take_while(|&b| b == b'_').count();
+        // Scope to the gap between #361 (`>= 2` underscores) and #405 (no letter):
+        // a single (or zero) leading underscore, a letter present somewhere.
+        if leading_underscores <= 1 && name.bytes().any(|b| b.is_ascii_alphabetic()) {
+            let after = name.as_bytes().get(leading_underscores).copied();
+            if !matches!(after, Some(b) if b.is_ascii_alphabetic()) {
+                return Err(GrammarError::SyntaxError {
+                    line: self.line,
+                    col: self.col,
+                    msg: format!(
+                        "Unexpected input: name {name:?} — the character after at most one \
+                         leading underscore must be a letter (a rule or terminal name matches \
+                         `_?[a-zA-Z][_a-zA-Z0-9]*`)"
+                    ),
+                });
+            }
         }
         Ok(())
     }
