@@ -946,10 +946,19 @@ impl<'a> Transformer<'a> {
                 };
                 let mut push_deduped = |v: NodeValue| {
                     if keys.insert(node_value_key(&v)) {
+                        // #518: one materialized derivation admitted — the
+                        // denominator of the cyclic re-assembly per-derivation
+                        // envelope (`tests/test_earley_scaling.rs`, cyclic arm).
+                        crate::perf::add_explicit_derivation();
                         derivs.push(v);
                     }
                 };
                 for list in lists {
+                    // #518: the re-assembly work this packed node repeats on each
+                    // reach of a cycle node — the child slots fed to `assemble`.
+                    // Counted before the move so the size is read once.
+                    #[cfg(feature = "perf-counters")]
+                    crate::perf::add_explicit_assemble_children(list.len() as u64);
                     // Python's `_collapse_ambig`: a derivation that assembles
                     // to an `_ambig` (an expand1 rule whose single kept child
                     // is ambiguous) contributes its alternatives flat, not as
