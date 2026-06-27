@@ -297,6 +297,171 @@ fn extend_imported_terminal_min_width_breaks_equal_max_width_tie() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// #449 — within-terminal alternation arms must be sorted by **match width**
+// (`(-max_width, -min_width, -len(value))`), NOT by regex-source-string length.
+// Spun off from #286: the `%extend` path already used the width key
+// (`sort_terminal_arms`), but the MAIN multi-alt path in `resolve_term_regex` still
+// did `alts.sort_by(|a, b| b.len().cmp(&a.len()))`. The lexer is leftmost-FIRST
+// (`MatchKind::LeftmostFirst`), so an arm with a larger match width but a SHORTER
+// source string (e.g. `"ab"`, src len 4, beside `/[A-Za-z]/`, src len 9) was placed
+// second and never tried. All cases below are Python Lark 1.3.1 oracle-verified.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Leaf `(type, value)` pairs of a parse tree, in order — for asserting a token
+/// segmentation against the Python oracle.
+fn leaf_tokens(t: &ParseTree) -> Vec<(String, String)> {
+    fn walk(c: &lark_rs::Child, out: &mut Vec<(String, String)>) {
+        match c {
+            lark_rs::Child::Token(tok) => out.push((tok.type_.clone(), tok.value.clone())),
+            lark_rs::Child::Tree(tr) => tr.children.iter().for_each(|ch| walk(ch, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    match t {
+        ParseTree::Tree(tr) => tr.children.iter().for_each(|ch| walk(ch, &mut out)),
+        ParseTree::Token(tok) => out.push((tok.type_.clone(), tok.value.clone())),
+        _ => {}
+    }
+    out
+}
+
+/// #449 HEADLINE. `V: /[A-Za-z]/ | "ab"` on `"ab"` → ONE `V="ab"` token, matching
+/// Python Lark. Python's `TerminalTreeToPattern` sorts the arms by match width, so
+/// `"ab"` (width 2) precedes `/[A-Za-z]/` (width 1) and the leftmost-first engine
+/// takes the 2-char match. The pre-fix source-length sort put the 9-char `[A-Za-z]`
+/// source ahead of the 4-char `"ab"`, so the engine matched only `"a"` then `"b"` —
+/// two `V` tokens. (Before this fix this test asserted the wrong tokenization.)
+#[test]
+fn within_terminal_arms_sorted_by_match_width_not_source_length() {
+    let g = "start: V+\nV: /[A-Za-z]/ | \"ab\"\n";
+    let lark =
+        Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).expect("grammar builds");
+    let tree = lark.parse("ab").expect("\"ab\" parses");
+    assert_eq!(
+        leaf_tokens(&tree),
+        vec![("V".to_string(), "ab".to_string())],
+        "#449: `\"ab\"` (width 2) must sort ahead of `/[A-Za-z]/` (width 1) → one V=\"ab\" token"
+    );
+}
+
+/// #449. Arm declaration order is irrelevant — width ordering is recomputed — so the
+/// string-first spelling `V: "ab" | /[A-Za-z]/` tokenizes identically (one V="ab").
+#[test]
+fn within_terminal_width_sort_is_order_independent() {
+    let g = "start: V+\nV: \"ab\" | /[A-Za-z]/\n";
+    let lark =
+        Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).expect("grammar builds");
+    assert_eq!(
+        leaf_tokens(&lark.parse("ab").expect("\"ab\" parses")),
+        vec![("V".to_string(), "ab".to_string())],
+    );
+}
+
+/// #449. Three arms of widths 1 / 2 / 3 (`/[A-Za-z]/ | "ab" | "abc"`): the widest
+/// (`"abc"`, src len 5 — shorter than the 9-char class) must win on `"abc"`. Pins
+/// the full descending-width ordering, not just a two-arm swap.
+#[test]
+fn within_terminal_widest_arm_wins_across_three_widths() {
+    let g = "start: V+\nV: /[A-Za-z]/ | \"ab\" | \"abc\"\n";
+    let lark =
+        Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).expect("grammar builds");
+    assert_eq!(
+        leaf_tokens(&lark.parse("abc").expect("\"abc\" parses")),
+        vec![("V".to_string(), "abc".to_string())],
+        "#449: the width-3 `\"abc\"` arm must be tried first → one V=\"abc\""
+    );
+}
+
+/// #449. A wider *regex* arm with a shorter source beats a narrower string arm:
+/// `V: /[0-9][0-9]/ | "5"` on `"55"` → one V="55" (Python). The two-digit class
+/// (max_width 2) sorts ahead of the width-1 `"5"`.
+#[test]
+fn within_terminal_wider_regex_arm_beats_narrower_string() {
+    let g = "start: V+\nV: /[0-9][0-9]/ | \"5\"\n";
+    let lark =
+        Lark::new(g, opts(ParserAlgorithm::Lalr, LexerType::Contextual)).expect("grammar builds");
+    assert_eq!(
+        leaf_tokens(&lark.parse("55").expect("\"55\" parses")),
+        vec![("V".to_string(), "55".to_string())],
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #449 / #286 RESIDUAL — DECIDED BY THE ORACLE (kept; not a divergence).
+//
+// The issue asked whether an `%extend`ed imported terminal should retain its
+// PER-ARM structure so a new extend arm of intermediate width interleaves *among*
+// the imported body's internal arms (the way Python flattens-then-width-sorts a
+// same-grammar `expansions` tree). Differential audit vs Python Lark 1.3.1 settles
+// it: Python does **NOT** flatten an imported body. An imported terminal is already
+// a compiled `Pattern` (PatternRE), so `%extend`'s `expansions` holds it as ONE
+// opaque arm; the width sort ranks the whole imported body against the new arm, and
+// the leftmost-first engine then resolves the imported body internally on its own
+// (declaration) order. lark-rs's monolithic-arm treatment reproduces this exactly —
+// so it is oracle-FAITHFUL, not a residual divergence. These pins lock that parity.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Build a `LarkOptions` carrying inline import sources.
+fn opts_with_imports(files: &[(&str, &str)]) -> LarkOptions {
+    let sources: std::collections::HashMap<String, String> = files
+        .iter()
+        .map(|(n, c)| (n.to_string(), c.to_string()))
+        .collect();
+    LarkOptions {
+        import_sources: Some(std::sync::Arc::new(sources)),
+        ..opts(ParserAlgorithm::Lalr, LexerType::Contextual)
+    }
+}
+
+/// #449/#286 RESIDUAL pin. Imported `T: /a|aaa/` (internal arms width 1 & 3, shared
+/// prefix `a`) `%extend`ed with `"aa"` (width 2, *strictly between* the internal
+/// arms). The headline residual question. Python keeps the imported body opaque, so
+/// the combined pattern is `(?:(?:a|aaa))|(?:aa)` — on `"aa"` the first arm matches
+/// only `"a"` (leftmost-first), giving TWO `T="a"` tokens. Python Lark 1.3.1 yields
+/// exactly `[T="a", T="a"]`; lark-rs must too (NOT interleave `"aa"` between `a` and
+/// `aaa`, which would have produced a single `T="aa"`).
+#[test]
+fn extend_imported_body_is_opaque_arm_matching_oracle() {
+    let lark = Lark::new(
+        "%import .tok (T)\n%extend T: \"aa\"\nstart: T+\n",
+        opts_with_imports(&[("tok.lark", "T: /a|aaa/\n")]),
+    )
+    .expect("grammar builds");
+    assert_eq!(
+        leaf_tokens(&lark.parse("aa").expect("\"aa\" parses")),
+        vec![
+            ("T".to_string(), "a".to_string()),
+            ("T".to_string(), "a".to_string())
+        ],
+        "#286 residual: imported body stays one opaque arm (Python parity) → two T=\"a\", \
+         not a single interleaved T=\"aa\""
+    );
+}
+
+/// #449/#286 RESIDUAL pin (companion). The SAME arms written as a single same-grammar
+/// terminal `V: /a|aaa/ | "aa"` tokenize `"aa"` identically (two `V="a"`) — because
+/// `/a|aaa/` is itself one regex-literal arm (max_width 3) that sorts ahead of `"aa"`
+/// (width 2), and leftmost-first inside it takes `"a"`. Confirms the imported-body
+/// "opaque arm" behavior is not special-casing: it is the same width-sort + leftmost-
+/// first rule the headline fix applies, and it matches Python in both spellings.
+#[test]
+fn same_grammar_regex_alt_arm_matches_oracle_like_opaque_import() {
+    let lark = Lark::new(
+        "start: V+\nV: /a|aaa/ | \"aa\"\n",
+        opts(ParserAlgorithm::Lalr, LexerType::Contextual),
+    )
+    .expect("grammar builds");
+    assert_eq!(
+        leaf_tokens(&lark.parse("aa").expect("\"aa\" parses")),
+        vec![
+            ("V".to_string(), "a".to_string()),
+            ("V".to_string(), "a".to_string())
+        ],
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Lexer / regex dialect.
 // ─────────────────────────────────────────────────────────────────────────────
 
