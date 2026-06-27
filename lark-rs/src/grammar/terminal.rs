@@ -1385,9 +1385,24 @@ fn find_nothing_to_repeat(pattern: &str) -> Option<usize> {
             }
         }
         // Everything else — an ordinary char, a `\`-escape pair, or a `[...]` class span —
-        // is repeatable text. Let the shared cursor consume one structural step.
-        cur.step();
-        repeatable = true;
+        // is repeatable text *unless* it is a bare zero-width anchor. A quantifier binds to
+        // an atom, and Python `re` treats an anchor as "nothing to repeat": an out-of-class
+        // `^`/`$` (`^*`, `$*`) and the anchor escapes `\b`/`\B`/`\A`/`\Z` (`\b*`, …) are
+        // non-repeatable, so a quantifier immediately after one is flagged. Inside a `[...]`
+        // class `^`/`$` are literal members and `\b` is a backspace literal — all repeatable
+        // — so this only fires out-of-class (`!cur.in_class()`), which `step()`'s class
+        // tracking already maintains (#510). Scoped strictly to the quantifier-binding
+        // question; whether lark-rs *supports* `\b`/`\Z` semantics at all is the parked
+        // anchor-policy fork (#275) and is untouched here — an *un*-quantified `\bword\b`
+        // builds exactly as before.
+        let step = cur.step();
+        let is_bare_anchor = !cur.in_class()
+            && match step {
+                Step::Char { c } => c == '^' || c == '$',
+                Step::Escape { esc } => matches!(esc, Some('b' | 'B' | 'A' | 'Z')),
+                Step::ClassOpen { .. } | Step::ClassClose => false,
+            };
+        repeatable = !is_bare_anchor;
     }
     None
 }
@@ -2092,6 +2107,62 @@ mod tests {
         }
     }
 
+    /// #510: a base quantifier applied to a **bare zero-width anchor** — an out-of-class
+    /// `^`/`$` or an anchor escape `\b`/`\B`/`\A`/`\Z` — is Python `re` "nothing to repeat",
+    /// but the `regex` crate accepts it (it lets you quantify an anchor), so `Regex::new`
+    /// would build a terminal Python rejects: lark-rs was *more permissive* than the oracle
+    /// (ADR-0017's unfalsifiable corollary). `PatternRe::new` must reject each with the
+    /// truthful `InvalidRegex` "nothing to repeat" category, matching Python. Grounded
+    /// against Python 3.11 `re.compile` (the worker's differential probe; see issue #510).
+    /// Scope is strictly the quantifier-binding question — whether lark-rs *supports*
+    /// `\b`/`\Z` semantics at all is the parked anchor-policy fork (#275), untouched here.
+    #[test]
+    fn quantified_bare_anchor_is_nothing_to_repeat() {
+        for p in [
+            "^*", "^+", "^?", "^{2,5}", "$*", "$+", "$?", r"\b*", r"\B*", r"\A*", r"\Z*", r"\b+",
+            r"\Z{2}", "(?m)^*", "(?m)$*", r"(?m)\b*", r"a\b*", "^$*",
+        ] {
+            let err = PatternRe::new(p, 0)
+                .expect_err("a quantified bare anchor is nothing to repeat (Python `re`)");
+            match &err {
+                GrammarError::InvalidRegex { reason, .. } => assert!(
+                    reason.contains("nothing to repeat"),
+                    "{p:?}: InvalidRegex reason must name \"nothing to repeat\", got: {reason}"
+                ),
+                other => panic!("{p:?}: must be InvalidRegex \"nothing to repeat\", not {other:?}"),
+            }
+        }
+    }
+
+    /// #510 negative control: an anchor followed by a **real** atom that the quantifier binds
+    /// to — or an anchor inside a character class where `^`/`$`/`\b` are literal members —
+    /// still builds. This is the boundary against the parked #275 anchor-support policy: an
+    /// *un*-quantified `\bword\b` (and `a$`, `^a*`, …) must build exactly as before; the fix
+    /// only flags the quantifier-on-anchor shape, never anchor support itself. Each builds in
+    /// Python `re` (oracle).
+    #[test]
+    fn anchor_then_real_atom_still_builds() {
+        for p in [
+            "^a*",
+            "a$",
+            "^(a)*",
+            r"\bword\b",
+            "a*$",
+            r"(\b)*",
+            r"\Bx*",
+            r"[\^]*",
+            "[$]*",
+            r"[\b]*",
+            "[^a]*",
+        ] {
+            assert!(
+                PatternRe::new(p, 0).is_ok(),
+                "{p:?}: the quantifier binds to a real atom (or the anchor is a class \
+                 member) — Python `re` accepts it, so lark-rs must build it (#510, not #275)"
+            );
+        }
+    }
+
     /// #448 differential-audit: the nothing-to-repeat pre-screen (#506: now a **local**
     /// shape classifier, `find_nothing_to_repeat`, no longer the `regex`-crate message text)
     /// must NOT re-bucket a genuine `LookaroundScope`/backref input. These constructs
@@ -2186,6 +2257,44 @@ mod tests {
             // NOT "nothing to repeat".
             ("a**", false),
             ("a*?", false),
+            // --- #510: a quantifier on a bare zero-width anchor is "nothing to repeat" ---
+            // Out-of-class `^`/`$` are anchors, not repeatable atoms.
+            ("^*", true),
+            ("^+", true),
+            ("^?", true),
+            ("^{0,5}", true),
+            ("$*", true),
+            ("$+", true),
+            ("$?", true),
+            // The anchor escapes `\b`/`\B`/`\A`/`\Z` likewise have nothing to repeat.
+            (r"\b*", true),
+            (r"\B*", true),
+            (r"\A*", true),
+            (r"\Z*", true),
+            (r"\b+", true),
+            (r"\Z{0,2}", true),
+            // A flag prefix does not change the verdict (the anchor still has nothing).
+            ("(?m)^*", true),
+            (r"(?m)\b*", true),
+            // An anchor with nothing real before it still poisons a following quantifier:
+            // the `*` binds to the anchor, not the earlier atom (Python: `a\b*` rejects).
+            (r"a\b*", true),
+            ("^$*", true),
+            ("$^*", true),
+            // --- #510 negative controls: the quantifier binds to a REAL atom, builds ---
+            ("^a*", false),   // `*` binds to `a`
+            ("a$", false),    // `$` is a trailing anchor, no quantifier
+            ("^(a)*", false), // `*` binds to the closed group
+            (r"\bword\b", false),
+            ("a*$", false),
+            ("(\\b)*", false), // `*` binds to the closed group, not the inner `\b`
+            (r"\Bx*", false),  // `*` binds to `x`
+            // Inside a class `^`/`$` are literal members and `\b` is a backspace literal —
+            // all repeatable, so a following quantifier has something to repeat.
+            (r"[\^]*", false),
+            ("[$]*", false),
+            (r"[\b]*", false),
+            ("[^a]*", false), // leading `^` is class negation; the class is repeatable
         ];
         for &(p, want) in cases {
             assert_eq!(
