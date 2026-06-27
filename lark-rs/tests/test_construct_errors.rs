@@ -35,3 +35,37 @@ fn test_unresolvable_import_is_rejected() {
     // A `common` import still resolves.
     assert!(try_build("start: WORD\n%import common.WORD").is_ok());
 }
+
+#[test]
+fn test_deeply_nested_terminal_fails_gracefully_without_aborting() {
+    // #455: a terminal regex with thousands of nested groups used to drive the
+    // lookaround front-end's unbounded recursion (`lookaround::parse` /
+    // `width_range`, reached via `Pattern::max_width` during terminal ordering on
+    // *every* lexer build) to a stack overflow that **aborted the whole process**.
+    // With the front-end's nesting cap it must instead fail to build with a normal,
+    // recoverable error — reaching the assertion at all is the evidence the build did
+    // not abort.
+    let depth = 50_000;
+    let grammar = format!(
+        "start: TOK\nTOK: /{}a{}/\n",
+        "(".repeat(depth),
+        ")".repeat(depth)
+    );
+    assert!(
+        try_build(&grammar).is_err(),
+        "a pathologically deep terminal must error, not abort the process"
+    );
+
+    // A deep-but-reasonable terminal still builds (the cap only bites the pathological
+    // case, well past anything a real grammar reaches).
+    let ok_depth = 20;
+    let ok_grammar = format!(
+        "start: TOK\nTOK: /{}a{}/\n",
+        "(".repeat(ok_depth),
+        ")".repeat(ok_depth)
+    );
+    assert!(
+        try_build(&ok_grammar).is_ok(),
+        "a reasonably-nested terminal must still build"
+    );
+}

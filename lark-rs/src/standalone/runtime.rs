@@ -67,6 +67,14 @@ pub struct GrammarData {
     pub unless: &'static [(u32, &'static [(&'static str, bool, u32)])],
     /// `%ignore` terminal ids, discarded after matching.
     pub ignore: &'static [u32],
+    /// Python Lark's `propagate_positions`: when true a non-transparent node's
+    /// `meta` span is widened to its rule's **pre-filter** children (so a filtered
+    /// `"("`/`")"` still bounds the parent — #402), byte-identical to the in-process
+    /// LALR engine's `TreeOutputBuilder::with_propagate_positions`. When false the
+    /// span is still populated from the (already-filtered) children, exactly as the
+    /// in-process default does — `propagate_positions` only changes *which* children
+    /// feed the span, never whether `meta` exists.
+    pub propagate_positions: bool,
 }
 
 impl GrammarData {
@@ -90,6 +98,11 @@ impl GrammarData {
 }
 
 /// A positioned token from the lexer.
+///
+/// `start_pos`/`end_pos` are **character** indices, not byte offsets — Python
+/// Lark's `start_pos`/`end_pos` are char indices and the two diverge on any
+/// non-ASCII input (#278). `end_line`/`end_column` are the 1-based position just
+/// past the token (multi-line aware), matching the in-process `BasicLexer`.
 #[derive(Clone, Debug)]
 pub struct Token {
     pub type_id: u32,
@@ -97,6 +110,10 @@ pub struct Token {
     pub value: String,
     pub line: usize,
     pub column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
+    pub start_pos: usize,
+    pub end_pos: usize,
 }
 
 /// A child of a `Tree` node — a subtree, a leaf token, or a `None` placeholder.
@@ -105,6 +122,94 @@ pub enum Child {
     Tree(Tree),
     Token(Token),
     None,
+}
+
+/// Source position metadata attached to a [`Tree`] node — the standalone mirror
+/// of the in-process `tree::Meta`. Populated for every node (a node with no
+/// positioned child stays `empty=true` with `None` fields). Under
+/// `propagate_positions` the span is widened to the rule's pre-filter children,
+/// byte-identical to the in-process LALR engine (#402).
+#[derive(Clone, Debug, Default)]
+pub struct Meta {
+    pub line: Option<usize>,
+    pub column: Option<usize>,
+    pub end_line: Option<usize>,
+    pub end_column: Option<usize>,
+    pub start_pos: Option<usize>,
+    pub end_pos: Option<usize>,
+    /// True when no child contributed a position (an empty match).
+    pub empty: bool,
+}
+
+impl Meta {
+    /// Base span from the **post-filter** children: the first positioned child
+    /// fixes the start fields, the last positioned child the end fields. Mirrors
+    /// `tree::Meta::from_children` (and Python's `_pp_get_meta`): a positionless
+    /// empty subtree contributes nothing, so a node whose sole child is one stays
+    /// `empty=true`.
+    fn from_children(children: &[Child]) -> Meta {
+        let mut meta = Meta::default();
+        for child in children {
+            if let (None, Some(line)) = (meta.line, child_line(child)) {
+                meta.line = Some(line);
+                meta.column = child_column(child);
+                meta.start_pos = child_start(child);
+            }
+        }
+        for child in children.iter().rev() {
+            if let Some(line) = child_end_line(child) {
+                meta.end_line = Some(line);
+                meta.end_column = child_end_column(child);
+                meta.end_pos = child_end(child);
+                break;
+            }
+        }
+        meta.empty = meta.line.is_none();
+        meta
+    }
+}
+
+fn child_line(c: &Child) -> Option<usize> {
+    match c {
+        Child::Token(t) if t.line > 0 => Some(t.line),
+        Child::Tree(t) => t.meta.line,
+        _ => None,
+    }
+}
+fn child_column(c: &Child) -> Option<usize> {
+    match c {
+        Child::Token(t) if t.column > 0 => Some(t.column),
+        Child::Tree(t) => t.meta.column,
+        _ => None,
+    }
+}
+fn child_start(c: &Child) -> Option<usize> {
+    match c {
+        Child::Token(t) => Some(t.start_pos),
+        Child::Tree(t) => t.meta.start_pos,
+        Child::None => None,
+    }
+}
+fn child_end_line(c: &Child) -> Option<usize> {
+    match c {
+        Child::Token(t) if t.end_line > 0 => Some(t.end_line),
+        Child::Tree(t) => t.meta.end_line,
+        _ => None,
+    }
+}
+fn child_end_column(c: &Child) -> Option<usize> {
+    match c {
+        Child::Token(t) if t.end_column > 0 => Some(t.end_column),
+        Child::Tree(t) => t.meta.end_column,
+        _ => None,
+    }
+}
+fn child_end(c: &Child) -> Option<usize> {
+    match c {
+        Child::Token(t) => Some(t.end_pos),
+        Child::Tree(t) => t.meta.end_pos,
+        Child::None => None,
+    }
 }
 
 /// A node in the parse tree. `data` is the rule name (or alias) that built it.
@@ -117,6 +222,7 @@ pub enum Child {
 pub struct Tree {
     pub data: String,
     pub children: Vec<Child>,
+    pub meta: Meta,
 }
 
 impl Drop for Tree {
@@ -152,12 +258,14 @@ impl Clone for Tree {
         struct Frame<'a> {
             src: std::slice::Iter<'a, Child>,
             data: String,
+            meta: Meta,
             out: Vec<Child>,
         }
         fn frame(t: &Tree) -> Frame<'_> {
             Frame {
                 src: t.children.iter(),
                 data: t.data.clone(),
+                meta: t.meta.clone(),
                 out: Vec::with_capacity(t.children.len()),
             }
         }
@@ -175,6 +283,7 @@ impl Clone for Tree {
                     let tree = Tree {
                         data: done.data,
                         children: done.out,
+                        meta: done.meta,
                     };
                     match stack.last_mut() {
                         Some(parent) => parent.out.push(Child::Tree(tree)),
@@ -309,7 +418,11 @@ impl Scanner {
 fn lex(data: &GrammarData, scanner: &Scanner, text: &str) -> Result<Vec<Token>, String> {
     let ignore: HashSet<u32> = data.ignore.iter().copied().collect();
     let mut tokens = Vec::new();
+    // `pos` is the **byte** offset (drives regex slicing); `char_pos` is the
+    // **character** index a token's `start_pos`/`end_pos` carry — Python parity,
+    // the two diverge on non-ASCII input (#278). Both advance together.
     let mut pos = 0usize;
+    let mut char_pos = 0usize;
     let mut line = 1usize;
     let mut col = 1usize;
 
@@ -318,6 +431,7 @@ fn lex(data: &GrammarData, scanner: &Scanner, text: &str) -> Result<Vec<Token>, 
             Some((id, value)) => {
                 let start_line = line;
                 let start_col = col;
+                let start_pos = char_pos;
                 for ch in value.chars() {
                     if ch == '\n' {
                         line += 1;
@@ -325,6 +439,7 @@ fn lex(data: &GrammarData, scanner: &Scanner, text: &str) -> Result<Vec<Token>, 
                     } else {
                         col += 1;
                     }
+                    char_pos += 1;
                 }
                 pos += value.len();
                 if !ignore.contains(&id) {
@@ -334,6 +449,10 @@ fn lex(data: &GrammarData, scanner: &Scanner, text: &str) -> Result<Vec<Token>, 
                         value: value.to_string(),
                         line: start_line,
                         column: start_col,
+                        end_line: line,
+                        end_column: col,
+                        start_pos,
+                        end_pos: char_pos,
                     });
                 }
             }
@@ -347,13 +466,17 @@ fn lex(data: &GrammarData, scanner: &Scanner, text: &str) -> Result<Vec<Token>, 
         }
     }
 
-    // End-of-input sentinel (terminal id 0 = $END).
+    // End-of-input sentinel (terminal id 0 = $END); carries the char index (#278).
     tokens.push(Token {
         type_id: 0,
         type_: data.name_of(0).to_string(),
         value: String::new(),
         line,
         column: col,
+        end_line: line,
+        end_column: col,
+        start_pos: char_pos,
+        end_pos: char_pos,
     });
     Ok(tokens)
 }
@@ -368,7 +491,76 @@ fn nones_at(rule: &RuleData, gap: usize) -> u32 {
     rule.nones_before.get(gap).copied().unwrap_or(0)
 }
 
-fn shape(rule: &RuleData, mut children: Vec<Child>) -> NodeValue {
+/// The container span of a rule's **pre-filter** children — the first/last
+/// positioned child's start/end, including filtered punctuation tokens the tree
+/// drops. The standalone mirror of `tree_builder::ContainerSpan` (Python's
+/// `PropagatePositions._pp_get_meta`), the #402 regression net: built by streaming
+/// every child value past `observe_*` left-to-right, then applied with `widen_meta`.
+#[derive(Default)]
+struct ContainerSpan {
+    first: Option<Meta>,
+    last: Option<Meta>,
+}
+
+impl ContainerSpan {
+    fn observe(&mut self, meta: Meta) {
+        if self.first.is_none() {
+            self.first = Some(meta.clone());
+        }
+        self.last = Some(meta);
+    }
+
+    fn observe_token(&mut self, t: &Token) {
+        self.observe(Meta {
+            line: Some(t.line),
+            column: Some(t.column),
+            end_line: Some(t.end_line),
+            end_column: Some(t.end_column),
+            start_pos: Some(t.start_pos),
+            end_pos: Some(t.end_pos),
+            empty: false,
+        });
+    }
+
+    fn observe_meta(&mut self, meta: &Meta) {
+        if !meta.empty && meta.line.is_some() {
+            self.observe(meta.clone());
+        }
+    }
+
+    fn observe_child(&mut self, c: &Child) {
+        match c {
+            Child::Token(t) => self.observe_token(t),
+            Child::Tree(t) => self.observe_meta(&t.meta),
+            Child::None => {}
+        }
+    }
+
+    /// Widen `meta`'s span to the container: start fields from the first positioned
+    /// child, end fields from the last. A node with no positioned pre-filter child
+    /// is left untouched (an empty production).
+    fn widen_meta(&self, meta: &mut Meta) {
+        if let Some(first) = &self.first {
+            meta.line = first.line;
+            meta.column = first.column;
+            meta.start_pos = first.start_pos;
+            meta.empty = false;
+        }
+        if let Some(last) = &self.last {
+            meta.end_line = last.end_line;
+            meta.end_column = last.end_column;
+            meta.end_pos = last.end_pos;
+            meta.empty = false;
+        }
+    }
+}
+
+fn shape(
+    data: &GrammarData,
+    rule: &RuleData,
+    mut children: Vec<Child>,
+    container: ContainerSpan,
+) -> NodeValue {
     for _ in 0..rule.placeholder_count {
         children.push(Child::None);
     }
@@ -376,6 +568,8 @@ fn shape(rule: &RuleData, mut children: Vec<Child>) -> NodeValue {
         children.push(Child::None);
     }
     if rule.transparent {
+        // `_rule` / `__anon_*`: splice into the parent. No node is built, so there
+        // is no `meta` to widen — the spliced children carry their own positions up.
         NodeValue::Inline(children)
     } else if rule.expand1 && !rule.has_alias && children.len() == 1 {
         // `?rule` with a single child: return that child directly. A lone `None`
@@ -384,6 +578,10 @@ fn shape(rule: &RuleData, mut children: Vec<Child>) -> NodeValue {
         // (bounty RC9; the `?` collapse is purely arity-1, never value-typed). This
         // mirrors `TreeOutputBuilder::shape`'s RC9 carve-out in
         // `parsers/tree_builder.rs` so the baked runtime stays byte-faithful to core.
+        //
+        // No container widening here: Python's `PropagatePositions` only sets meta
+        // when its node builder returns a `Tree`; an expand1 collapse to a bare
+        // token/tree keeps that value's own span.
         match children.pop().unwrap() {
             Child::Tree(t) => NodeValue::Tree(t),
             Child::Token(t) => NodeValue::Token(t),
@@ -392,9 +590,14 @@ fn shape(rule: &RuleData, mut children: Vec<Child>) -> NodeValue {
             Child::None => NodeValue::Inline(vec![Child::None]),
         }
     } else {
+        let mut meta = Meta::from_children(&children);
+        if data.propagate_positions {
+            container.widen_meta(&mut meta);
+        }
         NodeValue::Tree(Tree {
             data: rule.tree_name.to_string(),
             children,
+            meta,
         })
     }
 }
@@ -402,21 +605,40 @@ fn shape(rule: &RuleData, mut children: Vec<Child>) -> NodeValue {
 fn assemble(data: &GrammarData, rule_idx: usize, child_values: Vec<NodeValue>) -> NodeValue {
     let rule = &data.rules[rule_idx];
     let mut children: Vec<Child> = Vec::new();
+    // Under `propagate_positions`, the node's span comes from the *pre*-filter
+    // children (so a filtered `"("`/`")"` still bounds the span — #402), so observe
+    // every value as it streams by, kept or dropped, before the kept list is shaped.
+    let mut container = ContainerSpan::default();
     for (i, value) in child_values.into_iter().enumerate() {
         for _ in 0..nones_at(rule, i) {
             children.push(Child::None);
         }
         match value {
             NodeValue::Token(t) => {
+                if data.propagate_positions {
+                    container.observe_token(&t);
+                }
                 if keep_token(rule, i) {
                     children.push(Child::Token(t));
                 }
             }
-            NodeValue::Tree(t) => children.push(Child::Tree(t)),
-            NodeValue::Inline(cs) => children.extend(cs),
+            NodeValue::Tree(t) => {
+                if data.propagate_positions {
+                    container.observe_meta(&t.meta);
+                }
+                children.push(Child::Tree(t));
+            }
+            NodeValue::Inline(cs) => {
+                if data.propagate_positions {
+                    for c in &cs {
+                        container.observe_child(c);
+                    }
+                }
+                children.extend(cs);
+            }
         }
     }
-    shape(rule, children)
+    shape(data, rule, children, container)
 }
 
 fn run(data: &GrammarData, tokens: &[Token], start_state: usize) -> Result<ParseTree, String> {

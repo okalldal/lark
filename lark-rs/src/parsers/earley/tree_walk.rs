@@ -41,6 +41,37 @@ pub(crate) struct Transformer<'a> {
     /// [`Transformer::eval_symbol`] and the transparent-child ambiguity lifting in
     /// [`Transformer::expand_packed`].
     deriv_memo: HashMap<usize, Vec<NodeValue>>,
+    /// Explicit mode (#348): per-packed-node expansion cache — Python Lark's
+    /// `ForestToParseTree._cache`, keyed by the packed node's stable identity
+    /// `(symbol_node_id, family_index)` (`Packed` is `Copy` and lives inline in
+    /// `forest.nodes[n].families`, so the index is its identity). Stores the
+    /// alternative child-lists one packed node expands to (`ExpandPacked`'s
+    /// `Ret::Lists`), inserted **on the way out and only when non-empty** (a fully
+    /// built, cycle-free result — never a partial or a discarded family). On a
+    /// later reach of the same packed node the cached value is returned **without
+    /// re-descending**, so it side-steps the `visiting` cycle discard — exactly how
+    /// Python's `_cache` recovers the derivations a cyclic re-descent would drop.
+    /// Without it lark-rs reproduces Python's `use_cache=False` numbers (the H4-10
+    /// under-report: 6 vs 8 on `"bbb"`). Scoped to one walk — a fresh `Transformer`
+    /// is built per parse ([`super::EarleyParser::forest_to_tree`]), so it starts
+    /// empty and is never reused across forests.
+    packed_cache: HashMap<(usize, usize), Vec<Vec<NodeValue>>>,
+    /// Explicit mode (#348): the set of forest nodes that lie on a cycle — every
+    /// node in a non-trivial strongly-connected component (SCC size > 1, or a
+    /// self-loop). Computed once over the whole forest by
+    /// [`Transformer::ensure_cycle_nodes`] (Tarjan's SCC, iterative — never recurses
+    /// to forest depth, #33), then queried by [`Transformer::is_cycle_node`].
+    ///
+    /// The per-symbol `deriv_memo`/`memo` (one value per node) freeze a node's value
+    /// to the single ancestor context it was first reached in — correct for an
+    /// acyclic node but *wrong* for a cyclic one, whose enumeration is context-
+    /// sensitive (Python re-derives it; lark-rs governs it via `packed_cache`). So
+    /// those memos are consulted/written only for non-cycle nodes; cyclic nodes rely
+    /// on `packed_cache` for sharing and on `visiting` for termination. SCC
+    /// membership (not a single-pass back-edge DFS) is the correct test: interacting
+    /// cycles share nodes that a one-root DFS can mis-settle as acyclic (#348 audit).
+    /// `None` until first queried.
+    cycle_nodes: Option<HashSet<usize>>,
     /// Explicit mode (#59): memoized "is this node's whole subtree unambiguous?"
     /// (every reachable node has ≤ 1 family, no forest cycle). A `true` node has
     /// exactly one derivation, so the explicit walk would produce the *same* single
@@ -102,6 +133,8 @@ impl<'a> Transformer<'a> {
             term_priority,
             memo: HashMap::new(),
             deriv_memo: HashMap::new(),
+            packed_cache: HashMap::new(),
+            cycle_nodes: None,
             single_deriv: HashMap::new(),
             prio: HashMap::new(),
             prio_visiting: HashSet::new(),
@@ -346,6 +379,138 @@ impl<'a> Transformer<'a> {
         self.single_deriv.get(&id).copied().unwrap_or(false)
     }
 
+    /// Explicit mode (#348): is symbol/intermediate node `id` *on* a forest cycle —
+    /// a member of a non-trivial strongly-connected component of the SPPF? Used to
+    /// gate the per-symbol `deriv_memo`/`memo`: an acyclic node's value is identical
+    /// in every ancestor context (safe to memoize), but a cyclic node's enumeration
+    /// is context-sensitive (Python re-derives it; lark-rs governs it via
+    /// `packed_cache`), so memoizing it freezes the wrong single-context list.
+    ///
+    /// Triggers a one-time whole-forest SCC computation ([`Self::ensure_cycle_nodes`])
+    /// on first call. SCC membership — not a single-pass back-edge DFS — is the
+    /// correct test: two cycles that *share* a node form one SCC, and a node a
+    /// one-root DFS visits before its incoming cross-cycle edge could otherwise be
+    /// mis-settled acyclic (the H4-10 audit `e: e e | f | ; f: e | "d" f |` case,
+    /// 44 derivations, exposed exactly that false-negative).
+    fn is_cycle_node(&mut self, id: usize) -> bool {
+        self.ensure_cycle_nodes();
+        self.cycle_nodes.as_ref().unwrap().contains(&id)
+    }
+
+    /// Compute, once, the set of all forest nodes on a cycle — every node in an SCC
+    /// of size > 1, plus any node with a self-loop (a family with a direct child
+    /// edge to itself). Tarjan's SCC, iterated with an explicit work stack so it
+    /// never recurses to forest depth (#33). Edges are the `Node` child references
+    /// of every family (the same graph the walk traverses).
+    fn ensure_cycle_nodes(&mut self) {
+        if self.cycle_nodes.is_some() {
+            return;
+        }
+        let n = self.forest.nodes.len();
+        let mut on_cycle: HashSet<usize> = HashSet::new();
+        // Tarjan state, indexed by node id (`usize::MAX` = "unvisited").
+        let mut index = vec![usize::MAX; n];
+        let mut lowlink = vec![usize::MAX; n];
+        let mut on_stack = vec![false; n];
+        let mut scc_stack: Vec<usize> = Vec::new();
+        let mut next_index: usize = 0;
+        // Explicit DFS work items: visit a node, or resume it after a child returns.
+        enum Work {
+            // Enter `node`; `child_pos` is which family-edge to process next.
+            Visit { node: usize, child_pos: usize },
+        }
+        // Flat edge list per node (the `Node` children of all its families), so the
+        // resume can index into a stable sequence.
+        let edges_of = |node: usize, forest: &Forest| -> Vec<usize> {
+            let mut e = Vec::new();
+            for p in &forest.nodes[node].families {
+                for r in [p.left, p.right] {
+                    if let ForestRef::Node(c) = r {
+                        e.push(c);
+                    }
+                }
+            }
+            e
+        };
+        for root in 0..n {
+            if index[root] != usize::MAX {
+                continue;
+            }
+            let mut work = vec![Work::Visit {
+                node: root,
+                child_pos: 0,
+            }];
+            while let Some(Work::Visit { node, child_pos }) = work.pop() {
+                if child_pos == 0 {
+                    // First entry: assign index/lowlink, push onto the SCC stack.
+                    index[node] = next_index;
+                    lowlink[node] = next_index;
+                    next_index += 1;
+                    scc_stack.push(node);
+                    on_stack[node] = true;
+                }
+                let edges = edges_of(node, self.forest);
+                // Finish any child returned by a prior resume: fold its lowlink up.
+                if child_pos > 0 {
+                    let prev = edges[child_pos - 1];
+                    if lowlink[prev] < lowlink[node] {
+                        lowlink[node] = lowlink[prev];
+                    }
+                }
+                let mut advanced = false;
+                let mut pos = child_pos;
+                while pos < edges.len() {
+                    let c = edges[pos];
+                    if index[c] == usize::MAX {
+                        // Descend into the unvisited child, resuming `node` after it.
+                        work.push(Work::Visit {
+                            node,
+                            child_pos: pos + 1,
+                        });
+                        work.push(Work::Visit {
+                            node: c,
+                            child_pos: 0,
+                        });
+                        advanced = true;
+                        break;
+                    } else if on_stack[c] {
+                        // Back/cross edge to a node still on the SCC stack.
+                        if index[c] < lowlink[node] {
+                            lowlink[node] = index[c];
+                        }
+                    }
+                    pos += 1;
+                }
+                if advanced {
+                    continue;
+                }
+                // All edges processed: if `node` roots an SCC, pop it.
+                if lowlink[node] == index[node] {
+                    let mut members: Vec<usize> = Vec::new();
+                    loop {
+                        let w = scc_stack.pop().unwrap();
+                        on_stack[w] = false;
+                        members.push(w);
+                        if w == node {
+                            break;
+                        }
+                    }
+                    // Non-trivial SCC (> 1 node) ⇒ every member is on a cycle.
+                    if members.len() > 1 {
+                        on_cycle.extend(members.iter().copied());
+                    } else {
+                        // A singleton SCC is on a cycle only via a self-loop.
+                        let only = members[0];
+                        if edges_of(only, self.forest).contains(&only) {
+                            on_cycle.insert(only);
+                        }
+                    }
+                }
+            }
+        }
+        self.cycle_nodes = Some(on_cycle);
+    }
+
     // ─── The de-recursed walk (issue #33) ──────────────────────────────────────
     //
     // The walk's natural shape is a set of mutually recursive functions, but its
@@ -396,7 +561,13 @@ impl<'a> Transformer<'a> {
             //    `_ambig` over all of them under explicit. `Ret::Value(None)` if
             //    every derivation is discarded (e.g. an ambiguity cycle).
             Frame::Eval { node } => {
-                if let Some(v) = self.memo.get(&node) {
+                // The single-value `memo` freezes a node's `_ambig` to one ancestor
+                // context. That is correct in resolve mode (one derivation) and for
+                // any acyclic explicit node, but wrong for a cyclic explicit node,
+                // whose enumeration is context-sensitive (#348) and governed by
+                // `packed_cache` instead — so don't read a memo for those.
+                let use_memo = self.resolve || !self.is_cycle_node(node);
+                if let Some(v) = self.memo.get(&node).filter(|_| use_memo) {
                     w.ret = Some(Ret::Value(Some(v.clone())));
                 } else if self.resolve {
                     // Resolve mode keeps a single derivation, so its value is
@@ -604,8 +775,12 @@ impl<'a> Transformer<'a> {
                         Some(NodeValue::Tree(Tree::new("_ambig", children)))
                     }
                 };
+                // Memoize only acyclic explicit nodes (#348): a cyclic node's
+                // `_ambig` is context-sensitive, so caching it freezes the wrong one.
                 if let Some(v) = &result {
-                    self.memo.insert(node, v.clone());
+                    if !self.is_cycle_node(node) {
+                        self.memo.insert(node, v.clone());
+                    }
                 }
                 w.ret = Some(Ret::Value(result));
             }
@@ -663,10 +838,21 @@ impl<'a> Transformer<'a> {
                     !self.resolve,
                     "resolve mode streams; it never materializes derivation lists"
                 );
-                if let Some(d) = self.deriv_memo.get(&node) {
-                    w.ret = Some(Ret::Derivs(d.clone()));
-                } else if !w.visiting.insert(node) {
-                    // Cycle in the forest — discard this family.
+                // The per-symbol `deriv_memo` is consulted only for acyclic nodes:
+                // a cyclic node's enumeration is context-sensitive (#348), governed
+                // by `packed_cache`, so caching one context's list would freeze it.
+                if !self.is_cycle_node(node) {
+                    if let Some(d) = self.deriv_memo.get(&node) {
+                        w.ret = Some(Ret::Derivs(d.clone()));
+                        return;
+                    }
+                }
+                if !w.visiting.insert(node) {
+                    // Already on the DFS path: this is the triggering back-edge of a
+                    // cycle. Drop it (Python's `on_cycle`); the derivations a cyclic
+                    // re-descent would reach are recovered through `packed_cache`,
+                    // which short-circuits an already-built packed node before it
+                    // re-enters this node.
                     w.ret = Some(Ret::Derivs(Vec::new()));
                 } else {
                     let fams = self.sorted_families(node);
@@ -711,17 +897,44 @@ impl<'a> Transformer<'a> {
             //    child-lists. `left` is always an intermediate (the accumulated
             //    prefix) or nothing; `right` is the symbol just consumed (a
             //    symbol node or token leaf) or nothing (ε).
-            Frame::ExpandPacked { packed } => match packed.left {
-                ForestRef::None => self.expand_right(w, packed, vec![Vec::new()]),
-                ForestRef::Node(lid) => {
-                    w.frames.push(Frame::ExpandRight { packed });
-                    w.frames.push(Frame::ExpandInter { node: lid });
+            Frame::ExpandPacked { node, fi, packed } => {
+                // Python's `_cache` short-circuit (#348): an already-expanded packed
+                // node returns its cached child-lists WITHOUT re-descending — so it
+                // never re-enters the `visiting` cycle guard and the derivations a
+                // cyclic re-descent would discard are preserved.
+                if let Some(cached) = self.packed_cache.get(&(node, fi)) {
+                    w.ret = Some(Ret::Lists(cached.clone()));
+                } else {
+                    // Cache the result on the way out (only when non-empty — never a
+                    // discarded family or a partial), mirroring `transform_packed_node`.
+                    w.frames.push(Frame::ExpandPackedDone { node, fi });
+                    match packed.left {
+                        ForestRef::None => self.expand_right(w, packed, vec![Vec::new()]),
+                        ForestRef::Node(lid) => {
+                            w.frames.push(Frame::ExpandRight { packed });
+                            w.frames.push(Frame::ExpandInter { node: lid });
+                        }
+                        ForestRef::Tok(t) => {
+                            let tok = self.forest.tokens[t].clone();
+                            self.expand_right(w, packed, vec![vec![NodeValue::Token(tok)]]);
+                        }
+                    }
                 }
-                ForestRef::Tok(t) => {
-                    let tok = self.forest.tokens[t].clone();
-                    self.expand_right(w, packed, vec![vec![NodeValue::Token(tok)]]);
+            }
+            // Cache a packed node's fully expanded child-lists on the way out, then
+            // pass them through unchanged. Only non-empty (cycle-free, complete)
+            // results are cached: an empty `Lists` is the "family discarded" signal,
+            // and caching it — or a mid-expansion partial — would corrupt later reuse
+            // (#348; Python caches in `transform_packed_node` after its Discard check).
+            Frame::ExpandPackedDone { node, fi } => {
+                let Ret::Lists(lists) = w.take_ret() else {
+                    unreachable!("ExpandPacked's expansion returns Ret::Lists")
+                };
+                if !lists.is_empty() {
+                    self.packed_cache.insert((node, fi), lists.clone());
                 }
-            },
+                w.ret = Some(Ret::Lists(lists));
+            }
             Frame::ExpandRight { packed } => {
                 let Ret::Lists(lefts) = w.take_ret() else {
                     unreachable!("ExpandInter returns Ret::Lists")
@@ -876,7 +1089,11 @@ impl<'a> Transformer<'a> {
                 crate::perf::add_explicit_node_children(
                     derivs.iter().map(node_value_size).sum::<u64>(),
                 );
-                self.deriv_memo.insert(node, derivs.clone());
+                // Memoize only acyclic nodes (#348): a cyclic node's list is
+                // context-sensitive, so freezing it here would under-report.
+                if !self.is_cycle_node(node) {
+                    self.deriv_memo.insert(node, derivs.clone());
+                }
                 w.ret = Some(Ret::Derivs(derivs));
             }
             Some(&fi) => {
@@ -889,7 +1106,7 @@ impl<'a> Transformer<'a> {
                     derivs,
                     keys,
                 });
-                w.frames.push(Frame::ExpandPacked { packed });
+                w.frames.push(Frame::ExpandPacked { node, fi, packed });
             }
         }
     }
@@ -996,7 +1213,7 @@ impl<'a> Transformer<'a> {
                     idx,
                     out,
                 });
-                w.frames.push(Frame::ExpandPacked { packed });
+                w.frames.push(Frame::ExpandPacked { node, fi, packed });
             }
         }
     }
@@ -1097,8 +1314,19 @@ enum Frame {
         derivs: Vec<NodeValue>,
         keys: HashSet<String>,
     },
+    /// Expand one packed node (family `fi` of symbol/intermediate `node`) into its
+    /// rule's child-lists. `(node, fi)` is the packed node's stable identity — the
+    /// key for the `packed_cache` short-circuit/insert (#348).
     ExpandPacked {
+        node: usize,
+        fi: usize,
         packed: Packed,
+    },
+    /// Resume after a packed node's expansion: insert its non-empty child-lists into
+    /// `packed_cache` (Python's `_cache` write), then pass them through (#348).
+    ExpandPackedDone {
+        node: usize,
+        fi: usize,
     },
     /// Resume after the left intermediate's child-lists.
     ExpandRight {

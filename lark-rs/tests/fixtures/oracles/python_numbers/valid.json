@@ -550,5 +550,166 @@
       ]
     },
     "error": null
+  },
+  {
+    "input": "3.14j",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "IMAG",
+              "value": "3.14j"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": ".5j",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "IMAG",
+              "value": ".5j"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "3.j",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "IMAG",
+              "value": "3.j"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "0x_1A",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "HEX",
+              "value": "0x_1A"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "0b_1010",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "BIN",
+              "value": "0b_1010"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "0o_17",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "OCT",
+              "value": "0o_17"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
+  },
+  {
+    "input": "0X_1a",
+    "should_pass": true,
+    "ok": true,
+    "tree": {
+      "type": "tree",
+      "data": "start",
+      "children": [
+        {
+          "type": "tree",
+          "data": "number",
+          "children": [
+            {
+              "type": "token",
+              "token_type": "HEX",
+              "value": "0X_1a"
+            }
+          ]
+        }
+      ]
+    },
+    "error": null
   }
 ]

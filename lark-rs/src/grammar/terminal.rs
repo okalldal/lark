@@ -256,19 +256,43 @@ fn hir_max_width_chars(hir: &regex_syntax::hir::Hir) -> Option<usize> {
 }
 
 impl PartialEq for Pattern {
+    /// Equality gates on the `Pattern` **variant first** — a `Str` is never equal to a
+    /// `Re`, even when they share a regex source (`PatternStr("ab") != PatternRe(/ab/)`).
+    /// This mirrors Python Lark's `Pattern.__eq__` (`type(self) == type(other) and …`)
+    /// and the active `patterns_equivalent` unification gate (#403/#440): both require a
+    /// matching kind. Comparing across kinds through `as_regex_str()` (#467) was a latent
+    /// trap — a future `HashMap`/`==` would silently mis-merge a string literal onto a
+    /// same-source regex terminal.
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             // `"a"` and `"a"i` share an escaped form but are distinct patterns.
             (Pattern::Str(a), Pattern::Str(b)) => a.value == b.value && a.ci == b.ci,
-            _ => self.as_regex_str() == other.as_regex_str(),
+            (Pattern::Re(a), Pattern::Re(b)) => a.pattern == b.pattern,
+            // Cross-kind (`Str` vs `Re`) is never equal.
+            (Pattern::Str(_), Pattern::Re(_)) | (Pattern::Re(_), Pattern::Str(_)) => false,
         }
     }
 }
 impl Eq for Pattern {}
 
 impl std::hash::Hash for Pattern {
+    /// Hashing mixes in a per-variant discriminant **before** the body so a `Str` and a
+    /// `Re` with the same regex source land in different buckets — keeping `Hash`
+    /// consistent with the variant-first `PartialEq` above (`a == b ⇒ hash(a) == hash(b)`,
+    /// and never the reverse collision across kinds). #467.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.as_regex_str().hash(state);
+        match self {
+            // `ci` distinguishes `"a"` from `"a"i` in `eq`, so it must feed the hash too.
+            Pattern::Str(p) => {
+                0u8.hash(state);
+                p.value.hash(state);
+                p.ci.hash(state);
+            }
+            Pattern::Re(p) => {
+                1u8.hash(state);
+                p.pattern.hash(state);
+            }
+        }
     }
 }
 
@@ -425,6 +449,28 @@ fn normalize_python_escapes(pattern: &str) -> String {
                     out.push(d);
                 }
                 cur.seek(rest_start + upper_len + 1); // past the `}`
+                continue;
+            }
+            // Literal `{...}` brace run (#462). An out-of-class `{` that is **not** a
+            // well-formed quantifier — `{x}`, `a{x}b`, `{}`, `{ 2}`, `{2 }`, `{a,b}`,
+            // `{,x}`, `{2,x}`, an unterminated `a{`, … — is a *literal brace* in Python
+            // `re` (`re.compile(r'a{x}b')` matches the literal text `a{x}b`), but the Rust
+            // `regex` crate rejects it ("repetition quantifier expects a valid decimal" /
+            // "unclosed counted repetition") — and that rejection then routes through the
+            // lookaround seam and is *mis-categorized* as `LookaroundScope` (it involves no
+            // lookaround/backtracking). We escape the brace (`{` → `\{`) so the crate sees a
+            // literal `{`; a bare `}` it already treats as a literal, so only the open brace
+            // needs escaping. This builds and matches the literal text exactly like Python
+            // (oracle-faithful "support & match", ADR-0017). `base_quantifier_len` is the
+            // single quantifier oracle shared with the stacking/nothing-to-repeat screens,
+            // so a real quantifier (`{2}`, `{2,3}`, `{2,}`) is left untouched and the
+            // empty-lower-bound `{,n}`/`{,}` was already rewritten above. A `\{` never
+            // reaches here (the cursor's escape step consumes the escape pair first), and a
+            // `{` inside a `[...]` class is already a literal to the crate (the `!in_class`
+            // guard leaves it).
+            if base_quantifier_len(&chars, i).is_none() {
+                out.push_str("\\{");
+                cur.seek(i + 1);
                 continue;
             }
         }
@@ -1253,6 +1299,182 @@ fn empty_lower_bound_quantifier_upper_len(chars: &[char], i: usize) -> Option<us
     }
 }
 
+/// Detect a Python-`re` **"nothing to repeat"** shape locally, returning the char index of
+/// the offending quantifier, or `None` if the pattern has none. This is the #506 successor
+/// to the brittle `regex`-crate error-message substring check (`e.to_string().contains(
+/// "repetition operator missing expression")`): error-message text is not an API, so a
+/// future crate upgrade could reword it and silently route the same syntax back through the
+/// lookaround/backtracking path. We classify the shape directly instead.
+///
+/// A base quantifier (`*`, `+`, `?`, `{m,n}` per [`base_quantifier_len`]) is "nothing to
+/// repeat" exactly when it has **no preceding repeatable expression** to bind to — i.e. it
+/// sits at one of (grounded against Python `re` 3.11, `sre_parse`):
+///
+/// * the **start** of the pattern (`*a`),
+/// * right after an **alternation** bar `|` (`a|*b`),
+/// * right after a **group / assertion opener** — a plain `(`, a non-capturing `(?:`, a
+///   lookahead `(?=`/`(?!`, a lookbehind `(?<=`/`(?<!`, a named-group open `(?P<name>`, or a
+///   scoped flag-group open `(?flags:` — i.e. immediately after the *open* of any group, and
+/// * right after a **bodiless inline flag group** `(?flags)` (which consumes nothing
+///   repeatable, so `(?i)*a` is "nothing to repeat" just like `*a`).
+///
+/// Everything else gives the quantifier something to repeat: a literal, a `\`-escape
+/// (`\*`/`\d`/a backref), a closed group/assertion `)` (`(?=a)*` and `()*` are both fine in
+/// Python — a *closed* assertion is repeatable), a character class `[...]` close, or a
+/// `(?P=name)` backreference. A *second* quantifier stacked on a quantifier is Python's
+/// "multiple repeat", a distinct error already screened by
+/// [`reject_quantifier_dialect_divergence`] on the raw source — so this screen treats a
+/// just-consumed quantifier as repeatable and never re-reports it.
+///
+/// Runs on the **normalized** pattern (post [`normalize_python_escapes`]), the same string
+/// `Regex::new` validates: `(?#…)` comments are already stripped (so `(?#c)*a` ⇒ `*a` is
+/// caught) and `{,n}`/`{,}` are already `{0,n}`/`{0,}` (#400/#447). It is **class- and
+/// escape-aware** via the shared [`RegexCursor`] (#481/#494): a `*`/`+`/`?`/`{0,3}` inside
+/// `[...]` is a literal class member (`[*]`, `[{0,3}]`), and a `\*` is an escaped literal —
+/// neither is a quantifier. Detecting the shape here means real lookaround/backreferences
+/// (`(?=ab)`, `(?<=ab)c`, `(a)\1`) are never re-bucketed: they carry no nothing-to-repeat
+/// shape, so this returns `None` and they continue to the lookaround-analyzer fallback.
+fn find_nothing_to_repeat(pattern: &str) -> Option<usize> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut cur = RegexCursor::new(&chars);
+    // Whether a repeatable expression sits immediately to the left of the cursor. False at
+    // the start, after `|`, and after any group/assertion *open* or bodiless flag group;
+    // true after a literal/escape/class/closed-group/backref.
+    let mut repeatable = false;
+    while !cur.at_end() {
+        let i = cur.pos();
+        let c = chars[i];
+        // Out-of-class structure: alternation, group openers, and `)` close. Inside a
+        // `[...]` class none of these are structural (a `(`/`|`/`)` is a literal member), so
+        // the cursor's class steps below handle the class body as ordinary repeatable text.
+        if !cur.in_class() {
+            if c == '|' {
+                repeatable = false; // an arm starts here — a following quantifier has nothing
+                cur.seek(i + 1);
+                continue;
+            }
+            if c == ')' {
+                repeatable = true; // a closed group/assertion is itself repeatable (`()*`)
+                cur.seek(i + 1);
+                continue;
+            }
+            if c == '(' {
+                // Classify the opener. A `(?P=name)` backreference is a complete repeatable
+                // atom; a bodiless `(?flags)` group consumes nothing repeatable; every other
+                // opener (`(`, `(?:`, `(?=`, `(?!`, `(?<=`, `(?<!`, `(?P<name>`, `(?flags:`)
+                // *opens* a group, so a quantifier immediately after it has nothing to repeat.
+                let (consumed, after) = classify_group_opener(&chars, i);
+                repeatable = after;
+                cur.seek(i + consumed);
+                continue;
+            }
+            // A base quantifier out-of-class: nothing to repeat iff nothing repeatable
+            // precedes it. (A quantifier *after* a quantifier is "multiple repeat", a
+            // distinct error handled elsewhere — we leave `repeatable` true and move on.)
+            if let Some(len) = base_quantifier_len(&chars, i) {
+                if !repeatable {
+                    return Some(i);
+                }
+                cur.seek(i + len);
+                // A trailing lazy `?` (`a*?`) is part of the same quantifier, not a new one.
+                if chars.get(cur.pos()) == Some(&'?') {
+                    cur.seek(cur.pos() + 1);
+                }
+                repeatable = true;
+                continue;
+            }
+        }
+        // Everything else — an ordinary char, a `\`-escape pair, or a `[...]` class span —
+        // is repeatable text. Let the shared cursor consume one structural step.
+        cur.step();
+        repeatable = true;
+    }
+    None
+}
+
+/// Classify a group/assertion opener at `chars[start] == '('` for [`find_nothing_to_repeat`],
+/// returning `(consumed_chars, repeatable_after)`: how many chars the *opener token* spans
+/// and whether what it established is a complete repeatable atom (so a following quantifier
+/// has something to repeat) rather than an open group (so a following quantifier is "nothing
+/// to repeat").
+///
+/// * `(?P=name)` — a named backreference: a complete repeatable atom. Consume through the
+///   `)`, report `repeatable = true`.
+/// * `(?flags)` / `(?flags:` — a bodiless or scoped inline flag group: neither establishes a
+///   repeatable atom on its own (the bodiless form consumes nothing; the scoped form *opens*
+///   a body), so a quantifier immediately after is "nothing to repeat". Consume the opener,
+///   report `repeatable = false`.
+/// * `(?P<name>`, `(?:`, `(?=`, `(?!`, `(?<=`, `(?<!`, or a bare `(` — every form that
+///   *opens* a group/assertion body: consume the whole opener prefix and report
+///   `repeatable = false`, so the body's first char is evaluated as if at the start of a
+///   group.
+fn classify_group_opener(chars: &[char], start: usize) -> (usize, bool) {
+    // `(?P=name)` named backreference — a complete repeatable atom; skip to past its `)`.
+    if chars.get(start + 1) == Some(&'?')
+        && chars.get(start + 2) == Some(&'P')
+        && chars.get(start + 3) == Some(&'=')
+    {
+        let mut j = start + 4;
+        while j < chars.len() && chars[j] != ')' {
+            j += 1;
+        }
+        return ((j + 1).min(chars.len()) - start, true); // past the ')' (or end) — repeatable
+    }
+    // An inline flag group `(?flags)` (bodiless) or `(?flags:…)` (scoped). Either way the
+    // group itself is not yet a repeatable atom, so a following quantifier has nothing to
+    // repeat. (`parse_inline_flag_group`'s `current` verbose bit is irrelevant here; we
+    // consult only the consumed length.)
+    if let Some((_verbose, _bodiless, consumed)) = parse_inline_flag_group(chars, start, false) {
+        return (consumed, false);
+    }
+    // Every other opener — `(`, `(?:`, `(?=`, `(?!`, `(?<=`, `(?<!`, `(?P<name>` — opens a
+    // group/assertion body. Consume the whole opener prefix so the body's first char is the
+    // one evaluated against `repeatable == false` (the caller sets it), correctly flagging a
+    // quantifier that opens the body (`(?:*a)`, `(?<=*a)`, `(?P<n>*a)`) while the opener's
+    // own `?`/`:`/`=`/`<`/`P`/name chars never spuriously trip the quantifier check.
+    (group_opener_prefix_len(chars, start), false)
+}
+
+/// The length of a group/assertion *opener prefix* at `chars[start] == '('` — the chars up
+/// to (not including) where the group **body** begins — for the openers
+/// [`classify_group_opener`] treats as "opens a body": `(`, `(?:`, `(?=`, `(?!`, `(?<=`,
+/// `(?<!`, `(?P<name>`. Consuming the whole prefix means the body's first char is what is
+/// evaluated against `repeatable == false`, so a quantifier opening the body (`(?:*a)`,
+/// `(?<=*a)`, `(?P<n>*a)`) is correctly flagged "nothing to repeat", while the prefix's own
+/// `?`/`:`/`=`/`<`/`P`/name chars never spuriously trip the quantifier check.
+fn group_opener_prefix_len(chars: &[char], start: usize) -> usize {
+    // Bare `(` capturing group.
+    if chars.get(start + 1) != Some(&'?') {
+        return 1;
+    }
+    match chars.get(start + 2).copied() {
+        // `(?:`, `(?=`, `(?!` — three-char prefixes.
+        Some(':' | '=' | '!') => 3,
+        Some('<') => match chars.get(start + 3).copied() {
+            // `(?<=` / `(?<!` lookbehind — four-char prefixes.
+            Some('=' | '!') => 4,
+            // `(?<name>` angle named group (the crate accepts it; Python rejects it earlier
+            // via `reject_regex_crate_angle_named_group`, but be robust): up to `>`.
+            _ => prefix_through_angle_close(chars, start),
+        },
+        // `(?P<name>` named group — up to and including `>`.
+        Some('P') if chars.get(start + 3) == Some(&'<') => prefix_through_angle_close(chars, start),
+        // Anything else after `(?` (an assertion form not enumerated): conservatively
+        // consume just the `(?` so the next char is evaluated fresh.
+        _ => 2,
+    }
+}
+
+/// Length of a `(?P<name>` / `(?<name>` opener prefix through its closing `>` (or to end of
+/// input if unterminated).
+fn prefix_through_angle_close(chars: &[char], start: usize) -> usize {
+    let mut j = start + 1;
+    while j < chars.len() && chars[j] != '>' {
+        j += 1;
+    }
+    (j + 1).min(chars.len()) - start // past the `>` (or clamp at end)
+}
+
 impl PatternRe {
     pub fn new(pattern: impl Into<String>, flags: u32) -> Result<Self, GrammarError> {
         let raw = pattern.into();
@@ -1298,6 +1520,33 @@ impl PatternRe {
         // (H5-5, #364). The opposite contract to H4-2's reject set.
         reject_named_unicode_escape(&screen_src)?;
         let pattern = normalize_python_escapes(&raw);
+        // **"Nothing to repeat" pre-screen (#448, #506).** A leading/dangling quantifier
+        // with nothing to repeat before it (`*a`, `+a`, `?a`, `{0,3}`, the
+        // post-normalization `{,3}`/`{,}` of #400/#447, `(?#c)*a` after a stripped
+        // zero-width comment, `(?:*a)`, …) is a Python `re` "nothing to repeat" build error
+        // — a *malformed quantifier*, NOT lookaround or backtracking. We classify the shape
+        // **locally** (`find_nothing_to_repeat`, class-/escape-aware via the shared
+        // `RegexCursor`) rather than matching the `regex` crate's diagnostic text: an
+        // error-message string is not an API, and a future crate upgrade could reword it and
+        // silently route the same syntax back through the lookaround/backtracking path
+        // below (#506). Running on the normalized `pattern` matches the string `Regex::new`
+        // sees: `(?#…)` comments are already stripped and `{,n}`/`{,}` already `{0,n}`/`{0,}`.
+        // The build still *rejects* (parity with Python is unchanged); only the
+        // category/message is the truthful `InvalidRegex` "nothing to repeat" rather than the
+        // misleading `LookaroundScope`/`OutOfScope` "backtracking-only syntax" refusal. Runs
+        // BEFORE the lookaround-analyzer fallback for that reason; a genuine
+        // lookaround/backref carries no nothing-to-repeat shape, so it is never re-bucketed.
+        if find_nothing_to_repeat(&pattern).is_some() {
+            return Err(GrammarError::InvalidRegex {
+                pattern: pattern.clone(),
+                reason: "nothing to repeat — a quantifier (`*`/`+`/`?`/`{m,n}`) has no \
+                     preceding expression to repeat (e.g. a leading `*a`/`+a`/`?a`/\
+                     `{0,3}`, or a quantifier right after `(`, `(?:`, `|`, or a stripped \
+                     `(?#…)` comment). Python `re` rejects this as \"nothing to \
+                     repeat\"; lark-rs matches that rejection (ADR-0017)."
+                    .to_string(),
+            });
+        }
         let flag_prefix = build_flag_prefix(flags);
         let full = format!("{}{}", flag_prefix, pattern);
         // Validate the regex early to surface grammar errors. A pattern the linear
@@ -1311,35 +1560,6 @@ impl PatternRe {
         // grammar-load outcomes are identical with and without the `fancy-oracle`
         // test feature.
         if let Err(e) = Regex::new(&full) {
-            // **"Nothing to repeat" pre-screen (#448).** A leading/dangling quantifier
-            // with nothing to repeat before it (`*a`, `+a`, `?a`, `{0,3}`, the
-            // post-normalization `{,3}`/`{,}` of #400/#447, `(?#c)*a` after a stripped
-            // zero-width comment, `(?:*a)`, …) is a Python `re` "nothing to repeat" build
-            // error — a *malformed quantifier*, NOT lookaround or backtracking. The regex
-            // crate raises a distinct, dedicated error for exactly this shape —
-            // "repetition operator missing expression" — which is **disjoint** from the
-            // messages it gives real lookaround ("look-around … is not supported") and
-            // backreferences ("backreferences are not supported"). So leaning on that
-            // message (as the issue suggests) routes only the genuine nothing-to-repeat
-            // cases here and never re-buckets a real lookaround/backref input. The build
-            // still *rejects* (parity with Python is unchanged); only the category/message
-            // is corrected from the misleading `LookaroundScope`/`OutOfScope`
-            // "backtracking-only syntax" refusal to a truthful `InvalidRegex`. Runs BEFORE
-            // the lookaround-analyzer fallback below for that reason.
-            if e.to_string()
-                .contains("repetition operator missing expression")
-            {
-                return Err(GrammarError::InvalidRegex {
-                    pattern: pattern.clone(),
-                    reason: format!(
-                        "nothing to repeat — a quantifier (`*`/`+`/`?`/`{{m,n}}`) has no \
-                         preceding expression to repeat (e.g. a leading `*a`/`+a`/`?a`/\
-                         `{{0,3}}`, or a quantifier right after `(`, `(?:`, or a stripped \
-                         `(?#…)` comment). Python `re` rejects this as \"nothing to \
-                         repeat\"; lark-rs matches that rejection (ADR-0017). ({e})"
-                    ),
-                });
-            }
             // Parse the raw pattern (not `full`): the analyzer models the loader's
             // baked flag wrapper via the same parse the routing strip uses.
             // Also accept fence-idiom patterns (named backreferences): the lookaround
@@ -1542,6 +1762,54 @@ mod tests {
         assert_eq!(crate::lookaround::pattern_max_width("a+(?=b)"), Some(None));
     }
 
+    /// #467: `Pattern` equality/hash gate on the **variant first**, so a string literal
+    /// is never equal to (nor hash-collides with) a regex of the same source — matching
+    /// Python Lark's type-first `Pattern.__eq__` and the `patterns_equivalent` unification
+    /// gate (#403/#440). Before the fix the `_ => as_regex_str() == as_regex_str()` arm and
+    /// the `as_regex_str().hash()` impl reported `PatternStr("ab") == PatternRe(/ab/)` true
+    /// and hashed them equal.
+    #[test]
+    fn pattern_eq_hash_gate_on_kind() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let h = |p: &Pattern| {
+            let mut s = DefaultHasher::new();
+            p.hash(&mut s);
+            s.finish()
+        };
+
+        let str_ab = Pattern::Str(PatternStr::new("ab"));
+        let re_ab = Pattern::Re(PatternRe::new("ab", 0).expect("regex builds"));
+
+        // Cross-kind, same source: never equal, must not hash-collide.
+        assert_ne!(
+            str_ab, re_ab,
+            "PatternStr(\"ab\") must not equal PatternRe(/ab/)"
+        );
+        assert_ne!(re_ab, str_ab, "equality is symmetric across kinds");
+        assert_ne!(
+            h(&str_ab),
+            h(&re_ab),
+            "a string literal and a same-source regex must not hash equal"
+        );
+
+        // Same-kind equality still holds (and stays hash-consistent).
+        let str_ab2 = Pattern::Str(PatternStr::new("ab"));
+        let re_ab2 = Pattern::Re(PatternRe::new("ab", 0).expect("regex builds"));
+        assert_eq!(str_ab, str_ab2);
+        assert_eq!(h(&str_ab), h(&str_ab2));
+        assert_eq!(re_ab, re_ab2);
+        assert_eq!(h(&re_ab), h(&re_ab2));
+
+        // `"ab"` and `"ab"i` are distinct string patterns (the pre-existing `ci` gate).
+        let str_ab_ci = Pattern::Str(PatternStr::new_ci("ab"));
+        assert_ne!(
+            str_ab, str_ab_ci,
+            "case-sensitivity distinguishes string patterns"
+        );
+    }
+
     /// N3: a *global* (bodiless) inline flag group is detected anywhere — leading or
     /// mid-pattern — and `reject_global_inline_flags` (the loader gate on user regex
     /// literals) rejects it. A scoped `(?flags:…)` group, an assertion, a named group,
@@ -1665,21 +1933,43 @@ mod tests {
         // Escape-aware: a `\{` is a literal brace, never a quantifier open.
         assert_eq!(normalize_python_escapes("a\\{,3}"), "a\\{,3}");
         // A non-digit upper (`{,x}`) / unterminated (`{,3`) is a literal brace run in
-        // Python — left untouched.
-        assert_eq!(normalize_python_escapes("a{,x}b"), "a{,x}b"); // non-digit upper
-        assert_eq!(normalize_python_escapes("a{,3"), "a{,3"); // unterminated (no `}`)
-                                                              // The fully-empty `{,}` is Python's `{0,}` (== `*`), NOT a literal brace run
-                                                              // (#447): it is now recognized and rewritten exactly like `{,n}` (zero upper
-                                                              // digits). `re.match(r'a{,}b','aaab')` matches, so `/a{,}b/` must build as `a*b`.
+        // Python — NOT this empty-lower-bound shape, so it is not rewritten to `{0,…}`.
+        // Since #462 the literal `{` is escaped (`{` → `\{`) so the regex crate reads it as
+        // a literal brace (it otherwise rejects a non-numeric brace body), matching Python's
+        // literal interpretation — distinct from the `{0,n}` quantifier rewrite above.
+        assert_eq!(normalize_python_escapes("a{,x}b"), "a\\{,x}b"); // non-digit upper → literal `\{`
+        assert_eq!(normalize_python_escapes("a{,3"), "a\\{,3"); // unterminated (no `}`) → literal `\{`
+                                                                // The fully-empty `{,}` is Python's `{0,}` (== `*`), NOT a literal brace run
+                                                                // (#447): it is now recognized and rewritten exactly like `{,n}` (zero upper
+                                                                // digits). `re.match(r'a{,}b','aaab')` matches, so `/a{,}b/` must build as `a*b`.
         assert_eq!(normalize_python_escapes("a{,}b"), "a{0,}b");
         assert_eq!(normalize_python_escapes("{,}"), "{0,}");
         // Class-aware / escape-aware for `{,}` too: a `{,}` inside `[...]` or after `\`
         // is a literal brace run in Python, never a quantifier — left untouched.
         assert_eq!(normalize_python_escapes("[a{,}]"), "[a{,}]");
         assert_eq!(normalize_python_escapes("a\\{,}"), "a\\{,}");
-        // The bare `{}` (no comma, no digit) stays a literal brace pair — the widening
-        // keys on "digit *or* comma", and `{}` has neither.
-        assert_eq!(normalize_python_escapes("a{}b"), "a{}b");
+        // The bare `{}` (no comma, no digit) is a literal brace pair — the `{0,n}` widening
+        // keys on "digit *or* comma", and `{}` has neither. Since #462 it too is escaped
+        // (`{` → `\{`) so the regex crate reads the literal brace, matching Python.
+        assert_eq!(normalize_python_escapes("a{}b"), "a\\{}b");
+        // #462 literal brace runs: a `{` whose body is not a valid quantifier bound is
+        // escaped to a literal `\{` (a bare `}` is already a literal to the crate). Class-
+        // and escape-aware: a `{` inside `[...]` or after `\` is left as-is.
+        assert_eq!(normalize_python_escapes("a{x}b"), "a\\{x}b");
+        assert_eq!(normalize_python_escapes("{x}"), "\\{x}");
+        assert_eq!(normalize_python_escapes("N{x}"), "N\\{x}");
+        assert_eq!(normalize_python_escapes("a{"), "a\\{"); // lone unterminated brace
+        assert_eq!(normalize_python_escapes("{ 2}"), "\\{ 2}"); // space → not a quantifier
+        assert_eq!(normalize_python_escapes("{a,b}"), "\\{a,b}"); // non-digit bound
+                                                                  // A real quantifier is never escaped (the literal-brace branch keys on
+                                                                  // `base_quantifier_len`, the shared quantifier oracle).
+        assert_eq!(normalize_python_escapes("a{2}b"), "a{2}b");
+        assert_eq!(normalize_python_escapes("a{2,3}b"), "a{2,3}b");
+        // Mixed: a real `{2}` is kept, a sibling literal `{x}` is escaped.
+        assert_eq!(normalize_python_escapes("a{2}{x}"), "a{2}\\{x}");
+        // Class-aware / escape-aware for a literal `{x}` too.
+        assert_eq!(normalize_python_escapes("[a{x}]"), "[a{x}]"); // in-class `{` is literal already
+        assert_eq!(normalize_python_escapes("a\\{x}"), "a\\{x}"); // already-escaped `\{` untouched
     }
 
     /// H6/H7 (#333): the quantifier-shape dialect screen refuses possessive (`a++`) and
@@ -1802,16 +2092,15 @@ mod tests {
         }
     }
 
-    /// #448 differential-audit: the nothing-to-repeat pre-screen leans on the regex
-    /// crate's dedicated "repetition operator missing expression" message, which is
-    /// disjoint from the messages for real lookaround/backref — so it must NOT re-bucket a
-    /// genuine `LookaroundScope` input. These constructs (zero-width lookahead, the
-    /// general-internal-lookahead `(?:…)` form, a backreference) are routed to the
-    /// lookaround analyzer / refusal seam and must stay there (or build, for a lowerable
-    /// lookbehind). `PatternRe::new` itself does NOT gate lowerable lookaround — it
-    /// constructs cleanly and the verdict is deferred to the lexer-build routing — so the
-    /// assertion here is only that these do NOT come back as an `InvalidRegex` "nothing to
-    /// repeat" (the re-bucketing failure mode).
+    /// #448 differential-audit: the nothing-to-repeat pre-screen (#506: now a **local**
+    /// shape classifier, `find_nothing_to_repeat`, no longer the `regex`-crate message text)
+    /// must NOT re-bucket a genuine `LookaroundScope`/backref input. These constructs
+    /// (zero-width lookahead, the general-internal-lookahead `(?:…)` form, a backreference)
+    /// are routed to the lookaround analyzer / refusal seam and must stay there (or build,
+    /// for a lowerable lookbehind). `PatternRe::new` itself does NOT gate lowerable
+    /// lookaround — it constructs cleanly and the verdict is deferred to the lexer-build
+    /// routing — so the assertion here is only that these do NOT come back as an
+    /// `InvalidRegex` "nothing to repeat" (the re-bucketing failure mode).
     #[test]
     fn real_lookaround_not_rebucketed_as_nothing_to_repeat() {
         for p in ["(?=ab)", "(?<=ab)c", "a(?=b)", r"(a)\1", r"(?P<x>a)(?P=x)"] {
@@ -1821,6 +2110,137 @@ mod tests {
                     "{p:?}: a real lookaround/backref input must NOT be re-bucketed as a \
                      nothing-to-repeat malformed quantifier (#448 re-bucketing regression)"
                 );
+            }
+        }
+    }
+
+    /// #506 unit-level differential: `find_nothing_to_repeat` classifies the shape *locally*
+    /// (class-/escape-aware via the shared `RegexCursor`) and must agree with Python `re`'s
+    /// "nothing to repeat" verdict over an adversarial corpus — WITHOUT leaning on the
+    /// `regex` crate's diagnostic text. The screen runs on the **normalized** pattern, so the
+    /// inputs here are written post-normalization (no `(?#…)` comment, `{0,n}` not `{,n}`).
+    /// Each `true` case is one Python `re` flags "nothing to repeat at position …"; each
+    /// `false` case is one Python `re` accepts (or rejects for a *different* reason — e.g.
+    /// "multiple repeat", which is a distinct screen). Grounded against Python 3.11
+    /// (`re.compile`) by the worker's differential probe.
+    #[test]
+    fn find_nothing_to_repeat_matches_python_shapes() {
+        // (pattern, is_nothing_to_repeat) — pattern is already normalized.
+        let cases: &[(&str, bool)] = &[
+            // Leading quantifiers — nothing precedes.
+            ("*a", true),
+            ("+a", true),
+            ("?a", true),
+            ("{0,3}", true),
+            ("{0,}", true),
+            ("{3}", true),
+            ("{3,5}", true),
+            // After a group/assertion *open* — body has nothing yet.
+            ("(*a)", true),
+            ("(?:*a)", true),
+            ("(?=*a)", true),
+            ("(?!*a)", true),
+            ("(?<=*a)", true),
+            ("(?<!*a)", true),
+            ("(?P<n>*a)", true),
+            ("(?i:*a)", true),
+            // After an alternation bar — the arm has nothing yet.
+            ("(|*a)", true),
+            ("a|*b", true),
+            ("a|+b", true),
+            ("(a|?b)", true),
+            // After a bodiless inline flag group — consumes nothing repeatable.
+            ("(?i)*a", true),
+            // --- negative controls: Python accepts, or rejects for a different reason ---
+            // Quantifier has a real preceding atom.
+            ("a*", false),
+            ("a+", false),
+            ("a?", false),
+            ("a{0,3}", false),
+            ("(a)*", false),
+            ("(?:a)*", false),
+            ("a|b*", false),
+            // A *closed* group/assertion is itself repeatable.
+            ("()*", false),
+            ("(?:)*", false),
+            ("(a|)*", false),
+            ("(?=a)*b", false),
+            ("(?<=a)*b", false),
+            // Inside a character class a quantifier char is a literal member.
+            ("[*]", false),
+            ("[+]", false),
+            ("[?]", false),
+            ("[{0,3}]", false),
+            // An escaped quantifier is a literal.
+            (r"\*a", false),
+            (r"\+a", false),
+            (r"a\?", false),
+            // A named backreference is a repeatable atom.
+            (r"(?P<n>a)(?P=n)*x", false),
+            // Real lookaround/backref carry no nothing-to-repeat shape.
+            ("(?=ab)", false),
+            ("(?<=ab)c", false),
+            ("a(?=b)", false),
+            (r"(a)\1", false),
+            // A second quantifier on a quantifier is "multiple repeat" (a different screen),
+            // NOT "nothing to repeat".
+            ("a**", false),
+            ("a*?", false),
+        ];
+        for &(p, want) in cases {
+            assert_eq!(
+                find_nothing_to_repeat(p).is_some(),
+                want,
+                "{p:?}: find_nothing_to_repeat should be {want} (Python `re` oracle)"
+            );
+        }
+    }
+
+    /// #506: the nothing-to-repeat classification is independent of the `regex` crate's
+    /// error-message *text*. A leading quantifier still rejects with the truthful
+    /// `InvalidRegex` "nothing to repeat" category even though the screen never reads
+    /// `e.to_string()`. (The #448 pins above assert the category for the end-to-end
+    /// `PatternRe::new` path; this pins that the *local* screen, not the crate message, is
+    /// what produced the verdict — `find_nothing_to_repeat` fires on the normalized pattern.)
+    #[test]
+    fn nothing_to_repeat_is_local_not_message_text() {
+        // A construct whose Python-`re` rejection happens to also be "nothing to repeat"
+        // after the `{,}`→`{0,}` normalization (#447) — the local screen must see it on the
+        // normalized form, with no dependence on any crate diagnostic string.
+        assert!(find_nothing_to_repeat(&normalize_python_escapes("{,}a")).is_some());
+        assert!(find_nothing_to_repeat(&normalize_python_escapes("(?#c)*a")).is_some());
+        // And the end-to-end category is the truthful one.
+        let err = PatternRe::new("{,}a", 0).expect_err("leading {,} is nothing to repeat");
+        match err {
+            GrammarError::InvalidRegex { reason, .. } => {
+                assert!(reason.contains("nothing to repeat"), "got: {reason}")
+            }
+            other => panic!("expected InvalidRegex nothing-to-repeat, got {other:?}"),
+        }
+    }
+
+    /// #506 audit-pin: a *doubled* leading quantifier (`**`, `(?i:**`, `|**`, …) is rejected
+    /// by both engines, but Python `re` reports it as "nothing to repeat" (the first `*` has
+    /// nothing to repeat) whereas lark-rs reports "multiple repeat" — because
+    /// `reject_quantifier_dialect_divergence` runs on the **raw** source *before* this
+    /// nothing-to-repeat screen and catches the doubled quantifier first. This is a
+    /// **pre-existing** screen-ordering artifact (the prior message-string check was likewise
+    /// shadowed by that earlier screen), it is purely a divergence between two adjacent
+    /// *reject* categories, and accept/reject parity with Python is preserved. The worker's
+    /// 580-body differential audit (#506) flagged exactly this family (33 bodies, all the
+    /// `**`-with-nothing-before shape) and *no* accept/reject divergence. Pinned so the
+    /// behavior is intentional, not silent — full category parity here is tracked separately
+    /// if it ever matters.
+    #[test]
+    fn doubled_leading_quantifier_rejects_as_multiple_repeat_audit_pin() {
+        for p in ["**", "(?i:**)", "|**", "(?P<n>**)"] {
+            match PatternRe::new(p, 0) {
+                Err(GrammarError::InvalidRegex { reason, .. }) => assert!(
+                    reason.contains("multiple repeat"),
+                    "{p:?}: expected the earlier multiple-repeat screen to catch the doubled \
+                     quantifier first, got: {reason}"
+                ),
+                other => panic!("{p:?}: must reject (both engines do), got {other:?}"),
             }
         }
     }

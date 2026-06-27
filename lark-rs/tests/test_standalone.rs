@@ -13,9 +13,7 @@
 //!      checked-in artifact never drifts. Run with `LARK_STANDALONE_WRITE=1` to
 //!      rewrite the fixtures after an intentional generator change.
 
-use lark_rs::{
-    generate_standalone, GrammarError, Lark, LarkError, LarkOptions, LexerType, ParserAlgorithm,
-};
+use lark_rs::{generate_standalone, Lark, LarkOptions, LexerType, ParserAlgorithm};
 
 // The generated parsers, compiled as isolated modules. Each defines its own
 // `Parser`, `Tree`, `Token`, `ParseTree` — nothing is shared with lark-rs.
@@ -180,22 +178,14 @@ fn rejects_unsupported_backends() {
     );
 }
 
-/// #425 (option b): standalone bake **rejects** `propagate_positions=true` with a
-/// typed error rather than silently dropping spans. The standalone runtime
-/// (`src/standalone/runtime.rs`) has no `Tree.meta`/span tracking at all and `bake`
-/// never threads `cg.propagate_positions`, so a standalone parser built with
-/// `propagate_positions=true` would produce absent spans where the in-process engine
-/// produces real ones (#402) — an ADR-0017 "more permissive / unfalsifiable" silent
-/// asymmetry. Until the capability gap is closed (option a, #457) the bake fails loud,
-/// the same fail-loud chokepoint the #298 (illegal lexer/ambiguity) and #280
-/// (un-hostable lookaround) guards already use.
-///
-/// Oracle precondition: the in-process API *accepts* `propagate_positions=true` (it is
-/// a legal config that yields a meta-bearing tree), so this is genuinely a standalone
-/// gap to fail loud on, not an illegal config both front doors reject.
+/// #457 (option a): standalone bake now **accepts** `propagate_positions=true` —
+/// the #425 fail-loud rejection is removed. The standalone runtime grew a
+/// `Tree.meta` span (and the byte-offset fields on `Token` it is derived from), so a
+/// generated parser produces real spans, byte-identical to the in-process LALR
+/// engine (#402). This guards against the rejection creeping back.
 #[test]
-fn standalone_rejects_propagate_positions_until_meta_support() {
-    let src = "start: \"a\"\n";
+fn standalone_accepts_propagate_positions() {
+    let src = "start: \"(\" NUMBER \")\"\nNUMBER: /[0-9]+/\n%ignore \" \"\n";
     let opts = LarkOptions {
         parser: ParserAlgorithm::Lalr,
         propagate_positions: true,
@@ -205,20 +195,23 @@ fn standalone_rejects_propagate_positions_until_meta_support() {
     // Oracle precondition: the in-process API accepts propagate_positions=true.
     assert!(
         Lark::new(src, opts.clone()).is_ok(),
-        "#425 precondition: the in-process API must accept propagate_positions=true \
-         (it produces meta spans) — otherwise this would be an illegal config, not a \
-         standalone capability gap"
+        "#457 precondition: the in-process API must accept propagate_positions=true"
     );
 
-    // The fix: standalone bake rejects it with a typed GrammarError rather than baking
-    // a parser that silently drops spans.
-    let err = generate_standalone(src, &opts)
-        .expect_err("#425: standalone bake must reject propagate_positions=true");
+    // The fix: standalone bake now succeeds (it used to reject under #425).
     assert!(
-        matches!(err, LarkError::Grammar(GrammarError::Other { .. })),
-        "#425: expected a typed GrammarError for propagate_positions=true, got {err:?}"
+        generate_standalone(src, &opts).is_ok(),
+        "#457: standalone bake must now accept propagate_positions=true \
+         (the runtime has Tree.meta/span support)"
     );
 }
+
+// The byte-for-byte meta parity test against the in-process LALR oracle lives as a
+// unit test in `src/standalone/mod.rs` (`standalone_meta_matches_in_process_lalr`),
+// where it can read the shared runtime's `Tree.meta` (not part of lark-rs's public
+// API) off a baked-and-run parser. This integration crate only sees the generated
+// modules' public surface, so it pins the *acceptance* of propagate_positions here
+// and the span values there.
 
 /// RC7 (#272, ADR-0013) at the standalone-generation boundary. The standalone bake
 /// path now runs the same post-lowering reduce/reduce audit the live LALR build runs

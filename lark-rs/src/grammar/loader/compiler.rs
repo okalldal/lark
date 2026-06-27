@@ -211,6 +211,19 @@ pub(super) struct GrammarCompiler {
     /// definition tree). A same-grammar `%extend` (whose target is still a
     /// `RawTerm`) never lands here — it splices in [`stage_term_directive`].
     pub(super) pending_term_extends: Vec<(String, Vec<AliasedExpansion>)>,
+    /// `%extend` of an *imported interior* rule origin (#442), deferred so the
+    /// prepend ordering is applied *after* the extend body is compiled. Python's
+    /// `_extend` prepends: the new alternatives must sort strictly ahead of every
+    /// pre-existing (imported) alternative at that origin. The extend body is staged
+    /// as a fresh `RawRule`, whose compiled BNF alternatives number from 0; once we
+    /// know that count `k`, every pre-existing alternative is shifted up by `k`,
+    /// leaving the extend's `0..k` strictly first. Each entry snapshots the
+    /// pre-existing (imported) alternatives at stage time (by value), so the shift
+    /// can identify exactly which compiled rules to move — a real invariant rather
+    /// than the old fixed `EXTEND_ORDER_OFFSET` constant, which could collide once an
+    /// extend produced ≥1_000_000 alternatives. See [`stage_rule_directive`] /
+    /// [`apply_pending_interior_extends`](GrammarCompiler::apply_pending_interior_extends).
+    pub(super) pending_interior_extends: Vec<(String, Vec<Rule>)>,
     /// `%ignore` directives, in document order. A directive that is a single
     /// reference to a named terminal records that terminal's name
     /// ([`IgnoreEntry::Named`]) so it is marked ignored with its **declared
@@ -391,6 +404,7 @@ impl GrammarCompiler {
             terminals: Vec::new(),
             raw_terms: Vec::new(),
             pending_term_extends: Vec::new(),
+            pending_interior_extends: Vec::new(),
             ignore_patterns: Vec::new(),
             minter: NameMinter::new(),
             templates: HashMap::new(),
@@ -782,6 +796,13 @@ impl GrammarCompiler {
         for r in rule_items {
             self.compile_rule(r)?;
         }
+
+        // Apply the deferred `%extend`-of-imported-interior-origin prepend (#442/#505):
+        // now that every extend body has compiled (numbering its alternatives `0..k`),
+        // shift each origin's pre-existing imported alternatives up by `k` so the
+        // extend's alternatives sort strictly first, exactly as Python's `_extend`
+        // prepends. Computed from the actual alternative count — no fixed offset bound.
+        self.apply_pending_interior_extends();
         for expansions in ignore_items {
             // Mirror Python's `_ignore` (`load_grammar.py`): a directive that is a
             // single expansion containing a single value which is a reference to a
@@ -845,6 +866,17 @@ impl GrammarCompiler {
                 // them.)
                 rule_items.retain(|prev| prev.name != r.name);
                 self.rules.retain(|rule| rule.origin.name != r.name);
+                // An earlier `%extend` of this same imported interior origin recorded
+                // a deferred prepend (`pending_interior_extends`) whose snapshot points
+                // at the imported alternatives we just deleted. Python's `_extend` then
+                // `_define(override=True)` replaces the whole definition, discarding any
+                // alternatives the prior `%extend` inserted — so drop the pending
+                // prepend too (the terminal sibling does the same with
+                // `pending_term_extends`). Leaving it stale would underflow the
+                // computed shift in `apply_pending_interior_extends` (`total` now < the
+                // snapshot length) — issue #505 review finding.
+                self.pending_interior_extends
+                    .retain(|(name, _)| name != &r.name);
                 rule_items.push(r);
             }
             Directive::Extend => {
@@ -874,18 +906,31 @@ impl GrammarCompiler {
                     // numbers a fresh definition's alternatives from 0, and `order` is
                     // used only as a *relative* tie-break in resolve disambiguation
                     // (Earley `(is_empty, -priority, order)`; LALR same-reduction
-                    // collapse "first arm wins"), never as an index. So bump every
-                    // existing alternative of this origin by a large offset, leaving
-                    // the deferred extend's `0..k` orders strictly ahead of them —
-                    // making the extend win the resolve/reduce tie exactly as Python's
-                    // prepend does. Without this the extend was *appended* (its `0..k`
-                    // tied with the originals' low orders but lost insertion order), a
-                    // resolve divergence the named-terminal differential never surfaced
-                    // because a distinct terminal disambiguates at the lexer instead.
-                    const EXTEND_ORDER_OFFSET: usize = 1_000_000;
-                    for rule in self.rules.iter_mut().filter(|x| x.origin.name == r.name) {
-                        rule.order += EXTEND_ORDER_OFFSET;
-                    }
+                    // collapse "first arm wins"), never as an index. The prepend is
+                    // therefore "every extend alternative must sort strictly ahead of
+                    // every pre-existing imported alternative at this origin".
+                    //
+                    // Rather than bump the existing alternatives by a fixed constant
+                    // (the old `EXTEND_ORDER_OFFSET = 1_000_000`, which could overlap
+                    // once an extend produced ≥1_000_000 alternatives — issue #505), we
+                    // *defer* the shift: snapshot the pre-existing imported
+                    // alternatives now and record the origin. After the extend body is
+                    // compiled (numbering its alternatives `0..k`), `apply_pending_
+                    // interior_extends` shifts each pre-existing alternative up by the
+                    // computed `k`, leaving the extend's `0..k` strictly first — a real
+                    // invariant for any `k`. (Without the prepend the extend was
+                    // *appended* — its `0..k` tied with the originals' low orders but
+                    // lost insertion order — a resolve divergence the named-terminal
+                    // differential never surfaced because a distinct terminal
+                    // disambiguates at the lexer instead.)
+                    let preexisting: Vec<Rule> = self
+                        .rules
+                        .iter()
+                        .filter(|x| x.origin.name == r.name)
+                        .cloned()
+                        .collect();
+                    self.pending_interior_extends
+                        .push((r.name.clone(), preexisting));
                     rule_items.push(RawRule {
                         directive: Directive::Plain,
                         ..r
@@ -894,6 +939,45 @@ impl GrammarCompiler {
             }
         }
         Ok(())
+    }
+
+    /// Apply every deferred `%extend`-of-imported-interior-origin prepend recorded in
+    /// [`pending_interior_extends`](Self::pending_interior_extends). Called once after
+    /// all rule bodies have compiled.
+    ///
+    /// At record time we snapshotted the pre-existing (imported) alternatives at the
+    /// origin (orders untouched); the extend body has since compiled to a fresh
+    /// definition whose alternatives number `0..k`. To realize Python's `_extend`
+    /// *prepend*, every pre-existing alternative is shifted up by exactly `k` — the
+    /// **computed** alternative count, not a fixed constant — so the extend's `0..k`
+    /// orders sort strictly ahead of all of them, for any `k`. `k` is recovered as
+    /// "rules at the origin that are *not* in the snapshot" (the just-compiled extend
+    /// alternatives). A pre-existing alternative is matched by value; should an extend
+    /// alternative happen to be byte-identical *and* share an order with a pre-existing
+    /// one, shifting either is equivalent, so the match remains correct.
+    fn apply_pending_interior_extends(&mut self) {
+        let pending = std::mem::take(&mut self.pending_interior_extends);
+        for (origin, preexisting) in pending {
+            // Count the extend alternatives = rules at this origin minus the snapshot.
+            let total = self
+                .rules
+                .iter()
+                .filter(|x| x.origin.name == origin)
+                .count();
+            let k = total - preexisting.len();
+            if k == 0 {
+                continue;
+            }
+            // Shift each pre-existing (imported) alternative up by `k`, consuming each
+            // snapshot entry once so duplicate-valued alternatives are each shifted.
+            let mut remaining = preexisting;
+            for rule in self.rules.iter_mut().filter(|x| x.origin.name == origin) {
+                if let Some(pos) = remaining.iter().position(|p| p == rule) {
+                    remaining.swap_remove(pos);
+                    rule.order += k;
+                }
+            }
+        }
     }
 
     /// Resolve a terminal definition's `%override` / `%extend` directive (or stage
