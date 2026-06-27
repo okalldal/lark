@@ -802,7 +802,7 @@ impl GrammarCompiler {
         // shift each origin's pre-existing imported alternatives up by `k` so the
         // extend's alternatives sort strictly first, exactly as Python's `_extend`
         // prepends. Computed from the actual alternative count — no fixed offset bound.
-        self.apply_pending_interior_extends();
+        self.apply_pending_interior_extends()?;
         for expansions in ignore_items {
             // Mirror Python's `_ignore` (`load_grammar.py`): a directive that is a
             // single expansion containing a single value which is a reference to a
@@ -955,7 +955,17 @@ impl GrammarCompiler {
     /// alternatives). A pre-existing alternative is matched by value; should an extend
     /// alternative happen to be byte-identical *and* share an order with a pre-existing
     /// one, shifting either is equivalent, so the match remains correct.
-    fn apply_pending_interior_extends(&mut self) {
+    ///
+    /// Robustness (#527): the prepend count is `total - preexisting.len()`, which is
+    /// non-negative only as long as the snapshot invariant holds — every snapshotted
+    /// pre-existing alternative is still present at the origin when this runs. The one
+    /// path that could break it (`%extend`-then-`%override`, which deletes the
+    /// snapshotted alternatives) is already closed at the `%override` site by dropping
+    /// the stale pending entry (#505). We still compute the count with `checked_sub` so
+    /// that a *future* regression which violates the invariant surfaces as a clear
+    /// internal error rather than an underflow panic (debug) or a silent wrap into a
+    /// huge `k` (release).
+    fn apply_pending_interior_extends(&mut self) -> Result<(), GrammarError> {
         let pending = std::mem::take(&mut self.pending_interior_extends);
         for (origin, preexisting) in pending {
             // Count the extend alternatives = rules at this origin minus the snapshot.
@@ -964,7 +974,17 @@ impl GrammarCompiler {
                 .iter()
                 .filter(|x| x.origin.name == origin)
                 .count();
-            let k = total - preexisting.len();
+            let k = total
+                .checked_sub(preexisting.len())
+                .ok_or_else(|| GrammarError::Other {
+                    msg: format!(
+                        "internal error: pending interior %extend at origin `{origin}` \
+                         snapshotted {} pre-existing alternatives but only {total} remain \
+                         — the snapshot invariant was violated \
+                         (apply_pending_interior_extends, #527)",
+                        preexisting.len(),
+                    ),
+                })?;
             if k == 0 {
                 continue;
             }
@@ -978,6 +998,7 @@ impl GrammarCompiler {
                 }
             }
         }
+        Ok(())
     }
 
     /// Resolve a terminal definition's `%override` / `%extend` directive (or stage
@@ -2077,5 +2098,54 @@ mod tests {
     fn override_and_extend_not_treated_as_duplicates() {
         assert!(load("start: A\n%override start: B\nA: \"a\"\nB: \"b\"\n").is_ok());
         assert!(load("start: A\n%extend start: B\nA: \"a\"\nB: \"b\"\n").is_ok());
+    }
+
+    /// #527 hardening: `apply_pending_interior_extends` computes the prepend count as
+    /// `total - preexisting.len()`. The snapshot invariant (every snapshotted
+    /// pre-existing alternative is still present at the origin) is preserved by the
+    /// #505 `%override`-drops-pending fix on every reachable grammar path, so this
+    /// subtraction never underflows in practice. This test exercises the *defensive*
+    /// branch directly by violating the invariant — a snapshot longer than the actual
+    /// rules at the origin — which is exactly the shape a future same-origin mutation
+    /// could regress into. With the raw subtraction this underflow-**panics** in debug
+    /// (and wraps to a huge `k` in release); with `checked_sub` it returns a clear
+    /// internal `GrammarError` instead. Asserting `is_err()` (not catching a panic)
+    /// is the post-fix contract.
+    #[test]
+    fn pending_interior_extend_snapshot_underflow_is_internal_error_not_panic() {
+        use super::GrammarCompiler;
+        use crate::grammar::rule::{Rule, RuleOptions};
+        use crate::grammar::symbol::NonTerminal;
+
+        let mut compiler =
+            GrammarCompiler::new(vec!["start".to_string()], false, false, None, None);
+
+        let origin = NonTerminal::new("mod__inner");
+        // Exactly one real rule lives at the origin …
+        compiler.rules.push(Rule::new(
+            origin.clone(),
+            Vec::new(),
+            None,
+            RuleOptions::default(),
+            0,
+        ));
+        // … but the pending snapshot claims two pre-existing alternatives, so
+        // `total (1) - preexisting.len() (2)` would underflow. This is the
+        // invariant-violation shape the hardening guards against.
+        let snapshot = vec![
+            Rule::new(origin.clone(), Vec::new(), None, RuleOptions::default(), 0),
+            Rule::new(origin.clone(), Vec::new(), None, RuleOptions::default(), 1),
+        ];
+        compiler
+            .pending_interior_extends
+            .push(("mod__inner".to_string(), snapshot));
+
+        let err = compiler
+            .apply_pending_interior_extends()
+            .expect_err("snapshot longer than live rules must yield an internal error, not panic");
+        assert!(
+            err.to_string().contains("snapshot invariant was violated"),
+            "expected the #527 internal-error message, got: {err}"
+        );
     }
 }

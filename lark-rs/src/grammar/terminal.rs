@@ -23,17 +23,22 @@ enum Step {
 }
 
 /// A shared, character-class-aware cursor over a terminal's regex source — the single
-/// implementation of the `\`-escape / `[...]` / `[^...]` / leading-`]` tracking the five
+/// implementation of the `\`-escape / `[...]` / `[^...]` / leading-`]` tracking the
 /// Python-`re`-dialect *screens* (`normalize_python_escapes`, `reject_out_of_range_octal`,
 /// `find_global_inline_flag_group`, `reject_quantifier_dialect_divergence`,
-/// `reject_regex_crate_only_dialect`) used to hand-roll five times (issue #481).
-/// Centralizing it makes the class-tracking semantics **identical** across all five — the
-/// whole point, since the five copies were the drift surface.
+/// `reject_regex_crate_only_dialect`) used to hand-roll five times (issue #481), plus the
+/// two sibling walkers `strip_screening_comments` and `reject_regex_crate_angle_named_group`
+/// (issue #501). Centralizing it makes the class-tracking semantics **identical** across
+/// all of them — the whole point, since the duplicated copies were the drift surface.
 ///
-/// Two further walkers in this file deliberately stay separate (out of #481's scope):
-/// `strip_screening_comments` additionally carries a verbose **scope stack** the cursor
-/// does not model (per-`(` push/pop), and `reject_regex_crate_angle_named_group` inspects
-/// `(?<` openers — neither is a drop-in for this single-char/escape/class cursor.
+/// The two #501 walkers carry logic the cursor does **not** model and keep it as a thin
+/// out-of-class layer over the shared steps: `strip_screening_comments` maintains a verbose
+/// **scope stack** (per-`(` push/pop) and removes `(?#…)` / verbose `# …` comment spans;
+/// `reject_regex_crate_angle_named_group` inspects `(?<` openers. Both detect those
+/// constructs from the backing slice *before* stepping (only out-of-class, where the cursor's
+/// class flag is unchanged by a `seek` over the span) and delegate every escape / class /
+/// leading-`]` boundary to the cursor — `strip_screening_comments` copying each consumed step
+/// verbatim so its output stays byte-identical.
 ///
 /// The cursor advances over `chars` one structural [`Step`] at a time, maintaining the
 /// in-class flag with Python's class-boundary rules (a `[` opens a class; a leading `^`
@@ -936,101 +941,78 @@ fn reject_regex_crate_only_dialect(pattern: &str) -> Result<(), GrammarError> {
 fn strip_screening_comments(pattern: &str, flags: u32) -> String {
     let chars: Vec<char> = pattern.chars().collect();
     let mut out = String::with_capacity(chars.len());
-    let mut i = 0usize;
-    let mut in_class = false;
     // Verbose-scope stack: `verbose[last]` is the flag in effect at the cursor. A `(`
     // pushes (inheriting), a `)` pops; a scoped `(?flags:…)` pushes its own adjusted bit,
     // a bodiless `(?flags)` mutates the top in place.
     let mut verbose: Vec<bool> = vec![flags & flags::VERBOSE != 0];
-    while i < chars.len() {
-        let c = chars[i];
-        // An escape pair is copied verbatim (a `\#`/`\(` is a literal, never a comment
-        // start, group open, or close) — this also keeps the screens' own escape-awareness
-        // intact.
-        if c == '\\' {
-            out.push(c);
-            if let Some(&n) = chars.get(i + 1) {
-                out.push(n);
-                i += 2;
-            } else {
-                i += 1; // trailing backslash
-            }
-            continue;
-        }
-        if in_class {
-            // Inside `[...]`, `#`/`(?#`/whitespace are literal; only the close matters.
-            if c == ']' {
-                in_class = false;
-            }
-            out.push(c);
-            i += 1;
-            continue;
-        }
-        // `(?#…)` inline comment — dropped wholesale (shared span rule), in any scope.
-        if c == '(' && chars.get(i + 1) == Some(&'?') && chars.get(i + 2) == Some(&'#') {
-            i = end_of_inline_comment(&chars, i);
-            continue;
-        }
-        // Verbose `# …` comment to end-of-line — dropped where verbose is in effect (the
-        // `\n`, if any, is kept on the next pass; it is whitespace either way).
-        if *verbose.last().unwrap() && c == '#' {
-            let mut j = i + 1;
-            while j < chars.len() && chars[j] != '\n' {
-                j += 1;
-            }
-            i = j; // resume at the newline (copied next pass) or end of input
-            continue;
-        }
-        if c == '[' {
-            in_class = true;
-            out.push(c);
-            i += 1;
-            // A leading `]` (optionally after `^`) is a literal class member, not the
-            // close — copy it through so close-tracking doesn't end the class early.
-            if chars.get(i) == Some(&'^') {
-                out.push('^');
-                i += 1;
-            }
-            if chars.get(i) == Some(&']') {
-                out.push(']');
-                i += 1;
-            }
-            continue;
-        }
-        if c == '(' {
-            // An inline flag group `(?…)` / `(?…:…)` adjusts verbose; any other group
-            // `(`, `(?:`, `(?=`, `(?<=`, `(?P<…>`, … just inherits the current scope.
-            let cur = *verbose.last().unwrap();
-            if let Some((new_verbose, bodiless, consumed)) = parse_inline_flag_group(&chars, i, cur)
-            {
-                if bodiless {
-                    // `(?flags)` — mutate the current scope for its remainder, no push.
-                    *verbose.last_mut().unwrap() = new_verbose;
-                } else {
-                    // `(?flags:…)` — a new scope with the adjusted verbose bit.
-                    verbose.push(new_verbose);
-                }
-                for &ch in &chars[i..i + consumed] {
-                    out.push(ch);
-                }
-                i += consumed;
+    // Drives the shared class-/escape-aware [`RegexCursor`] (#481/#501): the `\`-escape,
+    // `[...]`/`[^...]`, and leading-`]` tracking — exactly the class-boundary edges the
+    // five sibling screens already share — are the cursor's job. The comment-removal and
+    // verbose-scope-stack logic this walker *additionally* carries runs only out-of-class
+    // (`cur.in_class()` is false), detected from the backing slice before the cursor steps;
+    // a recognized comment / flag-group span is consumed via `seek` (always out-of-class,
+    // so the cursor's class flag stays consistent). Every other step is copied verbatim
+    // (escape pair, class span, or ordinary char) so the output stays byte-identical.
+    let mut cur = RegexCursor::new(&chars);
+    while !cur.at_end() {
+        let i = cur.pos();
+        if !cur.in_class() {
+            let c = chars[i];
+            // `(?#…)` inline comment — dropped wholesale (shared span rule), in any scope.
+            if c == '(' && chars.get(i + 1) == Some(&'?') && chars.get(i + 2) == Some(&'#') {
+                cur.seek(end_of_inline_comment(&chars, i));
                 continue;
             }
-            verbose.push(cur); // ordinary group — inherit
-            out.push(c);
-            i += 1;
-            continue;
-        }
-        if c == ')' {
-            if verbose.len() > 1 {
-                verbose.pop();
+            // Verbose `# …` comment to end-of-line — dropped where verbose is in effect (the
+            // `\n`, if any, is kept on the next pass; it is whitespace either way).
+            if *verbose.last().unwrap() && c == '#' {
+                let mut j = i + 1;
+                while j < chars.len() && chars[j] != '\n' {
+                    j += 1;
+                }
+                cur.seek(j); // resume at the newline (copied next pass) or end of input
+                continue;
             }
-            out.push(c);
-            i += 1;
-            continue;
+            if c == '(' {
+                // An inline flag group `(?…)` / `(?…:…)` adjusts verbose; any other group
+                // `(`, `(?:`, `(?=`, `(?<=`, `(?P<…>`, … just inherits the current scope.
+                let cur_verbose = *verbose.last().unwrap();
+                if let Some((new_verbose, bodiless, consumed)) =
+                    parse_inline_flag_group(&chars, i, cur_verbose)
+                {
+                    if bodiless {
+                        // `(?flags)` — mutate the current scope for its remainder, no push.
+                        *verbose.last_mut().unwrap() = new_verbose;
+                    } else {
+                        // `(?flags:…)` — a new scope with the adjusted verbose bit.
+                        verbose.push(new_verbose);
+                    }
+                    for &ch in &chars[i..i + consumed] {
+                        out.push(ch);
+                    }
+                    cur.seek(i + consumed);
+                    continue;
+                }
+                verbose.push(cur_verbose); // ordinary group — inherit
+                out.push(c);
+                cur.seek(i + 1);
+                continue;
+            }
+            if c == ')' {
+                if verbose.len() > 1 {
+                    verbose.pop();
+                }
+                out.push(c);
+                cur.seek(i + 1);
+                continue;
+            }
         }
-        out.push(c);
-        i += 1;
+        // Not a comment / flag-group / paren handled above: let the cursor consume the
+        // escape pair, class span (including its leading `^`/`]` members), class close, or
+        // ordinary char, and copy exactly what it consumed verbatim.
+        let before = cur.pos();
+        cur.step();
+        out.extend(&chars[before..cur.pos()]);
     }
     out
 }
@@ -1113,61 +1095,44 @@ fn parse_inline_flag_group(
 /// group — is already gone and is not mis-rejected (#364 corrective).
 fn reject_regex_crate_angle_named_group(pattern: &str) -> Result<(), GrammarError> {
     let chars: Vec<char> = pattern.chars().collect();
-    let mut i = 0usize;
-    let mut in_class = false;
-    while i < chars.len() {
-        match chars[i] {
-            '\\' => {
-                i += 2; // skip the escape pair (`\(`, `\[`, `\\`, …)
-                continue;
-            }
-            '[' if !in_class => {
-                in_class = true;
-                i += 1;
-                // A `]` as the first class member (or first after `^`) is a literal — copy
-                // past it so the close-tracking doesn't end the class early.
-                if chars.get(i) == Some(&'^') {
-                    i += 1;
+    // Drives the shared class-/escape-aware [`RegexCursor`] (#481/#501): the `\`-escape,
+    // `[...]`/`[^...]`, and leading-`]` tracking are the cursor's job — this screen only
+    // reacts to a `(?<` opener *out-of-class*, detected from the backing slice before the
+    // cursor steps (inside `[…]` a `(?<` is a literal class member, which the cursor's
+    // `in_class()` flag tells us). `seek` past a recognized lookbehind so the cursor's
+    // class flag stays consistent (the skipped span is out-of-class, never a boundary).
+    let mut cur = RegexCursor::new(&chars);
+    while !cur.at_end() {
+        let i = cur.pos();
+        if !cur.in_class()
+            && chars[i] == '('
+            && chars.get(i + 1) == Some(&'?')
+            && chars.get(i + 2) == Some(&'<')
+        {
+            // `(?<` outside a class. Only the lookbehind forms `(?<=` / `(?<!` are
+            // valid Python; anything else (`(?<x>…)`, `(?<name>…)`) is the
+            // regex-crate-only angle named group Python rejects.
+            match chars.get(i + 3).copied() {
+                Some('=') | Some('!') => {
+                    cur.seek(i + 3); // lookbehind — leave it for the lowering path
+                    continue;
                 }
-                if chars.get(i) == Some(&']') {
-                    i += 1;
-                }
-                continue;
-            }
-            ']' if in_class => {
-                in_class = false;
-                i += 1;
-                continue;
-            }
-            '(' if !in_class
-                && chars.get(i + 1) == Some(&'?')
-                && chars.get(i + 2) == Some(&'<') =>
-            {
-                // `(?<` outside a class. Only the lookbehind forms `(?<=` / `(?<!` are
-                // valid Python; anything else (`(?<x>…)`, `(?<name>…)`) is the
-                // regex-crate-only angle named group Python rejects.
-                match chars.get(i + 3).copied() {
-                    Some('=') | Some('!') => {
-                        i += 3; // lookbehind — leave it for the lowering path
-                        continue;
-                    }
-                    _ => {
-                        return Err(GrammarError::InvalidRegex {
-                            pattern: pattern.to_string(),
-                            reason: "`(?<name>…)` angle named-group is a Rust `regex`-crate-only \
-                                     spelling — Python `re` names a capture only `(?P<name>…)` \
-                                     and raises \"unknown extension ?<\" for the angle form. Use \
-                                     `(?P<name>…)` instead. lark-rs matches Python's rejection \
-                                     (ADR-0017): being more permissive than the oracle is \
-                                     unfalsifiable. (The lookbehind spellings `(?<=…)`/`(?<!…)` \
-                                     are unaffected.)"
-                                .to_string(),
-                        });
-                    }
+                _ => {
+                    return Err(GrammarError::InvalidRegex {
+                        pattern: pattern.to_string(),
+                        reason: "`(?<name>…)` angle named-group is a Rust `regex`-crate-only \
+                                 spelling — Python `re` names a capture only `(?P<name>…)` \
+                                 and raises \"unknown extension ?<\" for the angle form. Use \
+                                 `(?P<name>…)` instead. lark-rs matches Python's rejection \
+                                 (ADR-0017): being more permissive than the oracle is \
+                                 unfalsifiable. (The lookbehind spellings `(?<=…)`/`(?<!…)` \
+                                 are unaffected.)"
+                            .to_string(),
+                    });
                 }
             }
-            _ => i += 1,
         }
+        cur.step();
     }
     Ok(())
 }
@@ -1385,9 +1350,24 @@ fn find_nothing_to_repeat(pattern: &str) -> Option<usize> {
             }
         }
         // Everything else — an ordinary char, a `\`-escape pair, or a `[...]` class span —
-        // is repeatable text. Let the shared cursor consume one structural step.
-        cur.step();
-        repeatable = true;
+        // is repeatable text *unless* it is a bare zero-width anchor. A quantifier binds to
+        // an atom, and Python `re` treats an anchor as "nothing to repeat": an out-of-class
+        // `^`/`$` (`^*`, `$*`) and the anchor escapes `\b`/`\B`/`\A`/`\Z` (`\b*`, …) are
+        // non-repeatable, so a quantifier immediately after one is flagged. Inside a `[...]`
+        // class `^`/`$` are literal members and `\b` is a backspace literal — all repeatable
+        // — so this only fires out-of-class (`!cur.in_class()`), which `step()`'s class
+        // tracking already maintains (#510). Scoped strictly to the quantifier-binding
+        // question; whether lark-rs *supports* `\b`/`\Z` semantics at all is the parked
+        // anchor-policy fork (#275) and is untouched here — an *un*-quantified `\bword\b`
+        // builds exactly as before.
+        let step = cur.step();
+        let is_bare_anchor = !cur.in_class()
+            && match step {
+                Step::Char { c } => c == '^' || c == '$',
+                Step::Escape { esc } => matches!(esc, Some('b' | 'B' | 'A' | 'Z')),
+                Step::ClassOpen { .. } | Step::ClassClose => false,
+            };
+        repeatable = !is_bare_anchor;
     }
     None
 }
@@ -1762,12 +1742,19 @@ mod tests {
         assert_eq!(crate::lookaround::pattern_max_width("a+(?=b)"), Some(None));
     }
 
-    /// #467: `Pattern` equality/hash gate on the **variant first**, so a string literal
-    /// is never equal to (nor hash-collides with) a regex of the same source — matching
-    /// Python Lark's type-first `Pattern.__eq__` and the `patterns_equivalent` unification
-    /// gate (#403/#440). Before the fix the `_ => as_regex_str() == as_regex_str()` arm and
-    /// the `as_regex_str().hash()` impl reported `PatternStr("ab") == PatternRe(/ab/)` true
-    /// and hashed them equal.
+    /// #467: `Pattern` equality gates on the **variant first**, so a string literal is
+    /// never equal to a regex of the same source — matching Python Lark's type-first
+    /// `Pattern.__eq__` and the `patterns_equivalent` unification gate (#403/#440). Before
+    /// the fix the `_ => as_regex_str() == as_regex_str()` arm reported
+    /// `PatternStr("ab") == PatternRe(/ab/)` true (and the `as_regex_str().hash()` impl
+    /// hashed them equal).
+    ///
+    /// This test asserts the real `Eq`/`Hash` contract — `a == b ⇒ hash(a) == hash(b)`,
+    /// i.e. *equal* patterns hash equal — not the stronger (and uncontracted) claim that
+    /// *unequal* patterns never collide. Rust's `Hash` makes no such no-collision promise
+    /// (#528). Mixing the variant discriminant into the hash makes a collision between these
+    /// two cross-kind patterns *practically* impossible under the default hasher, but that
+    /// is a quality-of-implementation property, not a guarantee, so we do not assert it.
     #[test]
     fn pattern_eq_hash_gate_on_kind() {
         use std::collections::hash_map::DefaultHasher;
@@ -1782,19 +1769,17 @@ mod tests {
         let str_ab = Pattern::Str(PatternStr::new("ab"));
         let re_ab = Pattern::Re(PatternRe::new("ab", 0).expect("regex builds"));
 
-        // Cross-kind, same source: never equal, must not hash-collide.
+        // Cross-kind, same source: never equal (both directions). We deliberately do NOT
+        // assert their hashes differ — that would over-claim a no-collision guarantee the
+        // `Hash` contract does not make (see the doc comment above).
         assert_ne!(
             str_ab, re_ab,
             "PatternStr(\"ab\") must not equal PatternRe(/ab/)"
         );
         assert_ne!(re_ab, str_ab, "equality is symmetric across kinds");
-        assert_ne!(
-            h(&str_ab),
-            h(&re_ab),
-            "a string literal and a same-source regex must not hash equal"
-        );
 
-        // Same-kind equality still holds (and stays hash-consistent).
+        // The actual contract: equal patterns hash equal. Same-kind equality still holds
+        // (and stays hash-consistent).
         let str_ab2 = Pattern::Str(PatternStr::new("ab"));
         let re_ab2 = Pattern::Re(PatternRe::new("ab", 0).expect("regex builds"));
         assert_eq!(str_ab, str_ab2);
@@ -1972,6 +1957,87 @@ mod tests {
         assert_eq!(normalize_python_escapes("a\\{x}"), "a\\{x}"); // already-escaped `\{` untouched
     }
 
+    /// #509: a `(?#…)` comment that falls **inside** a `{…}` brace run makes the whole
+    /// brace run a *literal* in Python `re` — Python's quantifier-bound scan only accepts
+    /// `digits`/`,`/`}`, so a comment-open `(?#` between `{` and `}` aborts the quantifier
+    /// read and `re.compile('{3(?#c)}').fullmatch('{3}')` matches the literal text `{3}`.
+    /// The comment-strip in `normalize_python_escapes` must therefore leave the brace run
+    /// literal (escape the `{` to `\{`), not strip the comment first and then re-recognize
+    /// the leftover `{3}` as a real quantifier (which both the regex crate and the local
+    /// "nothing to repeat" pre-screen then reject — an over-rejection of input Python
+    /// accepts). Oracle: Python `re` (verified 3.11). A comment *outside* the braces
+    /// (before `{` or after `}`) leaves the real quantifier intact.
+    #[test]
+    fn normalize_comment_inside_braces_is_literal() {
+        // The issue repro: `{3(?#c)}` → literal `\{3}` (matches the text `{3}`), NOT `{3}`.
+        assert_eq!(normalize_python_escapes("{3(?#c)}"), "\\{3}");
+        assert_eq!(normalize_python_escapes("a{3(?#c)}"), "a\\{3}");
+        // Comment anywhere inside the brace span aborts the quantifier read → literal.
+        assert_eq!(normalize_python_escapes("{(?#c)3}"), "\\{3}"); // before the digit
+        assert_eq!(normalize_python_escapes("{1(?#c)2}"), "\\{12}"); // between digits
+        assert_eq!(normalize_python_escapes("{3,(?#c)5}"), "\\{3,5}"); // around the comma
+        assert_eq!(normalize_python_escapes("{3,5(?#c)}"), "\\{3,5}"); // after the upper bound
+        assert_eq!(normalize_python_escapes("{,(?#c)3}"), "\\{,3}"); // empty-lower-bound form
+        assert_eq!(normalize_python_escapes("{(?#c)x}"), "\\{x}"); // already-literal body + comment
+                                                                   // A second brace run with an interior comment beside a real quantifier: only the
+                                                                   // comment-bearing run goes literal; the real `{2}` is untouched.
+        assert_eq!(normalize_python_escapes("a{2}{3(?#c)}"), "a{2}\\{3}");
+        // Class-aware: inside `[...]` a `{` is already a literal and the `(?#` is literal
+        // class text (not a comment) — left byte-exact.
+        assert_eq!(normalize_python_escapes("[{3(?#c)}]"), "[{3(?#c)}]");
+        // Escape-aware: a `\{` is already a literal brace; the comment after it still strips
+        // (it is outside any brace *quantifier* run — there is no quantifier to abort).
+        assert_eq!(normalize_python_escapes("\\{3(?#c)}"), "\\{3}");
+
+        // CONTROL — a comment OUTSIDE the braces leaves the real quantifier intact.
+        // `a{3}(?#c)` and `a(?#c){3}` both compile in Python as the quantifier `a{3}`.
+        assert_eq!(normalize_python_escapes("a{3}(?#c)"), "a{3}");
+        assert_eq!(normalize_python_escapes("a(?#c){3}"), "a{3}");
+        assert_eq!(normalize_python_escapes("a{3}(?#c)b"), "a{3}b");
+
+        // The normalized literal brace carries no "nothing to repeat" shape (it is a
+        // literal `\{`, not a leading `{3}` quantifier), so the #448/#506 pre-screen is
+        // clean — the regression the issue describes (`{3(?#c)}` → `{3}` → rejected) is
+        // gone at every stage.
+        assert!(find_nothing_to_repeat(&normalize_python_escapes("{3(?#c)}")).is_none());
+        assert!(find_nothing_to_repeat(&normalize_python_escapes("{3,5(?#c)}")).is_none());
+        assert!(find_nothing_to_repeat(&normalize_python_escapes("{,(?#c)3}")).is_none());
+    }
+
+    /// #509 end-to-end: a `/…/` terminal whose only "quantifier" is a `{…}` brace run with
+    /// an interior `(?#…)` comment **builds** and **matches the literal braces**, exactly
+    /// as Python `re` does (`re.compile('{3(?#c)}').fullmatch('{3}')` matches). Before the
+    /// fix the stripped comment left `{3}`, which the `regex` crate / nothing-to-repeat
+    /// pre-screen rejected — an over-rejection of input Python accepts. We assert the build
+    /// succeeds and the compiled regex matches `{3}` (and does NOT match three repeats —
+    /// it is literal, not a quantifier). Oracle: Python `re` 3.11.
+    #[test]
+    fn comment_inside_braces_builds_and_matches_literal() {
+        for (pat, lit, three_repeats) in [
+            ("{3(?#c)}", "{3}", "xxx"),
+            ("a{3(?#c)}", "a{3}", "aaa"),
+            ("{3,5(?#c)}", "{3,5}", "xxxxx"),
+            ("{,(?#c)3}", "{,3}", "xxx"),
+        ] {
+            let p = PatternRe::new(pat, 0)
+                .unwrap_or_else(|e| panic!("/{pat}/ should build (Python accepts it): {e:?}"));
+            // Anchor a full match against the *literal* text (the braces are literal).
+            let rx = Regex::new(&format!("^(?:{})$", p.pattern))
+                .unwrap_or_else(|e| panic!("compiled /{pat}/ → {:?} invalid: {e:?}", p.pattern));
+            assert!(
+                rx.is_match(lit),
+                "/{pat}/ (→ {:?}) must match the literal {lit:?} (Python oracle)",
+                p.pattern
+            );
+            assert!(
+                !rx.is_match(three_repeats),
+                "/{pat}/ (→ {:?}) is a literal brace run, not a quantifier — must NOT match \
+                 the repeated-char string {three_repeats:?}",
+                p.pattern
+            );
+        }
+    }
+
     /// H6/H7 (#333): the quantifier-shape dialect screen refuses possessive (`a++`) and
     /// stacked (`a{2}{3}`) quantifiers — both constructs the regex crate accepts with a
     /// meaning that diverges from Python — while leaving lazy quantifiers, normal
@@ -2092,6 +2158,62 @@ mod tests {
         }
     }
 
+    /// #510: a base quantifier applied to a **bare zero-width anchor** — an out-of-class
+    /// `^`/`$` or an anchor escape `\b`/`\B`/`\A`/`\Z` — is Python `re` "nothing to repeat",
+    /// but the `regex` crate accepts it (it lets you quantify an anchor), so `Regex::new`
+    /// would build a terminal Python rejects: lark-rs was *more permissive* than the oracle
+    /// (ADR-0017's unfalsifiable corollary). `PatternRe::new` must reject each with the
+    /// truthful `InvalidRegex` "nothing to repeat" category, matching Python. Grounded
+    /// against Python 3.11 `re.compile` (the worker's differential probe; see issue #510).
+    /// Scope is strictly the quantifier-binding question — whether lark-rs *supports*
+    /// `\b`/`\Z` semantics at all is the parked anchor-policy fork (#275), untouched here.
+    #[test]
+    fn quantified_bare_anchor_is_nothing_to_repeat() {
+        for p in [
+            "^*", "^+", "^?", "^{2,5}", "$*", "$+", "$?", r"\b*", r"\B*", r"\A*", r"\Z*", r"\b+",
+            r"\Z{2}", "(?m)^*", "(?m)$*", r"(?m)\b*", r"a\b*", "^$*",
+        ] {
+            let err = PatternRe::new(p, 0)
+                .expect_err("a quantified bare anchor is nothing to repeat (Python `re`)");
+            match &err {
+                GrammarError::InvalidRegex { reason, .. } => assert!(
+                    reason.contains("nothing to repeat"),
+                    "{p:?}: InvalidRegex reason must name \"nothing to repeat\", got: {reason}"
+                ),
+                other => panic!("{p:?}: must be InvalidRegex \"nothing to repeat\", not {other:?}"),
+            }
+        }
+    }
+
+    /// #510 negative control: an anchor followed by a **real** atom that the quantifier binds
+    /// to — or an anchor inside a character class where `^`/`$`/`\b` are literal members —
+    /// still builds. This is the boundary against the parked #275 anchor-support policy: an
+    /// *un*-quantified `\bword\b` (and `a$`, `^a*`, …) must build exactly as before; the fix
+    /// only flags the quantifier-on-anchor shape, never anchor support itself. Each builds in
+    /// Python `re` (oracle).
+    #[test]
+    fn anchor_then_real_atom_still_builds() {
+        for p in [
+            "^a*",
+            "a$",
+            "^(a)*",
+            r"\bword\b",
+            "a*$",
+            r"(\b)*",
+            r"\Bx*",
+            r"[\^]*",
+            "[$]*",
+            r"[\b]*",
+            "[^a]*",
+        ] {
+            assert!(
+                PatternRe::new(p, 0).is_ok(),
+                "{p:?}: the quantifier binds to a real atom (or the anchor is a class \
+                 member) — Python `re` accepts it, so lark-rs must build it (#510, not #275)"
+            );
+        }
+    }
+
     /// #448 differential-audit: the nothing-to-repeat pre-screen (#506: now a **local**
     /// shape classifier, `find_nothing_to_repeat`, no longer the `regex`-crate message text)
     /// must NOT re-bucket a genuine `LookaroundScope`/backref input. These constructs
@@ -2186,6 +2308,44 @@ mod tests {
             // NOT "nothing to repeat".
             ("a**", false),
             ("a*?", false),
+            // --- #510: a quantifier on a bare zero-width anchor is "nothing to repeat" ---
+            // Out-of-class `^`/`$` are anchors, not repeatable atoms.
+            ("^*", true),
+            ("^+", true),
+            ("^?", true),
+            ("^{0,5}", true),
+            ("$*", true),
+            ("$+", true),
+            ("$?", true),
+            // The anchor escapes `\b`/`\B`/`\A`/`\Z` likewise have nothing to repeat.
+            (r"\b*", true),
+            (r"\B*", true),
+            (r"\A*", true),
+            (r"\Z*", true),
+            (r"\b+", true),
+            (r"\Z{0,2}", true),
+            // A flag prefix does not change the verdict (the anchor still has nothing).
+            ("(?m)^*", true),
+            (r"(?m)\b*", true),
+            // An anchor with nothing real before it still poisons a following quantifier:
+            // the `*` binds to the anchor, not the earlier atom (Python: `a\b*` rejects).
+            (r"a\b*", true),
+            ("^$*", true),
+            ("$^*", true),
+            // --- #510 negative controls: the quantifier binds to a REAL atom, builds ---
+            ("^a*", false),   // `*` binds to `a`
+            ("a$", false),    // `$` is a trailing anchor, no quantifier
+            ("^(a)*", false), // `*` binds to the closed group
+            (r"\bword\b", false),
+            ("a*$", false),
+            ("(\\b)*", false), // `*` binds to the closed group, not the inner `\b`
+            (r"\Bx*", false),  // `*` binds to `x`
+            // Inside a class `^`/`$` are literal members and `\b` is a backspace literal —
+            // all repeatable, so a following quantifier has something to repeat.
+            (r"[\^]*", false),
+            ("[$]*", false),
+            (r"[\b]*", false),
+            ("[^a]*", false), // leading `^` is class negation; the class is repeatable
         ];
         for &(p, want) in cases {
             assert_eq!(
@@ -2616,5 +2776,72 @@ mod tests {
         );
         // `\<` INSIDE a class also normalizes to the bare char (ADR-0004 dotmotif case).
         assert_eq!(normalize_python_escapes(r"[\<\>]"), "[<>]");
+    }
+
+    /// #501 differential audit: the two *sibling* walkers left out of #481's scope —
+    /// [`strip_screening_comments`] and [`reject_regex_crate_angle_named_group`] — now also
+    /// drive the shared class-/escape-aware [`RegexCursor`]. This pins the class/escape
+    /// edges the standing scanner banks under-sample (ADR-0021), each grounded **verbatim**
+    /// to the pre-#501 behaviour: no strip-output or accept/reject decision may change.
+    /// (`test_scanner_differential` is the 3-way oracle that the end-to-end *match outcome*
+    /// is unchanged; this pins the unit-level class-boundary semantics.)
+    #[test]
+    fn unified_cursor_preserves_sibling_walker_decisions() {
+        use flags::VERBOSE;
+
+        // ── strip_screening_comments: the class-/escape-aware edges now owned by the cursor.
+        // A leading `]` (after an optional `^`) is a literal class member — a `#`/`(?#`
+        // inside that class stays literal (the class did not close early).
+        assert_eq!(
+            strip_screening_comments("[]#(?#]a", VERBOSE),
+            "[]#(?#]a",
+            "leading `]` keeps the class open; in-class `#`/`(?#` are literal members"
+        );
+        assert_eq!(
+            strip_screening_comments("[^]#x]y # c\n", VERBOSE),
+            "[^]#x]y \n",
+            "`[^]…]` literal leading `]`; only the OUT-of-class verbose `#` strips"
+        );
+        // An escaped `\]` inside a class is a literal, not the close — the class stays open,
+        // so a following `#` is still an in-class literal under VERBOSE.
+        assert_eq!(
+            strip_screening_comments(r"[\]#](?#c)z", VERBOSE),
+            r"[\]#]z",
+            r"`\]` is not the class close; the in-class `#` is literal, the out `(?#c)` strips"
+        );
+        // An escaped `\(` / `\#` is never a comment open / verbose comment — copied verbatim.
+        assert_eq!(strip_screening_comments(r"a\(?#c)b", 0), r"a\(?#c)b");
+        assert_eq!(strip_screening_comments(r"a\#b", VERBOSE), r"a\#b");
+        // Out-of-class `(?#…)` strips in any scope; a real verbose `#` strips to EOL.
+        assert_eq!(
+            strip_screening_comments("a(?#c)b # d\ne", VERBOSE),
+            "ab \ne"
+        );
+
+        // ── reject_regex_crate_angle_named_group: class-/escape-aware `(?<` detection.
+        // A real angle named group out-of-class is rejected; the lookbehind forms pass.
+        assert!(reject_regex_crate_angle_named_group("a(?<x>)b").is_err());
+        assert!(reject_regex_crate_angle_named_group("a(?<name>)b").is_err());
+        assert!(reject_regex_crate_angle_named_group("a(?<=b)c").is_ok());
+        assert!(reject_regex_crate_angle_named_group("a(?<!b)c").is_ok());
+        // `(?P<name>…)` is the Python-accepted form — never a `(?<` opener.
+        assert!(reject_regex_crate_angle_named_group("(?P<n>x)").is_ok());
+        // Inside `[…]` a `(?<` is a literal class member (Python reads `[(?<x>]` as plain
+        // chars) — must NOT reject. Leading `]`/`^` and an escaped `\(` keep the class /
+        // escape tracking honest.
+        assert!(
+            reject_regex_crate_angle_named_group("[(?<x>]z").is_ok(),
+            "`(?<` inside a class is literal — must not reject"
+        );
+        assert!(
+            reject_regex_crate_angle_named_group("[](?<x>]z").is_ok(),
+            "leading `]` keeps the class open over the `(?<`"
+        );
+        assert!(
+            reject_regex_crate_angle_named_group(r"a\(?<x>b").is_ok(),
+            r"an escaped `\(` is not a group open"
+        );
+        // A real angle group right AFTER a class still rejects (the class closed first).
+        assert!(reject_regex_crate_angle_named_group("[abc](?<x>)").is_err());
     }
 }
