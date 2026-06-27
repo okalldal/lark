@@ -16,7 +16,7 @@
 
 mod common;
 
-use lark_rs::{Lark, LarkOptions, LexerType, ParserAlgorithm};
+use lark_rs::{Ambiguity, Child, Lark, LarkOptions, LexerType, ParseTree, ParserAlgorithm, Tree};
 
 fn engine(spec: &str) -> (ParserAlgorithm, LexerType) {
     match spec {
@@ -128,4 +128,237 @@ fn propagate_positions_off_keeps_post_filter_span() {
     let tree = lark.parse("( cafX )").expect("parses");
     let t = tree.as_tree().expect("a tree root");
     assert_eq!((t.meta.start_pos, t.meta.end_pos), (Some(2), Some(6)));
+}
+
+// ─── Cross-engine empty/nullable-production span agreement (#500) ─────────────
+//
+// #500: an empty/nullable production's *synthesized* span under
+// `propagate_positions=true` must agree across LALR, CYK and **Earley's two
+// distinct forest-walk paths** — the resolve-mode *streaming mirror*
+// (`shape_with_container` driven by the `observe_*` container, `tree_walk.rs`) and
+// the explicit-mode *assemble* path (`TreeOutputBuilder::assemble`,
+// `tree_builder.rs`) — and match Python Lark's oracle. The standing
+// `propagate_positions_meta_matches_oracle` test above replays the empty/nullable
+// cases on every engine in resolve mode; these two tests add the missing axes:
+// (1) the Earley **explicit/assemble** path (the one the cross-engine differential
+// in #500 found could diverge from the streaming mirror), and (2) an explicit
+// engine-vs-engine span-equality assertion that does not route through the oracle,
+// so a future regression that drifts *all* engines together (matching the oracle is
+// then necessary but not sufficient — ADR-0021) is still caught.
+
+/// The fixture case-names the #500 differential targets — every empty/nullable
+/// production whose span must stay *positionless* while its parent widens over the
+/// surrounding tokens/punctuation. These are *names*, not grammars: the grammar +
+/// input are pulled from the committed oracle (`load_empty_nullable_cases`), so
+/// there is a single source of truth (the generator's `PROPAGATE_POSITIONS_CASES`)
+/// and no hand-duplicated grammar string can drift from it.
+const EMPTY_NULLABLE_CASE_NAMES: &[&str] = &[
+    "empty_rule_between_filtered_punct",
+    "empty_rule_between_tokens",
+    "empty_rule_leading",
+    "empty_rule_trailing",
+    "two_empties_between_tokens",
+    "nested_empty_widened_by_outer_punct",
+    "empty_via_transparent_chain",
+    "empty_expand1_keeps_positionless",
+    "nullable_optional_absent",
+    "nullable_alternation_picks_empty",
+    "empty_root_alone",
+    "nullable_rep_zero_between_punct",
+    "nullable_star_empty_between_punct",
+];
+
+/// Load `(name, grammar, input)` for each `EMPTY_NULLABLE_CASE_NAMES` entry from the
+/// committed `propagate_positions` oracle — the same fixture the
+/// `propagate_positions_meta_matches_oracle` replay holds every engine to. Pulling
+/// the grammar/input from the oracle (rather than re-literaling them) means the
+/// differential tests below can never exercise a grammar that has drifted from the
+/// Python-pinned case; a renamed/removed case fails loudly here.
+fn load_empty_nullable_cases() -> Vec<(String, String, String)> {
+    let cases = common::load_oracle("propagate_positions", "cases");
+    let cases = cases.as_array().expect("oracle is an array of cases");
+    EMPTY_NULLABLE_CASE_NAMES
+        .iter()
+        .map(|&want| {
+            let case = cases
+                .iter()
+                .find(|c| c["name"].as_str() == Some(want))
+                .unwrap_or_else(|| panic!("oracle missing empty/nullable case '{want}'"));
+            (
+                want.to_string(),
+                case["grammar"].as_str().unwrap().to_string(),
+                case["input"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// Flatten a tree into `(data, start_pos, end_pos, empty)` tuples in pre-order so
+/// two engines' span assignments can be compared directly (ignoring token leaves,
+/// which carry the lexer's spans and are not the synthesized-node question #500 is
+/// about). `_ambig` wrappers are skipped — their alternatives are unordered.
+fn span_shape(tree: &Tree, out: &mut Vec<(String, Option<usize>, Option<usize>, bool)>) {
+    if tree.data != "_ambig" {
+        out.push((
+            tree.data.clone(),
+            tree.meta.start_pos,
+            tree.meta.end_pos,
+            tree.meta.empty,
+        ));
+    }
+    for c in &tree.children {
+        if let Child::Tree(sub) = c {
+            span_shape(sub, out);
+        }
+    }
+}
+
+fn parse_spans(
+    grammar: &str,
+    input: &str,
+    parser: ParserAlgorithm,
+    lexer: LexerType,
+    ambiguity: Ambiguity,
+) -> Option<Vec<(String, Option<usize>, Option<usize>, bool)>> {
+    let opts = LarkOptions {
+        parser,
+        lexer,
+        ambiguity,
+        start: vec!["start".to_string()],
+        propagate_positions: true,
+        ..Default::default()
+    };
+    // An engine that refuses to build (CYK on a directly-ε rule) is skipped, not
+    // failed — Python refuses the same pairing (recorded as an error in the oracle).
+    let lark = Lark::new(grammar, opts).ok()?;
+    match lark.parse(input).ok()? {
+        ParseTree::Tree(t) => {
+            let mut v = Vec::new();
+            span_shape(&t, &mut v);
+            Some(v)
+        }
+        // A bare-token / bare-None root carries no synthesized node span to compare.
+        ParseTree::Token(_) | ParseTree::None => Some(Vec::new()),
+    }
+}
+
+/// Earley's **explicit/assemble** path must produce the same empty-production spans
+/// as its **resolve/streaming** path. These cases are all unambiguous, so explicit
+/// mode yields a single tree (no `_ambig` wrapper) — making the two walks directly
+/// comparable. This is the exact streaming-mirror-vs-assemble axis #500 names.
+#[test]
+fn empty_production_span_earley_streaming_matches_assemble() {
+    let mut failures = Vec::new();
+    for (name, grammar, input) in load_empty_nullable_cases() {
+        let resolve = parse_spans(
+            &grammar,
+            &input,
+            ParserAlgorithm::Earley,
+            LexerType::Basic,
+            Ambiguity::Resolve,
+        );
+        let explicit = parse_spans(
+            &grammar,
+            &input,
+            ParserAlgorithm::Earley,
+            LexerType::Basic,
+            Ambiguity::Explicit,
+        );
+        if resolve != explicit {
+            failures.push(format!(
+                "[{name}] earley resolve(streaming) != explicit(assemble):\n  streaming: {resolve:?}\n  assemble:  {explicit:?}"
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "Earley streaming-mirror vs assemble span divergence (#500):\n{}",
+        failures.join("\n")
+    );
+}
+
+/// Every engine that *accepts* an empty/nullable production must synthesize the
+/// same node spans as every other accepting engine — proven by direct engine-vs-
+/// engine equality, not only via the oracle (ADR-0021: a banks/oracle-green that
+/// drifts all engines together is necessary but not sufficient). LALR contextual is
+/// the reference and is deliberately *not* in `pairings` (a self-comparison would be
+/// trivially green); each other accepting pairing must match it tuple-for-tuple.
+///
+/// Note CYK's reach here is the *parent-widening* axis only: it rejects a directly-ε
+/// user rule (`e:`, ADR-0024), so the 11 cases carrying an actual positionless empty
+/// *node* skip CYK; the two nullable-via-repetition cases it accepts elide the empty
+/// node entirely (ε-removal), leaving just the widened `start`. LALR + Earley (both
+/// walk paths) carry the empty-node axis in full.
+#[test]
+fn empty_production_span_agrees_across_engines() {
+    let pairings = [
+        (
+            "lalr/basic",
+            ParserAlgorithm::Lalr,
+            LexerType::Basic,
+            Ambiguity::Resolve,
+        ),
+        (
+            "earley/basic",
+            ParserAlgorithm::Earley,
+            LexerType::Basic,
+            Ambiguity::Resolve,
+        ),
+        (
+            "earley/dynamic",
+            ParserAlgorithm::Earley,
+            LexerType::Dynamic,
+            Ambiguity::Resolve,
+        ),
+        (
+            "earley/explicit",
+            ParserAlgorithm::Earley,
+            LexerType::Basic,
+            Ambiguity::Explicit,
+        ),
+        (
+            "cyk/basic",
+            ParserAlgorithm::Cyk,
+            LexerType::Basic,
+            Ambiguity::Resolve,
+        ),
+    ];
+    let cases = load_empty_nullable_cases();
+    let mut failures = Vec::new();
+    let mut compared = 0usize;
+    for (name, grammar, input) in &cases {
+        let reference = parse_spans(
+            grammar,
+            input,
+            ParserAlgorithm::Lalr,
+            LexerType::Contextual,
+            Ambiguity::Resolve,
+        )
+        .unwrap_or_else(|| panic!("[{name}] LALR contextual reference must parse"));
+        for (spec, parser, lexer, amb) in &pairings {
+            // Skip a pairing that refuses to build/parse (CYK on a directly-ε rule).
+            let Some(spans) =
+                parse_spans(grammar, input, parser.clone(), lexer.clone(), amb.clone())
+            else {
+                continue;
+            };
+            compared += 1;
+            if spans != reference {
+                failures.push(format!(
+                    "[{name}/{spec}] span shape != LALR-contextual reference:\n  ref:  {reference:?}\n  this: {spans:?}"
+                ));
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "cross-engine empty-production span divergence (#500):\n{}",
+        failures.join("\n")
+    );
+    // Guard against the case table silently emptying: 13 cases × 4 always-accepting
+    // pairings (lalr/basic + the three Earley walks) + 2 CYK-accepting = 54.
+    assert!(
+        compared >= 50,
+        "expected many engine×case comparisons, ran {compared}"
+    );
 }

@@ -2610,6 +2610,45 @@ PROPAGATE_POSITIONS_CASES = [
     # to a positionless empty node.
     ("all_children_filtered",
      'start: "(" ")"\n%import common.WS\n%ignore WS\n', "( )"),
+    # ── Empty / nullable-production span synthesis (#500) ──────────────────────
+    # An empty production (a node that derives ε) must carry a *positionless* span
+    # (start/end = None, empty = True) — and its *parent* must widen over the
+    # surrounding tokens/punctuation exactly as Python does — byte-identical across
+    # LALR, Earley (resolve streaming *and* explicit assemble), and CYK where it
+    # accepts. Found by a cross-engine differential, not the standing banks, which
+    # under-sample empty-production span under propagate_positions (ADR-0021).
+    # CYK rejects a *directly* ε-deriving rule (`e:`), so those pairings record an
+    # error in the fixture and the replay skips them honestly; the nullable-via-
+    # repetition cases below (`x~0`, a `*` that derives ε by ε-removal) DO reach CYK.
+    ("empty_rule_between_filtered_punct",
+     'start: "(" e ")"\ne:\n%import common.WS\n%ignore WS\n', "( )"),
+    ("empty_rule_between_tokens",
+     'start: "a" e "b"\ne:\n%import common.WS\n%ignore WS\n', "a b"),
+    ("empty_rule_leading",
+     'start: e "x"\ne:\n%import common.WS\n%ignore WS\n', "x"),
+    ("empty_rule_trailing",
+     'start: "x" e\ne:\n%import common.WS\n%ignore WS\n', "x"),
+    ("two_empties_between_tokens",
+     'start: "a" e f "b"\ne:\nf:\n%import common.WS\n%ignore WS\n', "a b"),
+    ("nested_empty_widened_by_outer_punct",
+     'start: "(" mid ")"\nmid: e\ne:\n%import common.WS\n%ignore WS\n', "( )"),
+    ("empty_via_transparent_chain",
+     'start: "a" _m "b"\n_m: _n\n_n: e\ne:\n%import common.WS\n%ignore WS\n', "a b"),
+    ("empty_expand1_keeps_positionless",
+     'start: "a" w "b"\n?w: e\ne:\n%import common.WS\n%ignore WS\n', "a b"),
+    ("nullable_optional_absent",
+     'start: "a" n "b"\nn: c?\nc: "x"\n%import common.WS\n%ignore WS\n', "a b"),
+    ("nullable_alternation_picks_empty",
+     'start: "(" x ")"\nx: "a" | \n%import common.WS\n%ignore WS\n', "( )"),
+    ("empty_root_alone",
+     'start: e\ne:\n', ""),
+    # Nullable via repetition: a `~0` exact-repeat and a `*` that derives ε by
+    # CNF ε-removal are nullable but NOT directly-ε user rules, so CYK accepts them
+    # (ADR-0024) — the one empty/nullable family that exercises all three engines.
+    ("nullable_rep_zero_between_punct",
+     'start: "(" x~0 ")"\nx: "z"\n%import common.WS\n%ignore WS\n', "( )"),
+    ("nullable_star_empty_between_punct",
+     'start: "(" item* ")"\nitem: "a"\n%import common.WS\n%ignore WS\n', "( )"),
 ]
 
 # Every legal (parser, lexer) pairing — propagate_positions is engine-agnostic, so
