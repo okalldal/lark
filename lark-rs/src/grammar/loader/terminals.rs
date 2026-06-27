@@ -17,7 +17,7 @@ impl GrammarCompiler {
         lit: LiteralVal,
     ) -> Result<String, GrammarError> {
         let key = format!("{:?}", lit);
-        if let Some(name) = self.literal_cache.get(&key) {
+        if let Some(name) = self.minter.literal_cache.get(&key) {
             return Ok(name.clone());
         }
         // `string_type` mirrors Python's `pattern.type`: a string literal is a
@@ -47,7 +47,7 @@ impl GrammarCompiler {
             }
         };
         let name = self.intern_anon_pattern(pat, name_hint, string_type);
-        self.literal_cache.insert(key, name.clone());
+        self.minter.literal_cache.insert(key, name.clone());
         Ok(name)
     }
 
@@ -691,6 +691,24 @@ impl GrammarCompiler {
         Ok(combined)
     }
 
+    /// The regex quantifier suffix for an EBNF repetition `inner~min..max`, used
+    /// when a repetition appears inside a *terminal* body (where it lowers to a
+    /// regex quantifier rather than a recurse rule). `?`/`+`/`*` for the operator
+    /// forms; `{n}` / `{n,m}` / `{n,}` for the bounded `~` forms (a bounded count
+    /// must never silently drop to `""`). Shared by both terminal-regex paths
+    /// ([`term_expr_regex`](Self::term_expr_regex) and
+    /// [`expr_to_pattern`](Self::expr_to_pattern)).
+    fn regex_quantifier(min: usize, max: Option<usize>) -> String {
+        match (min, max) {
+            (0, Some(1)) => "?".to_string(),
+            (1, None) => "+".to_string(),
+            (0, None) => "*".to_string(),
+            (n, Some(m)) if n == m => format!("{{{n}}}"),
+            (n, Some(m)) => format!("{{{n},{m}}}"),
+            (n, None) => format!("{{{n},}}"),
+        }
+    }
+
     /// Regex for a single `Expr` appearing in a *terminal* body. Unlike
     /// `expr_to_pattern`, a terminal reference is resolved (and inlined) rather
     /// than looked up after the fact, and flags are applied as scoped groups.
@@ -732,14 +750,7 @@ impl GrammarCompiler {
                 inner, min, max, ..
             } => {
                 let inner_re = Self::term_expr_regex(inner, by_name, imported, memo, stack)?;
-                let quantifier = match (*min, *max) {
-                    (0, Some(1)) => "?".to_string(),
-                    (1, None) => "+".to_string(),
-                    (0, None) => "*".to_string(),
-                    (n, Some(m)) if n == m => format!("{{{n}}}"),
-                    (n, Some(m)) => format!("{{{n},{m}}}"),
-                    (n, None) => format!("{{{n},}}"),
-                };
+                let quantifier = Self::regex_quantifier(*min, *max);
                 format!("(?:{inner_re}){quantifier}")
             }
             Expr::Group(alts) => {
@@ -837,14 +848,7 @@ impl GrammarCompiler {
                 // Inside a terminal, repetition becomes a regex quantifier.
                 // Bounded forms (`~n`, `~n..m`) must emit `{n}` / `{n,m}` / `{n,}`;
                 // previously they fell through to "" and silently dropped the count.
-                let quantifier = match (*min, *max) {
-                    (0, Some(1)) => "?".to_string(),
-                    (1, None) => "+".to_string(),
-                    (0, None) => "*".to_string(),
-                    (n, Some(m)) if n == m => format!("{{{n}}}"),
-                    (n, Some(m)) => format!("{{{n},{m}}}"),
-                    (n, None) => format!("{{{n},}}"),
-                };
+                let quantifier = Self::regex_quantifier(*min, *max);
                 Ok(Pattern::Re(PatternRe::new(
                     &format!("(?:{}){}", inner_pat.as_regex_str(), quantifier),
                     0,
