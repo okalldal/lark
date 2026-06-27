@@ -451,6 +451,28 @@ fn normalize_python_escapes(pattern: &str) -> String {
                 cur.seek(rest_start + upper_len + 1); // past the `}`
                 continue;
             }
+            // Literal `{...}` brace run (#462). An out-of-class `{` that is **not** a
+            // well-formed quantifier — `{x}`, `a{x}b`, `{}`, `{ 2}`, `{2 }`, `{a,b}`,
+            // `{,x}`, `{2,x}`, an unterminated `a{`, … — is a *literal brace* in Python
+            // `re` (`re.compile(r'a{x}b')` matches the literal text `a{x}b`), but the Rust
+            // `regex` crate rejects it ("repetition quantifier expects a valid decimal" /
+            // "unclosed counted repetition") — and that rejection then routes through the
+            // lookaround seam and is *mis-categorized* as `LookaroundScope` (it involves no
+            // lookaround/backtracking). We escape the brace (`{` → `\{`) so the crate sees a
+            // literal `{`; a bare `}` it already treats as a literal, so only the open brace
+            // needs escaping. This builds and matches the literal text exactly like Python
+            // (oracle-faithful "support & match", ADR-0017). `base_quantifier_len` is the
+            // single quantifier oracle shared with the stacking/nothing-to-repeat screens,
+            // so a real quantifier (`{2}`, `{2,3}`, `{2,}`) is left untouched and the
+            // empty-lower-bound `{,n}`/`{,}` was already rewritten above. A `\{` never
+            // reaches here (the cursor's escape step consumes the escape pair first), and a
+            // `{` inside a `[...]` class is already a literal to the crate (the `!in_class`
+            // guard leaves it).
+            if base_quantifier_len(&chars, i).is_none() {
+                out.push_str("\\{");
+                cur.seek(i + 1);
+                continue;
+            }
         }
         match cur.step() {
             Step::Escape { esc } => match esc {
@@ -1911,21 +1933,43 @@ mod tests {
         // Escape-aware: a `\{` is a literal brace, never a quantifier open.
         assert_eq!(normalize_python_escapes("a\\{,3}"), "a\\{,3}");
         // A non-digit upper (`{,x}`) / unterminated (`{,3`) is a literal brace run in
-        // Python — left untouched.
-        assert_eq!(normalize_python_escapes("a{,x}b"), "a{,x}b"); // non-digit upper
-        assert_eq!(normalize_python_escapes("a{,3"), "a{,3"); // unterminated (no `}`)
-                                                              // The fully-empty `{,}` is Python's `{0,}` (== `*`), NOT a literal brace run
-                                                              // (#447): it is now recognized and rewritten exactly like `{,n}` (zero upper
-                                                              // digits). `re.match(r'a{,}b','aaab')` matches, so `/a{,}b/` must build as `a*b`.
+        // Python — NOT this empty-lower-bound shape, so it is not rewritten to `{0,…}`.
+        // Since #462 the literal `{` is escaped (`{` → `\{`) so the regex crate reads it as
+        // a literal brace (it otherwise rejects a non-numeric brace body), matching Python's
+        // literal interpretation — distinct from the `{0,n}` quantifier rewrite above.
+        assert_eq!(normalize_python_escapes("a{,x}b"), "a\\{,x}b"); // non-digit upper → literal `\{`
+        assert_eq!(normalize_python_escapes("a{,3"), "a\\{,3"); // unterminated (no `}`) → literal `\{`
+                                                                // The fully-empty `{,}` is Python's `{0,}` (== `*`), NOT a literal brace run
+                                                                // (#447): it is now recognized and rewritten exactly like `{,n}` (zero upper
+                                                                // digits). `re.match(r'a{,}b','aaab')` matches, so `/a{,}b/` must build as `a*b`.
         assert_eq!(normalize_python_escapes("a{,}b"), "a{0,}b");
         assert_eq!(normalize_python_escapes("{,}"), "{0,}");
         // Class-aware / escape-aware for `{,}` too: a `{,}` inside `[...]` or after `\`
         // is a literal brace run in Python, never a quantifier — left untouched.
         assert_eq!(normalize_python_escapes("[a{,}]"), "[a{,}]");
         assert_eq!(normalize_python_escapes("a\\{,}"), "a\\{,}");
-        // The bare `{}` (no comma, no digit) stays a literal brace pair — the widening
-        // keys on "digit *or* comma", and `{}` has neither.
-        assert_eq!(normalize_python_escapes("a{}b"), "a{}b");
+        // The bare `{}` (no comma, no digit) is a literal brace pair — the `{0,n}` widening
+        // keys on "digit *or* comma", and `{}` has neither. Since #462 it too is escaped
+        // (`{` → `\{`) so the regex crate reads the literal brace, matching Python.
+        assert_eq!(normalize_python_escapes("a{}b"), "a\\{}b");
+        // #462 literal brace runs: a `{` whose body is not a valid quantifier bound is
+        // escaped to a literal `\{` (a bare `}` is already a literal to the crate). Class-
+        // and escape-aware: a `{` inside `[...]` or after `\` is left as-is.
+        assert_eq!(normalize_python_escapes("a{x}b"), "a\\{x}b");
+        assert_eq!(normalize_python_escapes("{x}"), "\\{x}");
+        assert_eq!(normalize_python_escapes("N{x}"), "N\\{x}");
+        assert_eq!(normalize_python_escapes("a{"), "a\\{"); // lone unterminated brace
+        assert_eq!(normalize_python_escapes("{ 2}"), "\\{ 2}"); // space → not a quantifier
+        assert_eq!(normalize_python_escapes("{a,b}"), "\\{a,b}"); // non-digit bound
+                                                                  // A real quantifier is never escaped (the literal-brace branch keys on
+                                                                  // `base_quantifier_len`, the shared quantifier oracle).
+        assert_eq!(normalize_python_escapes("a{2}b"), "a{2}b");
+        assert_eq!(normalize_python_escapes("a{2,3}b"), "a{2,3}b");
+        // Mixed: a real `{2}` is kept, a sibling literal `{x}` is escaped.
+        assert_eq!(normalize_python_escapes("a{2}{x}"), "a{2}\\{x}");
+        // Class-aware / escape-aware for a literal `{x}` too.
+        assert_eq!(normalize_python_escapes("[a{x}]"), "[a{x}]"); // in-class `{` is literal already
+        assert_eq!(normalize_python_escapes("a\\{x}"), "a\\{x}"); // already-escaped `\{` untouched
     }
 
     /// H6/H7 (#333): the quantifier-shape dialect screen refuses possessive (`a++`) and
