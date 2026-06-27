@@ -341,6 +341,20 @@ pub(super) struct GrammarCompiler {
     ///
     /// `pub(super)` so the sibling `imports` module reads it from `import_rule_closure`.
     pub(super) claimed_rule_names: HashSet<String>,
+    /// Rule names that an `%override` / `%extend` directive targets (#442). A
+    /// directive legitimately *redefines* its target, so such a name must be
+    /// excluded from the #428 user-rule-vs-mangled-interior-import-origin collision
+    /// guard (`import_rule_closure`): `%override python__name` beside `%import
+    /// python (decorator)` must let the interior `python__name` origin be **copied**
+    /// (so the override has something to replace / the extend has something to
+    /// prepend to), exactly as Python — which resolves the import into
+    /// `_definitions` first, then applies `_define(override=True)` / `_extend` on
+    /// the now-present key. Unlike a plain user rule (which is in
+    /// [`claimed_rule_names`](Self::claimed_rule_names) and *does* collide, #428), an
+    /// override/extend target is deliberately kept out of that set.
+    ///
+    /// `pub(super)` so the sibling `imports` module reads it from `import_rule_closure`.
+    pub(super) override_extend_rule_targets: HashSet<String>,
     /// Per-module merged import-alias map, keyed by the resolved module path
     /// (e.g. `["python"]`), mapping each *independently imported* original name
     /// to its registered (aliased) final name. Mirrors Python Lark's per-dotted-
@@ -396,6 +410,7 @@ impl GrammarCompiler {
             base_path,
             import_sources,
             claimed_rule_names: HashSet::new(),
+            override_extend_rule_targets: HashSet::new(),
             import_alias_map: HashMap::new(),
             imported_origins: HashSet::new(),
         }
@@ -592,11 +607,23 @@ impl GrammarCompiler {
             match item {
                 Item::RuleItem(r) => {
                     self.minter.reserved_rule_names.insert(r.name.clone());
-                    // A user-authored rule/template name is unconditionally a name the
-                    // grammar defines — the precise discriminator for the #428
-                    // user-vs-import-origin collision (a *surviving* import final name
-                    // is added after this loop, once the alias map is complete).
-                    self.claimed_rule_names.insert(r.name.clone());
+                    // A *plain* user-authored rule/template name is unconditionally a
+                    // name the grammar defines — the precise discriminator for the
+                    // #428 user-vs-import-origin collision (a *surviving* import final
+                    // name is added after this loop, once the alias map is complete).
+                    //
+                    // An `%override`/`%extend` directive (#442) is the exception: it
+                    // *redefines* an existing origin rather than introducing a new one,
+                    // so its target must NOT enter `claimed_rule_names` — otherwise the
+                    // #428 guard would reject `%override python__name` beside `%import
+                    // python (decorator)` as a collision with the very interior origin
+                    // the override means to replace. Record it as an override/extend
+                    // target instead, so the import-closure copy is allowed to proceed.
+                    if r.directive == Directive::Plain {
+                        self.claimed_rule_names.insert(r.name.clone());
+                    } else {
+                        self.override_extend_rule_targets.insert(r.name.clone());
+                    }
                     // Register *plain* templates here; `%override`/`%extend` of a
                     // template are resolved (with their pre-existence gate) during
                     // the staging pass, so they must not pre-seed `self.templates`
@@ -684,9 +711,42 @@ impl GrammarCompiler {
         // extend *prepends* new alternatives to it.
         let mut rule_items: Vec<RawRule> = Vec::new();
         let mut ignore_items = Vec::new();
+
+        // Resolve every `%import` *before* staging any rule/terminal directive,
+        // mirroring Python Lark (`load_grammar.py` resolves all imports into
+        // `_definitions`, then walks the statements). This makes an `%override` /
+        // `%extend` of a mangled interior import origin (#442) order-independent: the
+        // interior origin (`python__name` under `%import python (decorator)`) is
+        // already copied into `self.rules` when the directive is staged, whichever
+        // document order the directive and the `%import` appear in. Imports stage into
+        // `self.rules` / `self.terminals` and never into `rule_items` / `raw_terms`,
+        // and terminal *resolution* runs later in `resolve_terminals`, so hoisting the
+        // imports ahead of the other directives changes nothing else (the relative
+        // order *among* imports, which last-alias-wins depends on, is preserved).
+        for item in &items {
+            if let Item::ImportItem(spec) = item {
+                self.resolve_import(spec.clone())?;
+            }
+        }
+        // Now that every interior import origin is present, any `%override`/`%extend`
+        // whose target is such an origin (#442) sees a pre-existing rule: seed the
+        // override/extend pre-existence ledger with the interior origins now in
+        // `self.rules` that a directive targets. Import *final* names are already in
+        // `defined_rule_names` (seeded by `precheck_import_collisions`); this adds the
+        // *interior* origins, which never reach that ledger.
+        for rule in &self.rules {
+            if self
+                .override_extend_rule_targets
+                .contains(&rule.origin.name)
+            {
+                defined_rule_names.insert(rule.origin.name.clone());
+            }
+        }
+
         for item in items {
             match item {
-                Item::ImportItem(spec) => self.resolve_import(spec)?,
+                // Imports already resolved above (hoisted, #442).
+                Item::ImportItem(_) => {}
                 Item::DeclareItem(syms) => self.declare_terminals(syms, &mut defined_term_names)?,
                 Item::TermItem(t) => {
                     self.stage_term_directive(t, &mut defined_term_names)?;
@@ -793,16 +853,39 @@ impl GrammarCompiler {
                         msg: format!("Can't extend rule {} as it wasn't defined before", r.name),
                     });
                 }
-                // Prepend the new alternatives to the existing definition. For a
-                // same-grammar target, splice them onto the front of the staged
-                // `RawRule` so they compile as one rule (Python's
-                // `base.children.insert(0, exp)`). For an imported target, stage
-                // them as an additional definition at the same origin.
+                // Prepend the new alternatives to the existing definition (Python's
+                // `_extend`: `base.children.insert(0, exp)`). For a same-grammar
+                // target, splice them onto the front of the staged `RawRule` so they
+                // compile as one rule — and a *second* `%extend` of the same origin
+                // finds that staged `RawRule` here and prepends onto it in turn, so
+                // the later extend ends up frontmost, exactly as Python's repeated
+                // `insert(0, …)`.
                 if let Some(existing) = rule_items.iter_mut().find(|prev| prev.name == r.name) {
                     let mut merged = r.expansions;
                     merged.append(&mut existing.expansions);
                     existing.expansions = merged;
                 } else {
+                    // No staged same-grammar `RawRule`: the target is an *imported
+                    // interior origin* (#442), already compiled into `self.rules` with
+                    // its alternatives' preserved `rule.order`. Stage the extend body
+                    // as a deferred definition at the same origin — but it must
+                    // *prepend*: Python's `_extend` gives the new alternative the
+                    // lowest `order` and shifts the originals down. `compile_rule`
+                    // numbers a fresh definition's alternatives from 0, and `order` is
+                    // used only as a *relative* tie-break in resolve disambiguation
+                    // (Earley `(is_empty, -priority, order)`; LALR same-reduction
+                    // collapse "first arm wins"), never as an index. So bump every
+                    // existing alternative of this origin by a large offset, leaving
+                    // the deferred extend's `0..k` orders strictly ahead of them —
+                    // making the extend win the resolve/reduce tie exactly as Python's
+                    // prepend does. Without this the extend was *appended* (its `0..k`
+                    // tied with the originals' low orders but lost insertion order), a
+                    // resolve divergence the named-terminal differential never surfaced
+                    // because a distinct terminal disambiguates at the lexer instead.
+                    const EXTEND_ORDER_OFFSET: usize = 1_000_000;
+                    for rule in self.rules.iter_mut().filter(|x| x.origin.name == r.name) {
+                        rule.order += EXTEND_ORDER_OFFSET;
+                    }
                     rule_items.push(RawRule {
                         directive: Directive::Plain,
                         ..r
