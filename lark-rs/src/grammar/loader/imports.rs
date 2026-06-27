@@ -489,7 +489,7 @@ impl GrammarCompiler {
             // CYK empty-rule guard (#101, ADR-0024) would reclassify it as a
             // user-written rule and wrongly reject an oracle-accepted import.
             if let Some(kind) = imported.anon_kinds.get(&rule.origin.name).copied() {
-                self.anon_kinds.insert(origin.name.clone(), kind);
+                self.minter.anon_kinds.insert(origin.name.clone(), kind);
             }
             let expansion = rule
                 .expansion
