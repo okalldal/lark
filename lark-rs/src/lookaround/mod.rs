@@ -238,6 +238,16 @@ impl Node {
 /// errors — the safe direction (reject), since a backref is not a regular language
 /// the lowering can accept anyway.
 ///
+/// **Nesting cap (#455).** Group/alternation nesting is bounded at [`NEST_LIMIT`]
+/// (mirroring `regex_syntax`'s default `nest_limit`); a pattern nested deeper returns
+/// an `InvalidRegex` error rather than recursing the parser to a stack overflow. The
+/// `regex` crate would itself reject such a pattern (its own `nest_limit`), so this
+/// only refuses what the engines already refuse. Every caller of [`parse`] maps the
+/// `Err` to a graceful fallback — `pattern_max_width` / `pattern_min_width_is_zero`
+/// return `None`, and the classifier turns it into a categorized
+/// `GrammarError::LookaroundScope` build error — so a pathological terminal fails the
+/// grammar build gracefully instead of aborting the process.
+///
 /// [`PatternRe`]: crate::grammar::terminal::PatternRe
 pub fn parse(pattern: &str) -> Result<Node, GrammarError> {
     let chars: Vec<char> = pattern.chars().collect();
@@ -245,6 +255,7 @@ pub fn parse(pattern: &str) -> Result<Node, GrammarError> {
         src: pattern,
         chars,
         pos: 0,
+        depth: 0,
     };
     let node = p.parse_alternation()?;
     if p.pos != p.chars.len() {
@@ -293,10 +304,21 @@ pub(crate) fn pattern_max_width(pattern: &str) -> Option<Option<usize>> {
     Some(lower::width_range(&node).1)
 }
 
+/// Maximum group/alternation nesting depth the front-end parser accepts before it
+/// refuses with an `InvalidRegex` error (#455). Mirrors `regex_syntax`'s default
+/// `nest_limit` of 250: a terminal regex nested deeper than this is already rejected
+/// by the `regex` crate, so capping here only refuses what the engines refuse — and it
+/// keeps the recursive descent (`parse_paren` → `parse_alternation`) from overflowing
+/// the stack on an adversarial deeply-nested terminal.
+pub(crate) const NEST_LIMIT: u32 = 250;
+
 struct Parser<'a> {
     src: &'a str,
     chars: Vec<char>,
     pos: usize,
+    /// Current group/assertion nesting depth; capped at [`NEST_LIMIT`] in
+    /// [`Parser::parse_paren`] so the recursion cannot overflow the stack (#455).
+    depth: u32,
 }
 
 impl Parser<'_> {
@@ -421,7 +443,24 @@ impl Parser<'_> {
 
     /// Parse a construct beginning with `(`: an assertion, or a (capturing,
     /// non-capturing, named, or flag-scoped) group. Assumes `self.peek() == '('`.
+    ///
+    /// Every nested construct re-enters the parser through here, so this is the single
+    /// place the [`NEST_LIMIT`] depth cap is enforced (#455): a group/assertion nested
+    /// deeper than the limit returns an `InvalidRegex` error instead of recursing into
+    /// `parse_alternation` and overflowing the stack. The depth is restored on the way
+    /// out (success or error) so a wide-but-shallow pattern is unaffected.
     fn parse_paren(&mut self) -> Result<Node, GrammarError> {
+        self.depth += 1;
+        if self.depth > NEST_LIMIT {
+            self.depth -= 1;
+            return Err(self.err("regex nesting depth exceeds the limit"));
+        }
+        let result = self.parse_paren_inner();
+        self.depth -= 1;
+        result
+    }
+
+    fn parse_paren_inner(&mut self) -> Result<Node, GrammarError> {
         // Classify by the characters right after '('.
         let assertion = match (self.at(1), self.at(2), self.at(3)) {
             (Some('?'), Some('='), _) => Some((false, Look::Ahead, 3)),
@@ -863,5 +902,82 @@ mod tests {
         }
         // The named *group* definition is unaffected (still a group, no backref).
         assert_eq!(parse("(?P<x>ab)").unwrap().to_source(), "(?P<x>ab)");
+    }
+
+    // ─── #455: nesting depth cap (mirrors regex_syntax's nest_limit) ────────────
+    //
+    // The front-end's recursive descent (`parse_paren` → `parse_alternation`) used to
+    // recurse on the regex nesting depth with no bound, so a terminal with thousands of
+    // nested groups — even plain, non-lookaround ones — overflowed the stack and
+    // *aborted the process* during a routine lexer build (`Pattern::max_width` /
+    // `pattern_min_width_is_zero` call `parse` on every terminal). The cap turns that
+    // process abort into a graceful, categorized refusal.
+
+    /// Build a pattern of `depth` nested capturing groups around a literal `a`, e.g.
+    /// `depth == 2` → `"((a))"`. This is the pathological shape #455 names.
+    fn nested(depth: usize) -> String {
+        format!("{}a{}", "(".repeat(depth), ")".repeat(depth))
+    }
+
+    #[test]
+    fn deep_but_under_limit_still_parses() {
+        // A terminal nested right up to the cap must still build (round-trips exactly).
+        let p = nested(NEST_LIMIT as usize);
+        let node = parse(&p).unwrap_or_else(|e| panic!("under-limit parse failed: {e:?}"));
+        assert_eq!(node.to_source(), p, "under-limit pattern must round-trip");
+    }
+
+    #[test]
+    fn over_limit_nesting_returns_categorized_error_not_overflow() {
+        // One level past the cap is refused with an `InvalidRegex` error instead of
+        // recursing — this is the categorized `GrammarError` the Done-when asks for.
+        let p = nested(NEST_LIMIT as usize + 1);
+        match parse(&p) {
+            Err(GrammarError::InvalidRegex { reason, .. }) => {
+                assert!(
+                    reason.contains("nesting depth"),
+                    "reason should name the nesting-depth cap, got: {reason}"
+                );
+            }
+            other => panic!("expected InvalidRegex nesting-depth error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pathological_depth_does_not_abort_and_callers_fall_back_to_none() {
+        // The headline #455 case: a *deeply* nested terminal (thousands of groups) that
+        // previously overflowed the stack / aborted the process. With the cap, `parse`
+        // returns an `Err` (it never recurses past the limit), and the two width
+        // callers that route through it (`pattern_max_width`,
+        // `pattern_min_width_is_zero` — called on every lexer build) fall back to `None`
+        // instead of aborting. Reaching these asserts at all is the evidence the build
+        // no longer aborts.
+        let p = nested(50_000);
+        assert!(
+            parse(&p).is_err(),
+            "pathological depth must error, not abort"
+        );
+        assert_eq!(
+            pattern_max_width(&p),
+            None,
+            "max-width caller falls back to None on an unparseable terminal"
+        );
+        assert_eq!(
+            pattern_min_width_is_zero(&p),
+            None,
+            "min-width caller falls back to None on an unparseable terminal"
+        );
+    }
+
+    #[test]
+    fn deep_nesting_inside_a_lookaround_assertion_is_capped() {
+        // The cap counts assertion bodies too (the lookaround front-end's reason for
+        // existing), so a deeply-nested assertion body is refused just like a plain
+        // group nest — not overflowed.
+        let p = format!("(?={})", nested(50_000));
+        assert!(
+            matches!(parse(&p), Err(GrammarError::InvalidRegex { .. })),
+            "deep nesting inside an assertion must be capped"
+        );
     }
 }
