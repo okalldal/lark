@@ -1987,6 +1987,87 @@ mod tests {
         assert_eq!(normalize_python_escapes("a\\{x}"), "a\\{x}"); // already-escaped `\{` untouched
     }
 
+    /// #509: a `(?#…)` comment that falls **inside** a `{…}` brace run makes the whole
+    /// brace run a *literal* in Python `re` — Python's quantifier-bound scan only accepts
+    /// `digits`/`,`/`}`, so a comment-open `(?#` between `{` and `}` aborts the quantifier
+    /// read and `re.compile('{3(?#c)}').fullmatch('{3}')` matches the literal text `{3}`.
+    /// The comment-strip in `normalize_python_escapes` must therefore leave the brace run
+    /// literal (escape the `{` to `\{`), not strip the comment first and then re-recognize
+    /// the leftover `{3}` as a real quantifier (which both the regex crate and the local
+    /// "nothing to repeat" pre-screen then reject — an over-rejection of input Python
+    /// accepts). Oracle: Python `re` (verified 3.11). A comment *outside* the braces
+    /// (before `{` or after `}`) leaves the real quantifier intact.
+    #[test]
+    fn normalize_comment_inside_braces_is_literal() {
+        // The issue repro: `{3(?#c)}` → literal `\{3}` (matches the text `{3}`), NOT `{3}`.
+        assert_eq!(normalize_python_escapes("{3(?#c)}"), "\\{3}");
+        assert_eq!(normalize_python_escapes("a{3(?#c)}"), "a\\{3}");
+        // Comment anywhere inside the brace span aborts the quantifier read → literal.
+        assert_eq!(normalize_python_escapes("{(?#c)3}"), "\\{3}"); // before the digit
+        assert_eq!(normalize_python_escapes("{1(?#c)2}"), "\\{12}"); // between digits
+        assert_eq!(normalize_python_escapes("{3,(?#c)5}"), "\\{3,5}"); // around the comma
+        assert_eq!(normalize_python_escapes("{3,5(?#c)}"), "\\{3,5}"); // after the upper bound
+        assert_eq!(normalize_python_escapes("{,(?#c)3}"), "\\{,3}"); // empty-lower-bound form
+        assert_eq!(normalize_python_escapes("{(?#c)x}"), "\\{x}"); // already-literal body + comment
+                                                                   // A second brace run with an interior comment beside a real quantifier: only the
+                                                                   // comment-bearing run goes literal; the real `{2}` is untouched.
+        assert_eq!(normalize_python_escapes("a{2}{3(?#c)}"), "a{2}\\{3}");
+        // Class-aware: inside `[...]` a `{` is already a literal and the `(?#` is literal
+        // class text (not a comment) — left byte-exact.
+        assert_eq!(normalize_python_escapes("[{3(?#c)}]"), "[{3(?#c)}]");
+        // Escape-aware: a `\{` is already a literal brace; the comment after it still strips
+        // (it is outside any brace *quantifier* run — there is no quantifier to abort).
+        assert_eq!(normalize_python_escapes("\\{3(?#c)}"), "\\{3}");
+
+        // CONTROL — a comment OUTSIDE the braces leaves the real quantifier intact.
+        // `a{3}(?#c)` and `a(?#c){3}` both compile in Python as the quantifier `a{3}`.
+        assert_eq!(normalize_python_escapes("a{3}(?#c)"), "a{3}");
+        assert_eq!(normalize_python_escapes("a(?#c){3}"), "a{3}");
+        assert_eq!(normalize_python_escapes("a{3}(?#c)b"), "a{3}b");
+
+        // The normalized literal brace carries no "nothing to repeat" shape (it is a
+        // literal `\{`, not a leading `{3}` quantifier), so the #448/#506 pre-screen is
+        // clean — the regression the issue describes (`{3(?#c)}` → `{3}` → rejected) is
+        // gone at every stage.
+        assert!(find_nothing_to_repeat(&normalize_python_escapes("{3(?#c)}")).is_none());
+        assert!(find_nothing_to_repeat(&normalize_python_escapes("{3,5(?#c)}")).is_none());
+        assert!(find_nothing_to_repeat(&normalize_python_escapes("{,(?#c)3}")).is_none());
+    }
+
+    /// #509 end-to-end: a `/…/` terminal whose only "quantifier" is a `{…}` brace run with
+    /// an interior `(?#…)` comment **builds** and **matches the literal braces**, exactly
+    /// as Python `re` does (`re.compile('{3(?#c)}').fullmatch('{3}')` matches). Before the
+    /// fix the stripped comment left `{3}`, which the `regex` crate / nothing-to-repeat
+    /// pre-screen rejected — an over-rejection of input Python accepts. We assert the build
+    /// succeeds and the compiled regex matches `{3}` (and does NOT match three repeats —
+    /// it is literal, not a quantifier). Oracle: Python `re` 3.11.
+    #[test]
+    fn comment_inside_braces_builds_and_matches_literal() {
+        for (pat, lit, three_repeats) in [
+            ("{3(?#c)}", "{3}", "xxx"),
+            ("a{3(?#c)}", "a{3}", "aaa"),
+            ("{3,5(?#c)}", "{3,5}", "xxxxx"),
+            ("{,(?#c)3}", "{,3}", "xxx"),
+        ] {
+            let p = PatternRe::new(pat, 0)
+                .unwrap_or_else(|e| panic!("/{pat}/ should build (Python accepts it): {e:?}"));
+            // Anchor a full match against the *literal* text (the braces are literal).
+            let rx = Regex::new(&format!("^(?:{})$", p.pattern))
+                .unwrap_or_else(|e| panic!("compiled /{pat}/ → {:?} invalid: {e:?}", p.pattern));
+            assert!(
+                rx.is_match(lit),
+                "/{pat}/ (→ {:?}) must match the literal {lit:?} (Python oracle)",
+                p.pattern
+            );
+            assert!(
+                !rx.is_match(three_repeats),
+                "/{pat}/ (→ {:?}) is a literal brace run, not a quantifier — must NOT match \
+                 the repeated-char string {three_repeats:?}",
+                p.pattern
+            );
+        }
+    }
+
     /// H6/H7 (#333): the quantifier-shape dialect screen refuses possessive (`a++`) and
     /// stacked (`a{2}{3}`) quantifiers — both constructs the regex crate accepts with a
     /// meaning that diverges from Python — while leaving lazy quantifiers, normal
