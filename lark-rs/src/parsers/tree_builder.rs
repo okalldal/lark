@@ -44,20 +44,17 @@ use crate::tree::{Child, Meta, ParseTree, Token, Tree};
 ///   (ADR-0017).
 ///
 /// Centralized here so the lone-`None` carve-out has **one** definition shared by
-/// the LALR and CYK roots, rather than hand-kept copies that could drift. Any
-/// **other** `Inline` shape (a non-lone-`None` collapse) is structurally impossible
-/// at a start root, so its children are returned as `Err(children)` for the caller
-/// to resolve under its own residual policy — LALR rejects it as no-parse, while CYK
-/// wraps it in a start-named node — keeping each backend's existing behaviour
-/// byte-for-byte.
+/// the LALR, CYK, and Earley roots, rather than hand-kept copies that could drift.
+/// Any **other** `Inline` shape (a non-lone-`None` collapse) is structurally
+/// impossible at a start root, so its children are returned as `Err(children)` for
+/// the caller to resolve under its own residual policy — LALR rejects it as
+/// no-parse, CYK wraps it in a start-named node, and Earley's `forest_to_tree`
+/// likewise wraps it in a start-named node — keeping each backend's existing
+/// behaviour byte-for-byte.
 ///
-/// Two copies of this carve-out remain *un*-migrated by design: `standalone/runtime.rs`
-/// keeps its own (ADR-0008 — it can't share in-tree code), and Earley's
-/// `earley::forest_to_tree` root match (`parsers/earley/mod.rs`) is the same shape but
-/// was out of scope for the dedup that introduced this helper (#483 scoped LALR + CYK;
-/// Earley had just been split into its own module). Routing Earley through here is a
-/// clean follow-up; until then a change to the lone-`None` contract (#289/ADR-0033)
-/// must be mirrored there too.
+/// One copy of this carve-out remains *un*-migrated by design: `standalone/runtime.rs`
+/// keeps its own (ADR-0008 — it can't share in-tree code), so a change to the
+/// lone-`None` contract (#289/ADR-0033) must still be mirrored there.
 pub(crate) fn root_slot_to_parse_tree(value: Slot) -> Result<ParseTree, Vec<Child>> {
     match value {
         Slot::Tree(t) => Ok(ParseTree::Tree(t)),

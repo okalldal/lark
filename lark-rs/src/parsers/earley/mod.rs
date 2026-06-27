@@ -59,9 +59,9 @@ use std::collections::HashMap;
 use crate::error::ParseError;
 use crate::grammar::intern::{CompiledGrammar, SymbolId};
 use crate::lexer::DynamicMatcher;
-use crate::tree::{Child, ParseTree, Token, Tree};
+use crate::tree::{ParseTree, Token, Tree};
 
-use super::tree_builder::Slot;
+use super::tree_builder::root_slot_to_parse_tree;
 
 use chart::Item;
 use forest::{Forest, NodeKey};
@@ -73,9 +73,6 @@ mod forest;
 mod leo;
 mod recognizer;
 mod tree_walk;
-
-// Backward-compat alias within earley — keeps diff minimal for this refactor.
-type NodeValue = Slot;
 
 // ─── Parser ───────────────────────────────────────────────────────────────────
 
@@ -237,24 +234,22 @@ impl EarleyParser {
         let value = tr
             .transform(root)
             .ok_or_else(|| ParseError::unexpected_eof(0, 0, vec![]))?;
-        Ok(match value {
-            NodeValue::Tree(t) => ParseTree::Tree(t),
-            NodeValue::Token(t) => ParseTree::Token(t),
-            // A start rule is never transparent. Its value can still be `Inline`
-            // when a top-level `?start` collapses a lone-`None` placeholder (RC9 in
-            // tree_builder: lone-`None` expand1 → `Inline([None])`). Python Lark
-            // returns a bare `None` there (`?start: [A]` on `""`), so emit
-            // `ParseTree::None` to match the oracle (#289).
-            NodeValue::Inline(mut cs) if cs.len() == 1 => match cs.pop().unwrap() {
-                Child::Tree(t) => ParseTree::Tree(t),
-                Child::Token(t) => ParseTree::Token(t),
-                Child::None => ParseTree::None,
-            },
-            NodeValue::Inline(cs) => ParseTree::Tree(Tree::new(
+        // Route the root `Slot`→`ParseTree` conversion through the shared helper so
+        // the lone-`None` carve-out (`?start: [A]` on `""` → bare `None`; RC9 in
+        // tree_builder, #289/ADR-0033) has one definition across LALR, CYK, and
+        // Earley. A start rule is never transparent, so the only `Inline` it can
+        // produce is that lone-`None` collapse; any *other* `Inline` is
+        // structurally impossible at a root, so the helper hands its children back
+        // as `Err` and we apply Earley's existing residual fallback: wrap them in a
+        // start-named node. (This deliberately mirrors the prior multi-child fallback
+        // and, like it, does not special-case a single non-`None` child — that shape
+        // is unreachable here, so unlike CYK's residual there is nothing to unwrap.)
+        Ok(root_slot_to_parse_tree(value).unwrap_or_else(|cs| {
+            ParseTree::Tree(Tree::new(
                 self.grammar.symbols.name(start_id).to_string(),
                 cs,
-            )),
-        })
+            ))
+        }))
     }
 }
 
