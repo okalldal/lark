@@ -26,6 +26,7 @@
 //! ```
 
 mod ast;
+mod audit;
 mod compiler;
 mod ebnf;
 mod imports;
@@ -252,9 +253,9 @@ fn load_grammar_inner(
     let could_overshare = items_need_audit_clone(&items);
     let items_for_audit = could_overshare.then(|| items.clone());
     compiler.process_items(items)?;
-    let recurse_overshare_seen = compiler.recurse_overshare_seen;
+    let recurse_overshare_seen = compiler.audit.overshare_seen();
     let mut grammar = compiler.compile()?;
-    // `recurse_overshare_seen` can only be set when `could_overshare` was true (a
+    // `overshare_seen()` can only be set when `could_overshare` was true (a
     // repeat operator in this body, or an `%import` that could carry one), so
     // `items_for_audit` is `Some` whenever an audit is actually needed.
     if recurse_overshare_seen {
@@ -267,7 +268,7 @@ fn load_grammar_inner(
             base_path,
             import_sources,
         );
-        shadow_compiler.python_keyed_recurse = true;
+        shadow_compiler.audit.set_python_keyed();
         shadow_compiler.process_items(items_for_audit)?;
         let shadow = shadow_compiler.compile()?;
         grammar.lalr_audit = Some(Box::new(shadow));

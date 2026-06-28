@@ -104,7 +104,8 @@ Turn `.lark` text into a `Grammar`. One module per pipeline phase:
 | `parser.rs` | recursive-descent parser → raw AST (`ast.rs`) |
 | `compiler.rs` | lowers the AST into a `Grammar`; orchestrates the helpers below |
 | `terminals.rs` | terminal algebra → regex; terminal ordering rules |
-| `ebnf.rs` | expands `* + ? \| (...)` into anonymous helper rules; mints the Python-faithful reduce/reduce **audit shadow** when its helper sharing over-shares (RC7/#272, ADR-0013) |
+| `ebnf.rs` | expands `* + ? \| (...)` into anonymous helper rules (load-bearing recurse-helper sharing, ADR-0013) |
+| `audit.rs` | the recurse-overshare **audit shadow** (`AuditShadow`): when `ebnf.rs`'s helper sharing over-shares relative to Python, owns the Python-AST-keyed shadow that surfaces the masked reduce/reduce at build (RC7/#272, ADR-0013) |
 | `templates.rs` | parameterized rules (`_sep{x, sep}`) |
 | `imports.rs` | `%import` resolution (bundled libs + sibling files) |
 

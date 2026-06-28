@@ -145,6 +145,14 @@ fn propagate_positions_off_keeps_post_filter_span() {
 // engine-vs-engine span-equality assertion that does not route through the oracle,
 // so a future regression that drifts *all* engines together (matching the oracle is
 // then necessary but not sufficient — ADR-0021) is still caught.
+//
+// #543 tightened both tests: the compared shape is now the **full** `Meta` tuple
+// (`line`/`column`/`end_line`/`end_column` *and* `start_pos`/`end_pos`), not just the
+// byte offsets, so an assemble-only regression that keeps the offsets but corrupts the
+// line/column metadata on an empty/nullable node fails here too — the same contract
+// `tree_matches_oracle_with_meta` holds the resolve-mode engines to. Two multi-line
+// cases were added so `end_line`/`end_column` carry a non-trivial (line-crossing)
+// value, making a line/column drift observable rather than masked by an always-`1`.
 
 /// The fixture case-names the #500 differential targets — every empty/nullable
 /// production whose span must stay *positionless* while its parent widens over the
@@ -166,7 +174,30 @@ const EMPTY_NULLABLE_CASE_NAMES: &[&str] = &[
     "empty_root_alone",
     "nullable_rep_zero_between_punct",
     "nullable_star_empty_between_punct",
+    // Multi-line cases (#543): the parent widens across a newline (`end_line = 2`),
+    // so a `line`/`column`/`end_line`/`end_column` regression on the explicit/
+    // assemble path that keeps the byte offsets correct is observable here.
+    "empty_rule_between_tokens_multiline",
+    "nullable_star_empty_multiline",
 ];
+
+/// One node's full propagate-positions span: `(data, line, column, end_line,
+/// end_column, start_pos, end_pos, empty)` — the *complete* `Meta` tuple. #543
+/// widened this from the original byte-offset-only shape so the explicit/assemble
+/// Earley path is held to the same contract as `tree_matches_oracle_with_meta`
+/// (which pins `line`/`column`/`end_*` against Python), not just `start_pos`/
+/// `end_pos`. An assemble-only regression that corrupts line/column while keeping
+/// the offsets correct now fails the cross-engine net instead of slipping through.
+type SpanShape = (
+    String,
+    Option<usize>, // line
+    Option<usize>, // column
+    Option<usize>, // end_line
+    Option<usize>, // end_column
+    Option<usize>, // start_pos
+    Option<usize>, // end_pos
+    bool,          // empty
+);
 
 /// Load `(name, grammar, input)` for each `EMPTY_NULLABLE_CASE_NAMES` entry from the
 /// committed `propagate_positions` oracle — the same fixture the
@@ -193,14 +224,20 @@ fn load_empty_nullable_cases() -> Vec<(String, String, String)> {
         .collect()
 }
 
-/// Flatten a tree into `(data, start_pos, end_pos, empty)` tuples in pre-order so
-/// two engines' span assignments can be compared directly (ignoring token leaves,
-/// which carry the lexer's spans and are not the synthesized-node question #500 is
-/// about). `_ambig` wrappers are skipped — their alternatives are unordered.
-fn span_shape(tree: &Tree, out: &mut Vec<(String, Option<usize>, Option<usize>, bool)>) {
+/// Flatten a tree into [`SpanShape`] tuples in pre-order so two engines' span
+/// assignments can be compared directly (ignoring token leaves, which carry the
+/// lexer's spans and are not the synthesized-node question #500 is about). `_ambig`
+/// wrappers are skipped — their alternatives are unordered. The tuple is the **full**
+/// `Meta` (line/column/end_line/end_column included, #543), so a line/column drift on
+/// any compared path is caught, not just a byte-offset drift.
+fn span_shape(tree: &Tree, out: &mut Vec<SpanShape>) {
     if tree.data != "_ambig" {
         out.push((
             tree.data.clone(),
+            tree.meta.line,
+            tree.meta.column,
+            tree.meta.end_line,
+            tree.meta.end_column,
             tree.meta.start_pos,
             tree.meta.end_pos,
             tree.meta.empty,
@@ -219,7 +256,7 @@ fn parse_spans(
     parser: ParserAlgorithm,
     lexer: LexerType,
     ambiguity: Ambiguity,
-) -> Option<Vec<(String, Option<usize>, Option<usize>, bool)>> {
+) -> Option<Vec<SpanShape>> {
     let opts = LarkOptions {
         parser,
         lexer,
@@ -285,10 +322,12 @@ fn empty_production_span_earley_streaming_matches_assemble() {
 /// trivially green); each other accepting pairing must match it tuple-for-tuple.
 ///
 /// Note CYK's reach here is the *parent-widening* axis only: it rejects a directly-ε
-/// user rule (`e:`, ADR-0024), so the 11 cases carrying an actual positionless empty
-/// *node* skip CYK; the two nullable-via-repetition cases it accepts elide the empty
+/// user rule (`e:`, ADR-0024), so the 12 cases carrying an actual positionless empty
+/// *node* skip CYK; the three nullable-via-repetition cases it accepts elide the empty
 /// node entirely (ε-removal), leaving just the widened `start`. LALR + Earley (both
-/// walk paths) carry the empty-node axis in full.
+/// walk paths) carry the empty-node axis in full. With #543 the compared tuple is the
+/// full `Meta` (line/column/end_*), and two of these cases are multi-line, so the
+/// parent-widening axis now exercises a real `end_line = 2` on every engine.
 #[test]
 fn empty_production_span_agrees_across_engines() {
     let pairings = [
@@ -355,10 +394,11 @@ fn empty_production_span_agrees_across_engines() {
         "cross-engine empty-production span divergence (#500):\n{}",
         failures.join("\n")
     );
-    // Guard against the case table silently emptying: 13 cases × 4 always-accepting
-    // pairings (lalr/basic + the three Earley walks) + 2 CYK-accepting = 54.
+    // Guard against the case table silently emptying: 15 cases × 4 always-accepting
+    // pairings (lalr/basic + the three Earley walks) + 3 CYK-accepting (the two
+    // nullable-via-repetition cases + the multi-line `*` case) = 63.
     assert!(
-        compared >= 50,
+        compared >= 58,
         "expected many engine×case comparisons, ran {compared}"
     );
 }

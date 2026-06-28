@@ -3181,5 +3181,184 @@
         }
       }
     }
+  },
+  {
+    "name": "empty_rule_between_tokens_multiline",
+    "grammar": "start: \"a\" e \"b\"\ne:\n%import common.WS\n%ignore WS\n",
+    "input": "a\nb",
+    "engines": {
+      "lalr/contextual": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "e",
+            "children": [],
+            "meta": {
+              "empty": true
+            }
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 2,
+          "end_column": 2
+        }
+      },
+      "lalr/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "e",
+            "children": [],
+            "meta": {
+              "empty": true
+            }
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 2,
+          "end_column": 2
+        }
+      },
+      "earley/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "e",
+            "children": [],
+            "meta": {
+              "empty": true
+            }
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 2,
+          "end_column": 2
+        }
+      },
+      "earley/dynamic": {
+        "type": "tree",
+        "data": "start",
+        "children": [
+          {
+            "type": "tree",
+            "data": "e",
+            "children": [],
+            "meta": {
+              "empty": true
+            }
+          }
+        ],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 2,
+          "end_column": 2
+        }
+      },
+      "cyk/basic": {
+        "error": "ParseError"
+      }
+    }
+  },
+  {
+    "name": "nullable_star_empty_multiline",
+    "grammar": "start: \"(\" item* \")\"\nitem: \"a\"\n%import common.WS\n%ignore WS\n",
+    "input": "(\n)",
+    "engines": {
+      "lalr/contextual": {
+        "type": "tree",
+        "data": "start",
+        "children": [],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 2,
+          "end_column": 2
+        }
+      },
+      "lalr/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 2,
+          "end_column": 2
+        }
+      },
+      "earley/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 2,
+          "end_column": 2
+        }
+      },
+      "earley/dynamic": {
+        "type": "tree",
+        "data": "start",
+        "children": [],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 2,
+          "end_column": 2
+        }
+      },
+      "cyk/basic": {
+        "type": "tree",
+        "data": "start",
+        "children": [],
+        "meta": {
+          "empty": false,
+          "start_pos": 0,
+          "end_pos": 3,
+          "line": 1,
+          "column": 1,
+          "end_line": 2,
+          "end_column": 2
+        }
+      }
+    }
   }
 ]

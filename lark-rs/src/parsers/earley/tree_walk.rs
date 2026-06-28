@@ -19,6 +19,44 @@ use super::forest::{Forest, ForestRef, Packed};
 // Backward-compat alias within earley — keeps diff minimal for this refactor.
 type NodeValue = Slot;
 
+/// One step of a two-phase iterative forest DFS (#517): `Enter` a node (the first
+/// time it is reached), or `Exit` it once all its children have settled. Shared by
+/// the priority pass (`node_priority`, #33) and the single-derivation pass
+/// (`single_deriv`, #59) through [`Transformer::enter_exit_dfs`], so the
+/// O(1)-native-stack de-recursion scaffold (#33) lives in exactly one place.
+enum Step {
+    Enter(usize),
+    Exit(usize),
+}
+
+/// What [`Transformer::enter_exit_dfs`]'s `enter` closure decides for a node on its
+/// first visit: recurse into its children, or settle it now without descending.
+enum Enter {
+    Descend,
+    Settled,
+}
+
+/// The `Node`-child edges of forest node `n`: every `ForestRef::Node` child of
+/// every family, in `families` order, `left` before `right`. This is the single
+/// definition of "the forest graph the walks traverse", shared by the priority
+/// pass (#33), the single-derivation pass (#59) and the cycle-membership SCC pass
+/// (`ensure_cycle_nodes`, #348) so a families-iteration change is made once (#517).
+///
+/// Returned as a `DoubleEndedIterator` so the Enter/Exit driver can push children
+/// in reverse (`.rev()`) without allocating — matching the zero-heap family
+/// iteration the priority/single-derivation passes had before the unification — while
+/// the SCC pass (which needs a stable index for its `child_pos` resume) `collect`s it.
+fn node_child_edges(forest: &Forest, n: usize) -> impl DoubleEndedIterator<Item = usize> + '_ {
+    forest.nodes[n]
+        .families
+        .iter()
+        .flat_map(|p| [p.left, p.right])
+        .filter_map(|r| match r {
+            ForestRef::Node(c) => Some(c),
+            _ => None,
+        })
+}
+
 // ─── Forest → tree conversion ─────────────────────────────────────────────────
 
 /// Walks the SPPF bottom-up, building parse trees through the shared
@@ -82,9 +120,9 @@ pub(crate) struct Transformer<'a> {
     /// `false` and keeps the cartesian `Derivs` distribution that the `_ambig`
     /// oracles pin. Computed once per node by [`Transformer::single_deriv`].
     single_deriv: HashMap<usize, bool>,
-    /// Memoized node priorities + the in-progress set for cycle-safe summing.
+    /// Memoized node priorities (cycle-safe summing; the in-progress set is owned
+    /// by the shared `enter_exit_dfs` driver per walk, #517).
     prio: HashMap<usize, i64>,
-    prio_visiting: HashSet<usize>,
     /// Resolve mode: nodes whose value has been fully built at least once. A value
     /// is memoized (and thereafter cloned) only on its *second* visit — so a node
     /// reached just once (the common case, including every node of a left-recursive
@@ -137,70 +175,125 @@ impl<'a> Transformer<'a> {
             cycle_nodes: None,
             single_deriv: HashMap::new(),
             prio: HashMap::new(),
-            prio_visiting: HashSet::new(),
             seen: HashSet::new(),
             pp: grammar.propagate_positions,
         }
     }
 
-    /// ForestSumVisitor: a node's priority is the max over its derivations.
+    /// The generic iterative forest-DFS skeleton (#517): the `Enter`/`Exit`
+    /// de-recursion scaffold the priority pass (#33) and the single-derivation pass
+    /// (#59) both ran as independent copies. It honors the #33 O(1)-native-stack
+    /// invariant — frames are heap-allocated work items, never native recursion —
+    /// and centralizes the parts that are easy to get subtly wrong in three places:
+    /// the memo short-circuit, the on-stack/`visiting` cycle guard (inserted on
+    /// `Enter`, removed on `Exit`), and the "push `Exit`, then push children" order.
     ///
-    /// Iterative two-phase DFS (issue #33 — the priority sum recurses to forest
-    /// depth just like the value walk did): `Enter` pushes a node's family
-    /// children, `Exit` combines their now-memoized priorities. Semantics are
-    /// identical to the natural recursion: results memoize in `prio`, and an edge
-    /// back into an in-progress node (`prio_visiting`) contributes 0.
-    fn node_priority(&mut self, id: usize) -> i64 {
-        if let Some(&p) = self.prio.get(&id) {
-            return p;
-        }
-        if self.prio_visiting.contains(&id) {
-            return 0; // cycle: contribute nothing
-        }
-        enum Step {
-            Enter(usize),
-            Exit(usize),
-        }
-        let mut stack = vec![Step::Enter(id)];
+    /// Per-pass behavior is supplied by four closures:
+    ///  * `memoized(self, node) -> bool`: the short-circuit predicate (the per-pass
+    ///    memo lookup). A node already settled is never re-entered.
+    ///  * `enter(self, on_stack, node) -> Enter`: called the first time `node` is
+    ///    reached. It returns [`Enter::Descend`] to recurse into `node`'s `Node`
+    ///    children (the driver pushes `Exit(node)` then the children in
+    ///    `families`×`[left,right]` order, **reversed** so they pop and settle in
+    ///    that order — the recursive call order, load-bearing in cyclic forests), or
+    ///    [`Enter::Settled`] to settle `node` at entry without descending (the
+    ///    closure has already written its memo).
+    ///  * `on_cycle(self, node)`: called when an edge re-enters a node still in
+    ///    progress (a forest cycle). The node keeps its pending `Exit`; the pass uses
+    ///    this to record cycle membership / a sentinel value as the recursion would.
+    ///  * `exit(self, on_stack, node)`: called once `node`'s children have settled;
+    ///    combines them and writes `node`'s memo. `node` is still in `on_stack` when
+    ///    this runs (removed immediately after), so a self-loop child reads the
+    ///    in-progress sentinel exactly as the recursion did.
+    ///
+    /// The driver owns the `on_stack` in-progress set and clears each node on `Exit`.
+    fn enter_exit_dfs<M, E, C, X>(
+        &mut self,
+        root: usize,
+        memoized: M,
+        mut enter: E,
+        mut on_cycle: C,
+        mut exit: X,
+    ) where
+        M: Fn(&Self, usize) -> bool,
+        E: FnMut(&mut Self, &HashSet<usize>, usize) -> Enter,
+        C: FnMut(&mut Self, usize),
+        X: FnMut(&mut Self, &HashSet<usize>, usize),
+    {
+        let mut on_stack: HashSet<usize> = HashSet::new();
+        let mut stack = vec![Step::Enter(root)];
         while let Some(step) = stack.pop() {
             match step {
                 Step::Enter(n) => {
-                    if self.prio.contains_key(&n) || !self.prio_visiting.insert(n) {
-                        continue; // memoized, or in-progress (a cycle edge)
+                    if memoized(self, n) {
+                        continue;
                     }
-                    stack.push(Step::Exit(n));
-                    // Children in reverse push order so they evaluate in family
-                    // order, left before right — the recursive call order, which
-                    // is load-bearing in cyclic forests (a child's value depends
-                    // on which ancestors are in-progress when it is reached).
-                    for p in self.forest.nodes[n].families.iter().rev() {
-                        for r in [p.right, p.left] {
-                            if let ForestRef::Node(c) = r {
+                    if !on_stack.insert(n) {
+                        on_cycle(self, n); // in-progress: a cycle edge
+                        continue;
+                    }
+                    match enter(self, &on_stack, n) {
+                        Enter::Settled => {
+                            // Settled at entry without descending (memo written).
+                            on_stack.remove(&n);
+                        }
+                        Enter::Descend => {
+                            stack.push(Step::Exit(n));
+                            // Children reversed so they pop in family order, left
+                            // before right — the recursive call order.
+                            for c in node_child_edges(self.forest, n).rev() {
                                 stack.push(Step::Enter(c));
                             }
                         }
                     }
                 }
                 Step::Exit(n) => {
-                    let node = &self.forest.nodes[n];
-                    let parent_inter = node.is_intermediate;
-                    let mut best = if node.families.is_empty() {
-                        0
-                    } else {
-                        i64::MIN
-                    };
-                    for k in 0..self.forest.nodes[n].families.len() {
-                        let p = self.forest.nodes[n].families[k];
-                        let v = self.packed_priority_value(&p, parent_inter);
-                        if v > best {
-                            best = v;
-                        }
-                    }
-                    self.prio_visiting.remove(&n);
-                    self.prio.insert(n, best);
+                    // `n` is still on the stack so a self-loop child reads the
+                    // in-progress sentinel; the driver removes it right after.
+                    exit(self, &on_stack, n);
+                    on_stack.remove(&n);
                 }
             }
         }
+    }
+
+    /// ForestSumVisitor: a node's priority is the max over its derivations.
+    ///
+    /// Iterative two-phase DFS over the shared [`enter_exit_dfs`](Self::enter_exit_dfs)
+    /// skeleton (#33 — the priority sum recurses to forest depth just like the value
+    /// walk did): `Enter` descends into a node's family children, `Exit` combines
+    /// their now-memoized priorities. Semantics are identical to the natural
+    /// recursion: results memoize in `prio`, and an edge back into an in-progress
+    /// node contributes 0.
+    fn node_priority(&mut self, id: usize) -> i64 {
+        if let Some(&p) = self.prio.get(&id) {
+            return p;
+        }
+        self.enter_exit_dfs(
+            id,
+            |this, n| this.prio.contains_key(&n),
+            |_this, _on_stack, _n| Enter::Descend, // always descend
+            |_this, _n| {}, // a cycle edge contributes 0 via the lookup default
+            |this, on_stack, n| {
+                let node = &this.forest.nodes[n];
+                let parent_inter = node.is_intermediate;
+                let mut best = if node.families.is_empty() {
+                    0
+                } else {
+                    i64::MIN
+                };
+                for k in 0..this.forest.nodes[n].families.len() {
+                    let p = this.forest.nodes[n].families[k];
+                    let v = this.packed_priority_value(&p, parent_inter, on_stack);
+                    if v > best {
+                        best = v;
+                    }
+                }
+                this.prio.insert(n, best);
+            },
+        );
+        // A cycle back-edge into `id` itself (it was on the stack when re-reached)
+        // contributes 0, exactly as the recursion did.
         self.prio.get(&id).copied().unwrap_or(0)
     }
 
@@ -209,18 +302,25 @@ impl<'a> Transformer<'a> {
     /// leaves count 0 — the basic lexer already "used up" terminal priorities.
     fn packed_priority(&mut self, packed: &Packed, parent_inter: bool) -> i64 {
         // Make sure both node children are computed (left before right, the
-        // recursive evaluation order), then combine by lookup.
+        // recursive evaluation order), then combine by lookup. Called outside any
+        // active priority DFS (from `sorted_families`), so no node is in progress.
         for r in [packed.left, packed.right] {
             if let ForestRef::Node(c) = r {
                 self.node_priority(c);
             }
         }
-        self.packed_priority_value(packed, parent_inter)
+        self.packed_priority_value(packed, parent_inter, &HashSet::new())
     }
 
     /// Lookup-only half of [`packed_priority`](Self::packed_priority): combines
-    /// child priorities already computed (or in-progress → 0) by the DFS.
-    fn packed_priority_value(&self, packed: &Packed, parent_inter: bool) -> i64 {
+    /// child priorities already computed (or in-progress → 0) by the DFS. `on_stack`
+    /// is the priority DFS's live in-progress set (empty when called outside it).
+    fn packed_priority_value(
+        &self,
+        packed: &Packed,
+        parent_inter: bool,
+        on_stack: &HashSet<usize>,
+    ) -> i64 {
         let rule_prio = self.grammar.rules[packed.rule].options.priority;
         let base = if !parent_inter && rule_prio != 0 {
             rule_prio
@@ -229,7 +329,7 @@ impl<'a> Transformer<'a> {
         };
         let child = |r: ForestRef| match r {
             ForestRef::Node(id) => {
-                if self.prio_visiting.contains(&id) {
+                if on_stack.contains(&id) {
                     0 // in-progress: a cycle edge contributes nothing
                 } else {
                     self.prio.get(&id).copied().unwrap_or(0)
@@ -324,58 +424,41 @@ impl<'a> Transformer<'a> {
         if let Some(&b) = self.single_deriv.get(&id) {
             return b;
         }
-        enum Step {
-            Enter(usize),
-            Exit(usize),
-        }
-        // In-progress set: a re-entry is a cycle (→ false). Local to this query
-        // chain; every node we settle lands in `single_deriv`, so a later query
-        // short-circuits at the memo.
-        let mut on_stack: HashSet<usize> = HashSet::new();
-        let mut stack = vec![Step::Enter(id)];
-        while let Some(step) = stack.pop() {
-            match step {
-                Step::Enter(n) => {
-                    if self.single_deriv.contains_key(&n) {
-                        continue;
-                    }
-                    if !on_stack.insert(n) {
-                        // Cycle edge: this node participates in a forest cycle.
-                        self.single_deriv.insert(n, false);
-                        continue;
-                    }
-                    let node = &self.forest.nodes[n];
-                    if node.families.len() != 1 {
-                        // 0 families (a discarded/empty node) or > 1 (ambiguous):
-                        // not a single clean derivation.
-                        on_stack.remove(&n);
-                        self.single_deriv.insert(n, node.families.len() == 1);
-                        continue;
-                    }
-                    stack.push(Step::Exit(n));
-                    let p = node.families[0];
-                    for r in [p.left, p.right] {
-                        if let ForestRef::Node(c) = r {
-                            stack.push(Step::Enter(c));
-                        }
-                    }
+        self.enter_exit_dfs(
+            id,
+            |this, n| this.single_deriv.contains_key(&n),
+            |this, _on_stack, n| {
+                let node = &this.forest.nodes[n];
+                if node.families.len() != 1 {
+                    // 0 families (a discarded/empty node) or > 1 (ambiguous): not a
+                    // single clean derivation. Settle now without descending.
+                    this.single_deriv.insert(n, node.families.len() == 1);
+                    Enter::Settled
+                } else {
+                    // Exactly one family: descend into its children (which are all
+                    // of `n`'s edges, since `families.len() == 1`).
+                    Enter::Descend
                 }
-                Step::Exit(n) => {
-                    on_stack.remove(&n);
-                    // Already decided as a cycle while on the stack? Keep it.
-                    if self.single_deriv.contains_key(&n) {
-                        continue;
-                    }
-                    let p = self.forest.nodes[n].families[0];
-                    let child_ok = |r: ForestRef, this: &Self| match r {
-                        ForestRef::Node(c) => this.single_deriv.get(&c).copied() == Some(true),
-                        _ => true,
-                    };
-                    let ok = child_ok(p.left, self) && child_ok(p.right, self);
-                    self.single_deriv.insert(n, ok);
+            },
+            |this, n| {
+                // Cycle edge: this node participates in a forest cycle → not a single
+                // clean derivation. Its pending `Exit` keeps this `false` (guarded).
+                this.single_deriv.insert(n, false);
+            },
+            |this, _on_stack, n| {
+                // Already decided as a cycle while on the stack? Keep it.
+                if this.single_deriv.contains_key(&n) {
+                    return;
                 }
-            }
-        }
+                let p = this.forest.nodes[n].families[0];
+                let child_ok = |r: ForestRef, this: &Self| match r {
+                    ForestRef::Node(c) => this.single_deriv.get(&c).copied() == Some(true),
+                    _ => true,
+                };
+                let ok = child_ok(p.left, this) && child_ok(p.right, this);
+                this.single_deriv.insert(n, ok);
+            },
+        );
         self.single_deriv.get(&id).copied().unwrap_or(false)
     }
 
@@ -419,19 +502,10 @@ impl<'a> Transformer<'a> {
             // Enter `node`; `child_pos` is which family-edge to process next.
             Visit { node: usize, child_pos: usize },
         }
-        // Flat edge list per node (the `Node` children of all its families), so the
-        // resume can index into a stable sequence.
-        let edges_of = |node: usize, forest: &Forest| -> Vec<usize> {
-            let mut e = Vec::new();
-            for p in &forest.nodes[node].families {
-                for r in [p.left, p.right] {
-                    if let ForestRef::Node(c) = r {
-                        e.push(c);
-                    }
-                }
-            }
-            e
-        };
+        // Per-node edges are the shared `node_child_edges` flat list (the `Node`
+        // children of all families, in order) — the same forest graph the
+        // Enter/Exit passes traverse (#517) — so the `child_pos` resume can index
+        // into a stable sequence.
         for root in 0..n {
             if index[root] != usize::MAX {
                 continue;
@@ -449,7 +523,7 @@ impl<'a> Transformer<'a> {
                     scc_stack.push(node);
                     on_stack[node] = true;
                 }
-                let edges = edges_of(node, self.forest);
+                let edges: Vec<usize> = node_child_edges(self.forest, node).collect();
                 // Finish any child returned by a prior resume: fold its lowlink up.
                 if child_pos > 0 {
                     let prev = edges[child_pos - 1];
@@ -501,7 +575,7 @@ impl<'a> Transformer<'a> {
                     } else {
                         // A singleton SCC is on a cycle only via a self-loop.
                         let only = members[0];
-                        if edges_of(only, self.forest).contains(&only) {
+                        if node_child_edges(self.forest, only).any(|c| c == only) {
                             on_cycle.insert(only);
                         }
                     }
@@ -872,10 +946,19 @@ impl<'a> Transformer<'a> {
                 };
                 let mut push_deduped = |v: NodeValue| {
                     if keys.insert(node_value_key(&v)) {
+                        // #518: one materialized derivation admitted — the
+                        // denominator of the cyclic re-assembly per-derivation
+                        // envelope (`tests/test_earley_scaling.rs`, cyclic arm).
+                        crate::perf::add_explicit_derivation();
                         derivs.push(v);
                     }
                 };
                 for list in lists {
+                    // #518: the re-assembly work this packed node repeats on each
+                    // reach of a cycle node — the child slots fed to `assemble`.
+                    // Counted before the move so the size is read once.
+                    #[cfg(feature = "perf-counters")]
+                    crate::perf::add_explicit_assemble_children(list.len() as u64);
                     // Python's `_collapse_ambig`: a derivation that assembles
                     // to an `_ambig` (an expand1 rule whose single kept child
                     // is ambiguous) contributes its alternatives flat, not as

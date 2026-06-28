@@ -404,8 +404,11 @@ pub struct PatternRe {
 ///   rewriting `{,n}` → `{0,n}` — outside a class only (inside `[...]` a `{` is a literal)
 ///   and only on a `base_quantifier_len`-valid `{,n}`. A `{,x}` with a non-digit upper, or
 ///   an unterminated `{,3`, is a literal brace run in Python and is left byte-exact. The
-///   inverted-bound `{m,n}` with `m>n` (`a{3,2}`) is *not* touched — it has a lower bound,
-///   so it never matches this shape and stays rejected by both engines. **Scoped to
+///   inverted-bound `{m,n}` with `m>n` (`a{3,2}`) is *not* touched here — it has a lower
+///   bound, so it never matches this empty-lower-bound shape. It is a *valid* counted
+///   repetition spelling that the Rust `regex` crate accepts but Python `re` rejects
+///   ("min repeat greater than max repeat"), so it is screened out separately by
+///   [`find_inverted_bound_quantifier`] (#534), not by this normalization. **Scoped to
 ///   `n ≥ 1`:** the fully-empty `{,}` — which Python reads as `{0,}` (== `*`), *not* a
 ///   literal — is a distinct divergence tracked in #447 (`base_quantifier_len` itself does
 ///   not yet recognize `{,}`), deliberately out of this rewrite's scope.
@@ -1227,6 +1230,105 @@ fn base_quantifier_len(chars: &[char], i: usize) -> Option<usize> {
     }
 }
 
+/// Detect a Python-`re` **"min repeat greater than max repeat"** shape locally, returning
+/// the char index of the offending `{m,n}` quantifier open `{`, or `None` if the pattern
+/// has none. A counted repetition `{m,n}` with an **inverted bound** (`m > n`, both
+/// present — e.g. `a{3,2}`) is a Python `re` *build error* (`sre_parse` raises "min repeat
+/// greater than max repeat"), but the Rust `regex` crate **accepts** it (it compiles to an
+/// empty/never-matching repeat), so `Regex::new` in [`PatternRe::new`] would let the
+/// terminal build — making lark-rs *more permissive than the oracle* (the unfalsifiable
+/// direction, ADR-0017). We classify the shape directly so it surfaces as a correctly-
+/// categorized `InvalidRegex`, never the misleading `LookaroundScope` refusal (#534).
+///
+/// Only the **both-bounds-present** `{m,n}` form can be inverted: an open `{m,}` has no
+/// upper bound, a `{,n}` / `{m}` cannot have `m > n`, and the empty-lower forms are
+/// already `{0,n}`/`{0,}` post-normalization (`0` is never greater). The scan reuses
+/// [`base_quantifier_len`] (the shared quantifier oracle, so a literal brace `{x}` / `{}`
+/// or a non-quantifier `{` is never inspected) and parses the lower/upper digit runs of a
+/// `{m,n}` it accepts.
+///
+/// Runs on the **normalized** pattern (post [`normalize_python_escapes`]), the same string
+/// `Regex::new` validates: `(?#…)` comments are already stripped — so an interior comment
+/// that makes Python read the braces as a *literal* (`a{3(?#c),2}` → `a\{3,2}`, which
+/// Python accepts) is already escaped to `\{` and carries no quantifier shape here — and
+/// `{,n}`/`{,}` are already `{0,n}`/`{0,}`. It is **class- and escape-aware** via the
+/// shared [`RegexCursor`]: a `{3,2}` inside `[...]` is a set of literal members and a `\{`
+/// is an escaped literal brace — neither is a quantifier.
+fn find_inverted_bound_quantifier(pattern: &str) -> Option<usize> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut cur = RegexCursor::new(&chars);
+    while !cur.at_end() {
+        let i = cur.pos();
+        // A `{m,n}` quantifier is only structural out-of-class (inside `[...]` a `{` is a
+        // literal member; a `\{` is consumed as an escape pair by `step()` below).
+        if !cur.in_class() && chars[i] == '{' {
+            if let Some(len) = base_quantifier_len(&chars, i) {
+                if let Some((lower, upper)) = inverted_bound_pair(&chars, i, len) {
+                    if decimal_gt(lower, upper) {
+                        return Some(i);
+                    }
+                }
+                // A well-formed quantifier (`{m}`, `{m,}`, `{0,n}`, or a non-inverted
+                // `{m,n}`) — skip past it; it carries no inverted-bound shape.
+                cur.seek(i + len);
+                continue;
+            }
+        }
+        cur.step();
+    }
+    None
+}
+
+/// For a `base_quantifier_len`-valid `{…}` of length `len` opening at `chars[i] == '{'`,
+/// return the `(lower, upper)` **digit slices** iff it is the **both-bounds-present**
+/// `{m,n}` form (a lower digit run, a comma, and an upper digit run) — the only shape that
+/// can be inverted. Returns `None` for `{m}` (no comma), `{m,}` (open — no upper), and
+/// `{,n}` (no lower; post-normalization these are `{0,n}`, but a `0` lower is handled
+/// correctly anyway). The runs are returned as raw digit slices (not parsed integers) so a
+/// bound too large for any integer type (Python's own `OverflowError` territory) is still
+/// compared correctly by [`decimal_gt`]. The digit runs are bounded by `len`, so no
+/// end-of-input check is needed.
+fn inverted_bound_pair(chars: &[char], i: usize, len: usize) -> Option<(&[char], &[char])> {
+    let end = i + len - 1; // index of the closing `}`
+    let mut j = i + 1;
+    let lower_start = j;
+    while j < end && chars[j].is_ascii_digit() {
+        j += 1;
+    }
+    if j == lower_start || chars.get(j) != Some(&',') {
+        return None; // no lower bound, or no comma (`{m}`) — not an `{m,n}`
+    }
+    let lower = &chars[lower_start..j];
+    j += 1; // past the comma
+    let upper_start = j;
+    while j < end && chars[j].is_ascii_digit() {
+        j += 1;
+    }
+    if j == upper_start {
+        return None; // open `{m,}` — no upper bound to compare against
+    }
+    Some((lower, &chars[upper_start..j]))
+}
+
+/// Whether the non-negative decimal `lower` is strictly greater than `upper`, comparing the
+/// **digit slices** directly so the verdict is correct even for bounds too large to fit any
+/// integer type (`a{99999999999999999999,1}` is still inverted — Python raises on the count
+/// magnitude, but the min>max relation is what we screen). Leading zeros are stripped first
+/// (`007` == `7`), then the longer significant-digit string is the larger number, ties
+/// broken lexically. Both slices are guaranteed all-ASCII-digit by [`inverted_bound_pair`].
+fn decimal_gt(lower: &[char], upper: &[char]) -> bool {
+    // Significant-digit tail (leading zeros stripped); an all-zeros run yields an empty tail.
+    fn sig(d: &[char]) -> &[char] {
+        let nz = d.iter().position(|&c| c != '0').unwrap_or(d.len());
+        &d[nz..]
+    }
+    let (lo, up) = (sig(lower), sig(upper));
+    if lo.len() != up.len() {
+        return lo.len() > up.len(); // more significant digits ⇒ larger number
+    }
+    lo > up // equal length — compare lexically (digit order == numeric order)
+}
+
 /// If `chars[i]` opens a Python-`re` **empty-lower-bound quantifier** `{,n}` (no lower
 /// bound, `≥0` upper digits — including the fully-empty `{,}`, e.g. the `{,3}` in `a{,3}b`
 /// or the `{,}` in `a{,}b`), return the length of the upper-bound digit run `n` (so `{,3}`
@@ -1523,6 +1625,27 @@ impl PatternRe {
                      preceding expression to repeat (e.g. a leading `*a`/`+a`/`?a`/\
                      `{0,3}`, or a quantifier right after `(`, `(?:`, `|`, or a stripped \
                      `(?#…)` comment). Python `re` rejects this as \"nothing to \
+                     repeat\"; lark-rs matches that rejection (ADR-0017)."
+                    .to_string(),
+            });
+        }
+        // **"Min repeat greater than max repeat" pre-screen (#534).** A counted repetition
+        // `{m,n}` with `m > n` (`a{3,2}`) is a Python `re` "min repeat greater than max
+        // repeat" build error, but the Rust `regex` crate *accepts* it (it compiles to an
+        // empty/never-matching repeat), so `Regex::new` below would let the terminal build —
+        // lark-rs would be *more permissive than the oracle* (the unfalsifiable direction,
+        // ADR-0017). We classify the shape locally (`find_inverted_bound_quantifier`, class-
+        // /escape-aware via the shared `RegexCursor`) so it surfaces as the truthful
+        // `InvalidRegex`, never the misleading `LookaroundScope` refusal. Runs on the
+        // normalized `pattern` (comments already stripped — an interior `(?#…)` that makes
+        // Python read the braces as a literal is already `\{`-escaped — and `{,n}`/`{,}`
+        // already `{0,n}`/`{0,}`, whose `0` lower is never an inverted bound).
+        if find_inverted_bound_quantifier(&pattern).is_some() {
+            return Err(GrammarError::InvalidRegex {
+                pattern: pattern.clone(),
+                reason: "min repeat greater than max repeat — a counted repetition `{m,n}` \
+                     has a lower bound greater than its upper bound (e.g. `a{3,2}`). Python \
+                     `re` (sre_parse) rejects this as \"min repeat greater than max \
                      repeat\"; lark-rs matches that rejection (ADR-0017)."
                     .to_string(),
             });
@@ -1890,8 +2013,10 @@ mod tests {
     /// is a literal), escape-aware (a `\{` is a literal brace), and fires only on a
     /// `base_quantifier_len`-valid `{,…}` — a `{,x}` with a non-digit upper, an
     /// unterminated `{,3`, a bare `{}` (no comma), or a lower-bounded `{m,n}` is left
-    /// byte-exact. The inverted bound `{3,2}` is left untouched (it has a lower bound, so it
-    /// never matches this shape and stays rejected downstream).
+    /// byte-exact. The inverted bound `{3,2}` is left untouched by *normalization* (it has a
+    /// lower bound, so it never matches this empty-lower-bound shape); it is rejected
+    /// separately as "min repeat greater than max repeat" (#534, see
+    /// `inverted_bound_quantifier_rejected`), not here.
     #[test]
     fn normalize_rewrites_empty_lower_bound_quantifier() {
         // The bug repro and minimal forms.
@@ -1910,7 +2035,9 @@ mod tests {
         assert_eq!(normalize_python_escapes("a{2,3}"), "a{2,3}");
         assert_eq!(normalize_python_escapes("a{2,}"), "a{2,}");
         assert_eq!(normalize_python_escapes("a{3}"), "a{3}");
-        // Inverted bound — NOT this shape; left byte-exact (stays rejected by both engines).
+        // Inverted bound — NOT this empty-lower-bound shape; left byte-exact by
+        // *normalization* (it is rejected separately as "min repeat greater than max repeat",
+        // #534 — see `inverted_bound_quantifier_rejected`).
         assert_eq!(normalize_python_escapes("a{3,2}b"), "a{3,2}b");
         // Class-aware: a `{,3}` *inside* a character class is a set of literal chars in
         // Python (`{`, `,`, `3`, `}`), not a quantifier — left untouched.
@@ -2402,6 +2529,105 @@ mod tests {
                 ),
                 other => panic!("{p:?}: must reject (both engines do), got {other:?}"),
             }
+        }
+    }
+
+    /// #534 unit-level differential: `find_inverted_bound_quantifier` classifies the
+    /// "min repeat greater than max repeat" shape *locally* (class-/escape-aware via the
+    /// shared `RegexCursor`) and must agree with Python `re`'s verdict — a counted
+    /// repetition `{m,n}` is inverted iff both bounds are present and `m > n`. The screen
+    /// runs on the **normalized** pattern, so inputs here are written post-normalization (no
+    /// `(?#…)` comment; `{,n}`/`{,}` already `{0,n}`/`{0,}`). Grounded against Python 3.11.
+    #[test]
+    fn find_inverted_bound_quantifier_matches_python_shapes() {
+        // (normalized pattern, is_inverted) — `true` ⇒ Python "min repeat greater than max".
+        let cases: &[(&str, bool)] = &[
+            // Inverted: both bounds present, m > n.
+            ("a{3,2}", true),
+            ("a{3,2}b", true),
+            ("{3,2}", true),
+            ("a{10,2}", true),   // multi-digit lower
+            ("a{100,50}", true), // multi-digit both
+            ("a{99,1}", true),
+            // Bounds too large for any integer type — the min>max relation is still decided
+            // by the digit-slice compare (Python raises on the count too; both reject).
+            ("a{99999999999999999999,1}", true),
+            ("a{007,5}", true), // leading zeros: 7 > 5
+            // Equal value with leading zeros is NOT inverted (`007` == `7`).
+            ("a{007,7}", false),
+            ("(a){3,2}", true), // quantifier on a closed group
+            ("[a-z]{3,2}", true),
+            ("a{2,3}b{3,2}", true), // a later one inverted
+            // --- negatives: Python accepts (or rejects for a different reason) ---
+            ("a{2,3}", false), // m < n
+            ("a{2,2}", false), // m == n
+            ("a{0,0}", false),
+            ("a{2,}", false), // open upper — not the both-bounds form
+            ("a{1,}", false),
+            ("a{3}", false),    // single bound
+            ("a{0,3}", false),  // the post-normalization `{,3}` — `0` lower, never inverted
+            ("a{0,}", false),   // the post-normalization `{,}`
+            ("a{2,10}", false), // lexicographically `2` < `10` but numerically too — must NOT
+            // be a string compare
+            // Class-aware: a `{3,2}` inside `[...]` is a set of literal chars, not a
+            // quantifier.
+            ("[a{3,2}]", false),
+            // Escape-aware: a `\{` is a literal brace (this is what the comment-bearing
+            // `a{3(?#c),2}` normalizes to), never a quantifier.
+            (r"a\{3,2}", false),
+            // A literal-brace body is not a quantifier at all.
+            ("a{x,y}", false),
+            ("a{3,2", false), // unterminated — not a well-formed quantifier
+        ];
+        for &(p, want) in cases {
+            assert_eq!(
+                find_inverted_bound_quantifier(p).is_some(),
+                want,
+                "{p:?}: find_inverted_bound_quantifier should be {want} (Python `re` oracle)"
+            );
+        }
+    }
+
+    /// #534 end-to-end: a `/…/` terminal containing an inverted-bound `{m,n}` (m > n) is
+    /// **rejected** at build with a correctly-categorized `InvalidRegex` carrying the
+    /// "min repeat greater than max repeat" reason (NOT a `LookaroundScope` refusal),
+    /// matching Python `re` (`re.compile('a{3,2}')` → "min repeat greater than max repeat").
+    /// The negative controls — non-inverted `{m,n}`, equal bounds, open `{m,}`, the
+    /// post-normalization `{,n}`/`{,}`, an in-class `{3,2}`, and an escaped `\{3,2}` — all
+    /// still **build** (Python accepts each). Oracle: Python `re` 3.11.
+    #[test]
+    fn inverted_bound_quantifier_rejected() {
+        // Rejected — both engines disagree (regex crate accepts, Python rejects); lark-rs
+        // matches Python.
+        for p in [
+            "a{3,2}",
+            "a{3,2}b",
+            "a{10,2}",
+            "a{100,50}",
+            "(a){3,2}",
+            "[a-z]{3,2}",
+        ] {
+            match PatternRe::new(p, 0) {
+                Err(GrammarError::InvalidRegex { reason, .. }) => assert!(
+                    reason.contains("min repeat greater than max repeat"),
+                    "/{p}/: expected the truthful min>max InvalidRegex, got: {reason}"
+                ),
+                other => panic!(
+                    "/{p}/: an inverted-bound quantifier must be rejected (Python `re` does), \
+                     got {other:?}"
+                ),
+            }
+        }
+        // Accepted — Python compiles each, so lark-rs must build them.
+        for p in [
+            "a{2,3}", "a{2,2}", "a{0,0}", "a{2,}", "a{1,}", "a{3}", "a{2,10}", "a{,3}", "a{,}",
+            "[a{3,2}]", r"a\{3,2}",
+        ] {
+            assert!(
+                PatternRe::new(p, 0).is_ok(),
+                "/{p}/: Python `re` accepts it — lark-rs must build it (#534 must not \
+                 over-reject)"
+            );
         }
     }
 
