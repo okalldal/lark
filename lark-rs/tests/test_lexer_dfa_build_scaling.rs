@@ -12,7 +12,7 @@
 //! Like the Earley/CYK/lexer scaling gates, this keys on a **deterministic work
 //! counter** — [`lark_rs::perf::dense_build_bytes`], the summed `dense::DFA`
 //! `memory_usage()` (state-count × stride proxy) over a scanner build — never
-//! wall-clock. Two sweeps, two pathologies:
+//! wall-clock. Three sweeps, three pathologies:
 //!
 //!   * **per terminal** — add lowered lookaround terminals to one scanner and assert
 //!     the determinized size stays *flat per terminal*. A union that determinizes to a
@@ -20,6 +20,11 @@
 //!   * **per guard width** — grow a single lookbehind's window width and assert the
 //!     size stays *flat per width*. A future window-carry lowering that built `2^W`
 //!     states instead of `O(W)` trips it.
+//!   * **per counted-repeat N** (H4-12 / #349) — grow a single *user* counted-repeat
+//!     terminal of the `.*a.{N}` family, whose minimal DFA is exponential in N, and
+//!     assert the dense build stays *flat* (bounded by a constant). Eager
+//!     determinization doubles per +1 in N; the hybrid fallback (ADR-0037) routes the
+//!     over-budget terminal to a lazy DFA, so its eager contribution collapses to ~0.
 //!
 //! The counter only exists under `--features perf-counters` (zero overhead otherwise),
 //! so `cargo test --all` runs the trivial placeholder and CI runs the real gate with:
@@ -80,6 +85,16 @@ fn grammar_with_lookbehind_width(w: usize) -> String {
     format!("start: T+\nT: /[a-z](?<![a-z]{{{w}}})z/\n")
 }
 
+/// A single **user counted-repeat** terminal of the classic `.*a.{N}` family
+/// (`/[01]*1[01]{N}/`), whose *minimal* DFA is exponential in `N` (`2^(N+1)` states) —
+/// the H4-12 / `#349` pathology. Python `re` matches it in linear time (no
+/// determinization); the hybrid fallback (ADR-0037) bounds lark-rs's eager build the same
+/// way, so `dense_build_bytes` must stay *flat* across `N` rather than doubling per `+1`.
+#[cfg(feature = "perf-counters")]
+fn grammar_with_counted_repeat(n: usize) -> String {
+    format!("start: T+\nT: /[01]*1[01]{{{n}}}/\n")
+}
+
 /// Build the `DfaScanner`-backed basic lexer for `grammar`, returning the
 /// `dense_build_bytes` counted during the build (the scanner determinizes its dense
 /// DFAs in `BasicLexer::new`).
@@ -125,6 +140,63 @@ fn dense_dfa_build_cost_is_flat() {
         &[1usize, 2, 4, 8],
         |w| grammar_with_lookbehind_width(w),
         |w| w as f64,
+    );
+
+    // Sweep 3 — flat per N for a USER counted-repeat terminal (H4-12 / #349). The
+    // `.*a.{N}` family's minimal DFA is exponential in N, so eager determinization used to
+    // roughly double `dense_build_bytes` per +1 in N (N=4 = 5184 B … N=10 = 311616 B,
+    // ≈60×). The hybrid fallback (ADR-0037) routes the over-budget terminal to a lazy DFA,
+    // so its eager-determinization contribution collapses to ~0 and the total dense build
+    // is *flat* (bounded by a small constant) across the whole sweep — Python's linear
+    // build, matched. This is the surface the old `test_lexer_dfa_build_scaling` gate did
+    // NOT cover (it swept only lowered lookaround, never a user counted-repeat terminal).
+    assert_bounded_flat(
+        "counted-repeat",
+        &[4usize, 6, 8, 10, 12, 16],
+        grammar_with_counted_repeat,
+    );
+}
+
+/// Assert a size sweep keeps `dense_build_bytes` **flat** (bounded by a small constant),
+/// not merely flat-per-unit. Used for the H4-12 counted-repeat family, where the
+/// pathological terminal is routed to the lazy/hybrid DFA so its eager contribution is
+/// ~0: the *total* dense build must stay tiny and non-growing across the whole N sweep.
+/// An eager determinization (the pre-fix behavior) would blow this by orders of magnitude
+/// at the larger N.
+#[cfg(feature = "perf-counters")]
+fn assert_bounded_flat(label: &str, sizes: &[usize], grammar: impl Fn(usize) -> String) {
+    let costs: Vec<(usize, u64)> = sizes
+        .iter()
+        .map(|&n| (n, build_cost(&grammar(n))))
+        .collect();
+    eprintln!("dense-build {label}: total bytes across sweep = {costs:?}");
+
+    // The smallest N here (4) determinizes to a few KiB even eagerly; every larger N must
+    // fall back, so the build cost never climbs past a small constant ceiling. Pin it well
+    // above the floor (any in-budget contribution) yet far below the exponential: 64 KiB
+    // equals the per-source budget, so a single over-budget terminal's dense contribution
+    // is bounded by it. The pre-fix N=16 build was megabytes.
+    let ceiling: u64 = 64 * 1024;
+    for &(n, cost) in &costs {
+        assert!(
+            cost <= ceiling,
+            "{label}: N={n} recorded {cost} dense-build bytes (> {ceiling} ceiling) — the \
+             counted-repeat terminal is being EAGERLY determinized (exponential in N) \
+             instead of routed to the hybrid fallback (ADR-0037). Sweep: {costs:?}"
+        );
+    }
+
+    // And it must not *grow* across the sweep: the last (largest-N) build is no larger
+    // than the first (smallest-N) build — flat or shrinking, never the exponential climb.
+    let first = costs.first().unwrap().1;
+    let last = costs.last().unwrap().1;
+    assert!(
+        last <= first.max(1),
+        "{label}: dense-DFA build cost GREW from {first} (N={}) to {last} (N={}) bytes \
+         across the sweep — the counted-repeat terminal's eager determinization is not \
+         bounded by the hybrid fallback. Sweep: {costs:?}",
+        costs.first().unwrap().0,
+        costs.last().unwrap().0
     );
 }
 
