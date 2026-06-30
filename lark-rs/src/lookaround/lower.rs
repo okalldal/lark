@@ -785,6 +785,11 @@ fn atom_width_range(atom: &str) -> (usize, Option<usize>) {
                 i += 1;
                 let n = chars.get(i).copied();
                 i += 1;
+                // A *multi-char* escape is a single code point, exactly as Python's
+                // `sre_parse` sizes it (#454): consume the rest of the escape body so its
+                // trailing chars are not re-counted as separate literal atoms, and so a
+                // following quantifier binds to the whole escape. Width 1 regardless.
+                consume_escape_tail(&chars, &mut i, n);
                 match n {
                     Some('b') | Some('B') | Some('A') | Some('z') | Some('Z') | Some('G') => 0,
                     _ => 1,
@@ -857,6 +862,49 @@ fn atom_width_range(atom: &str) -> (usize, Option<usize>) {
         };
     }
     (lo, hi)
+}
+
+/// Advance `*i` past the *body* of a multi-char backslash escape whose leading char is
+/// `lead` (the `\` and `lead` itself are already consumed; `*i` points just past `lead`).
+/// A multi-char escape (`\xHH`, `\uHHHH`, `\UHHHHHHHH`, `\ooo` octal, `\N{name}`) denotes a
+/// **single code point** — Python `sre_parse.getwidth()` sizes it at 1 (#454). Without this,
+/// [`atom_width_range`] re-counts the escape's trailing chars (`41` of `\x41`, the `name` of
+/// `\N{name}`) as separate width-1 literal atoms, over-counting the escape's char width.
+///
+/// Mirrors `sre_parse`'s lengths: `\x` reads 2 hex digits, `\u` 4, `\U` 8; `\0`–`\7` an octal
+/// run (up to three octal digits, the standard greedy `sre_parse` read); `\N` the `{name}`
+/// brace. Single-char escapes (`\n`, `\d`, `\.`, the anchors) have no tail and return
+/// unchanged. The reads are *bounded and saturating* — a malformed/short escape (e.g. `\x4`
+/// at end of input) simply consumes what is present; sizing stays at 1 either way, so width
+/// is robust to a body the upstream screens would reject as a build error.
+fn consume_escape_tail(chars: &[char], i: &mut usize, lead: Option<char>) {
+    let is_hex = |c: char| c.is_ascii_hexdigit();
+    let is_oct = |c: char| ('0'..='7').contains(&c);
+    let mut take = |n: usize, pred: &dyn Fn(char) -> bool| {
+        let mut k = 0;
+        while k < n && chars.get(*i).is_some_and(|&c| pred(c)) {
+            *i += 1;
+            k += 1;
+        }
+    };
+    match lead {
+        Some('x') => take(2, &is_hex),
+        Some('u') => take(4, &is_hex),
+        Some('U') => take(8, &is_hex),
+        // `\0`–`\7`: the leading octal digit was already consumed as `lead`; read up to
+        // two more octal digits (a full octal escape is at most three digits).
+        Some(d) if ('0'..='7').contains(&d) => take(2, &is_oct),
+        // `\N{name}`: consume through the closing `}` (or to end on a malformed run).
+        Some('N') if chars.get(*i) == Some(&'{') => {
+            while *i < chars.len() && chars[*i] != '}' {
+                *i += 1;
+            }
+            if *i < chars.len() {
+                *i += 1; // past the '}'
+            }
+        }
+        _ => {}
+    }
 }
 
 /// Skip a lazy (`?`) / possessive (`+`) marker after a quantifier.
@@ -1970,6 +2018,39 @@ fn unescape_regex_literal(s: &str) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #454: `atom_width_range` sizes a multi-char backslash escape at **1** code point,
+    /// matching Python `sre_parse.getwidth()` — it does not re-count the escape's trailing
+    /// chars as separate literal atoms. Grounded against `lark.utils.get_regexp_width`
+    /// (each `(min, max)` below is what Python reports for the same source).
+    #[test]
+    fn atom_width_range_escapes_size_one_codepoint() {
+        let w = atom_width_range;
+        // Hex / unicode escapes: one code point each.
+        assert_eq!(w("\\x41"), (1, Some(1)));
+        assert_eq!(w("\\uABCD"), (1, Some(1)));
+        assert_eq!(w("\\U0001F600"), (1, Some(1)));
+        // Octal escapes (leading-0 and 3-digit `\1`–`\7` forms).
+        assert_eq!(w("\\012"), (1, Some(1)));
+        assert_eq!(w("\\101"), (1, Some(1)));
+        // Named character escape.
+        assert_eq!(w("\\N{BULLET}"), (1, Some(1)));
+        assert_eq!(w("\\N{LATIN SMALL LETTER A}"), (1, Some(1)));
+        // Single-char escapes are unaffected (1 for a class/literal, 0 for an anchor).
+        assert_eq!(w("\\d"), (1, Some(1)));
+        assert_eq!(w("\\."), (1, Some(1)));
+        assert_eq!(w("\\b"), (0, Some(0)));
+        // A following quantifier binds to the *whole* escape, not its last digit.
+        assert_eq!(w("\\x41?"), (0, Some(1)));
+        assert_eq!(w("\\x41+"), (1, None));
+        assert_eq!(w("\\x41{2,3}"), (2, Some(3)));
+        // Concatenations sum correctly.
+        assert_eq!(w("A\\x41"), (2, Some(2)));
+        assert_eq!(w("\\x41\\012\\u0041"), (3, Some(3)));
+        // A `\xHH` *inside a character class* is consumed by the class walk, not the
+        // escape arm — the class is still one code point.
+        assert_eq!(w("[\\x41-\\x5a]"), (1, Some(1)));
+    }
 
     #[test]
     fn op_splits_into_guarded_and_unguarded_branches() {
