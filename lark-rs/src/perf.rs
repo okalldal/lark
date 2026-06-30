@@ -89,6 +89,21 @@
 //!   flat in `k`. Asserting that (`tests/test_grammar_build_scaling.rs`) is the
 //!   deterministic gate — the grammar-build analog of the Earley/CYK/lexer
 //!   scaling gates, paid at load, never wall-clock.
+//!
+//! An eighth counter backs the **LALR parse-table density** gate (#367, H5-9):
+//!
+//! * [`parse_table_action_cells`] — every ACTION cell the in-process `ParseTable`
+//!   *stores* (summed over all states). A grammar whose state and terminal counts
+//!   both grow with size (`start: r0 | … | rn` / `ri: Ai Bi Ci`) has a dense
+//!   `action[state][terminal]` matrix of `O(states × terminals) = O(n²)` cells,
+//!   while the semantic content — the `Some` actions, matching Python Lark's
+//!   sparse dict-of-dicts — is `O(n)`. Counting the cells the representation
+//!   actually stores makes the *dense* allocation `O(n²)` and the *sparse*
+//!   per-state `(terminal id, action)` rows `O(filled)`. Asserting the count
+//!   stays `O(filled)` (not `O(states × terminals)`) over the size sweep
+//!   (`tests/test_lalr_table_scaling.rs`) is the deterministic gate — the
+//!   parse-table analog of the Earley/CYK/lexer scaling gates, paid at build,
+//!   never wall-clock.
 
 #[cfg(feature = "perf-counters")]
 mod imp {
@@ -104,6 +119,7 @@ mod imp {
     static LEXER_SCAN_STEPS: AtomicU64 = AtomicU64::new(0);
     static DENSE_BUILD_BYTES: AtomicU64 = AtomicU64::new(0);
     static EXPANSION_ALTS: AtomicU64 = AtomicU64::new(0);
+    static PARSE_TABLE_ACTION_CELLS: AtomicU64 = AtomicU64::new(0);
     static LEO_DISABLED: AtomicBool = AtomicBool::new(false);
 
     #[inline]
@@ -197,6 +213,19 @@ mod imp {
         EXPANSION_ALTS.fetch_add(n, Ordering::Relaxed);
     }
 
+    /// Count the ACTION cells the in-process `ParseTable` *stores* — `n` is the
+    /// total entry count across all of `action`'s per-state rows. With the dense
+    /// `vec![vec![None; n_terminals]; n_states]` matrix this is `states ×
+    /// terminals` (`O(n²)` on the #367 size sweep); with the sparse per-state
+    /// `(terminal id, action)` rows it is the *filled* count (`O(n)`). Asserting
+    /// the per-`filled` ratio stays flat (`tests/test_lalr_table_scaling.rs`)
+    /// separates the two regimes — the parse-table analog of the Earley/CYK/lexer
+    /// scaling counters.
+    #[inline]
+    pub fn add_parse_table_action_cells(n: u64) {
+        PARSE_TABLE_ACTION_CELLS.fetch_add(n, Ordering::Relaxed);
+    }
+
     /// Zero every counter. Call before the workload you want to measure.
     pub fn reset() {
         COMPLETER_SCAN_STEPS.store(0, Ordering::Relaxed);
@@ -209,6 +238,7 @@ mod imp {
         LEXER_SCAN_STEPS.store(0, Ordering::Relaxed);
         DENSE_BUILD_BYTES.store(0, Ordering::Relaxed);
         EXPANSION_ALTS.store(0, Ordering::Relaxed);
+        PARSE_TABLE_ACTION_CELLS.store(0, Ordering::Relaxed);
     }
 
     pub fn completer_scan_steps() -> u64 {
@@ -249,6 +279,10 @@ mod imp {
 
     pub fn expansion_alts() -> u64 {
         EXPANSION_ALTS.load(Ordering::Relaxed)
+    }
+
+    pub fn parse_table_action_cells() -> u64 {
+        PARSE_TABLE_ACTION_CELLS.load(Ordering::Relaxed)
     }
 
     /// Turn the Joop-Leo optimization off (`true`) or on (`false`). Lets a
@@ -301,6 +335,9 @@ mod imp {
     #[inline]
     pub fn add_expansion_alts(_n: u64) {}
 
+    #[inline]
+    pub fn add_parse_table_action_cells(_n: u64) {}
+
     pub fn reset() {}
 
     pub fn completer_scan_steps() -> u64 {
@@ -340,6 +377,10 @@ mod imp {
     }
 
     pub fn expansion_alts() -> u64 {
+        0
+    }
+
+    pub fn parse_table_action_cells() -> u64 {
         0
     }
 

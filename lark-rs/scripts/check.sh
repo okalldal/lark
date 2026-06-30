@@ -52,11 +52,13 @@ note "Fancy-oracle differential: cargo test -p lark-rs --features fancy-oracle -
 #     work counters only run with the perf-counters feature, so they are a no-op
 #     in `cargo test --all`. One invocation, one build (matches the CI "Scaling
 #     gates" step): Earley super-linearity (#56), CYK cubic envelope (#87), lexer
-#     linear scan (#104), dense-DFA build cost (docs/LEXER_DFA_PLAN.md).
-note "Scaling gates: cargo test --features perf-counters --test test_earley_scaling --test test_cyk_scaling --test test_lexer_scaling --test test_lexer_dfa_build_scaling"
+#     linear scan (#104), dense-DFA build cost (docs/LEXER_DFA_PLAN.md), LALR
+#     parse-table density (#367).
+note "Scaling gates: cargo test --features perf-counters --test test_earley_scaling --test test_cyk_scaling --test test_lexer_scaling --test test_lexer_dfa_build_scaling --test test_lalr_table_scaling"
 ( cd "$LARK_RS_DIR" && cargo test --features perf-counters \
     --test test_earley_scaling --test test_cyk_scaling \
-    --test test_lexer_scaling --test test_lexer_dfa_build_scaling ) \
+    --test test_lexer_scaling --test test_lexer_dfa_build_scaling \
+    --test test_lalr_table_scaling ) \
   || fail "a scaling gate failed — a complexity regression (see the failing test_*_scaling.rs)"
 
 # 2c. python.lark LALR build gate (#79) — #[ignore]d because the build is slow

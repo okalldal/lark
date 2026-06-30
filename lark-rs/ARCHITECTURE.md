@@ -131,7 +131,7 @@ backtracking engine — that whole story lives in `lookaround/` and
 
 | Module | Responsibility |
 |---|---|
-| `lalr.rs` | dense LALR(1) parse table + the parse loop; `audit_lalr_reduce_reduce` gates the build on the EBNF audit shadow (RC7/#272), shared by the live build and standalone |
+| `lalr.rs` | sparse LALR(1) parse table (per-state `(id, action)` rows, #367) + the parse loop; `audit_lalr_reduce_reduce` gates the build on the EBNF audit shadow (RC7/#272), shared by the live build and standalone |
 | `earley.rs` | Earley recognizer + SPPF forest + forest→tree + dynamic lexer |
 | `cyk.rs` | CYK parser (CNF conversion + O(n³) DP) |
 | `tree_builder.rs` | `OutputBuilder` seam + `TreeOutputBuilder` (default tree shaping, used by all three) |
