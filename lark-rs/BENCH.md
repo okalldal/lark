@@ -59,9 +59,12 @@ falsifiable without wall-clock (ADR-0007):
 * `tree_nodes_built` — every `Tree` node built (`build_node`).
 * `token_value_string_bytes` — the owned token-value bytes copied into the output
   (`build_token`).
-* `semantic_reduce_calls` — one per reduction shaped (`assemble`); for a known LALR
-  input this equals the parser's user-rule reduction count (the augmented `$root`
-  accept does not route through `assemble`).
+* `semantic_reduce_calls` — one per reduction shaped through `assemble`; for a known
+  **LALR/CYK** input this equals the parser's user-rule reduction count (the augmented
+  `$root` accept does not route through `assemble`). The Earley *resolve* walk shapes
+  via `shape`/`shape_with_container` directly, so this counter does not track its
+  reductions — unlike `tree_nodes_built`/`token_value_string_bytes`, which live in
+  `build_node`/`build_token` and are engine-agnostic.
 
 ```bash
 cargo test --features perf-counters --test test_output_counters

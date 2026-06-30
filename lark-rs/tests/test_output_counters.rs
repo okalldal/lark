@@ -8,7 +8,9 @@
 //! * [`perf::tree_nodes_built`] — every `Tree` node built (`build_node`);
 //! * [`perf::token_value_string_bytes`] — the owned token-value bytes copied into
 //!   the output (`build_token`);
-//! * [`perf::semantic_reduce_calls`] — one per reduction shaped (`assemble`).
+//! * [`perf::semantic_reduce_calls`] — one per reduction shaped through `assemble`
+//!   (the LALR/CYK reducers and the Earley *explicit* walk; the Earley *resolve*
+//!   walk shapes via `shape` directly, so this gate is LALR-scoped).
 //!
 //! This test pins two properties of the *default* `TreeOutputBuilder` backend:
 //!

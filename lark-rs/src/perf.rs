@@ -123,11 +123,17 @@
 //!   owned strings drives it to `0` (the `token_value_string_bytes == 0` gate #230
 //!   defers to C8).
 //! * [`semantic_reduce_calls`] — one per `TreeOutputBuilder::assemble` call, i.e.
-//!   one per rule reduction the engine shapes into a value. For a known input this
-//!   equals the parser's reduction count (the augmented `$root` accept does *not*
-//!   route through `assemble`, so this counts exactly the user-rule reductions),
-//!   the denominator that makes the per-reduction output-build cost a flat envelope
-//!   (`tests/test_output_counters.rs`).
+//!   one per rule reduction the engine shapes into a value through `assemble`. The
+//!   LALR and CYK reducers (and the Earley *explicit* walk's `DerivsNext`) all route
+//!   each reduction through `assemble`, so for a known **LALR/CYK** input this equals
+//!   the parser's user-rule reduction count (the augmented `$root` accept does *not*
+//!   route through `assemble`, so it is not counted). The Earley *resolve* walk
+//!   shapes via `TreeOutputBuilder::shape`/`shape_with_container` directly (it never
+//!   calls `assemble`), so this counter does **not** track Earley-resolve reductions
+//!   — unlike [`tree_nodes_built`]/[`token_value_string_bytes`], which live in
+//!   `build_node`/`build_token` and are engine-agnostic. It is the denominator that
+//!   makes the per-reduction output-build cost a flat envelope on the LALR/CYK paths
+//!   (`tests/test_output_counters.rs`, an LALR gate).
 
 #[cfg(feature = "perf-counters")]
 mod imp {
@@ -270,9 +276,10 @@ mod imp {
     }
 
     /// Count one `TreeOutputBuilder::assemble` call — one rule reduction shaped into
-    /// a value (semantic-output C5, #230). For a known input this equals the parser's
-    /// user-rule reduction count (the augmented `$root` accept does not route through
-    /// `assemble`).
+    /// a value (semantic-output C5, #230). For a known **LALR/CYK** input this equals
+    /// the parser's user-rule reduction count (the augmented `$root` accept does not
+    /// route through `assemble`). The Earley resolve walk shapes via `shape`, not
+    /// `assemble`, so it does not increment this — see the module-level doc.
     #[inline]
     pub fn add_semantic_reduce_call() {
         SEMANTIC_REDUCE_CALLS.fetch_add(1, Ordering::Relaxed);
