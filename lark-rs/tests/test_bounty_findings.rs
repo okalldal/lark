@@ -1269,15 +1269,15 @@ fn rc_override_extend_of_interior_import_origin_builds() {
 /// The `%override` tree is pinned tree-identically: the override body's literal token
 /// is filtered, so `python__name` is empty — matching the Python oracle for `@z\nz`.
 ///
-/// The `%extend` case is asserted to BUILD and PARSE only, *not* tree-compared: with a
-/// bare keyword-cased literal `"z"` the imported-extend path keeps the auto-named
-/// `Token(Z, "z")` in Python but filters it in lark-rs. That literal-token-keeping
-/// divergence is **orthogonal to #442** — it is purely about how an anonymous
-/// literal terminal is filtered in the imported-`%extend` path, and reproduces only
-/// for a bare literal, never for a *named* terminal body (the named-`Z` differential
-/// in `rc_override_extend_of_interior_import_origin_builds`, which IS tree-pinned,
-/// passes). Filed as a separate out-of-scope find (PRINCIPLES §7); not silently
-/// asserted against a value lark-rs does not produce.
+/// The `%extend` case is now tree-pinned (#493): with a bare keyword-cased literal
+/// `"z"` the imported-extend path keeps the auto-named `Token(Z, "z")` in Python,
+/// because the imported `python.lark` `name` rule is `!name: NAME | "match" | "case"`
+/// (`keep_all_tokens=True`), and Python's `_extend` inserts the new alternative into
+/// that *same* rule definition, so the prepended literal inherits the target rule's
+/// `keep_all_tokens` and its anonymous `Z` terminal is *not* filtered. lark-rs used to
+/// stage the extend body as a fresh definition with its own (non-keep-all) options and
+/// thus filtered the token (empty `python__name`); #493 inherits the target origin's
+/// `keep_all_tokens` so the token is kept exactly like Python.
 #[test]
 fn rc_override_extend_interior_origin_issue_repro() {
     let g_override = "start: decorator python__name\n%import python (decorator)\n%override python__name: \"z\"\n%ignore \" \"\n";
@@ -1301,9 +1301,10 @@ fn rc_override_extend_interior_origin_issue_repro() {
         "#442 issue-repro override: tree mismatch vs Python oracle"
     );
 
-    // #442's contract for the literal extend is *acceptance* (Python builds it; lark-rs
-    // used to reject). Assert it builds and parses; the literal-token-keeping nuance is
-    // the separate out-of-scope find noted above.
+    // #493: the literal extend is now tree-pinned. The prepended `"z"` surfaces as a
+    // KEPT `Token(Z, "z")` inside `python__name` (the imported `!name` rule's
+    // `keep_all_tokens` covers the extend's alternative), matching the Python Lark
+    // 1.3.1 oracle below — previously lark-rs filtered it (empty `python__name`).
     let lark = build(
         g_extend,
         ParserAlgorithm::Lalr,
@@ -1313,8 +1314,88 @@ fn rc_override_extend_interior_origin_issue_repro() {
     .unwrap_or_else(|e| {
         panic!("#442 issue-repro extend: Python builds this; lark-rs rejected: {e:?}")
     });
-    lark.parse("@z\nz")
+    let te = lark
+        .parse("@z\nz")
         .unwrap_or_else(|e| panic!("#442 issue-repro extend: parse failed: {e:?}"));
+    assert_eq!(
+        te.to_string(),
+        "Tree(start, [Tree(decorator, [Tree(python__dotted_name, \
+         [Tree(python__name, [Token(Z, \"z\")])])]), Tree(python__name, [Token(Z, \"z\")])])",
+        "#493 issue-repro extend: literal token must be KEPT (Token(Z,\"z\")) like Python, not filtered"
+    );
+}
+
+/// #493 DIFFERENTIAL AUDIT — the imported-`%extend`/`%override` × literal/named/regex
+/// matrix the banks under-sample. Each `(grammar, input, expected-tree)` is the Python
+/// Lark 1.3.1 oracle; the #493 fix (inherit the target origin's `keep_all_tokens` on the
+/// staged imported-extend body) must match every cell and **not over-keep** the ones
+/// Python filters. Cells:
+///   * imported-`%extend` **named** terminal `Z` → kept (already correct pre-#493);
+///   * imported-`%override` **bare literal** `"z"` → FILTERED (override replaces the
+///     whole rule with its *own* options; #493 must not leak keep-all here → empty);
+///   * imported-`%extend` **regex** `/z/` → matches the imported `python__NAME` (kept);
+///   * **plain** (no-import) `%extend r: "z"` over a non-keep-all `r: NAME` → FILTERED
+///     in both engines (the same-grammar extend path, untouched by #493);
+///   * **plain** `%extend r: "z"` over a keep-all `!r: NAME` → KEPT in both;
+///   * imported-`%extend` of a *second* bare literal `"q"` → kept `Token(Q,"q")`.
+#[test]
+fn rc493_imported_extend_literal_keep_differential() {
+    // (label, grammar, input, expected-tree). Trees are Python Lark 1.3.1, rendered in
+    // lark-rs Display form (maybe_placeholders=false).
+    let cases: &[(&str, &str, &str, &str)] = &[
+        (
+            "imported-extend named terminal Z (kept, pre-#493 correct)",
+            "start: decorator python__name\n%import python (decorator)\n%extend python__name: Z\nZ: \"z\"\n%ignore \" \"\n",
+            "@z\nz",
+            "Tree(start, [Tree(decorator, [Tree(python__dotted_name, \
+             [Tree(python__name, [Token(Z, \"z\")])])]), Tree(python__name, [Token(Z, \"z\")])])",
+        ),
+        (
+            "imported-override bare literal (FILTERED — override replaces, no keep-all leak)",
+            "start: decorator python__name\n%import python (decorator)\n%override python__name: \"z\"\n%ignore \" \"\n",
+            "@z\nz",
+            "Tree(start, [Tree(decorator, [Tree(python__dotted_name, \
+             [Tree(python__name, [])])]), Tree(python__name, [])])",
+        ),
+        (
+            "imported-extend regex literal /z/ (matches python__NAME, kept)",
+            "start: decorator python__name\n%import python (decorator)\n%extend python__name: /z/\n%ignore \" \"\n",
+            "@z\nz",
+            "Tree(start, [Tree(decorator, [Tree(python__dotted_name, \
+             [Tree(python__name, [Token(python__NAME, \"z\")])])]), Tree(python__name, [Token(python__NAME, \"z\")])])",
+        ),
+        (
+            "imported-extend second bare literal q (kept Token(Q))",
+            "start: decorator python__name\n%import python (decorator)\n%extend python__name: \"q\"\n%ignore \" \"\n",
+            "@q\nq",
+            "Tree(start, [Tree(decorator, [Tree(python__dotted_name, \
+             [Tree(python__name, [Token(Q, \"q\")])])]), Tree(python__name, [Token(Q, \"q\")])])",
+        ),
+        (
+            "plain extend bare literal over non-keep-all rule (FILTERED both)",
+            "start: r\nr: NAME\n%extend r: \"z\"\nNAME: /[a-y]+/\n%ignore \" \"\n",
+            "z",
+            "Tree(start, [Tree(r, [])])",
+        ),
+        (
+            "plain extend bare literal over keep-all !rule (KEPT both)",
+            "start: r\n!r: NAME\n%extend r: \"z\"\nNAME: /[a-y]+/\n%ignore \" \"\n",
+            "z",
+            "Tree(start, [Tree(r, [Token(Z, \"z\")])])",
+        ),
+    ];
+    for (label, g, input, expected) in cases {
+        let lark = build(g, ParserAlgorithm::Lalr, LexerType::Contextual, false)
+            .unwrap_or_else(|e| panic!("#493 differential {label}: build failed: {e:?}"));
+        let t = lark
+            .parse(input)
+            .unwrap_or_else(|e| panic!("#493 differential {label}: parse {input:?} failed: {e:?}"));
+        assert_eq!(
+            t.to_string(),
+            *expected,
+            "#493 differential {label}: tree mismatch vs Python Lark 1.3.1 oracle"
+        );
+    }
 }
 
 /// #442 NEGATIVE CONTROL — the #428 collision must STILL reject. A *plain* user rule

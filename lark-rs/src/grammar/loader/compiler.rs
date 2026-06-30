@@ -908,10 +908,31 @@ impl GrammarCompiler {
                         .filter(|x| x.origin.name == r.name)
                         .cloned()
                         .collect();
+                    // Inherit the target origin's `keep_all_tokens` (#493). Python's
+                    // `_extend` *inserts* the new alternative into the existing rule
+                    // definition tree (`base.children.insert(0, exp)`), so the prepended
+                    // alternative compiles under that rule's options — including a `!`
+                    // (`keep_all_tokens`). lark-rs instead stages the extend body as a
+                    // fresh `Plain` definition, which would otherwise compile with its
+                    // *own* (here keep-all-less) modifiers and wrongly filter an
+                    // anonymous string-literal token the target rule keeps. The bundled
+                    // `!name: NAME | "match" | "case"` is the load-bearing case: an
+                    // imported `python__name` carries `keep_all_tokens`, so `%extend
+                    // python__name: "z"` must keep its auto-named `Z` token, matching
+                    // the oracle. Mirror that by propagating keep-all onto the staged
+                    // body when every pre-existing alternative at the origin keeps all
+                    // tokens (all alternatives of one rule share its `keep_all_tokens`).
+                    let target_keep_all = !preexisting.is_empty()
+                        && preexisting.iter().all(|x| x.options.keep_all_tokens);
+                    let mut staged_modifiers = r.modifiers.clone();
+                    if target_keep_all && !staged_modifiers.contains('!') {
+                        staged_modifiers.push('!');
+                    }
                     self.pending_interior_extends
                         .push((r.name.clone(), preexisting));
                     rule_items.push(RawRule {
                         directive: Directive::Plain,
+                        modifiers: staged_modifiers,
                         ..r
                     });
                 }
