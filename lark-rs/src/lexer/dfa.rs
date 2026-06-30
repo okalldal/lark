@@ -4,12 +4,13 @@
 //! two engines, then derive the start-byte **prefilter** — each stage a named
 //! function rather than one interleaved build.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use regex::Regex;
 use regex_automata::{
     dfa::{dense, Automaton, OverlappingState, StartKind},
-    hybrid::dfa::DFA as LazyDfa,
+    hybrid::dfa::{Cache as LazyCache, DFA as LazyDfa},
     nfa::thompson,
     Anchored, Input, MatchKind,
 };
@@ -96,19 +97,120 @@ pub(super) struct DfaScanner {
     fences: Vec<FenceMatcher>,
 }
 
+/// A combined DFA over a set of sub-pattern sources, either **eagerly determinized**
+/// (the dense default) or **lazily** (the hybrid fallback for over-budget sources —
+/// `#349`/H4-12). Both expose the same anchored leftmost-first / overlapping drives, so
+/// a [`PlainEngine`]/[`GuardedEngine`] consults whichever it holds transparently.
+///
+/// **Why a fallback at all (the H4-12 contract, ADR-0037).** A terminal whose minimal
+/// DFA is exponential in its source — the `.*a.{N}` family `/[01]*1[01]{N}/` — blows the
+/// dense determinizer to `2^(N+1)` states; Python `re` matches it in linear time (no
+/// determinization). The dense build is now bounded by a `dfa_size_limit`; a source that
+/// would exceed it is routed here as a **lazy** DFA instead (`regex-automata`'s hybrid
+/// engine — the same one the start-byte prefilter already uses), which realizes states on
+/// demand and so stays *flat* in build cost. The hybrid DFA produces byte-identical
+/// matches, so oracle parity is preserved: the grammar still builds and lexes exactly as
+/// Python accepts it — only the eager determinization is skipped.
+///
+/// The lazy DFA needs a mutable scratch [`LazyCache`] per search. `Lark` is already
+/// `!Sync` (the `regex` backend holds a `RefCell` too), so a `RefCell<LazyCache>` here is
+/// consistent — a single-threaded reuse of one cache, never a fresh allocation per token.
+enum CombinedDfa {
+    /// The eager determinization — used for every source that fits the size budget.
+    Dense(dense::DFA<Vec<u32>>),
+    /// The lazy fallback — used only for over-budget sources (H4-12). The cache is
+    /// reused across `match_at` calls (interior-mutable; the scanner is `!Sync`).
+    Hybrid {
+        dfa: LazyDfa,
+        cache: RefCell<LazyCache>,
+    },
+}
+
+impl CombinedDfa {
+    /// Anchored leftmost-first forward search at `input`'s span start — the dense DFA's
+    /// `try_search_fwd`, or the lazy DFA's with a borrowed cache. Returns the winning
+    /// `(PatternID, end)` (local to this engine's source order), or `None`.
+    fn search_fwd(&self, input: &Input<'_>) -> Option<(usize, usize)> {
+        match self {
+            CombinedDfa::Dense(dfa) => dfa
+                .try_search_fwd(input)
+                .ok()
+                .flatten()
+                .map(|hm| (hm.pattern().as_usize(), hm.offset())),
+            CombinedDfa::Hybrid { dfa, cache } => dfa
+                .try_search_fwd(&mut cache.borrow_mut(), input)
+                .ok()
+                .flatten()
+                .map(|hm| (hm.pattern().as_usize(), hm.offset())),
+        }
+    }
+
+    /// Enumerate every `(PatternID, end)` accept of the anchored **overlapping**
+    /// (all-matches) search, invoking `on_accept` once per distinct accept. The dense and
+    /// lazy DFAs use *different* `OverlappingState` types (`dfa::` vs `hybrid::`), so each
+    /// owns its own state-threaded loop here rather than sharing one — the caller just
+    /// receives `(pid, end)` pairs.
+    fn for_each_overlapping(&self, input: &Input<'_>, mut on_accept: impl FnMut(usize, usize)) {
+        match self {
+            CombinedDfa::Dense(dfa) => {
+                let mut state = OverlappingState::start();
+                loop {
+                    if dfa.try_search_overlapping_fwd(input, &mut state).is_err() {
+                        break;
+                    }
+                    let Some(hm) = state.get_match() else { break };
+                    on_accept(hm.pattern().as_usize(), hm.offset());
+                }
+            }
+            CombinedDfa::Hybrid { dfa, cache } => {
+                let cache = &mut cache.borrow_mut();
+                let mut state = regex_automata::hybrid::dfa::OverlappingState::start();
+                loop {
+                    if dfa
+                        .try_search_overlapping_fwd(cache, input, &mut state)
+                        .is_err()
+                    {
+                        break;
+                    }
+                    let Some(hm) = state.get_match() else { break };
+                    on_accept(hm.pattern().as_usize(), hm.offset());
+                }
+            }
+        }
+    }
+}
+
 /// Leftmost-first DFA over the unguarded sub-patterns. Sub-patterns are ordered by
 /// `(rank, branch_order)`, so the lowest `PatternID` is the leftmost-first winner with
 /// its own (order-sensitive) match length — byte-identical to M0.
+///
+/// A source that overflows the dense size budget (H4-12) lives in a parallel **hybrid**
+/// sub-engine (`overflow`); the two sub-engines partition the sources, and `match_at`
+/// keeps the lower `(rank, branch_order)` winner across both — leftmost-first by rank is
+/// re-merged globally, so the partition never changes which terminal wins.
 pub(super) struct PlainEngine {
-    dfa: dense::DFA<Vec<u32>>,
-    /// `PatternID` → (terminal id, rank, branch_order).
+    /// In-budget sources, eagerly determinized. `local`s are indices into `globals`.
+    dfa: CombinedDfa,
+    /// `local PatternID` → global sub-pattern index (the `(rank, branch_order)` order).
+    globals: Vec<usize>,
+    /// Over-budget sources, lazily determinized (the H4-12 fallback). `None` when every
+    /// source fit the budget — the common case, zero hybrid cost.
+    overflow: Option<(CombinedDfa, Vec<usize>)>,
+    /// `global sub-pattern index` → (terminal id, rank, branch_order).
     map: Vec<(SymbolId, usize, usize)>,
 }
 
-/// All-matches DFA over the guarded sub-patterns + their guards.
+/// All-matches DFA over the guarded sub-patterns + their guards. Like [`PlainEngine`], an
+/// over-budget guarded base lives in a parallel hybrid sub-engine; `guarded_best` walks
+/// both accept-sets into the same per-sub `longest` accumulator.
 pub(super) struct GuardedEngine {
-    dfa: dense::DFA<Vec<u32>>,
-    /// Indexed by `PatternID`.
+    /// In-budget sources, eagerly determinized.
+    dfa: CombinedDfa,
+    /// `local PatternID` → global sub index (into `subs`).
+    globals: Vec<usize>,
+    /// Over-budget sources, lazily determinized.
+    overflow: Option<(CombinedDfa, Vec<usize>)>,
+    /// Indexed by the **global** sub index.
     subs: Vec<SubPattern>,
 }
 
@@ -269,6 +371,10 @@ impl PlainEngine {
     /// Borrows `subs` (unlike [`GuardedEngine::build`], which consumes them): this
     /// engine only derives its id/rank `map` from them — the guards a `SubPattern`
     /// carries are all `None`/empty on the plain side, so nothing is stored.
+    ///
+    /// Over-budget sources (H4-12) are split into a parallel hybrid sub-engine in
+    /// `(rank, branch_order)` order, so the leftmost-first re-merge in `match_at` is
+    /// exact regardless of which sub-engine a winner lands in.
     fn build(subs: &[SubPattern], srcs: &[String]) -> Result<Option<Self>, GrammarError> {
         if srcs.is_empty() {
             return Ok(None);
@@ -280,21 +386,34 @@ impl PlainEngine {
             .iter()
             .map(|&i| (subs[i].id, subs[i].rank, subs[i].branch_order))
             .collect();
-        let dfa = build_combined_dfa(&ordered_srcs, MatchKind::LeftmostFirst)?;
-        Ok(Some(PlainEngine { dfa, map }))
+        let (dfa, globals, overflow) =
+            build_partitioned_dfa(&ordered_srcs, MatchKind::LeftmostFirst)?;
+        Ok(Some(PlainEngine {
+            dfa,
+            globals,
+            overflow,
+            map,
+        }))
     }
 }
 
 impl GuardedEngine {
     /// Stage 2b — the all-matches guarded engine. Consumes `subs`: the engine
     /// stores them (guards and all) for `guarded_best` to evaluate per accept.
+    /// Over-budget guarded bases (H4-12) split into a parallel hybrid sub-engine;
+    /// `guarded_best` reads both accept-sets into the same per-sub accumulator.
     fn build(subs: Vec<SubPattern>, srcs: &[String]) -> Result<Option<Self>, GrammarError> {
         if srcs.is_empty() {
             return Ok(None);
         }
         let srcs: Vec<&str> = srcs.iter().map(String::as_str).collect();
-        let dfa = build_combined_dfa(&srcs, MatchKind::All)?;
-        Ok(Some(GuardedEngine { dfa, subs }))
+        let (dfa, globals, overflow) = build_partitioned_dfa(&srcs, MatchKind::All)?;
+        Ok(Some(GuardedEngine {
+            dfa,
+            globals,
+            overflow,
+            subs,
+        }))
     }
 }
 
@@ -359,19 +478,13 @@ impl DfaScanner {
             // Plain engine: the leftmost-first winner over the unguarded sub-patterns,
             // with its own (order-sensitive) length — never disturbed by a sibling guard.
             if let Some(p) = &self.plain {
-                let input = Input::new(text)
-                    .span(pos..text.len())
-                    .anchored(Anchored::Yes);
-                if let Ok(Some(hm)) = p.dfa.try_search_fwd(&input) {
-                    if hm.offset() > pos {
-                        let (id, rank, bo) = p.map[hm.pattern().as_usize()];
-                        best = Some((rank, bo, id, &text[pos..hm.offset()]));
-                    }
+                if let Some(cand) = p.match_at(text, pos) {
+                    best = Some(cand);
                 }
             }
             // Guarded engine: the guarded-accept accumulator's winner.
             if let Some(g) = &self.guarded {
-                if let Some(cand) = guarded_best(&g.dfa, &g.subs, text, pos) {
+                if let Some(cand) = g.guarded_best(text, pos) {
                     if best.is_none_or(|(r, b, _, _)| (cand.0, cand.1) < (r, b)) {
                         best = Some(cand);
                     }
@@ -399,108 +512,269 @@ impl DfaScanner {
     }
 }
 
-/// Drive the guarded all-matches DFA over `text` from `pos`: enumerate every
-/// `(sub-pattern, end)` accept via an **overlapping** anchored search, keep per
-/// sub-pattern the **longest accept where its guard holds**, then select Lark's
-/// leftmost-first winner across the survivors by `(rank, branch_order)`. Returns the
-/// winning `(rank, branch_order, terminal id, matched slice)`, or `None`.
-///
-/// The overlapping search is the `regex-automata`-blessed way to read the full
-/// accept-set out of a `MatchKind::All` DFA (it reports each distinct `(pattern,
-/// end)` once, including multiple ends for one pattern — `[0-9]+` accepting at every
-/// length). It is anchored at `pos` and stops when the DFA dies, so it is linear in
-/// the matched token's length, never forward-scanning.
-fn guarded_best<'t>(
-    dfa: &dense::DFA<Vec<u32>>,
-    subs: &[SubPattern],
-    text: &'t str,
-    pos: usize,
-) -> Option<(usize, usize, SymbolId, &'t str)> {
-    let input = Input::new(text)
-        .span(pos..text.len())
-        .anchored(Anchored::Yes);
-
-    // A leading guard — and every bounded-lookbehind guard — is a precondition on the
-    // match start (`pos`), identical for every accept of that sub-pattern, so evaluate
-    // it once. `false` = some precondition failed, so the sub-pattern is out entirely.
-    let leading_ok: Vec<bool> = subs
-        .iter()
-        .map(|s| {
-            let lead = match &s.leading {
-                None => true,
-                Some(g) => g.holds(text, pos),
-            };
-            lead && s.lookbehind.iter().all(|lb| lb.holds(text, pos))
-        })
-        .collect();
-
-    // Longest accept end (exclusive) per sub-pattern where both guards held.
-    let mut longest: Vec<Option<usize>> = vec![None; subs.len()];
-    let mut state = OverlappingState::start();
-    loop {
-        dfa.try_search_overlapping_fwd(&input, &mut state).ok()?;
-        let Some(hm) = state.get_match() else { break };
-        let pid = hm.pattern().as_usize();
-        let end = hm.offset();
-        if end <= pos {
-            continue; // reject a zero-width accept
-        }
-        if !leading_ok[pid] {
-            continue; // leading precondition failed → this sub-pattern can't match
-        }
-        let trailing_ok = match &subs[pid].trailing {
-            None => true,
-            Some(g) => g.holds(text, end),
+impl PlainEngine {
+    /// The leftmost-first winner over the unguarded sub-patterns at `pos`, as
+    /// `(rank, branch_order, terminal id, matched slice)`, or `None`. Consults the
+    /// dense sub-engine and (if present) the hybrid overflow sub-engine, re-merging
+    /// the two by `(rank, branch_order)` — the global leftmost-first order — so the
+    /// H4-12 partition never changes which terminal wins.
+    fn match_at<'t>(&self, text: &'t str, pos: usize) -> Option<(usize, usize, SymbolId, &'t str)> {
+        let input = Input::new(text)
+            .span(pos..text.len())
+            .anchored(Anchored::Yes);
+        let mut best: Option<(usize, usize, SymbolId, &'t str)> = None;
+        let mut consider = |dfa: &CombinedDfa, globals: &[usize]| {
+            if let Some((local, end)) = dfa.search_fwd(&input) {
+                if end > pos {
+                    let (id, rank, bo) = self.map[globals[local]];
+                    if best.is_none_or(|(r, b, _, _)| (rank, bo) < (r, b)) {
+                        best = Some((rank, bo, id, &text[pos..end]));
+                    }
+                }
+            }
         };
-        if trailing_ok && longest[pid].is_none_or(|cur| end > cur) {
-            longest[pid] = Some(end);
+        consider(&self.dfa, &self.globals);
+        if let Some((dfa, globals)) = &self.overflow {
+            consider(dfa, globals);
         }
+        best
     }
-
-    // Lark's leftmost-first selection across the survivors: lowest terminal rank,
-    // then lowest branch order within a terminal; the winner keeps its own longest
-    // guard-held length.
-    let mut best: Option<(usize, usize, SymbolId, usize)> = None;
-    for (pid, end_opt) in longest.iter().enumerate() {
-        let Some(end) = *end_opt else { continue };
-        let s = &subs[pid];
-        let key = (s.rank, s.branch_order);
-        if best.is_none_or(|(r, b, _, _)| key < (r, b)) {
-            best = Some((s.rank, s.branch_order, s.id, end));
-        }
-    }
-    best.map(|(rank, bo, id, end)| (rank, bo, id, &text[pos..end]))
 }
 
+impl GuardedEngine {
+    /// Drive the guarded all-matches DFA(s) over `text` from `pos`: enumerate every
+    /// `(sub-pattern, end)` accept via an **overlapping** anchored search, keep per
+    /// sub-pattern the **longest accept where its guard holds**, then select Lark's
+    /// leftmost-first winner across the survivors by `(rank, branch_order)`. Returns the
+    /// winning `(rank, branch_order, terminal id, matched slice)`, or `None`.
+    ///
+    /// The overlapping search is the `regex-automata`-blessed way to read the full
+    /// accept-set out of a `MatchKind::All` DFA (it reports each distinct `(pattern,
+    /// end)` once, including multiple ends for one pattern — `[0-9]+` accepting at every
+    /// length). It is anchored at `pos` and stops when the DFA dies, so it is linear in
+    /// the matched token's length, never forward-scanning. The dense and hybrid (H4-12)
+    /// sub-engines feed the **same** per-sub `longest` accumulator, so the split is
+    /// transparent to the leftmost-first selection.
+    fn guarded_best<'t>(
+        &self,
+        text: &'t str,
+        pos: usize,
+    ) -> Option<(usize, usize, SymbolId, &'t str)> {
+        let input = Input::new(text)
+            .span(pos..text.len())
+            .anchored(Anchored::Yes);
+        let subs = &self.subs;
+
+        // A leading guard — and every bounded-lookbehind guard — is a precondition on the
+        // match start (`pos`), identical for every accept of that sub-pattern, so evaluate
+        // it once. `false` = some precondition failed, so the sub-pattern is out entirely.
+        let leading_ok: Vec<bool> = subs
+            .iter()
+            .map(|s| {
+                let lead = match &s.leading {
+                    None => true,
+                    Some(g) => g.holds(text, pos),
+                };
+                lead && s.lookbehind.iter().all(|lb| lb.holds(text, pos))
+            })
+            .collect();
+
+        // Longest accept end (exclusive) per sub-pattern where both guards held.
+        let mut longest: Vec<Option<usize>> = vec![None; subs.len()];
+        let mut accumulate = |dfa: &CombinedDfa, globals: &[usize]| {
+            dfa.for_each_overlapping(&input, |local, end| {
+                let pid = globals[local];
+                if end <= pos {
+                    return; // reject a zero-width accept
+                }
+                if !leading_ok[pid] {
+                    return; // leading precondition failed → this sub-pattern can't match
+                }
+                let trailing_ok = match &subs[pid].trailing {
+                    None => true,
+                    Some(g) => g.holds(text, end),
+                };
+                if trailing_ok && longest[pid].is_none_or(|cur| end > cur) {
+                    longest[pid] = Some(end);
+                }
+            });
+        };
+        accumulate(&self.dfa, &self.globals);
+        if let Some((dfa, globals)) = &self.overflow {
+            accumulate(dfa, globals);
+        }
+
+        // Lark's leftmost-first selection across the survivors: lowest terminal rank,
+        // then lowest branch order within a terminal; the winner keeps its own longest
+        // guard-held length.
+        let mut best: Option<(usize, usize, SymbolId, usize)> = None;
+        for (pid, end_opt) in longest.iter().enumerate() {
+            let Some(end) = *end_opt else { continue };
+            let s = &subs[pid];
+            let key = (s.rank, s.branch_order);
+            if best.is_none_or(|(r, b, _, _)| key < (r, b)) {
+                best = Some((s.rank, s.branch_order, s.id, end));
+            }
+        }
+        best.map(|(rank, bo, id, end)| (rank, bo, id, &text[pos..end]))
+    }
+}
+
+/// Per-terminal dense determinization budget (`#349`/H4-12). A single source whose
+/// eager dense DFA would exceed this is routed to the lazy/hybrid fallback instead of
+/// blowing the determinizer to `2^N` states. The bound is **per source**, so a
+/// well-behaved union is unaffected — only the pathological `.*a.{N}` family overflows.
+///
+/// Sizing rationale (ADR-0037): the dense `memory_usage()` of every bundled terminal
+/// compiled alone sits at or below ~13 KiB (`python.STRING` 13.2 KiB, `python.LONG_STRING`
+/// 12.9 KiB, the rest smaller — measured), so a 64 KiB budget clears the legitimate
+/// ceiling by ~5× while sitting well below where the `.*a.{N}` family lands (≈39 KiB at
+/// N=8, ≈156 KiB at N=10 — measured) and the dense size doubles per +1 in N. The
+/// over-budget terminal still builds and lexes via the hybrid DFA (byte-identical
+/// matches), so oracle parity is preserved; only the eager determinization is skipped.
+const DENSE_PER_SOURCE_BUDGET: usize = 64 * 1024;
+
 /// Compile `srcs` to one Thompson NFA (`build_many`, `PatternID` = index), then
-/// determinize one anchored dense DFA under `match_kind`. The NFA is
-/// match-kind-agnostic — `MatchKind` lives on the determinizer (leftmost-first keeps
-/// the NFA's alternation priority; all surfaces every overlapping match). Captures are
-/// dropped — the winning sub-pattern is read from `PatternID`.
+/// determinize one anchored dense DFA under `match_kind`, **with no size limit**. The
+/// NFA is match-kind-agnostic — `MatchKind` lives on the determinizer (leftmost-first
+/// keeps the NFA's alternation priority; all surfaces every overlapping match). Captures
+/// are dropped — the winning sub-pattern is read from `PatternID`.
+///
+/// Used for inputs known not to blow up determinization (the `fence.rs` tag literal); the
+/// engine builders route through [`build_partitioned_dfa`], which bounds each source.
 pub(super) fn build_combined_dfa(
     srcs: &[&str],
     match_kind: MatchKind,
 ) -> Result<dense::DFA<Vec<u32>>, GrammarError> {
-    let nfa = thompson::NFA::compiler()
+    let nfa = build_nfa(srcs)?;
+    let dfa = dense_from_nfa(&nfa, match_kind, None).map_err(|e| GrammarError::InvalidRegex {
+        pattern: srcs.join("|"),
+        reason: e.to_string(),
+    })?;
+    crate::perf::add_dense_build_bytes(dfa.memory_usage() as u64);
+    Ok(dfa)
+}
+
+/// Build the combined NFA over `srcs` (captures dropped), the shared front half of every
+/// dense/hybrid determinization.
+fn build_nfa(srcs: &[&str]) -> Result<thompson::NFA, GrammarError> {
+    thompson::NFA::compiler()
         .configure(thompson::Config::new().which_captures(thompson::WhichCaptures::None))
         .build_many(srcs)
         .map_err(|e| GrammarError::InvalidRegex {
             pattern: srcs.join("|"),
             reason: e.to_string(),
-        })?;
-    let dfa = dense::Builder::new()
+        })
+}
+
+/// Determinize one anchored dense DFA from `nfa` under `match_kind`, bounded by an
+/// optional `dfa_size_limit`. Returns the typed [`dense::BuildError`] so the caller can
+/// distinguish a **size-limit overflow** (`is_size_limit_exceeded()` → route this source
+/// to the hybrid fallback) from an **unsupported-feature** error (e.g. a Unicode word
+/// boundary the dense determinizer rejects), which must surface as a real `GrammarError`
+/// rather than being silently rerouted.
+fn dense_from_nfa(
+    nfa: &thompson::NFA,
+    match_kind: MatchKind,
+    size_limit: Option<usize>,
+) -> Result<dense::DFA<Vec<u32>>, dense::BuildError> {
+    dense::Builder::new()
         .configure(
             dense::Config::new()
                 .match_kind(match_kind)
-                .start_kind(StartKind::Anchored),
+                .start_kind(StartKind::Anchored)
+                .dfa_size_limit(size_limit)
+                .determinize_size_limit(size_limit),
         )
-        .build_from_nfa(&nfa)
-        .map_err(|e| GrammarError::InvalidRegex {
-            pattern: srcs.join("|"),
-            reason: e.to_string(),
-        })?;
-    crate::perf::add_dense_build_bytes(dfa.memory_usage() as u64);
-    Ok(dfa)
+        .build_from_nfa(nfa)
+}
+
+/// Stage 2 driver — partition `srcs` (already in engine order) into the sources that fit
+/// [`DENSE_PER_SOURCE_BUDGET`] under eager determinization and those that overflow it,
+/// then build one **dense** DFA over the former and one **hybrid** (lazy) DFA over the
+/// latter (the `#349`/H4-12 fallback). Returns the dense engine + its `local → global`
+/// index map, and `Some((hybrid, map))` when any source overflowed (`None` in the common
+/// all-fit case, so a normal grammar pays zero hybrid cost).
+///
+/// Only the **final** engine DFAs are counted into `dense_build_bytes`; the per-source
+/// budget probes determinize each source alone but are never counted — the scaling gate
+/// reads the engines we actually keep, and an over-budget source contributes ~0 (its
+/// states are realized lazily, off the counter).
+fn build_partitioned_dfa(
+    srcs: &[&str],
+    match_kind: MatchKind,
+) -> Result<(CombinedDfa, Vec<usize>, Option<(CombinedDfa, Vec<usize>)>), GrammarError> {
+    // Probe each source alone: a source whose bounded dense build overflows the budget is
+    // routed to the hybrid fallback. Probing per-source (not the whole union) keeps the
+    // partition at terminal granularity — one pathological terminal never forces its
+    // well-behaved siblings off the eager engine.
+    let mut dense_idx: Vec<usize> = Vec::new();
+    let mut hybrid_idx: Vec<usize> = Vec::new();
+    for (i, &src) in srcs.iter().enumerate() {
+        let probe_nfa = build_nfa(&[src])?;
+        match dense_from_nfa(&probe_nfa, match_kind, Some(DENSE_PER_SOURCE_BUDGET)) {
+            Ok(_) => dense_idx.push(i),
+            // Route to the hybrid fallback ONLY for a genuine "too big to determinize
+            // eagerly" overflow (the H4-12 case — `is_size_limit_exceeded()` covers both
+            // the DFA- and determinize-size limits and the too-many-states overflows). Any
+            // *other* dense error (e.g. a Unicode word boundary the dense determinizer does
+            // not support) is a real build error, not a budget overflow: surface it as an
+            // `InvalidRegex` for this exact source instead of silently rerouting it to a
+            // hybrid engine (which would either also fail with a misattributed message or,
+            // worse, accept a pattern the eager path rejected — a silent behavior change).
+            Err(e) if e.is_size_limit_exceeded() => hybrid_idx.push(i),
+            Err(e) => {
+                return Err(GrammarError::InvalidRegex {
+                    pattern: src.to_string(),
+                    reason: e.to_string(),
+                })
+            }
+        }
+    }
+
+    // The dense engine over the in-budget sources. Every source fits the budget here, so
+    // the union build cannot overflow (each part is bounded; the union of bounded parts
+    // can still legitimately grow, so this build carries no size limit — it is the same
+    // determinization the engine has always paid for well-behaved terminals).
+    let dense = {
+        let kept: Vec<&str> = dense_idx.iter().map(|&i| srcs[i]).collect();
+        let nfa = build_nfa(&kept)?;
+        let dfa =
+            dense_from_nfa(&nfa, match_kind, None).map_err(|e| GrammarError::InvalidRegex {
+                pattern: kept.join("|"),
+                reason: e.to_string(),
+            })?;
+        crate::perf::add_dense_build_bytes(dfa.memory_usage() as u64);
+        CombinedDfa::Dense(dfa)
+    };
+
+    let overflow = if hybrid_idx.is_empty() {
+        None
+    } else {
+        let over: Vec<&str> = hybrid_idx.iter().map(|&i| srcs[i]).collect();
+        let nfa = build_nfa(&over)?;
+        let dfa = LazyDfa::builder()
+            .configure(
+                LazyDfa::config()
+                    .match_kind(match_kind)
+                    // Skip the cache-capacity sanity check: a deliberately large NFA
+                    // (the .*a.{N} family) has a big worst-case state, but the realized
+                    // cache stays small in practice. The lazy DFA bounds memory itself.
+                    .skip_cache_capacity_check(true),
+            )
+            .build_from_nfa(nfa)
+            .map_err(|e| GrammarError::InvalidRegex {
+                pattern: over.join("|"),
+                reason: e.to_string(),
+            })?;
+        let cache = RefCell::new(dfa.create_cache());
+        // The lazy DFA realizes states on demand, so its build-time memory is a small
+        // fixed cache — counting it keeps the scaling gate honest (it stays ~flat).
+        crate::perf::add_dense_build_bytes(cache.borrow().memory_usage() as u64);
+        Some((CombinedDfa::Hybrid { dfa, cache }, hybrid_idx))
+    };
+
+    Ok((dense, dense_idx, overflow))
 }
 
 /// The set of bytes any branch of the plain union `src` can begin a match with, or
