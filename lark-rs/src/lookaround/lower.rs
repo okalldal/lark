@@ -1008,6 +1008,24 @@ impl StringIdiom {
     }
 }
 
+// ─── Why these three recognizers are kept separate (do NOT unify) ────────────
+//
+// `recognize_string_idiom`, `recognize_long_string_idiom`, and
+// `recognize_short_string_idiom` (below) are near-duplicates, and it is tempting
+// to fold them into one parameterized `recognize_delimited_idiom`. We
+// deliberately do not. Each recognizer pins the *exact* bundled shape of its
+// idiom, and that per-idiom matcher IS the soundness proof that its lowering
+// reproduces the original match — the same "a variant must re-prove, not ride
+// along" invariant the `regexp` recognizer documents further down. A shared
+// abstraction trades that independent auditability for DRY: it makes it easy for
+// a later edit to widen one idiom's accept set through the common helper, and the
+// differential oracle does **not** catch that — a faithful unification and an
+// accidental widening both stay green until a real grammar hits the gap. The ~3×
+// duplication is the intended cost of keeping every idiom's soundness
+// independently checkable. Architect decision (#478, 2026-06-30): keep separate;
+// do not DRY this. (The orthogonal, no-fork half of #478 — splitting this file
+// into submodules — stays available as good-autonomous work.)
+
 /// Recognize the [`StringIdiom`] in a parsed terminal `node`, or `None`. Structural and
 /// exact: the only newly-supported shape is `python.STRING`'s `(?!"")`-after-prefix
 /// opening guard, so the matcher pins the precise arm shape and declines everything else.
