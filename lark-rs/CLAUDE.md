@@ -426,9 +426,19 @@ the combined regex is built. Higher priority and longer patterns come first so t
 `OCT` (`0[oO][0-7]…`) beats `INT` (`[0-9]…`) at `"0o777"`. Get this wrong and the lexer
 silently picks the wrong terminal.
 
-**Within-terminal alternatives are sorted longest-first.** Python Lark does this internally.
-A terminal like `FLOAT` with 4 alternatives must list `decimal+exponent` before `decimal`
-so that `"3.14e10"` matches the right alternative.
+**Within-terminal alternatives are sorted by match width, not source length (#449).**
+Python Lark's `TerminalTreeToPattern` orders a terminal's flattened arms by the expansion
+key `(-x.max_width, -x.min_width, -len(x.value))` — widest match first, then (on a max-width
+tie) largest *minimum* width, then longest source string. lark-rs reproduces this in
+`sort_terminal_arms` (`grammar/loader/terminals.rs`), keyed `(-max_width, -min_width,
+-len(value))`, NOT by regex-source-string length. "Longest source first" is only the *last*
+tiebreak: a `FLOAT` with 4 alternatives lists `decimal+exponent` before `decimal` because it
+matches *wider*, and an imported `T: /a|bc/` (max 2, **min 1**) extended with `"ab"` (max 2,
+**min 2**) puts `"ab"` first on its larger min width — sorting by source length alone would
+put `a|bc` first and the leftmost-first engine would consume only `"a"` (exactly the #449
+bug). **Both** within-terminal sort paths share this one key: the resolver
+(`resolve_term_regex`) and the `%extend` path (`resolve_pending_extends`) each call
+`sort_terminal_arms`, so the two can never disagree on which arm Python would try first.
 
 **`expand1` returns `Child`, not `Tree`.** The `?rule` modifier must be able to return a
 bare `Token` when the rule has a single terminal child — e.g., `?atom: NAME` should yield
