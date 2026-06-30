@@ -1846,6 +1846,71 @@ mod tests {
         assert_eq!(w("a+"), None, "plain unbounded repetition");
     }
 
+    /// #454: a **multi-char backslash escape** (`\xHH`, `\uHHHH`, `\UHHHHHHHH`, `\ooo`
+    /// octal, `\N{name}`) is a single code point — `sre_parse` sizes it at width 1.
+    /// The assertion-aware width walk (`atom_width_range`, the lookaround/backref path the
+    /// `regex` crate refuses) used to consume only `\` + the escape's *first* char and then
+    /// re-count the remaining escape chars as separate literal atoms, over-counting the
+    /// escape's char width vs Python. Every expected number below is grounded against
+    /// Python's `lark.utils.get_regexp_width(src)[1]` (Lark 1.3.1):
+    ///
+    /// | pattern | Python `get_regexp_width(...)[1]` |
+    /// |---|---|
+    /// | `\x41(?=b)` | 1 |
+    /// | `ꯍ(?=b)` | 1 |
+    /// | `\U0001F600(?=b)` | 1 |
+    /// | `\101(?=b)` (octal) | 1 |
+    /// | `\012(?=b)` (octal) | 1 |
+    /// | `\N{BULLET}(?=b)` | 1 (pinned via the raw walk — see below) |
+    ///
+    /// This only reaches the assertion-aware walk for lookaround/backref terminals the
+    /// `regex` crate rejects (the trailing `(?=b)` forces that path); the HIR path already
+    /// sizes these at 1.
+    #[test]
+    fn lookaround_terminal_multichar_escape_width_is_one() {
+        let w =
+            |src: &str| Pattern::Re(PatternRe::new(src, 0).expect("pattern builds")).max_width();
+        // Hex escape: `\x41` is one code point ('A').
+        assert_eq!(w("\\x41(?=b)"), Some(1), "\\xHH is width 1");
+        // 4-digit unicode escape.
+        assert_eq!(w("\\uABCD(?=b)"), Some(1), "\\uHHHH is width 1");
+        // 8-digit unicode escape (astral plane).
+        assert_eq!(w("\\U0001F600(?=b)"), Some(1), "\\UHHHHHHHH is width 1");
+        // Octal escapes (3-digit and 0-led).
+        assert_eq!(w("\\101(?=b)"), Some(1), "\\ooo octal is width 1");
+        assert_eq!(w("\\012(?=b)"), Some(1), "\\0oo octal is width 1");
+        // (`\N{BULLET}` cannot build a `PatternRe` today — it is a categorized
+        // `InvalidRegex` re-bucket, tracked in #461 — so its width is pinned through the
+        // raw-source walk in `atom_width_range_sizes_multichar_escapes_at_one` instead.)
+        // Combined with a leading literal: the literal `A` (1) + escape (1) = 2.
+        assert_eq!(w("A\\x41(?=b)"), Some(2), "literal + escape sums correctly");
+    }
+
+    /// #454: pin the fix at the `atom_width_range` layer directly, driving the raw
+    /// lookaround source through [`crate::lookaround::pattern_max_width`] so the
+    /// octal/named spellings reach the walk *verbatim* (the `PatternRe::new` path above
+    /// normalizes octals to `\xHH` first). Each `src` sizes to `[1, 1]` in Python's
+    /// `get_regexp_width`.
+    #[test]
+    fn atom_width_range_sizes_multichar_escapes_at_one() {
+        let mw = |src: &str| crate::lookaround::pattern_max_width(src).flatten();
+        assert_eq!(mw("\\x41(?=b)"), Some(1));
+        assert_eq!(mw("\\uABCD(?=b)"), Some(1));
+        assert_eq!(mw("\\U0001F600(?=b)"), Some(1));
+        assert_eq!(mw("\\101(?=b)"), Some(1), "raw octal spelling");
+        assert_eq!(mw("\\012(?=b)"), Some(1), "raw octal spelling");
+        assert_eq!(mw("\\N{BULLET}(?=b)"), Some(1), "raw named spelling");
+        // A quantifier still binds to the *whole* escape, not its last hex digit:
+        // `\x41+` is unbounded; `\x41?` is 0..=1.
+        assert_eq!(mw("\\x41+(?=b)"), None, "quantified escape: + → unbounded");
+        assert_eq!(mw("\\x41?(?=b)"), Some(1), "quantified escape: ? → max 1");
+        assert_eq!(
+            mw("(?<=\\x41)b"),
+            Some(1),
+            "escape inside a fixed lookbehind"
+        );
+    }
+
     /// #360: the outer `Option` of [`crate::lookaround::pattern_max_width`] reports
     /// *parseability*. A pattern the assertion-aware front-end cannot parse at all (here
     /// a structurally unbalanced `(`) returns the outer `None`, so `Pattern::max_width`'s
