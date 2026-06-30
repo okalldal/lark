@@ -230,7 +230,8 @@ src/
                       new impl, not match arms); per-backend builders share the
                       lower + lexer-conf preamble; ParseError construction is
                       centralized in error.rs (unexpected_token's END split)
-    lalr.rs           Dense ParseTable, LalrParser, build_lalr_table; ParserStack
+    lalr.rs           Sparse ParseTable (per-state (id, action) rows, #367),
+                      LalrParser, build_lalr_table; ParserStack
                       (the shared state+value stack + feed_token reduce-loop that
                       run/run_recovering/interactive all drive)
     interactive.rs    InteractiveParser (#168) — driveable LALR over ParserStack:
@@ -361,15 +362,20 @@ CompiledGrammar
   → GrammarAnalysis   (NULLABLE / FIRST over SymbolId; no FOLLOW)
   → LR0Builder        (closure + goto → item sets / transitions, keyed by SymbolId)
   → LookaheadComputer (true LALR(1) lookaheads: spontaneous generation + propagation)
-  → build_lalr_table  dense tables, conflict detection by rule priority
-  → ParseTable        { action: Vec<Vec<Option<Action>>>  [state][terminal_id],
-                        goto:   Vec<Vec<Option<u32>>>      [state][nonterminal_index] }
+  → build_lalr_table  sparse tables, conflict detection by rule priority
+  → ParseTable        { action: Vec<Vec<(u32, Action)>>  per-state (terminal id, action) rows,
+                        goto:   Vec<Vec<(u32, u32)>>      per-state (nonterminal index, next state) rows }
 ```
 
-Both tables are dense and indexed directly by id — the parse loop is an array
-index per token, never a string hash. Transparent rules splice via a
-`Slot::Inline` rather than a post-hoc tree-name scan, and ACCEPT is the
-`is_start` flag — no name inspection anywhere on the engine path.
+Both tables are **sparse** per-state `(id, …)` rows sorted ascending — Python
+Lark's dict-of-dicts, not a dense `[state][terminal]` matrix — so the table stores
+only the `O(filled)` actions, never the `O(states × terminals)` cells a grammar
+whose state *and* terminal counts both grow with size would otherwise allocate
+(#367, H5-9; the same `&[(u32, Action)]` shape the standalone runtime bakes).
+Lookup is a linear scan of a state's few entries (`action_at`/`goto_at`); a token
+still hashes nothing on the hot path. Transparent rules splice via a `Slot::Inline`
+rather than a post-hoc tree-name scan, and ACCEPT is the `is_start` flag — no name
+inspection anywhere on the engine path.
 
 ### Parse-Tree Assembly
 

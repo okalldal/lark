@@ -4,15 +4,20 @@
 //! 1. `GrammarAnalysis` computes NULLABLE/FIRST.
 //! 2. `LR0Builder` constructs LR(0) item sets (states).
 //! 3. `LookaheadComputer` propagates true LALR(1) lookaheads.
-//! 4. `build_lalr_table` assembles dense ACTION/GOTO tables.
+//! 4. `build_lalr_table` assembles the sparse ACTION/GOTO tables.
 //! 5. `LalrParser` drives the state machine against a token stream.
 //!
 //! The grammar is fully interned ([`CompiledGrammar`]): every symbol is a `Copy`
 //! [`SymbolId`], terminals occupy id range `[0, n_terminals)` and non-terminals
-//! `[n_terminals, len)`. So ACTION is a dense `[state][terminal_id]` matrix and
-//! GOTO a dense `[state][nonterminal_index]` matrix — both pure array indexing,
-//! no hashing on the hot path. Every tree-shaping decision is a precomputed flag
-//! on the rule; the engine never inspects a symbol's name.
+//! `[n_terminals, len)`. ACTION/GOTO are **sparse** per-state `(id, …)` rows
+//! (Python Lark's dict-of-dicts, not a dense `[state][terminal]` matrix) so the
+//! table stores only the `O(filled)` actions, not `O(states × terminals)` cells —
+//! a grammar whose state and terminal counts both grow with size is otherwise
+//! `O(n²)` (#367, H5-9). Lookup ([`ParseTable::action_at`]) is a linear scan of a
+//! state's few entries — the same `&[(u32, Action)]` shape the standalone runtime
+//! bakes — and a token still hashes nothing on the hot path. Every tree-shaping
+//! decision is a precomputed flag on the rule; the engine never inspects a
+//! symbol's name.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
@@ -38,13 +43,26 @@ pub enum Action {
     Accept,
 }
 
-/// Immutable parse tables produced by LALR analysis. Dense and id-indexed.
+/// Immutable parse tables produced by LALR analysis. **Sparse** and id-keyed.
+///
+/// Each `action[state]` row is a `(terminal id, action)` list sorted ascending by
+/// id, and each `goto[state]` row a `(nonterminal index, next state)` list likewise
+/// — Python Lark's sparse dict-of-dicts, not a dense `[state][terminal]` matrix
+/// (#367, H5-9). For a grammar whose state *and* terminal counts both grow with
+/// size the dense matrix is `O(states × terminals) = O(n²)` cells where only the
+/// `O(n)` `Some` actions are semantic; the sparse rows store only those. This is
+/// the same `&[(u32, Action)]` shape the standalone emitter already bakes
+/// (`standalone::runtime::GrammarData`), so lookup is a linear scan of the row's
+/// few entries (`action_at`), and the per-state valid-terminal set the contextual
+/// lexer needs (`state_terminals`) reads directly off the row keys.
 #[derive(Debug)]
 pub struct ParseTable {
-    /// `action[state][terminal_id]` → action (None = error).
-    pub action: Vec<Vec<Option<Action>>>,
-    /// `goto[state][nonterminal_index]` → next state (None = no transition).
-    pub goto: Vec<Vec<Option<u32>>>,
+    /// `action[state]` → sparse `(terminal id, action)` row, sorted by id. A
+    /// missing terminal is an error (the old dense `None`).
+    pub action: Vec<Vec<(u32, Action)>>,
+    /// `goto[state]` → sparse `(nonterminal index, next state)` row, sorted by
+    /// index. A missing index is no transition (the old dense `None`).
+    pub goto: Vec<Vec<(u32, u32)>>,
     /// Start state per start symbol.
     pub start_states: HashMap<SymbolId, usize>,
     /// Configured start symbols, in `LarkOptions.start` order. Resolving a
@@ -65,9 +83,30 @@ pub struct ParseTable {
 }
 
 impl ParseTable {
+    /// ACTION for `(state, terminal)`, or `None` if the state has no action for
+    /// the terminal (the old dense `None`). A linear scan of the state's sparse
+    /// row — the same lookup the standalone runtime does (`GrammarData::action_at`)
+    /// — which is cheap because a state has only its few outgoing actions.
     #[inline]
-    fn action_at(&self, state: usize, terminal: SymbolId) -> Option<&Action> {
-        self.action.get(state)?.get(terminal.index())?.as_ref()
+    fn action_at(&self, state: usize, terminal: SymbolId) -> Option<Action> {
+        let key = terminal.index() as u32;
+        self.action
+            .get(state)?
+            .iter()
+            .find(|(t, _)| *t == key)
+            .map(|(_, a)| *a)
+    }
+
+    /// Next state for `(state, nonterminal)` via GOTO, or `None`. `nt_index` is the
+    /// non-terminal's GOTO index (`origin.index() - n_terminals`). A linear scan of
+    /// the sparse row (`GrammarData::goto_at`'s in-process twin).
+    #[inline]
+    fn goto_at(&self, state: usize, nt_index: u32) -> Option<u32> {
+        self.goto
+            .get(state)?
+            .iter()
+            .find(|(n, _)| *n == nt_index)
+            .map(|(_, s)| *s)
     }
 }
 
@@ -413,7 +452,6 @@ pub fn build_lalr_table(
 ) -> Result<ParseTable, GrammarError> {
     let rules = &grammar.rules;
     let n_terminals = grammar.n_terminals();
-    let n_nonterminals = grammar.symbols.n_nonterminals();
     let analysis = GrammarAnalysis::compute(grammar);
 
     // Pair each start symbol with its augmented `$root` rule index.
@@ -434,15 +472,23 @@ pub fn build_lalr_table(
     let (states, transitions) = (builder.states, builder.transitions);
 
     let n_states = states.len();
-    let mut action: Vec<Vec<Option<Action>>> = vec![vec![None; n_terminals]; n_states];
-    let mut goto: Vec<Vec<Option<u32>>> = vec![vec![None; n_nonterminals]; n_states];
+    // Sparse per-state rows (#367, H5-9): a `BTreeMap` per state holds only the
+    // filled cells, keyed by terminal id / non-terminal GOTO index. Build keeps the
+    // dense matrix's read-modify-write semantics (the shift/reduce conflict check
+    // below reads back what SHIFT/ACCEPT wrote) but stores `Θ(filled)` entries, not
+    // the dense `n_states × n_terminals`. The `BTreeMap` key order also makes the
+    // flattened rows sorted ascending — the deterministic `&[(u32, Action)]` shape
+    // the standalone emitter bakes. (The old dense GOTO matrix sized itself on
+    // `n_nonterminals`; the sparse rows don't need it, so it is no longer computed.)
+    let mut action: Vec<BTreeMap<u32, Action>> = vec![BTreeMap::new(); n_states];
+    let mut goto: Vec<BTreeMap<u32, u32>> = vec![BTreeMap::new(); n_states];
 
     // SHIFT and GOTO from transitions — terminal vs non-terminal is the id range.
     for (&(state_id, sym), &next_state) in &transitions {
         if sym.index() < n_terminals {
-            action[state_id][sym.index()] = Some(Action::Shift(next_state));
+            action[state_id].insert(sym.index() as u32, Action::Shift(next_state));
         } else {
-            goto[state_id][sym.index() - n_terminals] = Some(next_state as u32);
+            goto[state_id].insert((sym.index() - n_terminals) as u32, next_state as u32);
         }
     }
 
@@ -456,7 +502,7 @@ pub fn build_lalr_table(
         // Augmented start items reduce to ACCEPT on $END.
         for item in state {
             if item.is_complete(rules) && rules[item.rule_idx].is_start {
-                action[state_id][SymbolId::END.index()] = Some(Action::Accept);
+                action[state_id].insert(SymbolId::END.index() as u32, Action::Accept);
             }
         }
 
@@ -536,7 +582,7 @@ pub fn build_lalr_table(
             // Shift/accept wins over reduce (Lark default). In strict mode a
             // shift/reduce conflict is fatal instead of silently resolved —
             // exactly Python Lark's `strict=True` (lalr_analysis.py).
-            match &action[state_id][la.index()] {
+            match action[state_id].get(&(la.index() as u32)) {
                 Some(Action::Shift(_)) | Some(Action::Accept) => {
                     if strict {
                         conflicts.push(format!(
@@ -546,7 +592,9 @@ pub fn build_lalr_table(
                         ));
                     }
                 }
-                _ => action[state_id][la.index()] = Some(Action::Reduce(winner)),
+                _ => {
+                    action[state_id].insert(la.index() as u32, Action::Reduce(winner));
+                }
             }
         }
     }
@@ -556,6 +604,23 @@ pub fn build_lalr_table(
             report: conflicts.join("\n\n"),
         });
     }
+
+    // Flatten the per-state maps into sorted sparse rows — the `&[(u32, Action)]`
+    // shape (#367). `BTreeMap` iteration is already key-ascending, so the rows are
+    // deterministic without an explicit sort. The work counter records the *stored*
+    // cell count — now `Θ(filled)` (the `Some` actions), not the dense `Θ(states ×
+    // terminals)`: this is exactly the density win the #367 gate asserts.
+    let action: Vec<Vec<(u32, Action)>> = action
+        .into_iter()
+        .map(|row| row.into_iter().collect())
+        .collect();
+    let goto: Vec<Vec<(u32, u32)>> = goto
+        .into_iter()
+        .map(|row| row.into_iter().collect())
+        .collect();
+    crate::perf::add_parse_table_action_cells(
+        action.iter().map(|row| row.len() as u64).sum::<u64>(),
+    );
 
     Ok(ParseTable {
         action,
@@ -657,7 +722,7 @@ impl ParserStack {
     pub(crate) fn feed_token(&mut self, table: &ParseTable, token: &Token) -> Feed {
         loop {
             let state = self.position();
-            match table.action_at(state, token.type_id).copied() {
+            match table.action_at(state, token.type_id) {
                 Some(Action::Shift(next_state)) => {
                     self.state_stack.push(next_state);
                     self.value_stack.push(Slot::Token(token.clone()));
@@ -703,18 +768,17 @@ impl ParserStack {
                 .assemble(rule_idx, child_values);
 
         let top_state = self.position();
-        let nt_index = rule.origin.index() - table.n_terminals;
-        let next_state = table.goto[top_state]
-            .get(nt_index)
-            .copied()
-            .flatten()
-            .ok_or_else(|| ParseError::UnexpectedToken {
-                token: at.value.clone(),
-                token_type: table.symbols.name(rule.origin).to_string(),
-                line: at.line,
-                col: at.column,
-                expected: vec![table.symbols.name(rule.origin).to_string()],
-            })?;
+        let nt_index = (rule.origin.index() - table.n_terminals) as u32;
+        let next_state =
+            table
+                .goto_at(top_state, nt_index)
+                .ok_or_else(|| ParseError::UnexpectedToken {
+                    token: at.value.clone(),
+                    token_type: table.symbols.name(rule.origin).to_string(),
+                    line: at.line,
+                    col: at.column,
+                    expected: vec![table.symbols.name(rule.origin).to_string()],
+                })?;
         self.state_stack.push(next_state as usize);
         self.value_stack.push(value);
         Ok(())
@@ -744,7 +808,7 @@ impl ParserStack {
         let mut states = self.state_stack.clone();
         loop {
             let state = *states.last().unwrap();
-            match table.action_at(state, terminal).copied() {
+            match table.action_at(state, terminal) {
                 Some(Action::Shift(_)) | Some(Action::Accept) => return true,
                 Some(Action::Reduce(rule_idx)) => {
                     let rule = &table.rules[rule_idx];
@@ -752,8 +816,8 @@ impl ParserStack {
                         states.pop();
                     }
                     let top = *states.last().unwrap();
-                    let nt_index = rule.origin.index() - table.n_terminals;
-                    match table.goto[top].get(nt_index).copied().flatten() {
+                    let nt_index = (rule.origin.index() - table.n_terminals) as u32;
+                    match table.goto_at(top, nt_index) {
                         Some(next) => states.push(next as usize),
                         None => return false,
                     }
@@ -904,18 +968,16 @@ impl LalrParser {
         LalrParser { table }
     }
 
-    /// Valid terminal ids per state — for the contextual lexer.
+    /// Valid terminal ids per state — for the contextual lexer. With the sparse
+    /// rows (#367) this is just the row's keys (each is a terminal the state has
+    /// an action for), no longer a scan over the full dense terminal range.
     pub fn state_terminals(&self) -> HashMap<usize, Vec<SymbolId>> {
         self.table
             .action
             .iter()
             .enumerate()
             .map(|(state, row)| {
-                let ids = row
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(t, a)| a.as_ref().map(|_| SymbolId(t as u32)))
-                    .collect();
+                let ids = row.iter().map(|(t, _)| SymbolId(*t)).collect();
                 (state, ids)
             })
             .collect()
@@ -941,18 +1003,15 @@ impl LalrParser {
             })
     }
 
-    /// Valid terminal names for a state — used to build error reports.
+    /// Valid terminal names for a state — used to build error reports. The sparse
+    /// row's keys are exactly the terminals the state has an action for (#367).
     fn expected_at(&self, state: usize) -> Vec<String> {
         self.table
             .action
             .get(state)
             .map(|row| {
                 row.iter()
-                    .enumerate()
-                    .filter_map(|(t, a)| {
-                        a.as_ref()
-                            .map(|_| self.table.symbols.name(SymbolId(t as u32)).to_string())
-                    })
+                    .map(|(t, _)| self.table.symbols.name(SymbolId(*t)).to_string())
                     .collect()
             })
             .unwrap_or_default()
@@ -1027,9 +1086,9 @@ impl LalrParser {
             .get(state)
             .map(|row| {
                 row.iter()
-                    .enumerate()
-                    .filter(|(t, a)| a.is_some() && SymbolId(*t as u32) != SymbolId::END)
-                    .map(|(t, _)| self.table.symbols.name(SymbolId(t as u32)).to_string())
+                    .map(|(t, _)| SymbolId(*t))
+                    .filter(|&t| t != SymbolId::END)
+                    .map(|t| self.table.symbols.name(t).to_string())
                     .collect()
             })
             .unwrap_or_default();

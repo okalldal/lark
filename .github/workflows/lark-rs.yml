@@ -90,6 +90,8 @@ jobs:
       #   * test_lexer_scaling           — flat-per-byte lexer scan work (#104)
       #   * test_lexer_dfa_build_scaling — dense-DFA build cost (LEXER_DFA_PLAN.md,
       #                                    determinization-blowup tripwire)
+      #   * test_lalr_table_scaling      — LALR ParseTable density: O(filled) not
+      #                                    O(states×terminals) (#367)
       - name: Scaling gates (perf-counters)
         run: >-
           cargo test --features perf-counters
@@ -97,6 +99,7 @@ jobs:
           --test test_cyk_scaling
           --test test_lexer_scaling
           --test test_lexer_dfa_build_scaling
+          --test test_lalr_table_scaling
 
       # python.lark LALR build gate (#79). The headline result of the EBNF-helper
       # dedup is that upstream python.lark's full LALR table now *builds* (without
