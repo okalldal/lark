@@ -1,6 +1,6 @@
 # ADR-0034: Terminal/rule priority storage is `i64`, not `i32`
 
-- **Status:** Proposed (pending architect ratification)
+- **Status:** Accepted (2026-06-30; was Proposed — architect ratified)
 - **Date:** 2026-06-24
 
 ## Context
