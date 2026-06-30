@@ -460,6 +460,14 @@ word-boundary assertions in the regex crate (outside a class `\<\>` silently mat
 `PatternRe::new` (`normalize_python_escapes`) rewrites exactly those two escapes to
 bare chars. Flip side: a grammar author *expecting* the regex crate's word-boundary
 `\<`/`\>` is silently overridden — that is the intended trade.
+**Further dialect-parity work is FROZEN pending a user-needs signal (ADR-0035).**
+The shipped normalization above stays as-is, but *new* "match Python construct X"
+fixes and the larger dialect-mode question (maximise-compat vs. regex-crate
+semantics vs. selectable modes) are deferred: the open dialect `needs-decision`
+issues carry the `frozen` label and leave the `/next-task` / `/xfail-burndown` /
+bug-hackathon queues. Leak/categorization hygiene (turning an *uncategorized* or
+*mis-categorized* regex error into a clean `GrammarError`, no accept/reject change)
+is **not** frozen.
 
 **Lookaround: no runtime backtracking engine — bounded shapes are *lowered* into the
 DFA.** The `regex` crate has no lookaround or backreferences; some Lark grammars (the
