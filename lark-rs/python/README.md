@@ -31,9 +31,17 @@ arguments as Python Lark for the options the Rust engine currently supports:
   `g_regex_flags`
 
 `parse(text, start=None)` returns a `Tree` (or a bare `Token` for a collapsing
-`?start` rule). `Tree` exposes `.data` / `.children` / `.pretty()`; `Token` is a
-`str`-like object exposing `.type` / `.value` and position info, so it compares
-equal to its own text value just like Python Lark's `Token`.
+`?start` rule). `Tree` exposes `.data` / `.children` / `.pretty()` and always
+carries a `.meta` (a `Meta`, empty until `propagate_positions=True`). `Token` is
+a genuine `str` *subclass* (like Python Lark's) exposing `.type` / `.value` and
+position info, so `isinstance(tok, str)`, `tok == tok.value`, `tok in {value}`
+and `{value: ...}[tok]` all behave exactly as in Python Lark.
+
+`Token` and `Meta` are defined in pure Python (`lark_rs._types`) and the parser
+engine in the compiled extension `lark_rs._lark_rs`; the user-facing `lark_rs`
+package re-exports both. PyO3 cannot subclass `str` under the `abi3` build, so
+the `str`-subclass contract is realised in Python and constructed by the Rust
+core (see `lark-rs/docs/decisions/0036-pyo3-token-is-a-str.md`).
 
 ## Building
 

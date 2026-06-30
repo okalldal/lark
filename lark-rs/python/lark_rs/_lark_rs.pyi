@@ -1,6 +1,12 @@
-"""Type stubs for the `lark_rs` extension module."""
+"""Type stubs for the compiled extension `lark_rs._lark_rs`.
 
-from typing import List, Optional, Union
+`Token` and `Meta` are pure-Python types (see `lark_rs/__init__.pyi`); this
+module exposes only the parser and the `Tree`/exception types built in Rust.
+"""
+
+from typing import Any, List, Optional, Union
+
+from ._types import Meta, Token
 
 __version__: str
 
@@ -8,31 +14,17 @@ class LarkError(Exception): ...
 class GrammarError(LarkError): ...
 class ParseError(LarkError): ...
 
-class Token:
-    type: str
-    value: str
-    line: int
-    column: int
-    end_line: int
-    end_column: int
-    start_pos: int
-    end_pos: int
-    def __init__(self, type_: str, value: str) -> None: ...
-    def __str__(self) -> str: ...
-    def __len__(self) -> int: ...
-    def __eq__(self, other: object) -> bool: ...
-    def __hash__(self) -> int: ...
-
 class Tree:
     data: str
     children: List[Union["Tree", Token, None]]
+    meta: Meta
     def __init__(
         self, data: str, children: Optional[List[Union["Tree", Token, None]]] = ...
     ) -> None: ...
     def pretty(self, indent_str: str = ...) -> str: ...
     def __eq__(self, other: object) -> bool: ...
 
-ParseTree = Union[Tree, Token]
+ParseTree = Union[Tree, Token, None]
 
 class Lark:
     def __init__(
