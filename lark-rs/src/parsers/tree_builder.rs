@@ -27,6 +27,7 @@
 //! issue #231.
 
 use crate::grammar::intern::CompiledRule;
+use crate::perf;
 use crate::tree::{Child, Meta, ParseTree, Token, Tree};
 
 // ─── Root Slot → ParseTree ──────────────────────────────────────────────────
@@ -137,10 +138,17 @@ impl<'g> OutputBuilder for TreeOutputBuilder<'g> {
     type Value = Child;
 
     fn build_node(&self, tree_name: &str, children: Vec<Child>) -> Child {
+        // Output-shape counter (#230): one `Tree` node materialized. A future
+        // tree-bypassing span backend (C8) builds none of these.
+        perf::add_tree_node_built();
         Child::Tree(Tree::new(tree_name.to_string(), children))
     }
 
     fn build_token(&self, token: Token) -> Child {
+        // Output-shape counter (#230): the owned token value bytes this backend
+        // copies into the output. The span backend (C8) keeps offsets, not strings,
+        // and drives this to 0.
+        perf::add_token_value_string_bytes(token.value.len() as u64);
         Child::Token(token)
     }
 }
@@ -166,6 +174,10 @@ impl<'g> TreeOutputBuilder<'g> {
     /// the LALR reducer drains them off its value stack; an Earley walk collects
     /// them from a forest node.
     pub fn assemble(&self, rule_idx: usize, child_values: Vec<Slot>) -> Slot {
+        // Output-shape counter (#230): one rule reduction shaped into a value. For
+        // a known LALR input this equals the parser's user-rule reduction count (the
+        // augmented `$root` accept does not route through `assemble`).
+        perf::add_semantic_reduce_call();
         // Flatten child values into the parent's child list: drop filtered
         // punctuation tokens (unless the rule keeps all tokens), and splice the
         // children of an inlined (transparent) sub-rule in place. Inlined children

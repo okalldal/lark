@@ -50,6 +50,40 @@ loop — kept as a committed disproof that it is linear), and `explicit_node_chi
 (Arm 2, the *real* O(n²) cost). Adding a new suspicion means adding a counter + a
 sweep here, never a wall-clock threshold.
 
+### Output-shape counters (semantic-output C5, #230)
+
+The shared `TreeOutputBuilder` is the one place that materializes the output tree,
+so three counters make the "the fast path builds the right *shape* of output" claim
+falsifiable without wall-clock (ADR-0007):
+
+* `tree_nodes_built` — every `Tree` node built (`build_node`).
+* `token_value_string_bytes` — the owned token-value bytes copied into the output
+  (`build_token`).
+* `semantic_reduce_calls` — one per reduction shaped through `assemble`; for a known
+  **LALR/CYK** input this equals the parser's user-rule reduction count (the augmented
+  `$root` accept does not route through `assemble`). The Earley *resolve* walk shapes
+  via `shape`/`shape_with_container` directly, so this counter does not track its
+  reductions — unlike `tree_nodes_built`/`token_value_string_bytes`, which live in
+  `build_node`/`build_token` and are engine-agnostic.
+
+```bash
+cargo test --features perf-counters --test test_output_counters
+```
+
+The gate pins the *default* `TreeOutputBuilder` backend: it **builds** trees
+(`tree_nodes_built > 0`, `token_value_string_bytes > 0`), all three counters scale
+with output shape over a size sweep, and `semantic_reduce_calls` equals the closed-
+form reduction count for a known input.
+
+**Eventual zero-tree gate (lands with C8, blocked on C7/#232).** A future tree-
+bypassing span backend (`SpanTree`) must drive `tree_nodes_built == 0` and
+`token_value_string_bytes == 0` for the same parse — the deterministic proof that
+the fast path builds *no* tree and copies *no* token strings. Those two assertions
+are NOT gated yet: the C3 fixture backend that landed (PR #261) walks an already-
+built `ParseTree`, so it builds trees by construction. C5 lays the counter
+infrastructure those C8 gates will key on (`token_value_string_bytes == 0` is the
+same gate the #230 issue body already defers to C8).
+
 ## Running it
 
 ```bash
