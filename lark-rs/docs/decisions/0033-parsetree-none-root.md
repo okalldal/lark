@@ -1,6 +1,6 @@
 # ADR-0033: `ParseTree::None` — a bare-`None` root parse result
 
-- **Status:** Proposed (pending architect ratification)
+- **Status:** Accepted (2026-06-30; was Proposed — architect ratified)
 - **Date:** 2026-06-24
 
 ## Context

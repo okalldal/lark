@@ -1,6 +1,6 @@
 # ADR-0037: Hybrid-DFA fallback for over-budget terminals (the `.*a.{N}` pathology)
 
-- **Status:** Proposed (pending architect ratification)
+- **Status:** Accepted (2026-06-30; was Proposed — architect ratified)
 - **Date:** 2026-06-30
 
 ## Context

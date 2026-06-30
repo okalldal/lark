@@ -1,6 +1,6 @@
 # ADR-0036: The PyO3 `Token` IS-A `str` — realised in Python under `abi3`
 
-- **Status:** Proposed (pending architect ratification)
+- **Status:** Accepted (2026-06-30; was Proposed — architect ratified)
 - **Date:** 2026-06-30
 
 ## Context
