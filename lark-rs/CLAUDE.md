@@ -560,8 +560,12 @@ added (and this note used to flag as a soft spot) is **removed**. Pinned by
 
 **The recurse-helper sharing is *coarser* than Python's — a post-lowering audit
 restores reduce/reduce parity (RC7/#272, amends ADR-0013).** `recurse_helper` keys
-its `recurse_cache` on the *compiled arms*, which collapse the single-symbol group
-wrapper, so `r0*` and `(r0)*` share **one** helper. Python keys on the inner `expr`
+its `recurse_cache` on the inner arms' **filter-out-agnostic shape**
+(`RecurseShareKey` — `sym_key` per symbol + gaps + keep-all, #377), which collapses
+the single-symbol group wrapper *and* per-occurrence `filter_out`, so `r0*` and
+`(r0)*`, and two sites with the same unified terminal in opposite source order, share
+**one** helper (emitted from the first occurrence's arms, so its `filter_out` is
+first-defined-wins — matching Python). Python keys on the inner `expr`
 **Tree** (`EBNF_to_BNF._add_recurse_rule`), mints **two** distinct helpers, and
 rejects `start: r0* | (r0)*` with a reduce/reduce collision. Un-sharing to match
 regresses the LALR bank 512→482 (the sharing is load-bearing — ADR-0013), so the fix
