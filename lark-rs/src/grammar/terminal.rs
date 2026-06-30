@@ -1286,47 +1286,141 @@ fn find_inverted_bound_quantifier(pattern: &str) -> Option<usize> {
 /// `{,n}` (no lower; post-normalization these are `{0,n}`, but a `0` lower is handled
 /// correctly anyway). The runs are returned as raw digit slices (not parsed integers) so a
 /// bound too large for any integer type (Python's own `OverflowError` territory) is still
-/// compared correctly by [`decimal_gt`]. The digit runs are bounded by `len`, so no
-/// end-of-input check is needed.
+/// compared correctly by [`decimal_gt`].
+///
+/// This is exactly the **both-bounds-present** case of the shared [`repeat_count_digit_runs`]
+/// parser (one digit-run scan for all `{m}`/`{m,}`/`{m,n}` forms, #545), filtered down so the
+/// brace-span parsing lives in a single place — the duplicated scan was a drift surface (the
+/// same anti-duplication rationale the shared `RegexCursor` cites).
 fn inverted_bound_pair(chars: &[char], i: usize, len: usize) -> Option<(&[char], &[char])> {
+    match repeat_count_digit_runs(chars, i, len) {
+        (Some(lower), Some(upper)) => Some((lower, upper)),
+        _ => None, // `{m}` (no upper), open `{m,}`, or no lower — not the both-bounds form
+    }
+}
+
+/// Compare two non-negative decimal numbers given as all-ASCII-digit slices, by **magnitude**
+/// — correct even for values too large to fit any integer type (`a{99999999999999999999}`),
+/// which is exactly the counted-repeat territory both [`decimal_gt`] and
+/// [`decimal_ge_maxrepeat`] need (Python's own `OverflowError` range, #534/#545). Leading
+/// zeros are stripped first (`007` == `7`, an all-zeros run is `0`), then the longer
+/// significant-digit string is the larger number, ties broken lexically (digit order ==
+/// numeric order). Slices must be all-ASCII-digit (guaranteed by the brace-span parsers).
+fn decimal_cmp(a: &[char], b: &[char]) -> std::cmp::Ordering {
+    // Significant-digit tail (leading zeros stripped); an all-zeros run yields an empty tail.
+    fn sig(d: &[char]) -> &[char] {
+        let nz = d.iter().position(|&c| c != '0').unwrap_or(d.len());
+        &d[nz..]
+    }
+    let (a, b) = (sig(a), sig(b));
+    // More significant digits ⇒ larger; equal length ⇒ lexical compare is numeric.
+    a.len().cmp(&b.len()).then_with(|| a.cmp(b))
+}
+
+/// Whether the non-negative decimal `lower` is strictly greater than `upper` (the inverted
+/// `{m,n}` bound relation, #534). A thin magnitude compare over [`decimal_cmp`], so the
+/// digit-string comparison logic lives in one place.
+fn decimal_gt(lower: &[char], upper: &[char]) -> bool {
+    decimal_cmp(lower, upper) == std::cmp::Ordering::Greater
+}
+
+/// Python's `sre_constants.MAXREPEAT` (`0xFFFFFFFF`) as its decimal digit slice — the
+/// smallest counted-repetition bound `re.compile` rejects with `OverflowError: the repetition
+/// number is too large`. A count `== MAXREPEAT` is already too large (`a{4294967295}` raises);
+/// `MAXREPEAT - 1` (`a{4294967294}`) is the largest Python accepts. Stored as digit `char`s
+/// (matching the bound slices it is compared against) so the magnitude compare never parses a
+/// possibly-20-digit, integer-overflowing bound into a fixed-width type. #545.
+const PY_MAXREPEAT_DECIMAL: &[char] = &['4', '2', '9', '4', '9', '6', '7', '2', '9', '5'];
+
+/// Whether the non-negative decimal `digits` (an all-ASCII-digit slice) is **>= Python's
+/// `MAXREPEAT`** (`0xFFFFFFFF == 4294967295`) — i.e. a repetition count Python `re` rejects
+/// as "the repetition number is too large". A magnitude compare over [`decimal_cmp`], so a
+/// bound too large for any integer type (`a{99999999999999999999}`, the issue's repro) is
+/// flagged correctly. `>=` because MAXREPEAT itself is already rejected by Python. #545.
+fn decimal_ge_maxrepeat(digits: &[char]) -> bool {
+    decimal_cmp(digits, PY_MAXREPEAT_DECIMAL) != std::cmp::Ordering::Less
+}
+
+/// For a [`base_quantifier_len`]-valid `{…}` of length `len` opening at `chars[i] == '{'`,
+/// return its **lower** and **upper** bound digit slices as `(lower, upper)` where each is
+/// `Some` iff that bound carries digits. Covers every counted form: `{m}` ⇒
+/// `(Some(m), None)`, `{m,}` ⇒ `(Some(m), None)`, `{m,n}` ⇒ `(Some(m), Some(n))`, and the
+/// post-normalization `{0,n}` ⇒ `(Some("0"), Some(n))`. The runs are raw digit slices (not
+/// parsed integers) so a bound too large for any integer type is preserved for the
+/// magnitude compare in [`find_oversized_repeat_count`]. Bounded by `len`, so no
+/// end-of-input check is needed. #545.
+fn repeat_count_digit_runs(
+    chars: &[char],
+    i: usize,
+    len: usize,
+) -> (Option<&[char]>, Option<&[char]>) {
     let end = i + len - 1; // index of the closing `}`
     let mut j = i + 1;
     let lower_start = j;
     while j < end && chars[j].is_ascii_digit() {
         j += 1;
     }
-    if j == lower_start || chars.get(j) != Some(&',') {
-        return None; // no lower bound, or no comma (`{m}`) — not an `{m,n}`
+    let lower = (j > lower_start).then_some(&chars[lower_start..j]);
+    if chars.get(j) != Some(&',') {
+        return (lower, None); // `{m}` — single bound, no comma
     }
-    let lower = &chars[lower_start..j];
     j += 1; // past the comma
     let upper_start = j;
     while j < end && chars[j].is_ascii_digit() {
         j += 1;
     }
-    if j == upper_start {
-        return None; // open `{m,}` — no upper bound to compare against
-    }
-    Some((lower, &chars[upper_start..j]))
+    let upper = (j > upper_start).then_some(&chars[upper_start..j]);
+    (lower, upper)
 }
 
-/// Whether the non-negative decimal `lower` is strictly greater than `upper`, comparing the
-/// **digit slices** directly so the verdict is correct even for bounds too large to fit any
-/// integer type (`a{99999999999999999999,1}` is still inverted — Python raises on the count
-/// magnitude, but the min>max relation is what we screen). Leading zeros are stripped first
-/// (`007` == `7`), then the longer significant-digit string is the larger number, ties
-/// broken lexically. Both slices are guaranteed all-ASCII-digit by [`inverted_bound_pair`].
-fn decimal_gt(lower: &[char], upper: &[char]) -> bool {
-    // Significant-digit tail (leading zeros stripped); an all-zeros run yields an empty tail.
-    fn sig(d: &[char]) -> &[char] {
-        let nz = d.iter().position(|&c| c != '0').unwrap_or(d.len());
-        &d[nz..]
+/// Detect a Python-`re` **"the repetition number is too large"** shape locally, returning
+/// the char index of the offending `{…}` quantifier open `{`, or `None` if every count is
+/// in range. A counted repetition `{m}` / `{m,}` / `{m,n}` whose lower **or** upper bound
+/// is `>= 0xFFFFFFFF` (Python's `sre_constants.MAXREPEAT`) is a Python `re` *build error*
+/// (`re.compile('a{1,99999999999999999999}')` → `OverflowError: the repetition number is
+/// too large`). Both downstream finite engines disagree in the unfalsifiable direction
+/// (ADR-0017): the Rust `regex` crate accepts a count up to its own `u32` cap
+/// (`0xFFFFFFFF`), and a count *over* that cap (which the crate rejects) then slips through
+/// the lookaround-analyzer fallback in [`PatternRe::new`] (which sizes the brace count as
+/// OK) — so without this screen `a{99999999999999999999}` *builds*. We classify the shape
+/// directly so it surfaces as a correctly-categorized `InvalidRegex`, never the misleading
+/// `LookaroundScope` refusal, and *match Python's rejection* (#545).
+///
+/// The threshold is `>= MAXREPEAT`: Python rejects the count `== 0xFFFFFFFF` already
+/// (`a{4294967295}` raises), and `0xFFFFFFFE` (`a{4294967294}`) is the largest it accepts —
+/// grounded against both engines. The compare is the overflow-safe digit-slice
+/// [`decimal_ge_maxrepeat`], so a 20-digit bound is still flagged.
+///
+/// Runs on the **normalized** pattern (post [`normalize_python_escapes`]), the same string
+/// `Regex::new` validates: `(?#…)` comments are already stripped and `{,n}`/`{,}` are
+/// already `{0,n}`/`{0,}` (a `0` lower is never over the cap). It is **class- and
+/// escape-aware** via the shared [`RegexCursor`]: a `{99…}` inside `[...]` is a set of
+/// literal members and a `\{` is an escaped literal brace — neither is a quantifier. Reuses
+/// [`base_quantifier_len`] (the shared quantifier oracle) so a literal brace `{x}` / `{}` or
+/// an unterminated `{` is never inspected.
+fn find_oversized_repeat_count(pattern: &str) -> Option<usize> {
+    let chars: Vec<char> = pattern.chars().collect();
+    let mut cur = RegexCursor::new(&chars);
+    while !cur.at_end() {
+        let i = cur.pos();
+        // A `{m,n}` quantifier is only structural out-of-class (inside `[...]` a `{` is a
+        // literal member; a `\{` is consumed as an escape pair by `step()` below).
+        if !cur.in_class() && chars[i] == '{' {
+            if let Some(len) = base_quantifier_len(&chars, i) {
+                let (lower, upper) = repeat_count_digit_runs(&chars, i, len);
+                if lower.is_some_and(decimal_ge_maxrepeat)
+                    || upper.is_some_and(decimal_ge_maxrepeat)
+                {
+                    return Some(i);
+                }
+                // A well-formed in-range quantifier — skip past it.
+                cur.seek(i + len);
+                continue;
+            }
+        }
+        cur.step();
     }
-    let (lo, up) = (sig(lower), sig(upper));
-    if lo.len() != up.len() {
-        return lo.len() > up.len(); // more significant digits ⇒ larger number
-    }
-    lo > up // equal length — compare lexically (digit order == numeric order)
+    None
 }
 
 /// If `chars[i]` opens a Python-`re` **empty-lower-bound quantifier** `{,n}` (no lower
@@ -1629,6 +1723,40 @@ impl PatternRe {
                     .to_string(),
             });
         }
+        // **"The repetition number is too large" pre-screen (#545).** A counted repetition
+        // `{m}`/`{m,}`/`{m,n}` whose lower or upper bound is `>= 0xFFFFFFFF` (Python's
+        // `sre_constants.MAXREPEAT`) is a Python `re` build error
+        // (`re.compile('a{1,99999999999999999999}')` → `OverflowError: the repetition number
+        // is too large`). Both finite engines disagree in the unfalsifiable direction: the
+        // Rust `regex` crate accepts up to its own `u32` cap (`0xFFFFFFFF`), and a count
+        // *over* that cap (which the crate rejects) then slips through the lookaround-analyzer
+        // fallback below (it sizes the brace count as OK) — so without this screen
+        // `a{99999999999999999999}` *builds*, more permissive than the oracle (ADR-0017). We
+        // classify the shape locally (`find_oversized_repeat_count`, an overflow-safe
+        // digit-slice magnitude compare, class-/escape-aware via the shared `RegexCursor`) so
+        // it surfaces as the truthful `InvalidRegex`, never the misleading `LookaroundScope`
+        // refusal. Runs on the normalized `pattern` ((?#…) comments already stripped, `{,n}`/
+        // `{,}` already `{0,n}`/`{0,}` — a `0` lower is never over the cap). Grounded against
+        // both engines: Python rejects `>= MAXREPEAT` (`a{4294967295}` raises), `0xFFFFFFFE`
+        // is the largest accepted; the regex crate's parse cap is the same `0xFFFFFFFF`.
+        //
+        // **Ordered before the #534 inverted-bound screen below**, matching Python's own
+        // evaluation order: `sre_parse` raises the magnitude `OverflowError` *before* it
+        // checks the `min > max` relation, so a bound that is both oversized *and* inverted
+        // (`a{99999999999,3}`) reports "the repetition number is too large", not "min repeat
+        // greater than max repeat". The accept/reject verdict is identical either way (both
+        // reject as `InvalidRegex`); the order makes the *reason* faithful to the oracle.
+        if find_oversized_repeat_count(&pattern).is_some() {
+            return Err(GrammarError::InvalidRegex {
+                pattern: pattern.clone(),
+                reason: "the repetition number is too large — a counted repetition \
+                     `{m}`/`{m,}`/`{m,n}` has a bound at or above Python's MAXREPEAT \
+                     (0xFFFFFFFF == 4294967295), e.g. `a{1,99999999999999999999}`. Python \
+                     `re` rejects this with OverflowError (\"the repetition number is too \
+                     large\"); lark-rs matches that rejection (ADR-0017)."
+                    .to_string(),
+            });
+        }
         // **"Min repeat greater than max repeat" pre-screen (#534).** A counted repetition
         // `{m,n}` with `m > n` (`a{3,2}`) is a Python `re` "min repeat greater than max
         // repeat" build error, but the Rust `regex` crate *accepts* it (it compiles to an
@@ -1639,7 +1767,8 @@ impl PatternRe {
         // `InvalidRegex`, never the misleading `LookaroundScope` refusal. Runs on the
         // normalized `pattern` (comments already stripped — an interior `(?#…)` that makes
         // Python read the braces as a literal is already `\{`-escaped — and `{,n}`/`{,}`
-        // already `{0,n}`/`{0,}`, whose `0` lower is never an inverted bound).
+        // already `{0,n}`/`{0,}`, whose `0` lower is never an inverted bound). Both bounds
+        // here are `< MAXREPEAT` — the #545 screen above already rejected any oversized one.
         if find_inverted_bound_quantifier(&pattern).is_some() {
             return Err(GrammarError::InvalidRegex {
                 pattern: pattern.clone(),
@@ -2693,6 +2822,124 @@ mod tests {
                 "/{p}/: Python `re` accepts it — lark-rs must build it (#534 must not \
                  over-reject)"
             );
+        }
+    }
+
+    /// #545 unit: `find_oversized_repeat_count` flags a `{m}`/`{m,}`/`{m,n}` whose lower
+    /// **or** upper bound is `>= 0xFFFFFFFF` (Python's `sre_constants.MAXREPEAT`), the
+    /// smallest count Python `re` rejects ("the repetition number is too large").
+    /// `0xFFFFFFFE` and below build in both engines. Bounds too large for any integer type
+    /// are compared by the same overflow-safe digit-slice magnitude check, so a 20-digit
+    /// count is still flagged. Class- and escape-aware via the shared `RegexCursor`. Runs on
+    /// the normalized pattern (`{,n}`/`{,}` already `{0,n}`/`{0,}`). Grounded against
+    /// Python 3.11 (`sre_constants.MAXREPEAT == 0xFFFFFFFF`).
+    #[test]
+    fn find_oversized_repeat_count_matches_python_threshold() {
+        // (normalized pattern, is_oversized) — `true` ⇒ Python "the repetition number is
+        // too large".
+        let cases: &[(&str, bool)] = &[
+            // At/over MAXREPEAT (0xFFFFFFFF == 4294967295) — Python rejects.
+            ("a{4294967295}", true),             // == MAXREPEAT, exact form
+            ("a{4294967296}", true),             // just over (also over the regex-crate u32 cap)
+            ("a{1,4294967295}", true),           // upper == MAXREPEAT
+            ("a{4294967295,}", true),            // open upper, lower == MAXREPEAT
+            ("a{4294967295,9999999999}", true),  // both over (lower triggers)
+            ("a{1,99999999999999999999}", true), // 20-digit upper, way over
+            ("a{99999999999999999999}", true),   // 20-digit exact
+            ("a{99999999999999999999,}", true),  // 20-digit open lower
+            ("a{0042949672950}", true),          // leading zeros: significant tail == MAXREPEAT
+            ("(a){4294967296}", true),           // quantifier on a closed group
+            ("[a-z]{4294967296}", true),         // on a class
+            ("a{2,3}b{4294967296}", true),       // a later one oversized
+            // --- negatives: Python accepts (count fits) ---
+            ("a{4294967294}", false), // == MAXREPEAT-1, the largest accepted
+            ("a{1,4294967294}", false), // upper at the cap-1
+            ("a{4294967294,}", false),
+            ("a{1000,2000}", false),
+            ("a{3}", false),
+            ("a{2,3}", false),
+            ("a{0,}", false), // the post-normalization `{,}`
+            ("a{0,3}", false),
+            ("a{00000000005}", false), // many leading zeros, small value
+            // Class-aware: an in-class brace run is literal members, not a quantifier.
+            ("[a{99999999999999999999}]", false),
+            // Escape-aware: a `\{` is a literal brace.
+            (r"a\{99999999999999999999}", false),
+            // Not a well-formed quantifier — a literal brace run, never sized.
+            ("a{x}", false),
+            ("a{99999999999999999999", false), // unterminated
+        ];
+        for &(p, want) in cases {
+            assert_eq!(
+                find_oversized_repeat_count(p).is_some(),
+                want,
+                "{p:?}: find_oversized_repeat_count should be {want} (Python `re` oracle, \
+                 MAXREPEAT == 0xFFFFFFFF)"
+            );
+        }
+    }
+
+    /// #545 end-to-end: a `/…/` terminal with a counted-repeat bound `>= 0xFFFFFFFF` is
+    /// **rejected** at build with a correctly-categorized `InvalidRegex` carrying the
+    /// "repetition number is too large" reason (NOT a `LookaroundScope` refusal), matching
+    /// Python `re` (`re.compile('a{1,99999999999999999999}')` → `OverflowError: the
+    /// repetition number is too large`). The negative controls — a count at MAXREPEAT-1, a
+    /// small `{m,n}`, an in-class brace run, an escaped `\{` — all still **build** (Python
+    /// accepts each). Oracle: Python `re` 3.11.
+    #[test]
+    fn oversized_repeat_count_rejected() {
+        // Rejected — both engines disagree (regex crate / lookaround analyzer accept up to
+        // their own caps, Python rejects at MAXREPEAT); lark-rs matches Python.
+        for p in [
+            "a{1,99999999999999999999}", // the issue's repro
+            "a{99999999999999999999}",
+            "a{99999999999999999999,}",
+            "a{4294967295}",   // == MAXREPEAT, exact
+            "a{1,4294967295}", // == MAXREPEAT, upper
+            "a{4294967295,}",  // == MAXREPEAT, open lower
+            "a{4294967296}",   // just over (over the regex-crate cap too)
+        ] {
+            match PatternRe::new(p, 0) {
+                Err(GrammarError::InvalidRegex { reason, .. }) => assert!(
+                    reason.contains("repetition number is too large"),
+                    "/{p}/: expected the truthful too-large InvalidRegex, got: {reason}"
+                ),
+                other => panic!(
+                    "/{p}/: an over-large repeat count must be rejected (Python `re` raises \
+                     OverflowError), got {other:?}"
+                ),
+            }
+        }
+        // Accepted — Python compiles each (count fits under MAXREPEAT), so lark-rs must
+        // build them.
+        for p in [
+            "a{4294967294}", // == MAXREPEAT-1, the largest accepted
+            "a{1,4294967294}",
+            "a{4294967294,}",
+            "a{1000,2000}",
+            "a{3}",
+            "a{2,3}",
+            "[a{99999999999999999999}]", // in-class literal
+            r"a\{99999999999999999999}", // escaped literal brace
+        ] {
+            assert!(
+                PatternRe::new(p, 0).is_ok(),
+                "/{p}/: Python `re` accepts it (count fits) — lark-rs must build it (#545 \
+                 must not over-reject)"
+            );
+        }
+        // A bound that is **both** oversized *and* inverted (`a{99999999999,3}`) must report
+        // the *magnitude* reason, not the inverted one — Python's `sre_parse` raises the count
+        // `OverflowError` *before* it checks `min > max` (verified: `a{99999999999,3}`,
+        // `a{3,99999999999}`, `a{99999999999,1}` all → "the repetition number is too large").
+        // The #545 screen is ordered before the #534 screen to match.
+        match PatternRe::new("a{99999999999,3}", 0) {
+            Err(GrammarError::InvalidRegex { reason, .. }) => assert!(
+                reason.contains("repetition number is too large"),
+                "oversized+inverted must report the magnitude reason first (Python order), \
+                 got: {reason}"
+            ),
+            other => panic!("a{{99999999999,3}} must be rejected, got {other:?}"),
         }
     }
 
