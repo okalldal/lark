@@ -261,27 +261,12 @@ fn bake(grammar_src: &str, options: &LarkOptions) -> Result<Baked, LarkError> {
         })
         .collect();
 
-    let action = table
-        .action
-        .iter()
-        .map(|row| {
-            row.iter()
-                .enumerate()
-                .filter_map(|(t, cell)| cell.map(|a| (t as u32, a)))
-                .collect()
-        })
-        .collect();
-
-    let goto = table
-        .goto
-        .iter()
-        .map(|row| {
-            row.iter()
-                .enumerate()
-                .filter_map(|(nt, cell)| cell.map(|s| (nt as u32, s)))
-                .collect()
-        })
-        .collect();
+    // The in-process `ParseTable` is already sparse `(id, …)` rows (#367), the same
+    // `&[(u32, Action)]` shape the standalone runtime bakes, so the bake just clones
+    // the rows — no dense-matrix sparsification step. The rows are id-ascending (the
+    // build flattens them from a `BTreeMap`), the order the bake expects.
+    let action = table.action.clone();
+    let goto = table.goto.clone();
 
     let mut start_states: Vec<(String, u32)> = table
         .start_states
