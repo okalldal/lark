@@ -6,10 +6,11 @@ description = "PyO3 Python bindings for lark-rs — a drop-in speedup for Python
 license = "MIT"
 repository = "https://github.com/lark-parser/lark"
 
-# The compiled artifact is a Python extension module (`lark_rs`), so it must be a
-# C-compatible dynamic library. `maturin` packages this cdylib into the wheel.
+# The compiled artifact is the Python extension submodule `lark_rs._lark_rs`, so
+# it must be a C-compatible dynamic library. `maturin` packages this cdylib into
+# the wheel; the pure-Python `lark_rs` package re-exports it (ADR-0036).
 [lib]
-name = "lark_rs"
+name = "_lark_rs"
 crate-type = ["cdylib"]
 
 [dependencies]

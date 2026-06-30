@@ -28,9 +28,12 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 
 [tool.maturin]
-# The crate lives in this directory; the importable module is `lark_rs`.
+# Mixed Rust/Python layout: the importable package is `lark_rs` (pure-Python
+# `__init__.py` + `_types.py` under `lark_rs/`), and the compiled engine is the
+# extension submodule `lark_rs._lark_rs`. `Token` (a `str` subclass) and `Meta`
+# must be pure Python because PyO3 cannot subclass `str` under `abi3` (ADR-0036).
 manifest-path = "Cargo.toml"
-module-name = "lark_rs"
-# Ship the hand-written type stubs alongside the extension so editors and type
-# checkers see the API surface.
-include = ["lark_rs.pyi", "py.typed"]
+python-source = "."
+module-name = "lark_rs._lark_rs"
+# Ship `py.typed` and the per-module stubs (`lark_rs/__init__.pyi`,
+# `lark_rs/_lark_rs.pyi`) so editors and type checkers see the API surface.

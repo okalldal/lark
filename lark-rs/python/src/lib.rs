@@ -1,11 +1,21 @@
 //! PyO3 bindings for `lark-rs` — a drop-in, Rust-powered replacement for the
 //! Python Lark parsing toolkit.
 //!
-//! The module exposes three types mirroring Python Lark's API surface:
+//! This compiled extension is imported as `lark_rs._lark_rs`; the user-facing
+//! `lark_rs` package re-exports it together with the pure-Python value types.
+//! It exposes:
 //!
 //! * [`PyLark`] — `Lark(grammar, parser=..., lexer=..., start=...)` + `.parse()`
-//! * [`PyTree`] — `Tree(data, children)` with `.data`, `.children`, `.pretty()`
-//! * [`PyToken`] — a `str`-like leaf with `.type`, `.value`, and position info
+//! * [`PyTree`] — `Tree(data, children)` with `.data`, `.children`, `.meta`,
+//!   `.pretty()`
+//! * [`PyMeta`] — per-node metadata (`.empty`), always present on a `Tree`
+//!
+//! `Token` is **not** defined here: it must be a genuine `str` *subclass* to
+//! match Python Lark's contract (issue #416), and PyO3 cannot subclass a native
+//! type such as `str` under the `abi3` build (ADR-0036). It lives in pure Python
+//! (`lark_rs._types.Token`); the Rust core constructs it via the cached class
+//! object when shaping a parse tree, so callers get genuine `str`-subclass
+//! tokens with no Python-side re-walk.
 //!
 //! All parsing logic lives in the shared `lark-rs` crate; this file is a thin
 //! adapter that translates Python kwargs into [`LarkOptions`] and the Rust
@@ -14,7 +24,8 @@
 use pyo3::create_exception;
 use pyo3::exceptions::PyException;
 use pyo3::prelude::*;
-use pyo3::types::PyList;
+use pyo3::sync::GILOnceCell;
+use pyo3::types::{PyList, PyType};
 
 use lark_core::{
     Ambiguity, Child, Lark, LarkOptions, LexerType, ParseTree, ParserAlgorithm, Token, Tree,
@@ -61,97 +72,69 @@ fn map_parse_error(e: RsParseError) -> PyErr {
     ParseError::new_err(e.to_string())
 }
 
-// ─── Token ──────────────────────────────────────────────────────────────────
+// ─── Python value types (defined in `lark_rs._types`) ───────────────────────
+//
+// `Token` (a `str` subclass) and `Meta` are pure-Python types. We cache their
+// class objects on first use so shaping a parse tree is a cheap `call` per node
+// rather than an import per token.
 
-/// A positioned lexer token, mirroring `lark.Token`.
+static TOKEN_TYPE: GILOnceCell<Py<PyType>> = GILOnceCell::new();
+static META_TYPE: GILOnceCell<Py<PyType>> = GILOnceCell::new();
+
+fn token_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+    TOKEN_TYPE
+        .get_or_try_init(py, || {
+            py.import("lark_rs._types")?
+                .getattr("Token")?
+                .downcast_into::<PyType>()
+                .map(Into::into)
+                .map_err(Into::into)
+        })
+        .map(|t| t.bind(py))
+}
+
+fn meta_type(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
+    META_TYPE
+        .get_or_try_init(py, || {
+            py.import("lark_rs._types")?
+                .getattr("Meta")?
+                .downcast_into::<PyType>()
+                .map(Into::into)
+                .map_err(Into::into)
+        })
+        .map(|t| t.bind(py))
+}
+
+/// Is `obj` a `lark_rs._types.Token` instance?
+fn is_token(obj: &Bound<'_, PyAny>) -> bool {
+    token_type(obj.py())
+        .and_then(|t| obj.is_instance(t))
+        .unwrap_or(false)
+}
+
+/// Build a Python `Token` (the `str` subclass) from the Rust core `Token`.
 ///
-/// Like Python Lark's `Token` (which subclasses `str`), it compares equal to its
-/// own string `value`, so existing code that does `tok == "foo"` keeps working.
-#[pyclass(name = "Token", module = "lark_rs")]
-#[derive(Clone)]
-struct PyToken {
-    #[pyo3(get, name = "type")]
-    type_: String,
-    #[pyo3(get)]
-    value: String,
-    #[pyo3(get)]
-    line: usize,
-    #[pyo3(get)]
-    column: usize,
-    #[pyo3(get)]
-    end_line: usize,
-    #[pyo3(get)]
-    end_column: usize,
-    #[pyo3(get)]
-    start_pos: usize,
-    #[pyo3(get)]
-    end_pos: usize,
+/// A parsed token always carries real positions from the lexer (independent of
+/// `propagate_positions`, which governs `Tree.meta`, not token positions), so we
+/// pass them through as ints — matching Python Lark, whose parsed tokens are
+/// likewise positioned.
+fn token_to_py(py: Python<'_>, t: &Token) -> PyResult<PyObject> {
+    let cls = token_type(py)?;
+    let obj = cls.call1((
+        t.type_.clone(),
+        t.value.clone(),
+        t.start_pos,
+        t.line,
+        t.column,
+        t.end_line,
+        t.end_column,
+        t.end_pos,
+    ))?;
+    Ok(obj.unbind())
 }
 
-impl PyToken {
-    fn from_token(t: &Token) -> Self {
-        PyToken {
-            type_: t.type_.clone(),
-            value: t.value.clone(),
-            line: t.line,
-            column: t.column,
-            end_line: t.end_line,
-            end_column: t.end_column,
-            start_pos: t.start_pos,
-            end_pos: t.end_pos,
-        }
-    }
-}
-
-#[pymethods]
-impl PyToken {
-    #[new]
-    #[pyo3(signature = (type_, value))]
-    fn new(type_: String, value: String) -> Self {
-        PyToken {
-            type_,
-            value,
-            line: 0,
-            column: 0,
-            end_line: 0,
-            end_column: 0,
-            start_pos: 0,
-            end_pos: 0,
-        }
-    }
-
-    fn __str__(&self) -> &str {
-        &self.value
-    }
-
-    fn __repr__(&self) -> String {
-        format!("Token({:?}, {:?})", self.type_, self.value)
-    }
-
-    fn __len__(&self) -> usize {
-        self.value.chars().count()
-    }
-
-    fn __hash__(&self) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut h = DefaultHasher::new();
-        self.value.hash(&mut h);
-        h.finish()
-    }
-
-    /// `str`-like equality: a token equals another token (or a plain string) when
-    /// their text values match — exactly the semantics of Python Lark's `Token`,
-    /// which is a `str` subclass.
-    fn __eq__(&self, other: &Bound<'_, PyAny>) -> bool {
-        if let Ok(s) = other.extract::<String>() {
-            return self.value == s;
-        }
-        if let Ok(tok) = other.extract::<PyRef<'_, PyToken>>() {
-            return self.value == tok.value;
-        }
-        false
-    }
+fn new_meta(py: Python<'_>) -> PyResult<PyObject> {
+    Ok(meta_type(py)?.call0()?.unbind())
 }
 
 // ─── Tree ───────────────────────────────────────────────────────────────────
@@ -161,12 +144,16 @@ impl PyToken {
 /// `children` is a real Python `list` so it can be indexed, iterated and mutated
 /// exactly like Python Lark's. Each child is a `Tree`, a `Token`, or `None`
 /// (the latter only when the parser is built with `maybe_placeholders=True`).
-#[pyclass(name = "Tree", module = "lark_rs")]
+/// `meta` is always present (an empty `Meta` until positions are propagated),
+/// matching Python Lark, whose `Tree` always carries a `Meta` (issue #416).
+#[pyclass(name = "Tree", module = "lark_rs._lark_rs")]
 struct PyTree {
     #[pyo3(get, set)]
     data: String,
     #[pyo3(get, set)]
     children: Py<PyList>,
+    #[pyo3(get, set)]
+    meta: PyObject,
 }
 
 impl PyTree {
@@ -181,6 +168,7 @@ impl PyTree {
             PyTree {
                 data: t.data.clone(),
                 children: children.unbind(),
+                meta: new_meta(py)?,
             },
         )
     }
@@ -190,7 +178,7 @@ impl PyTree {
 fn child_to_py(py: Python<'_>, child: &Child) -> PyResult<PyObject> {
     match child {
         Child::Tree(t) => Ok(PyTree::from_tree(py, t)?.into_any()),
-        Child::Token(tok) => Ok(Py::new(py, PyToken::from_token(tok))?.into_any()),
+        Child::Token(tok) => token_to_py(py, tok),
         Child::None => Ok(py.None()),
     }
 }
@@ -199,12 +187,16 @@ fn child_to_py(py: Python<'_>, child: &Child) -> PyResult<PyObject> {
 impl PyTree {
     #[new]
     #[pyo3(signature = (data, children=None))]
-    fn new(py: Python<'_>, data: String, children: Option<Bound<'_, PyList>>) -> PyTree {
+    fn new(py: Python<'_>, data: String, children: Option<Bound<'_, PyList>>) -> PyResult<PyTree> {
         let children = match children {
             Some(list) => list.unbind(),
             None => PyList::empty(py).unbind(),
         };
-        PyTree { data, children }
+        Ok(PyTree {
+            data,
+            children,
+            meta: new_meta(py)?,
+        })
     }
 
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
@@ -264,8 +256,9 @@ impl PyTree {
         if children.len() == 1 {
             // A single non-tree child renders inline: `data\tvalue`.
             let only = children.get_item(0)?;
-            if let Ok(tok) = only.extract::<PyRef<'_, PyToken>>() {
-                out.push_str(&format!("{}{}\t{}\n", pad, self.data, tok.value));
+            if is_token(&only) {
+                let value: String = only.getattr("value")?.extract()?;
+                out.push_str(&format!("{}{}\t{}\n", pad, self.data, value));
                 return Ok(());
             }
         }
@@ -273,8 +266,9 @@ impl PyTree {
         for child in children.iter() {
             if let Ok(subtree) = child.extract::<PyRef<'_, PyTree>>() {
                 subtree.pretty_into(py, level + 1, indent_str, out)?;
-            } else if let Ok(tok) = child.extract::<PyRef<'_, PyToken>>() {
-                out.push_str(&format!("{}{}\n", indent_str.repeat(level + 1), tok.value));
+            } else if is_token(&child) {
+                let value: String = child.getattr("value")?.extract()?;
+                out.push_str(&format!("{}{}\n", indent_str.repeat(level + 1), value));
             } else {
                 out.push_str(&format!("{}None\n", indent_str.repeat(level + 1)));
             }
@@ -284,20 +278,33 @@ impl PyTree {
 }
 
 fn child_repr(c: &Bound<'_, PyAny>) -> String {
-    if let Ok(tok) = c.extract::<PyRef<'_, PyToken>>() {
-        tok.__repr__()
-    } else if let Ok(tree) = c.extract::<PyRef<'_, PyTree>>() {
+    if let Ok(tree) = c.extract::<PyRef<'_, PyTree>>() {
         tree.__repr__(c.py())
             .unwrap_or_else(|_| "Tree(...)".to_string())
-    } else {
+    } else if c.is_none() {
         "None".to_string()
+    } else {
+        // A `Token` (or any other leaf): defer to its own `repr`. On the unlikely
+        // failure path use a placeholder, never the literal `"None"` — `None` is a
+        // distinct, legitimate child kind (maybe_placeholders) and must not be
+        // confused with a leaf whose repr could not be read.
+        c.repr()
+            .ok()
+            .and_then(|r| r.extract::<String>().ok())
+            .unwrap_or_else(|| "<token>".to_string())
     }
 }
+
+// ─── Meta ───────────────────────────────────────────────────────────────────
+//
+// `Meta` is defined in pure Python (`lark_rs._types`); see ADR-0036. It is
+// re-exported through the package so `lark_rs.Meta` resolves, but the Rust core
+// constructs instances via the cached class object (`new_meta`).
 
 // ─── Lark ───────────────────────────────────────────────────────────────────
 
 /// The compiled parser, mirroring `lark.Lark`.
-#[pyclass(name = "Lark", module = "lark_rs", unsendable)]
+#[pyclass(name = "Lark", module = "lark_rs._lark_rs", unsendable)]
 struct PyLark {
     inner: Lark,
 }
@@ -376,7 +383,7 @@ impl PyLark {
 fn parse_tree_to_py(py: Python<'_>, pt: &ParseTree) -> PyResult<PyObject> {
     match pt {
         ParseTree::Tree(t) => Ok(PyTree::from_tree(py, t)?.into_any()),
-        ParseTree::Token(tok) => Ok(Py::new(py, PyToken::from_token(tok))?.into_any()),
+        ParseTree::Token(tok) => token_to_py(py, tok),
         // A bare `None` root (`?start: [A]` on `""`, #289) maps to Python's literal
         // `None`, exactly what Python Lark returns for that collapse.
         ParseTree::None => Ok(py.None()),
@@ -443,10 +450,9 @@ fn parse_ambiguity(s: &str) -> PyResult<Ambiguity> {
 // ─── Module ─────────────────────────────────────────────────────────────────
 
 #[pymodule]
-fn lark_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _lark_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyLark>()?;
     m.add_class::<PyTree>()?;
-    m.add_class::<PyToken>()?;
     m.add("LarkError", m.py().get_type::<LarkError>())?;
     m.add("GrammarError", m.py().get_type::<GrammarError>())?;
     m.add("ParseError", m.py().get_type::<ParseError>())?;
