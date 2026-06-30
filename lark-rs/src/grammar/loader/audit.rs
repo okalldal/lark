@@ -39,7 +39,7 @@
 //! every branch that used to read the bare `python_keyed_recurse` boolean now goes
 //! through a named method on this type.
 
-use super::ebnf::CompiledAlt;
+use super::ebnf::RecurseShareKey;
 use std::collections::HashMap;
 
 /// What [`AuditShadow::lookup`] decided for one recurse-helper request.
@@ -47,8 +47,8 @@ pub(super) enum RecurseDecision {
     /// A cache hit: reuse this already-minted helper rule name. The over-share
     /// evidence (if any) was already recorded by [`AuditShadow::lookup`].
     Cached(String),
-    /// A cache miss: the caller must mint a fresh helper for these `arms` under
-    /// `effective_keep_all`, then record it via [`AuditShadow::record_minted`].
+    /// A cache miss: the caller must mint a fresh helper for this request's `arms`,
+    /// then record it via [`AuditShadow::record_minted`].
     Mint,
 }
 
@@ -82,11 +82,15 @@ pub(super) struct AuditShadow {
     /// affects the real (compiled-arms-keyed) `recurse_cache`.
     recurse_cache_ast: HashMap<(String, bool), String>,
     /// The inner-AST key that first created each *real* `recurse_cache` entry, keyed
-    /// by that entry's `(arms, keep_all)`. On a later real cache *hit* with a
-    /// **different** inner-AST key, the real (compiled-arms) sharing has collapsed two
-    /// helpers Python Lark would have minted distinctly — exactly the RC7/#272
-    /// over-share. Tracked only in the real pass.
-    recurse_cache_origin_key: HashMap<(Vec<CompiledAlt>, bool), String>,
+    /// by that entry's [`RecurseShareKey`] (the same filter-out-agnostic share key the
+    /// real cache uses, #377). On a later real cache *hit* with a **different**
+    /// inner-AST key, the real sharing has collapsed two helpers Python Lark would have
+    /// minted distinctly — exactly the RC7/#272 over-share. Keying on the share key
+    /// (not the raw arms) keeps this over-share detection aligned with the real cache:
+    /// the two sites that now share a helper carry one origin entry, and a later hit
+    /// from a distinct inner-AST (`r0*` vs `(r0)*`) still flips the over-share signal.
+    /// Tracked only in the real pass.
+    recurse_cache_origin_key: HashMap<RecurseShareKey, String>,
     /// Set in the real pass when a `recurse_cache` hit fuses two distinct inner-AST
     /// shapes into one helper (see [`recurse_cache_origin_key`](Self::recurse_cache_origin_key)),
     /// or in [`note_imported_audit`](Self::note_imported_audit) when an imported
@@ -123,44 +127,41 @@ impl AuditShadow {
         self.overshare_seen
     }
 
-    /// Decide whether a recurse-helper request for `arms`/`effective_keep_all`
-    /// (whose inner source-AST key is `ast_key`) hits an existing helper or must mint
-    /// a fresh one, against whichever cache this pass keys on.
+    /// Decide whether a recurse-helper request for `share_key` (the filter-out-agnostic
+    /// arm-shape + keep-all key, #377; inner source-AST key `ast_key`) hits an existing
+    /// helper or must mint a fresh one, against whichever cache this pass keys on.
     ///
     /// - **Shadow pass** ([`python_keyed`](Self::python_keyed)): keys on
     ///   `(ast_key, keep_all)`, reproducing Python's `rules_cache[expr]` split.
-    /// - **Real pass**: keys on the caller-owned compiled-arms `recurse_cache`
-    ///   (passed in, since the load-bearing ADR-0013 sharing lives on the compiler).
-    ///   On a real hit, this also records the over-share: if the inner-AST key that
-    ///   first minted the helper differs from `ast_key`, the sharing fused two helpers
-    ///   Python would mint distinctly, so [`overshare_seen`](Self::overshare_seen)
-    ///   flips.
+    /// - **Real pass**: keys on the caller-owned `recurse_cache` (passed in, since the
+    ///   load-bearing ADR-0013 sharing lives on the compiler). On a real hit, this also
+    ///   records the over-share: if the inner-AST key that first minted the helper
+    ///   differs from `ast_key`, the sharing fused two helpers Python would mint
+    ///   distinctly, so [`overshare_seen`](Self::overshare_seen) flips.
     ///
     /// On a miss the caller mints the helper and calls
     /// [`record_minted`](Self::record_minted) to populate the matching cache.
     pub(super) fn lookup(
         &mut self,
-        recurse_cache: &HashMap<(Vec<CompiledAlt>, bool), String>,
-        arms: &[CompiledAlt],
-        effective_keep_all: bool,
+        recurse_cache: &HashMap<RecurseShareKey, String>,
+        share_key: &RecurseShareKey,
         ast_key: &str,
     ) -> RecurseDecision {
         if self.python_keyed {
-            let ast_cache_key = (ast_key.to_string(), effective_keep_all);
+            let ast_cache_key = (ast_key.to_string(), share_key.1);
             if let Some(name) = self.recurse_cache_ast.get(&ast_cache_key) {
                 return RecurseDecision::Cached(name.clone());
             }
             return RecurseDecision::Mint;
         }
-        let key = (arms.to_vec(), effective_keep_all);
-        if let Some(name) = recurse_cache.get(&key) {
-            // A real (compiled-arms) cache hit. If the inner-AST shape differs from
-            // the one that created this helper, the sharing has fused two helpers
+        if let Some(name) = recurse_cache.get(share_key) {
+            // A real (filter-out-agnostic) cache hit. If the inner-AST shape differs
+            // from the one that created this helper, the sharing has fused two helpers
             // Python Lark would mint distinctly — flag the over-share so the loader
             // knows an audit shadow (RC7/#272) is worth building.
             if self
                 .recurse_cache_origin_key
-                .get(&key)
+                .get(share_key)
                 .is_some_and(|origin| origin != ast_key)
             {
                 self.overshare_seen = true;
@@ -173,25 +174,24 @@ impl AuditShadow {
     /// Record a freshly minted recurse helper `name` into the cache this pass keys
     /// on, after a [`lookup`](Self::lookup) returned [`RecurseDecision::Mint`]. The
     /// real pass also records the inner-AST origin key so a future hit can recognize
-    /// an over-share; the caller inserts into its own compiled-arms `recurse_cache`.
+    /// an over-share; the caller inserts into its own `recurse_cache`.
     ///
     /// Returns whether this pass owns the cache entry: in the shadow pass the entry
     /// lives here (`true`, the caller need not touch `recurse_cache`); in the real
-    /// pass the caller still inserts into its compiled-arms `recurse_cache` (`false`).
+    /// pass the caller still inserts into its `recurse_cache` (`false`).
     pub(super) fn record_minted(
         &mut self,
-        arms: &[CompiledAlt],
-        effective_keep_all: bool,
+        share_key: &RecurseShareKey,
         ast_key: &str,
         name: &str,
     ) -> bool {
         if self.python_keyed {
             self.recurse_cache_ast
-                .insert((ast_key.to_string(), effective_keep_all), name.to_string());
+                .insert((ast_key.to_string(), share_key.1), name.to_string());
             return true;
         }
         self.recurse_cache_origin_key
-            .insert((arms.to_vec(), effective_keep_all), ast_key.to_string());
+            .insert(share_key.clone(), ast_key.to_string());
         false
     }
 

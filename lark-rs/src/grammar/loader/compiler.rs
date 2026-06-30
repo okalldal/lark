@@ -268,11 +268,16 @@ pub(super) struct GrammarCompiler {
     /// one rule — Python Lark's `rules_cache`. This sharing is what keeps grammars
     /// like `a+ b | a+` and `a* b | a+` LALR-parseable: with separate recurse rules
     /// the duplicated `… -> "a"` reductions are an unresolvable reduce/reduce. The
-    /// key is the inner expression's *compiled alternatives*: Python inlines a
-    /// grouped repetition's arms straight into the recurse rule
-    /// (`(A | B)+` → `_p: A | B | _p A | _p B`), so two `(A|B)+` occurrences share
-    /// iff their cartesian-expanded arms coincide.
-    pub(super) recurse_cache: HashMap<(Vec<super::ebnf::CompiledAlt>, bool), String>,
+    /// key is the inner expression's compiled alternatives reduced to their
+    /// **filter-out-agnostic** shape ([`RecurseShareKey`](super::ebnf::RecurseShareKey),
+    /// `sym_key` per symbol + gaps): Python inlines a grouped repetition's arms
+    /// straight into the recurse rule (`(A | B)+` → `_p: A | B | _p A | _p B`), so two
+    /// `(A|B)+` occurrences share iff their cartesian-expanded arms coincide *modulo*
+    /// per-occurrence `filter_out` — matching Python's Tree-keyed `rules_cache`, so
+    /// two sites referencing the same unified terminal in opposite source order still
+    /// share one helper (#377). The helper is emitted from the first occurrence's
+    /// arms, so the shared `filter_out` is first-defined-wins, exactly like Python.
+    pub(super) recurse_cache: HashMap<super::ebnf::RecurseShareKey, String>,
     /// The recurse-overshare **audit shadow** mechanism (ADR-0013, RC7/#272),
     /// concentrated behind one type ([`AuditShadow`]) instead of four scattered
     /// fields. It owns the "real vs Python-keyed shadow" duality: the mode flag, the
