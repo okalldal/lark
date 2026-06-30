@@ -13,16 +13,16 @@
 //! Each test asserts the **Python Lark 1.3.1** (oracle) behavior. This file is an XFAIL
 //! catalog: a test is `#[ignore]`d while its bug is open and fails today; once the bug is
 //! fixed its `#[ignore]` is dropped so it runs as a permanent regression guard (e.g.
-//! `h4_2_*`, `h4_5_*`, `h4_6_*`, and `h4_9_*` are fixed and now run by default). Run the
-//! still-open
+//! `h4_2_*`, `h4_5_*`, `h4_6_*`, `h4_9_*`, and `h4_12_*` are fixed and now run by
+//! default). Run the still-open
 //! XFAILs with:
 //!
 //!     cargo test --test test_bounty_findings_h4 -- --ignored
 //!
-//! The DFA-build determinization gate (H4-12) additionally needs the deterministic work
-//! counters, so run it with:
+//! The DFA-build determinization gate (H4-12, now fixed — ADR-0037) additionally needs
+//! the deterministic work counters, so run it with:
 //!
-//!     cargo test --features perf-counters --test test_bounty_findings_h4 -- --ignored
+//!     cargo test --features perf-counters --test test_bounty_findings_h4
 //!
 //! Baseline SHA: a74841ac21d0ab1d115ba5b5d93de814d399ba12. Catalog with repros, severity,
 //! blast radius, and fix contracts: `docs/BOUNTY_FINDINGS_H4.md`.
@@ -924,36 +924,53 @@ fn h4_11_declare_lowercase_name_rejected() {
 /// determinized size — fall back to the lazy/hybrid DFA (as the `regex` scanner backend
 /// already does) for over-budget terminals so `dense_build_bytes` stays ~flat per source,
 /// or refuse with a categorized `GrammarError` (a needs-decision fork; see catalog).
+///
+/// **FIXED (ADR-0037, the hybrid-fallback contract).** `build_combined_dfa`'s engine
+/// builder now determinizes each source under a per-source `dfa_size_limit`; a source
+/// that would overflow it (the `.*a.{N}` family) is routed to the lazy/hybrid DFA
+/// instead (`lexer/dfa.rs::build_partitioned_dfa`). The hybrid DFA matches
+/// byte-identically (Python accepts these inputs — a resource pathology, not a behavioral
+/// divergence), so the grammar still builds and lexes; only the eager determinization is
+/// skipped. `dense_build_bytes` therefore stays ~flat across N (the over-budget terminal
+/// contributes ~0 — its states are realized lazily, off the counter), where it used to
+/// roughly double per +1 in N (N=4 = 5184 B, N=10 = 311616 B; ≈60× — the pre-fix XFAIL).
 #[cfg(feature = "perf-counters")]
 #[test]
-#[ignore = "XFAIL (bounty H4-12): DFA backend eagerly determinizes a counted-repeat terminal to 2^N states (unbounded); Python re is linear"]
 fn h4_12_dense_dfa_build_is_subexponential() {
     use lark_rs::perf;
 
-    // Build the same terminal at increasing N (all small enough to determinize fast
-    // today: N=10 ⇒ 2^11 states) and record the determinized heap size per build.
+    // Build the same terminal at increasing N and record the eager-determinization heap
+    // size per build. Pre-fix this doubled per +1 in N (exponential); post-fix the
+    // over-budget terminal falls back to the lazy DFA, so the dense counter stays flat.
     let measure = |n: usize| -> Option<u64> {
         let g = format!("start: T\nT: /[01]*1[01]{{{n}}}/\n");
         let mut o = opts(ParserAlgorithm::Lalr, LexerType::Basic);
         o.start = vec!["start".to_string()];
         perf::reset();
-        // A fix may refuse over-budget terminals: an Err is acceptable (bounded by refusal).
+        // The fix bounds (not refuses) over-budget terminals: the grammar still builds.
         let lark = Lark::new(&g, o).ok()?;
         // Force the combined-DFA build by lexing a valid input of length > n+1.
         let input = "1".repeat(n + 6);
-        let _ = lark.parse(&input);
+        let parsed = lark.parse(&input);
+        assert!(
+            parsed.is_ok(),
+            "H4-12: the hybrid-fallback terminal must still LEX byte-identically (Python \
+             accepts {input:?}); the fallback preserves oracle parity"
+        );
         Some(perf::dense_build_bytes())
     };
 
-    let bytes = |n: usize| measure(n).expect("H4-12: builds today (no size limit)");
+    let bytes = |n: usize| measure(n).expect("H4-12: the grammar still builds after the fix");
     let (b4, b10) = (bytes(4), bytes(10));
-    // Today the determinized size roughly doubles per +1 in N (≈2^6 = 64× across this
-    // span); a bounded fix keeps it ~linear in the +6 input growth. Assert sub-exponential.
+    // Post-fix the over-budget terminal is lazy, so its eager-determinization contribution
+    // collapses to ~0 — `dense_build_bytes` is flat-or-shrinking across N, never the ≈60×
+    // exponential climb of the pre-fix XFAIL. Assert sub-exponential (well under the 8×
+    // the XFAIL pinned), which the hybrid fallback satisfies by construction.
     assert!(
         b10 <= b4.saturating_mul(8),
         "H4-12: determinized DFA size is exponential in the terminal's counted repeat \
-         (bytes N=4 = {b4}, N=10 = {b10}; ratio {:.1}× ≫ linear) — unbounded eager \
-         determinization with no dfa_size_limit",
+         (bytes N=4 = {b4}, N=10 = {b10}; ratio {:.1}× ≫ linear) — the dense build is not \
+         bounded by the hybrid fallback",
         b10 as f64 / b4.max(1) as f64
     );
 }

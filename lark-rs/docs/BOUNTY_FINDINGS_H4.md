@@ -35,10 +35,11 @@ clusters** of known root causes.
   `parser`/`lexer`/`start`/`ambiguity`/`maybe_placeholders`/`keep_all_tokens`/`strict`;
   `g_regex_flags`, `propagate_positions`, file/`base_path` imports, and `postlex` are not
   wired (no H4 find depends on them).
-- **Reproductions:** `tests/test_bounty_findings_h4.rs` — 12 `#[ignore]` (XFAIL) tests
-  (H4-1 … H4-12). Run the 11 non-perf XFAILs with
-  `cargo test --test test_bounty_findings_h4 -- --ignored`; H4-12 needs the work counters:
-  `cargo test --features perf-counters --test test_bounty_findings_h4 -- --ignored`.
+- **Reproductions:** `tests/test_bounty_findings_h4.rs` — H4-1 … H4-12. **H4-12 is now
+  FIXED** (hybrid-DFA fallback, ADR-0037 / #349): its test runs by default (no `#[ignore]`)
+  as a permanent regression guard under `cargo test --features perf-counters --test
+  test_bounty_findings_h4`. The remaining open XFAILs run with
+  `cargo test --test test_bounty_findings_h4 -- --ignored`.
 - **Eligibility:** none reduce to a round-1/2/3 root cause (RC1–RC10, N1–N10, V1–V4,
   H1–H12, P1–P2) or the open known-issue set: #208 (fuzzer burndown), #275 (`\b`/`\B`/`\Z`
   anchor dialect), #281 (binding recursion), #282 (RC/N burndown epic), #286 (`%extend`
@@ -93,7 +94,7 @@ import mangling, forest enumeration, eager determinization) untouched by the pri
 | H4-6  | High     | fresh  | A        | error parity     | Contextual lexer reports `UnexpectedToken` for an unlexable char; Python/basic say `UnexpectedCharacters` |
 | H4-9  | High     | fresh  | A        | lalr / earley    | Equal named-terminal-vs-literal alternation → spurious LALR reduce/reduce (Python accepts) + Earley phantom derivation |
 | H4-10 | High     | fresh  | A        | earley           | Nullable+recursive grammar: Earley under-reports distinct derivations (6 vs Python's 8) — ADR-0017 forbidden direction |
-| H4-12 | High     | fresh  | B        | perf (lexer)     | DFA backend eagerly determinizes a counted-repeat terminal to `2^N` states (unbounded); Python `re` is linear |
+| H4-12 | High     | fresh  | B        | perf (lexer)     | DFA backend eagerly determinizes a counted-repeat terminal to `2^N` states (unbounded); Python `re` is linear — **FIXED (ADR-0037, #349): hybrid-DFA fallback** |
 | H4-1  | Medium   | fresh  | A        | grammar-loader   | String-literal escapes `\v` / `\0` / `\'` over-decoded vs Python `eval_escaping` |
 | H4-3  | Medium   | fresh  | A        | lexer / loader   | `%ignore NAME` mints a priority-0 `__IGNORE_n` clone → drops declared priority + fails to filter a rule-referenced terminal |
 | H4-7  | Medium   | fresh  | A        | error parity     | EOF error position is the end cursor, not the last token's start (Python `new_borrow_pos`) |
@@ -324,17 +325,27 @@ import mangling, forest enumeration, eager determinization) untouched by the pri
   lazy/hybrid DFA with size limits) and the Earley dynamic lexer (per-terminal `regex`
   matching) are both linear — verified.
 - **Root cause:** no determinization size bound on the `dense::Builder`.
-- **Expected fix contract:** support-and-match while bounding cost — fall back to the
-  lazy/hybrid DFA for over-budget terminals so `dense_build_bytes` stays ~flat per source.
-  **Alternative (needs-decision):** a `dfa_size_limit` → categorized build-time
-  `GrammarError` refusal (the existing `test_lexer_dfa_build_scaling` gate's philosophy). The
-  XFAIL pins sub-exponential `dense_build_bytes` growth; either fix flips it (the
-  hybrid-fallback directly; the refusal via the test's `Ok(...)?` early-out on a bounded N).
+- **FIXED — hybrid-DFA fallback (ADR-0037, #349).** The engine builder
+  (`build_partitioned_dfa`, `src/lexer/dfa.rs`) now probes each source under a per-source
+  `dfa_size_limit` (`DENSE_PER_SOURCE_BUDGET` = 64 KiB) and routes any over-budget source to
+  a parallel **lazy/hybrid** DFA (`CombinedDfa::Hybrid`) instead of the dense union, while
+  in-budget sources stay on the eager engine. The hybrid DFA matches byte-identically
+  (Python accepts these inputs), so the grammar still builds and lexes — oracle parity
+  preserved — and `dense_build_bytes` stays *flat* across N (the over-budget terminal's
+  eager contribution collapses to ~0). The size-limit→`GrammarError` refusal (issue #349's
+  contract 2) was rejected as the primary path — it would reject a grammar Python accepts (a
+  less-permissive divergence with no behavioral justification, ADR-0017) — and survives only
+  as an inner guard for a source even the hybrid engine cannot build. **Measured flip:**
+  the scaling sweep now reads N=4 → 2592 B, N=8 → 39072 B (still in-budget, dense), then
+  N=10/12/16 → ~600 B (lazy fallback) — flat, not the pre-fix exponential climb.
 - **Nearest known:** #335/H11 (dynamic-lexer per-position *scan* O(n²)) and
-  `test_lexer_dfa_build_scaling` (sweeps only lowered lookaround, never a user counted-repeat
-  terminal) — distinct. N9/#279 is *grammar-size* blowup, not terminal-DFA build.
+  `test_lexer_dfa_build_scaling` (which **now** covers this family — a `counted-repeat`
+  sweep — having previously swept only lowered lookaround) — distinct. N9/#279 is
+  *grammar-size* blowup, not terminal-DFA build.
 - **Evidence:** B (deterministic counter; wall-clock corroboration is provisional/non-binding).
-- **Test:** `h4_12_dense_dfa_build_is_subexponential` (needs `--features perf-counters`).
+- **Test:** `h4_12_dense_dfa_build_is_subexponential` (now passing, no `#[ignore]`) plus the
+  `counted-repeat` sweep in `test_lexer_dfa_build_scaling.rs` (both need
+  `--features perf-counters`).
 
 ---
 
