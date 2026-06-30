@@ -60,8 +60,10 @@ impl Expr {
     /// Lark's `EBNF_to_BNF._add_recurse_rule` sharing decision. Python keys its
     /// `rules_cache` on the inner `expr` **Tree** — so `r0*` (inner `value(r0)`) and
     /// `(r0)*` (inner `expansions(expansion(value(r0)))`) get *distinct* star
-    /// helpers, whereas lark-rs's real `recurse_cache` keys on the *compiled* arms
-    /// (which collapse the single-symbol group wrapper) and so shares one helper.
+    /// helpers, whereas lark-rs's real `recurse_cache` keys on the compiled arms'
+    /// filter-out-agnostic shape (`RecurseShareKey`, #377 — which collapses both the
+    /// single-symbol group wrapper *and* per-occurrence `filter_out`) and so shares
+    /// one helper.
     /// This key preserves the full group-nesting structure of the source, matching
     /// Python's verdict that `r0* | ((r0))*` splits but `((r0))* | ((r0))*` shares
     /// (verified against Python Lark 1.3.1). It is only ever a *cache key* for the

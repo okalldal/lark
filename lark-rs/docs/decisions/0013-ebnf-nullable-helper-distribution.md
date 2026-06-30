@@ -5,6 +5,11 @@
 - **Amended:** 2026-06-23 (#272, RC7) — added the post-lowering reduce/reduce
   collision audit (see "Amendment" below). The sharing is unchanged; the audit is
   a build-time gate layered on top of it.
+- **Amended:** 2026-06-30 (#377) — made the real `recurse_cache` sharing key
+  **filter-out-agnostic** (see "Amendment 3" below). The share/split *decision* and
+  the RC7 audit are unchanged; the key change only lets two `+`/`*` sites that
+  reference the same unified terminal in opposite source order share one helper, as
+  Python's Tree-keyed `rules_cache` already does.
 
 ## Context
 
@@ -146,3 +151,44 @@ Verified against Python Lark 1.3.1 across the direct + import families (whole-im
 genuine-accept cells in
 `rc7_reduce_reduce_differential_matches_oracle_via_import`; the **LALR compliance bank
 stays 512/512**.
+
+## Amendment 3 (2026-06-30, #377 — cross-site sharing key is filter-out-agnostic)
+
+**Problem.** The real `recurse_cache` keyed on the *compiled arms* (`Vec<CompiledAlt>`,
+whose `Symbol` `Eq`/`Hash` include `filter_out`), so the share/split decision was
+sensitive to per-occurrence token-keep fate. Two `+`/`*` sites that reference the same
+**unified terminal in opposite source order** — `(A | "a")+` and `("a" | A)+`, where
+`A: "a"` unifies the literal onto `A` — produce different first-occurrence arms (one
+keeps `A`, the other keeps the *filtered* literal `"a"`), so they got different cache
+keys and lark-rs minted **two** helpers with opposite token-keep fate. Python's
+`EBNF_to_BNF.rules_cache` keys on the inner `expr` **Tree** (filter-out-agnostic), so
+both sites share the ONE helper minted at the first-defined site and both keep the
+token. On `start: drop "|" keep` / `keep: (A | "a")+` / `drop: ("a" | A)+` / `A: "a"`
+with input `a a | a a`, Python (LALR & Earley) yields `start(drop(A,A), keep(A,A))`,
+but lark-rs emitted `start(drop(), keep(A,A))` — the `drop` site's helper dropped its
+tokens. That is the **forbidden more-permissive direction** (ADR-0017): a tree Python
+never produces, so it must be fixed, not documented-and-diverged. (The single-site case
+`(A | "a")+` was already correct — #347 deduped the *inner* arms filter-out-agnostically
+via `sym_key`; only the cross-site, opposite-order *sharing* key still diverged.)
+
+**Decision.** Key the real `recurse_cache` (and the audit's `recurse_cache_origin_key`)
+on the **filter-out-agnostic** arm shape — a new `RecurseShareKey` mapping every symbol
+through `GrammarCompiler::sym_key` (`(is_terminal, name)`, the same key the within-helper
+arm dedup already uses) plus the gap vectors and `effective_keep_all`. `Symbol` carries
+only `name` + `filter_out` (terminals) / `name` (non-terminals), so this key drops
+*exactly* `filter_out` and nothing else. The helper is still **emitted from the
+first-occurrence arms** (`emit_recurse_rule`), so the shared helper's `filter_out` is
+first-defined-wins — exactly Python's behavior. This mirrors Python's Tree-keyed
+`rules_cache` at the sharing layer.
+
+**Why the RC7 audit is untouched.** The share/split *decision* is unchanged: the
+over-share detection still compares the inner *source-AST* key (`python_recurse_key`),
+now stored under the same filter-out-agnostic `RecurseShareKey`. The new key is strictly
+*coarser* than the old one (it merges opposite-`filter_out` arm variants that the old
+key split), so it can only ever *add* sharing between sites that were already structurally
+identical modulo `filter_out` — it never splits a previously-shared pair, and the
+`r0*` vs `(r0)*` over-share (distinct AST, same arm shape) is still flagged. Verified:
+the RC7 differentials (`rc7_reduce_reduce_differential_matches_oracle` +
+`…_via_import`) stay green, the new pin is
+`h4_9_cross_site_recurse_helper_sharing_filterout` (tests/test_bounty_findings_h4.rs),
+and the **LALR compliance bank stays 512/512** (all four banks green).

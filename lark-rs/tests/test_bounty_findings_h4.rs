@@ -734,6 +734,59 @@ fn h4_9_literal_vs_named_dedup_differential() {
     }
 }
 
+/// H4-9 cross-site recurse-helper sharing (#377). The H4-9 fix (#347) deduped the
+/// *inner arms* of a `+`/`*` recurse helper filter-out-agnostically (`sym_key`), so
+/// a single site `(A | "a")+` keeps the first arm's `filter_out` and is correct. But
+/// the recurse-helper *sharing* key (`recurse_cache`, keyed on `Vec<CompiledAlt>`
+/// whose `Symbol` `Eq`/`Hash` include `filter_out`) was still filter-out-*sensitive*:
+/// two sites referencing the same unified terminal in **opposite source order** —
+/// `(A | "a")+` and `("a" | A)+`, both unifying the literal `"a"` onto `A` — produced
+/// different first-occurrence arms (one keeps `A`, one keeps the filtered literal) and
+/// therefore different cache keys, so lark-rs minted **two** helpers with opposite
+/// token-keep fate. Python's `EBNF_to_BNF.rules_cache` keys on the inner `expr` Tree
+/// (filter-out-agnostic), so **both** sites share the ONE helper minted at the
+/// first-defined site, and both keep the token.
+///
+/// Repro: `start: drop "|" keep` / `keep: (A | "a")+` / `drop: ("a" | A)+` / `A: "a"`
+/// on `"a a | a a"`. Python (LALR & Earley): `start(drop(A,A), keep(A,A))` — the shared
+/// helper keeps the token at both sites. Before the fix lark-rs emitted
+/// `start(drop(), keep(A,A))` — the `drop` site's helper carried `filter_out=true`
+/// (its first arm is the literal `"a"`) and dropped both tokens, the forbidden
+/// more-permissive direction (ADR-0017): lark-rs produced a tree Python never emits.
+///
+/// FIXED (#377): the real-pass `recurse_cache` (and the audit's over-share origin map)
+/// now key on the **filter-out-agnostic** arm shape (`sym_key` per symbol + gaps),
+/// mirroring Python's Tree-keyed `rules_cache`, while `emit_recurse_rule` still builds
+/// from the first-occurrence arms (so the shared helper's `filter_out` matches the
+/// first site). The RC7/#272 share/split decision is unchanged (LALR bank stays 512).
+#[test]
+fn h4_9_cross_site_recurse_helper_sharing_filterout() {
+    let g =
+        "start: drop \"|\" keep\nkeep: (A | \"a\")+\ndrop: (\"a\" | A)+\nA: \"a\"\n%ignore \" \"\n";
+    let input = "a a | a a";
+    // Python (oracle), LALR & Earley: start(drop(A,A), keep(A,A)) — every leaf is an
+    // `A` token (both sites keep it via the one shared helper).
+    let want = vec!["A", "A", "A", "A"];
+
+    for (parser, lexer) in [
+        (ParserAlgorithm::Lalr, LexerType::Contextual),
+        (ParserAlgorithm::Earley, LexerType::Dynamic),
+    ] {
+        let lark = Lark::new(g, opts(parser.clone(), lexer))
+            .unwrap_or_else(|e| panic!("#377 ({parser:?}): grammar should build: {e:?}"));
+        let tree = lark
+            .parse(input)
+            .unwrap_or_else(|e| panic!("#377 ({parser:?}): should parse {input:?}: {e:?}"));
+        let mut types = Vec::new();
+        collect_token_types(&tree, &mut types);
+        assert_eq!(
+            types, want,
+            "#377 ({parser:?}): both `+` sites must share one token-keeping helper \
+             (Python: start(drop(A,A), keep(A,A))); lark-rs dropped the `drop` site's tokens"
+        );
+    }
+}
+
 /// H4-10 (HIGH, earley). A nullable + directly-recursive grammar — `start: z` /
 /// `z: | "b" z | z z` — makes lark-rs's SPPF forest→tree enumeration (`earley.rs`)
 /// **under-report** distinct derivations: on `"bbb"` Python yields 8 distinct

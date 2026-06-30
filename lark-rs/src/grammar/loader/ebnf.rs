@@ -34,6 +34,53 @@ pub(super) enum HelperKind {
 /// only when some entry is nonzero.
 pub(super) type CompiledAlt = (Vec<Symbol>, Vec<usize>);
 
+/// The **filter-out-agnostic** sharing key for a `+`/`*` recurse helper (#377).
+///
+/// The real-pass `recurse_cache` decides whether two `+`/`*` sites share one helper.
+/// Keying it on the raw [`CompiledAlt`]s makes the decision *sensitive* to each
+/// occurrence's per-symbol `filter_out`, because `Symbol`'s `Eq`/`Hash` include it.
+/// That splits two sites whose inner arms are the *same unified terminal in opposite
+/// source order* — `(A | "a")+` and `("a" | A)+`, both unifying the literal `"a"`
+/// onto `A` — into two helpers with opposite token-keep fate, where Python's
+/// `EBNF_to_BNF.rules_cache` (keyed on the inner `expr` Tree, filter-out-agnostic)
+/// shares the ONE helper minted at the first-defined site.
+///
+/// So the cache key maps every symbol through [`GrammarCompiler::sym_key`] (the same
+/// `(bool, name)` shape the within-helper arm dedup already uses), preserves the gap
+/// vectors, and carries `effective_keep_all`. Two sites with the same arm *shape*
+/// modulo `filter_out` now share one helper; the kept helper is still emitted from
+/// the **first-occurrence** arms (`emit_recurse_rule`), so its `filter_out` matches
+/// the first site — exactly Python's first-defined-wins. The RC7/#272 share/split
+/// decision is unchanged: the audit's over-share origin map is keyed identically and
+/// still compares the inner *source-AST* key, so `r0*` vs `(r0)*` (distinct AST, same
+/// arm shape) is still recognized as the over-share it is (ADR-0013).
+pub(super) type RecurseShareKey = (Vec<ArmShape>, bool);
+
+/// One arm's **filter-out-agnostic** identity: each symbol reduced to its
+/// `(is_terminal, name)` key plus the gap vector. This is the single source of truth
+/// for "two arms are the same modulo `filter_out`" — used both by the within-helper
+/// arm dedup ([`recurse_helper_keyed`]) and by the cross-site sharing key
+/// ([`recurse_share_key`]), so the two can never silently disagree (#347/#377).
+type ArmShape = (Vec<(bool, String)>, Vec<usize>);
+
+/// The filter-out-agnostic identity of one compiled arm (`sym_key` per symbol + gaps).
+fn arm_share_shape((syms, gaps): &CompiledAlt) -> ArmShape {
+    (
+        syms.iter()
+            .map(GrammarCompiler::sym_key)
+            .collect::<Vec<_>>(),
+        gaps.clone(),
+    )
+}
+
+/// Build the filter-out-agnostic [`RecurseShareKey`] for `arms` under `keep_all`.
+pub(super) fn recurse_share_key(arms: &[CompiledAlt], keep_all: bool) -> RecurseShareKey {
+    (
+        arms.iter().map(arm_share_shape).collect::<Vec<_>>(),
+        keep_all,
+    )
+}
+
 /// One compiled position of an expansion (see `compile_slot`): either a fixed
 /// symbol sequence, or a distributable leading nullable contributing several
 /// present-form alternatives that fan out across the parent's alternatives.
@@ -1188,17 +1235,8 @@ impl GrammarCompiler {
         // reduce/reduce (and Earley `_ambig` over-count) of #347 in the `+`/`*`
         // path, adjacent to the H4-9 top-level-alternation case.
         {
-            let mut seen: std::collections::HashSet<(Vec<(bool, String)>, Vec<usize>)> =
-                std::collections::HashSet::new();
-            arms.retain(|(syms, gaps)| {
-                let key = (
-                    syms.iter()
-                        .map(GrammarCompiler::sym_key)
-                        .collect::<Vec<_>>(),
-                    gaps.clone(),
-                );
-                seen.insert(key)
-            });
+            let mut seen: std::collections::HashSet<ArmShape> = std::collections::HashSet::new();
+            arms.retain(|arm| seen.insert(arm_share_shape(arm)));
         }
         // Named (non-filtered) single-terminal arms are always kept regardless of
         // keep_all, so the rule options difference is semantically invisible →
@@ -1217,23 +1255,23 @@ impl GrammarCompiler {
         // In the shadow pass it keys on the inner-AST structural key so the verdict
         // matches Python Lark's `_add_recurse_rule` (`rules_cache[expr]`), reproducing
         // the un-shared helper split; in the real pass it observes the load-bearing
-        // compiled-arms `recurse_cache` (ADR-0013) and records the over-share evidence.
-        match self
-            .audit
-            .lookup(&self.recurse_cache, &arms, effective_keep_all, ast_key)
-        {
+        // `recurse_cache` (ADR-0013) and records the over-share evidence.
+        //
+        // The real-pass cache key is the **filter-out-agnostic** arm shape (#377):
+        // two `+`/`*` sites whose inner arms are the same unified terminal in opposite
+        // source order share one helper, matching Python's Tree-keyed `rules_cache`.
+        // The helper is still emitted from the **first-occurrence** `arms`, so the
+        // shared helper's `filter_out` matches the first site.
+        let share_key = recurse_share_key(&arms, effective_keep_all);
+        match self.audit.lookup(&self.recurse_cache, &share_key, ast_key) {
             RecurseDecision::Cached(name) => Symbol::NonTerminal(NonTerminal::new(&name)),
             RecurseDecision::Mint => {
                 let name = self.emit_recurse_rule(arms.clone(), effective_keep_all);
                 // The audit owns the shadow-pass cache and the over-share origin map;
-                // it returns whether the real pass still owns the compiled-arms entry.
-                let real_pass_owns_cache =
-                    !self
-                        .audit
-                        .record_minted(&arms, effective_keep_all, ast_key, &name);
+                // it returns whether the real pass still owns the share-key entry.
+                let real_pass_owns_cache = !self.audit.record_minted(&share_key, ast_key, &name);
                 if real_pass_owns_cache {
-                    self.recurse_cache
-                        .insert((arms, effective_keep_all), name.clone());
+                    self.recurse_cache.insert(share_key, name.clone());
                 }
                 Symbol::NonTerminal(NonTerminal::new(&name))
             }
