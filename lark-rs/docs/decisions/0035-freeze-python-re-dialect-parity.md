@@ -1,6 +1,6 @@
 # ADR-0035: Python `re` dialect parity is frozen pending a user-needs signal
 
-- **Status:** Proposed (pending architect ratification)
+- **Status:** Accepted (2026-06-30; architect ratified)
 - **Date:** 2026-06-30
 
 > Forward-looking *policy* ADR (architect product-direction). There is no oracle
