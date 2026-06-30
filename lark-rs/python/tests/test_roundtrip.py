@@ -138,3 +138,164 @@ def test_start_as_list():
     )
     assert parser.parse("x", start="a").data == "a"
     assert parser.parse("y", start="b").data == "b"
+
+
+# ─── #416: Token IS-A str (eq/hash invariant) + folded surface gaps ──────────
+#
+# Oracle: Python Lark 1.3.1. `Token` is a genuine `str` subclass, so
+# `isinstance`/`__hash__`/`__eq__` all derive from `str`, set/dict membership
+# keyed by the token's own string value works, and the constructor accepts
+# Python's optional position kwargs. These tests are written failed-first
+# against the pre-#416 binding (standalone class + Rust DefaultHasher).
+
+
+def _word_token():
+    """A real parsed token from the engine, not a hand-built one."""
+    parser = lark_rs.Lark(
+        "start: WORD\nWORD: /[a-z]+/\n", parser="lalr"
+    )
+    return parser.parse("hello").children[0]
+
+
+def test_token_is_str_subclass():
+    """H7-4: isinstance(tok, str) — the headline contract Python Lark gives."""
+    tok = _word_token()
+    assert isinstance(tok, str)
+
+
+def test_token_set_membership():
+    """H7-4: `tok in {tok.value}` must hold (was False: Rust hash != str hash)."""
+    tok = _word_token()
+    assert tok == "hello"  # already worked
+    assert tok in {"hello"}  # FAILED pre-fix — silent wrong result
+    assert tok not in {"goodbye"}
+
+
+def test_token_dict_key_membership():
+    """H7-4: a token finds its own value's dict entry (was KeyError)."""
+    tok = _word_token()
+    assert {"hello": 1}[tok] == 1  # FAILED pre-fix — KeyError
+
+
+def test_token_hash_matches_str_hash():
+    """H7-4: hash(tok) == hash(tok.value) — the root cause of the set/dict break."""
+    tok = _word_token()
+    assert hash(tok) == hash("hello")
+
+
+def test_constructed_token_set_membership():
+    """H7-4: a hand-built Token honors the same str contract."""
+    tok = lark_rs.Token("WORD", "hello")
+    assert isinstance(tok, str)
+    assert tok in {"hello"}
+    assert {"hello": 1}[tok] == 1
+
+
+def test_token_repr_single_quote_style():
+    """H7-4c: repr() uses Python single-quote style, not Rust {:?} double quotes."""
+    tok = lark_rs.Token("WORD", "ab")
+    assert repr(tok) == "Token('WORD', 'ab')"
+
+
+def test_token_ctor_position_kwargs():
+    """H7-4d: constructor accepts Python's optional position kwargs."""
+    tok = lark_rs.Token(
+        "WORD",
+        "ab",
+        start_pos=3,
+        line=2,
+        column=4,
+        end_line=2,
+        end_column=6,
+        end_pos=5,
+    )
+    assert tok.start_pos == 3
+    assert tok.line == 2
+    assert tok.column == 4
+    assert tok.end_line == 2
+    assert tok.end_column == 6
+    assert tok.end_pos == 5
+
+
+def test_token_ctor_defaults_are_none():
+    """H7-4d: omitted position kwargs default to None, matching Python Lark."""
+    tok = lark_rs.Token("WORD", "ab")
+    assert tok.start_pos is None
+    assert tok.line is None
+    assert tok.column is None
+    assert tok.end_line is None
+    assert tok.end_column is None
+    assert tok.end_pos is None
+
+
+def test_tree_has_meta():
+    """H7-4b: Tree always carries a .meta (Python's Tree always has a Meta)."""
+    parser = lark_rs.Lark("start: WORD\nWORD: /[a-z]+/\n", parser="lalr")
+    tree = parser.parse("hello")
+    assert hasattr(tree, "meta")
+    # Without propagate_positions the Meta is empty, exactly like Python Lark.
+    assert tree.meta.empty is True
+
+
+def test_constructed_tree_has_meta():
+    """H7-4b: a hand-built Tree also carries a .meta."""
+    tree = lark_rs.Tree("x", [lark_rs.Token("N", "1")])
+    assert hasattr(tree, "meta")
+    assert tree.meta.empty is True
+
+
+@pytest.mark.parametrize("text", ["hello", "abc", "x"])
+def test_token_str_contract_matches_oracle(text):
+    """H7-4: the full str contract is byte-identical to Python Lark's Token."""
+    rs = lark_rs.Token("WORD", text)
+    py = lark.Token("WORD", text)
+    assert isinstance(rs, str) == isinstance(py, str)
+    assert hash(rs) == hash(py)
+    assert (rs in {text}) == (py in {text})
+    assert repr(rs) == repr(py)
+
+
+def test_token_eq_is_type_aware():
+    """#416: type-aware equality, like Python Lark — same text + different type
+    are NOT equal, but a token still equals a plain str of its value."""
+    a = lark_rs.Token("A", "x")
+    b = lark_rs.Token("B", "x")
+    same = lark_rs.Token("A", "x")
+    # Oracle parity:
+    pa, pb = lark.Token("A", "x"), lark.Token("B", "x")
+    assert (a == b) == (pa == pb) == False  # noqa: E712
+    assert (a == same) is True
+    assert a == "x"  # still equals its plain-str value
+    # Overriding __eq__ must not have made the token unhashable (would re-break
+    # the #416 set/dict membership fix).
+    assert a in {"x"}
+    assert {"x": 1}[a] == 1
+
+
+def test_token_deepcopy_roundtrips():
+    """#416: copy.deepcopy preserves type + positions, matching Python Lark."""
+    import copy
+
+    tok = lark_rs.Token("WORD", "ab", start_pos=3, line=2, column=4)
+    d = copy.deepcopy(tok)
+    assert d == tok and d.type == "WORD" and d.value == "ab"
+    assert d.start_pos == 3 and d.line == 2 and d.column == 4
+
+
+def test_token_pickle_roundtrips():
+    """#416: a token round-trips through pickle, matching Python Lark."""
+    import pickle
+
+    tok = lark_rs.Token("WORD", "ab", start_pos=3, line=2, column=4)
+    p = pickle.loads(pickle.dumps(tok))
+    assert isinstance(p, lark_rs.Token)
+    assert p == tok and p.type == "WORD"
+    assert p.start_pos == 3 and p.line == 2 and p.column == 4
+
+
+def test_tree_eq_distinguishes_token_type():
+    """#416 follow-on: type-aware token eq must propagate into Tree.__eq__ so two
+    trees differing only in a child token's TYPE are not equal."""
+    a = lark_rs.Tree("x", [lark_rs.Token("A", "v")])
+    b = lark_rs.Tree("x", [lark_rs.Token("B", "v")])
+    assert a != b
