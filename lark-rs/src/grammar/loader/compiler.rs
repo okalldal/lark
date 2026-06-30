@@ -913,26 +913,36 @@ impl GrammarCompiler {
                         .filter(|x| x.origin.name == r.name)
                         .cloned()
                         .collect();
-                    // Inherit the target origin's `keep_all_tokens` (#493). Python's
-                    // `_extend` *inserts* the new alternative into the existing rule
-                    // definition tree (`base.children.insert(0, exp)`), so the prepended
-                    // alternative compiles under that rule's options — including a `!`
-                    // (`keep_all_tokens`). lark-rs instead stages the extend body as a
-                    // fresh `Plain` definition, which would otherwise compile with its
-                    // *own* (here keep-all-less) modifiers and wrongly filter an
-                    // anonymous string-literal token the target rule keeps. The bundled
-                    // `!name: NAME | "match" | "case"` is the load-bearing case: an
-                    // imported `python__name` carries `keep_all_tokens`, so `%extend
-                    // python__name: "z"` must keep its auto-named `Z` token, matching
-                    // the oracle. Mirror that by propagating keep-all onto the staged
-                    // body when every pre-existing alternative at the origin keeps all
-                    // tokens (all alternatives of one rule share its `keep_all_tokens`).
+                    // The staged body's options come from the **target** origin, NOT the
+                    // extend directive's own modifiers (#493 + #561). Python's `_extend`
+                    // *inserts* the new alternative into the existing rule definition tree
+                    // (`base.children.insert(0, exp)`) and **discards the extend tree's own
+                    // `options`** (`load_grammar.py` ~1142–1160, `# TODO: think about what
+                    // to do with 'options'`), so the prepended alternative compiles under
+                    // the *target* rule's per-rule `keep_all_tokens` only — an explicit `!`
+                    // (or any modifier) written on the `%extend` directive is ignored.
+                    //
+                    // lark-rs stages the extend body as a fresh `Plain` definition, so we
+                    // must (a) NOT copy the extend's own `r.modifiers` (a user-written `!`
+                    // would over-keep tokens Python filters — #561, the OVER-keep direction)
+                    // and (b) inherit the target origin's keep-all when it has it (else a
+                    // bare literal would under-keep a token the target rule keeps — #493,
+                    // the UNDER-keep direction). The load-bearing #493 case is the bundled
+                    // `!name: NAME | "match" | "case"`: an imported `python__name` carries
+                    // `keep_all_tokens`, so `%extend python__name: "z"` keeps its auto-named
+                    // `Z` token. The #561 case is the inverse: `%extend !python__dotted_name:
+                    // "q" "r"` over the non-keep-all `dotted_name` must FILTER its tokens —
+                    // the extend's `!` is discarded. Drive keep-all purely off the target
+                    // (all alternatives of one rule share its `keep_all_tokens`); this also
+                    // mirrors the same-grammar extend branch above, which splices onto the
+                    // existing RawRule and likewise never carries the extend's modifiers.
                     let target_keep_all = !preexisting.is_empty()
                         && preexisting.iter().all(|x| x.options.keep_all_tokens);
-                    let mut staged_modifiers = r.modifiers.clone();
-                    if target_keep_all && !staged_modifiers.contains('!') {
-                        staged_modifiers.push('!');
-                    }
+                    let staged_modifiers = if target_keep_all {
+                        "!".to_string()
+                    } else {
+                        String::new()
+                    };
                     self.pending_interior_extends
                         .push((r.name.clone(), preexisting));
                     rule_items.push(RawRule {

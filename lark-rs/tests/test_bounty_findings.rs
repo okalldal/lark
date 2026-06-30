@@ -1398,6 +1398,179 @@ fn rc493_imported_extend_literal_keep_differential() {
     }
 }
 
+/// #561 — an explicit `!` (`keep_all_tokens`) written on a `%extend` directive must be
+/// **discarded**, exactly as Python Lark's `_extend` discards the extend tree's own
+/// `options` (`load_grammar.py` ~1142–1160, `# TODO: think about what to do with
+/// 'options'`). The prepended alternative compiles under the *target* rule's per-rule
+/// `keep_all_tokens` only. This is the OPPOSITE direction of #493: #493 fixed
+/// UNDER-keeping (a bare literal inheriting a keep-all target's `!`); #561 fixes
+/// OVER-keeping (the extend's OWN `!` leaking through the imported-interior-origin path
+/// and keeping tokens Python filters).
+///
+/// The matrix the Done-when names: **imported vs same-grammar × explicit-`!`-on-extend ×
+/// keep-all/non-keep-all target**. Every `(grammar, input, expected-tree)` is the Python
+/// Lark 1.3.1 oracle (rendered in lark-rs Display form, maybe_placeholders=false).
+///
+/// Pre-#561, the imported-interior-origin branch in `stage_rule_directive` seeded the
+/// staged body's modifiers from `r.modifiers.clone()`, so the user-written `!` was
+/// preserved and the row "imported-extend EXPLICIT-! over non-keep-all interior origin"
+/// kept `[Token(Q), Token(R)]` instead of the oracle's empty `python__dotted_name`. The
+/// same-grammar rows already matched (that branch splices onto the existing RawRule and
+/// never copies the extend's modifiers), so this test pins the two `%extend` paths into
+/// agreement with each other AND the oracle.
+#[test]
+fn rc561_extend_discards_own_keep_all_modifier_differential() {
+    // (label, grammar, input, expected-tree).
+    let cases: &[(&str, &str, &str, &str)] = &[
+        // --- IMPORTED interior origin, NON-keep-all target (python__dotted_name) ---
+        // `python__dotted_name` is reached as an interior origin via `%import python
+        // (decorator)` (`decorator: "@" dotted_name … _NEWLINE`, `dotted_name: name …`
+        // is NOT keep-all). The extend prepends `"q" "r"` as the frontmost alternative,
+        // so `@q r\n` drives through it; the discarded `!` means its tokens are FILTERED.
+        (
+            "imported-extend EXPLICIT-! over non-keep-all interior origin (FILTERED — `!` discarded)",
+            "start: decorator\n%import python (decorator)\n%extend !python__dotted_name: \"q\" \"r\"\n%ignore \" \"\n",
+            "@q r\n",
+            "Tree(start, [Tree(decorator, [Tree(python__dotted_name, [])])])",
+        ),
+        (
+            "imported-extend NO-! over non-keep-all interior origin (FILTERED — control)",
+            "start: decorator\n%import python (decorator)\n%extend python__dotted_name: \"q\" \"r\"\n%ignore \" \"\n",
+            "@q r\n",
+            "Tree(start, [Tree(decorator, [Tree(python__dotted_name, [])])])",
+        ),
+        // --- IMPORTED interior origin, KEEP-ALL target (python__name is `!name`) ---
+        // The target keeps regardless of the extend's modifier; the extend's `!` is
+        // moot here, so EXPLICIT-! and NO-! must agree (both KEPT). This is the #493
+        // direction kept green — the fix must not regress it.
+        (
+            "imported-extend EXPLICIT-! over KEEP-ALL interior origin (KEPT — target keep-all)",
+            "start: decorator python__name\n%import python (decorator)\n%extend !python__name: \"q\"\n%ignore \" \"\n",
+            "@q\nq",
+            "Tree(start, [Tree(decorator, [Tree(python__dotted_name, \
+             [Tree(python__name, [Token(Q, \"q\")])])]), Tree(python__name, [Token(Q, \"q\")])])",
+        ),
+        (
+            "imported-extend NO-! over KEEP-ALL interior origin (KEPT — #493 control)",
+            "start: decorator python__name\n%import python (decorator)\n%extend python__name: \"q\"\n%ignore \" \"\n",
+            "@q\nq",
+            "Tree(start, [Tree(decorator, [Tree(python__dotted_name, \
+             [Tree(python__name, [Token(Q, \"q\")])])]), Tree(python__name, [Token(Q, \"q\")])])",
+        ),
+        // --- SAME-GRAMMAR (non-import) mirror, NON-keep-all target ---
+        // Already matched the oracle pre-#561; pinned so the two `%extend` paths can't
+        // drift apart again.
+        (
+            "same-grammar extend EXPLICIT-! over non-keep-all rule (FILTERED — `!` discarded)",
+            "start: foo\nfoo: A\n%extend !foo: \"c\" \"d\"\nA: \"a\"\n%ignore \" \"\n",
+            "c d",
+            "Tree(start, [Tree(foo, [])])",
+        ),
+        (
+            "same-grammar extend NO-! over non-keep-all rule (FILTERED — control)",
+            "start: foo\nfoo: A\n%extend foo: \"c\" \"d\"\nA: \"a\"\n%ignore \" \"\n",
+            "c d",
+            "Tree(start, [Tree(foo, [])])",
+        ),
+        // --- SAME-GRAMMAR mirror, KEEP-ALL target (`!foo`) ---
+        (
+            "same-grammar extend EXPLICIT-! over KEEP-ALL rule (KEPT — target keep-all)",
+            "start: foo\n!foo: A\n%extend !foo: \"c\" \"d\"\nA: \"a\"\n%ignore \" \"\n",
+            "c d",
+            "Tree(start, [Tree(foo, [Token(C, \"c\"), Token(D, \"d\")])])",
+        ),
+        (
+            "same-grammar extend NO-! over KEEP-ALL rule (KEPT — control)",
+            "start: foo\n!foo: A\n%extend foo: \"c\" \"d\"\nA: \"a\"\n%ignore \" \"\n",
+            "c d",
+            "Tree(start, [Tree(foo, [Token(C, \"c\"), Token(D, \"d\")])])",
+        ),
+    ];
+    for (label, g, input, expected) in cases {
+        let lark = build(g, ParserAlgorithm::Lalr, LexerType::Contextual, false)
+            .unwrap_or_else(|e| panic!("#561 differential {label}: build failed: {e:?}"));
+        let t = lark
+            .parse(input)
+            .unwrap_or_else(|e| panic!("#561 differential {label}: parse {input:?} failed: {e:?}"));
+        assert_eq!(
+            t.to_string(),
+            *expected,
+            "#561 differential {label}: tree mismatch vs Python Lark 1.3.1 oracle"
+        );
+    }
+}
+
+/// #561 Finding 2 — pin keep-all provenance across **chained** `%extend`s of an imported
+/// interior origin, so a future change can't silently flip it. Two `%extend`s of the
+/// same origin: the keep/filter decision must come from the *target* rule's
+/// `keep_all_tokens`, not incidentally from the first staged body's modifiers.
+///
+///   * chained over a NON-keep-all origin, both extends carry an explicit `!` → the `!`s
+///     are discarded, every alternative's tokens FILTERED (oracle: empty
+///     `python__dotted_name` for either extend body);
+///   * chained over the KEEP-ALL `python__name` origin → tokens KEPT regardless.
+#[test]
+fn rc561_chained_imported_extend_keep_all_provenance() {
+    let cases: &[(&str, &str, &str, &str)] = &[
+        (
+            "chained ! extends over non-keep-all origin, parse 2nd body (FILTERED)",
+            "start: decorator\n%import python (decorator)\n%extend !python__dotted_name: \"q\" \"r\"\n%extend !python__dotted_name: \"s\" \"t\"\n%ignore \" \"\n",
+            "@s t\n",
+            "Tree(start, [Tree(decorator, [Tree(python__dotted_name, [])])])",
+        ),
+        (
+            "chained ! extends over non-keep-all origin, parse 1st body (FILTERED)",
+            "start: decorator\n%import python (decorator)\n%extend !python__dotted_name: \"q\" \"r\"\n%extend !python__dotted_name: \"s\" \"t\"\n%ignore \" \"\n",
+            "@q r\n",
+            "Tree(start, [Tree(decorator, [Tree(python__dotted_name, [])])])",
+        ),
+        (
+            "chained extends over KEEP-ALL python__name, parse 2nd body (KEPT)",
+            "start: decorator python__name\n%import python (decorator)\n%extend python__name: \"q\"\n%extend python__name: \"s\"\n%ignore \" \"\n",
+            "@s\ns",
+            "Tree(start, [Tree(decorator, [Tree(python__dotted_name, \
+             [Tree(python__name, [Token(S, \"s\")])])]), Tree(python__name, [Token(S, \"s\")])])",
+        ),
+    ];
+    for (label, g, input, expected) in cases {
+        let lark = build(g, ParserAlgorithm::Lalr, LexerType::Contextual, false)
+            .unwrap_or_else(|e| panic!("#561 chained {label}: build failed: {e:?}"));
+        let t = lark
+            .parse(input)
+            .unwrap_or_else(|e| panic!("#561 chained {label}: parse {input:?} failed: {e:?}"));
+        assert_eq!(
+            t.to_string(),
+            *expected,
+            "#561 chained {label}: tree mismatch vs Python Lark 1.3.1 oracle"
+        );
+    }
+}
+
+/// #561 Finding 3 — `%extend` of an imported interior origin followed by a `%override`
+/// of the same origin: the override REPLACES the whole definition (its `rule_items.retain`
+/// + `pending_interior_extends.retain` drop the staged extend), so the prior extend — and
+/// its (now-discarded) `!` — must not leak into the result. The override body is a bare
+/// literal over the non-keep-all target, so its token is FILTERED. Guards the ordering
+/// coupling at the fix site (the staged extend body is only safe under a later same-pass
+/// `%override` because that override deletes the staged RawRule).
+#[test]
+fn rc561_extend_then_override_imported_origin_drops_staged_extend() {
+    let g = "start: decorator python__name\n%import python (decorator)\n%extend !python__name: \"q\"\n%override python__name: \"z\"\n%ignore \" \"\n";
+    let lark = build(g, ParserAlgorithm::Lalr, LexerType::Contextual, false)
+        .unwrap_or_else(|e| panic!("#561 extend-then-override: build failed: {e:?}"));
+    let t = lark
+        .parse("@z\nz")
+        .unwrap_or_else(|e| panic!("#561 extend-then-override: parse failed: {e:?}"));
+    // Override replaces with a bare literal over the (non-keep-all) target → FILTERED.
+    // The staged `%extend !python__name: "q"` (and its discarded `!`) must be gone.
+    assert_eq!(
+        t.to_string(),
+        "Tree(start, [Tree(decorator, [Tree(python__dotted_name, \
+         [Tree(python__name, [])])]), Tree(python__name, [])])",
+        "#561 extend-then-override: override must replace the staged extend; token filtered like Python"
+    );
+}
+
 /// #442 NEGATIVE CONTROL — the #428 collision must STILL reject. A *plain* user rule
 /// `python__name` beside `%import python (decorator)` is a genuine duplicate of the
 /// interior origin (Python: `Rule 'python__name' defined more than once`). The #442
