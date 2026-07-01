@@ -27,6 +27,8 @@ pub use parsers::{
     basic_lexer_conf, lalr, EarleyParser, InteractiveParser, LexFailure, OutputBuilder,
     OutputContext, ParseTable, ParserConf, RecoveryContext, TokenSource,
 };
+#[cfg(feature = "span-tree")]
+pub use parsers::{SpanBranch, SpanNode, SpanToken, SpanTreeBuilder};
 pub use postlex::Indenter;
 pub use standalone::generate as generate_standalone;
 pub use tree::{Child, Meta, ParseTree, Token, Tree};
@@ -107,6 +109,38 @@ impl Lark {
         builder: &mut B,
     ) -> Result<B::Value, LarkError> {
         self.frontend.parse_into(input, Some(start), builder)
+    }
+
+    /// Parse `input` into a zero-copy [`SpanNode`] — the borrowed-span output
+    /// backend (#233, C8; experimental, `--features span-tree`, ADR-0029 fork 3).
+    ///
+    /// Unlike [`parse`](Self::parse), which materializes an owned
+    /// [`Tree`]/[`Token`], this builds no `Tree` and copies no token value: a node's
+    /// label borrows the grammar (`'g`) and a token's value borrows `input` (`'i`),
+    /// so the result lives as long as both. [`SpanNode::materialize`] projects it
+    /// back to the exact [`ParseTree`] `parse()` returns. Supported on
+    /// `parser='lalr'` with the basic or contextual lexer (ADR-0029 fork 4); every
+    /// other configuration returns a typed [`LarkError`], exactly as
+    /// [`parse_into`](Self::parse_into).
+    ///
+    /// [`SpanNode`]: crate::parsers::span_tree::SpanNode
+    /// [`SpanNode::materialize`]: crate::parsers::span_tree::SpanNode::materialize
+    #[cfg(feature = "span-tree")]
+    pub fn parse_span<'i, 'g>(
+        &'g self,
+        input: &'i str,
+    ) -> Result<crate::parsers::span_tree::SpanNode<'i, 'g>, LarkError> {
+        self.frontend.parse_span(input, None)
+    }
+
+    /// [`parse_span`](Self::parse_span) from an explicit start symbol.
+    #[cfg(feature = "span-tree")]
+    pub fn parse_span_with_start<'i, 'g>(
+        &'g self,
+        input: &'i str,
+        start: &str,
+    ) -> Result<crate::parsers::span_tree::SpanNode<'i, 'g>, LarkError> {
+        self.frontend.parse_span(input, Some(start))
     }
 
     /// Parse with built-in panic-mode error recovery (issues #43, #94).

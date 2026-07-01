@@ -31,6 +31,13 @@ exclude = ["python", "wasm"]
 # with `--features perf-counters` to read `lark_rs::perf` (the noise-free
 # super-linearity regression net, `tests/test_earley_scaling.rs`).
 perf-counters = []
+# EXPERIMENTAL, default OFF (ADR-0029 fork 3): the zero-copy `SpanTree<'i>` output
+# backend (C8, #233) and its `Lark::parse_span` entry point. Gated because the
+# borrowed-span surface is *not stabilised* until its projection + counter gates are
+# accepted as a public commitment; a default build carries none of it. The gates
+# themselves live behind this feature (projection) plus `perf-counters` (the
+# `tree_nodes_built == 0` / `token_value_string_bytes == 0` proofs).
+span-tree = []
 # TEST-ONLY (not a user escape hatch): re-enables the `Regex` reference backend's
 # historical `fancy-regex` side-probes so the whole-lexer differential
 # (tests/test_scanner_differential.rs) has an independent oracle. Default OFF, and

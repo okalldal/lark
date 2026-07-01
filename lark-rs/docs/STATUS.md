@@ -264,6 +264,32 @@ relative-oracle ladder + perf counters; public API shape escalate). Design RFC:
 callback-trace oracle harness, then a no-behaviour-change `TreeBuilder`→seam
 refactor; implementation issues to be filed.
 
+*Progress (epic #225).* The C-series critical path `C5 (#230) → C7 (#232) → C8 (#233)`
+is landed: C5 landed the output-shape perf counters (#576); C7 landed the public
+value-parametric `Lark::parse_into<B: OutputBuilder>` seam (`f1a0b68`, ADR-0029 +
+ADR-0038); and **C8 landed the zero-copy `SpanTree<'i>` *output* backend** —
+`Lark::parse_span(input)` behind the experimental `span-tree` feature (ADR-0029
+fork 3, LALR + basic/contextual). Token values borrow `&'i input` spans and node /
+terminal labels borrow the grammar's interned `&'g` names, so no owned `Tree`/`Token`
+graph is materialized; `SpanNode::materialize()` projects back to the exact tree
+`parse()` returns. Gated (`tests/test_span_tree.rs`) by the relative oracle (span
+materialize == tree `parse()` over the arith/JSON/`maybe_placeholders`/shaping grammars
++ a non-ASCII char-index→byte-slice pin **and the whole LALR compliance bank**) plus the
+deterministic counters (`tree_nodes_built == 0`, `token_value_string_bytes == 0`, one
+`semantic_reduce_call` per reduction).
+
+**Scope — output half, not a zero-copy pipeline.** C8 is the *output-representation*
+win: `token_value_string_bytes == 0` means the result tree copies no token values, **not**
+that the parse avoided allocating them. The lexer still allocates each `Token.value: String`
+upstream (and `run_into` clones it per shift); the span builder borrows from `input` and
+drops it. So two of #233's aims are split into honest follow-ups rather than claimed here:
+the lexer-side allocation elimination (a span-emitting lexer path — **C8.1, #582**, where
+the headline allocation win actually lands) and the *bounded child-buffer reuse* counter +
+gate (**C8.2, #583**; today's per-reduction child `Vec` is bounded but neither reused nor
+gated). Other deferred follow-ups stay gated: C8b #242 (event stream) + C8c #243 (JSON
+tape), each `needs-decision` on a concrete consumer; C9 #234 (standalone); C10 #244
+(bindings `OutputMode` taxonomy).
+
 Phase 4 distribution (#46–#50) follows after Phase 3 is substantially complete.
 
 ---
