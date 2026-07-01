@@ -760,6 +760,385 @@ fn start_state_for(data: &GrammarData, start: Option<&str>) -> Result<usize, Str
     Err(format!("unknown start symbol {:?}", name))
 }
 
+// ─────────────────── semantic output seam (issue #234, C9) ───────────────────
+//
+// The value-parametric mirror of the in-process `OutputBuilder` seam
+// (`parsers/tree_builder.rs`, #232 C7): the *same* engine-driven tree shaping
+// (per-position punctuation filtering, transparent / `?`-expand1 collapse,
+// `maybe_placeholders`, `Discard`), but over an [`OutputBuilder`]'s opaque `Value`
+// instead of the runtime's own `Child`/`Tree`. A generated standalone parser can
+// therefore drive a semantic backend (`Parser::parse_into`) that never materializes
+// the runtime's tree — exactly as `Lark::parse_into` does in-process. The tree path
+// (`run`/`assemble`/`shape` above) is untouched, so the committed tree fixtures stay
+// byte-for-byte identical.
+//
+// This is baked verbatim into every generated parser, so it must depend only on
+// `regex` + std (no lark-rs items), like the rest of `runtime.rs`. It is a faithful
+// re-expression of the crate's `shape_reduction`, kept byte-identical for the tree
+// case by the round-trip fixtures and — for the semantic case — by the C1 transformer
+// oracle replayed through this seam in `src/standalone/mod.rs`.
+
+/// A cheap borrow of the baked metadata a semantic builder needs to resolve a rule
+/// index / terminal id back to the Python-side name world it dispatches on — the
+/// standalone mirror of the crate's `OutputContext`. Holds no owned data.
+pub struct OutputContext<'g> {
+    data: &'g GrammarData,
+}
+
+impl<'g> OutputContext<'g> {
+    /// The callback name Python's `create_callback` dispatches on for a reduction of
+    /// `rule_idx`: the rule's `-> alias`, else its origin/template name — exactly the
+    /// `tree_name` the tree path stamps into `Tree::data`, so a builder keyed by
+    /// callback name matches Python without re-deriving anything.
+    pub fn callback_name(&self, rule_idx: usize) -> &'g str {
+        self.data.rules[rule_idx].tree_name
+    }
+
+    /// The terminal type name for a shifted token's interned id (the `Token::type_`
+    /// world), e.g. `"NUMBER"`.
+    pub fn terminal_name(&self, terminal: u32) -> &'g str {
+        self.data.name_of(terminal)
+    }
+}
+
+/// The value-parametric semantic-output seam — the standalone mirror of the crate's
+/// [`OutputBuilder`](../../parsers/tree_builder.rs). The engine drives all tree
+/// shaping (filtering, transparent/expand1 splicing, placeholder insertion,
+/// `Discard`) and calls the builder only with the flat, already-shaped children.
+///
+/// `'i` ties a borrowing builder's `Value` to the parse `input` (owned backends
+/// ignore it). `Parser::parse_into` drives an arbitrary builder; the built-in
+/// `parse()` keeps the concrete tree path.
+pub trait OutputBuilder<'i> {
+    /// The value carried on the parse stack (Yacc's semantic value).
+    type Value;
+
+    /// A shifted terminal. Runs for *every* shifted terminal (the parse stack always
+    /// needs a value) — engine token materialization, lower-level than Python's
+    /// *visible* terminal callback. `ctx` resolves the interned terminal id to its
+    /// Python-side name; `input` is the whole source so a span backend can borrow.
+    fn token(&mut self, token: Token, input: &'i str, ctx: &OutputContext) -> Self::Value;
+
+    /// A completed reduction of `rule_idx` over its already-shaped `children` (the
+    /// engine did all filtering / transparent-splicing / placeholder insertion).
+    /// `meta` is the node's engine-computed span. `ctx.callback_name(rule_idx)`
+    /// resolves the name Python's `create_callback` dispatches on.
+    fn reduce(
+        &mut self,
+        rule_idx: usize,
+        children: &mut Vec<Self::Value>,
+        meta: &Meta,
+        ctx: &OutputContext,
+    ) -> Self::Value;
+
+    /// The value for an absent `maybe_placeholders` optional (`[...]`). Python Lark
+    /// inserts a literal `None` child; a builder maps that to its own "absent" value.
+    /// Default panics — a builder used with a `maybe_placeholders` grammar MUST
+    /// override this.
+    fn placeholder(&mut self, _ctx: &OutputContext) -> Self::Value {
+        panic!(
+            "OutputBuilder::placeholder called: this builder was used with a \
+             maybe_placeholders grammar but does not implement placeholder()"
+        );
+    }
+
+    /// Discard hook (Python's `Discard` sentinel). Default: nothing discards, so the
+    /// engine skips the check and non-discarding builders pay zero. The engine drops
+    /// discarded children *after* placeholder insertion.
+    fn is_discard(&self, _value: &Self::Value) -> bool {
+        false
+    }
+}
+
+/// Origin tag for a generic stack value — the shaping decisions the opaque `Value`
+/// cannot answer (which `child_*` meta rule applies, whether an `expand1` lone child
+/// is a `None` placeholder). Mirrors the crate's `GTag`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum GTag {
+    Token,
+    Tree,
+    None,
+}
+
+/// One value on the generic parse stack: the builder value plus the engine-tracked
+/// `meta` and `tag`, kept beside the value so shaping never inspects it.
+struct GElem<V> {
+    value: V,
+    meta: Meta,
+    tag: GTag,
+}
+
+/// The generic stack currency (the `Value`-parametric analog of [`NodeValue`]): a
+/// single value, or the children of a transparent rule to splice into the parent.
+enum GSlot<V> {
+    Value(GElem<V>),
+    Inline(Vec<GElem<V>>),
+}
+
+// Tag-aware mirrors of the `child_*` position helpers above, so a generic node's
+// `meta` is computed byte-for-byte like `Meta::from_children` over `(Meta, GTag)`
+// pairs (Token guards `> 0` on line/column; Tree reads meta directly; None
+// contributes nothing).
+fn gc_line(m: &Meta, tag: GTag) -> Option<usize> {
+    match tag {
+        GTag::Token => m.line.filter(|&l| l > 0),
+        GTag::Tree => m.line,
+        GTag::None => Option::None,
+    }
+}
+fn gc_column(m: &Meta, tag: GTag) -> Option<usize> {
+    match tag {
+        GTag::Token => m.column.filter(|&c| c > 0),
+        GTag::Tree => m.column,
+        GTag::None => Option::None,
+    }
+}
+fn gc_start(m: &Meta, tag: GTag) -> Option<usize> {
+    match tag {
+        GTag::None => Option::None,
+        _ => m.start_pos,
+    }
+}
+fn gc_end_line(m: &Meta, tag: GTag) -> Option<usize> {
+    match tag {
+        GTag::Token => m.end_line.filter(|&l| l > 0),
+        GTag::Tree => m.end_line,
+        GTag::None => Option::None,
+    }
+}
+fn gc_end_column(m: &Meta, tag: GTag) -> Option<usize> {
+    match tag {
+        GTag::Token => m.end_column.filter(|&c| c > 0),
+        GTag::Tree => m.end_column,
+        GTag::None => Option::None,
+    }
+}
+fn gc_end(m: &Meta, tag: GTag) -> Option<usize> {
+    match tag {
+        GTag::None => Option::None,
+        _ => m.end_pos,
+    }
+}
+
+/// The `Meta` a shifted token contributes (all fields present, unguarded — the raw
+/// form `ContainerSpan::observe_token` uses).
+fn meta_from_token(t: &Token) -> Meta {
+    Meta {
+        line: Some(t.line),
+        column: Some(t.column),
+        end_line: Some(t.end_line),
+        end_column: Some(t.end_column),
+        start_pos: Some(t.start_pos),
+        end_pos: Some(t.end_pos),
+        empty: false,
+    }
+}
+
+/// The `Meta` a node builds from its (post-filter, placeholder-inclusive) children —
+/// the `Meta::from_children` contract reproduced over `GElem`s so the engine (not the
+/// opaque value) is the single source of a node's span.
+fn node_meta_from_elems<V>(elems: &[GElem<V>]) -> Meta {
+    let mut meta = Meta::default();
+    for e in elems {
+        if let Some(line) = gc_line(&e.meta, e.tag) {
+            meta.line = Some(line);
+            meta.column = gc_column(&e.meta, e.tag);
+            meta.start_pos = gc_start(&e.meta, e.tag);
+            break;
+        }
+    }
+    for e in elems.iter().rev() {
+        if let Some(line) = gc_end_line(&e.meta, e.tag) {
+            meta.end_line = Some(line);
+            meta.end_column = gc_end_column(&e.meta, e.tag);
+            meta.end_pos = gc_end(&e.meta, e.tag);
+            break;
+        }
+    }
+    meta.empty = meta.line.is_none();
+    meta
+}
+
+impl ContainerSpan {
+    /// Observe a generic pre-filter child (the `GElem` analog of `observe_child`).
+    fn observe_gelem<V>(&mut self, e: &GElem<V>) {
+        match e.tag {
+            GTag::Token => self.observe(e.meta.clone()),
+            GTag::Tree => self.observe_meta(&e.meta),
+            GTag::None => {}
+        }
+    }
+}
+
+/// Shape one reduction of `rule` over its child stack slots into the parent value —
+/// the value-parametric mirror of `assemble` + `shape`. `builder` mints
+/// token/node/placeholder values; the engine owns every shaping decision.
+fn shape_reduction<'i, B: OutputBuilder<'i>>(
+    data: &GrammarData,
+    rule_idx: usize,
+    child_slots: Vec<GSlot<B::Value>>,
+    builder: &mut B,
+    ctx: &OutputContext,
+) -> GSlot<B::Value> {
+    let rule = &data.rules[rule_idx];
+
+    // Flatten to the kept child list (drop per-position filtered punctuation, splice
+    // transparent inlines, insert `nones_before` placeholders), accumulating the
+    // pre-filter container span exactly as `assemble` does.
+    let mut kept: Vec<GElem<B::Value>> = Vec::new();
+    let mut container = ContainerSpan::default();
+    for (i, slot) in child_slots.into_iter().enumerate() {
+        for _ in 0..nones_at(rule, i) {
+            kept.push(GElem {
+                value: builder.placeholder(ctx),
+                meta: Meta::default(),
+                tag: GTag::None,
+            });
+        }
+        match slot {
+            GSlot::Value(e) => {
+                if data.propagate_positions {
+                    container.observe_gelem(&e);
+                }
+                let filtered = e.tag == GTag::Token && !keep_token(rule, i);
+                if !filtered {
+                    kept.push(e);
+                }
+            }
+            GSlot::Inline(cs) => {
+                if data.propagate_positions {
+                    for c in &cs {
+                        container.observe_gelem(c);
+                    }
+                }
+                kept.extend(cs);
+            }
+        }
+    }
+    // Trailing placeholders: an empty `[...]`'s widest-alternative count, plus a
+    // distributed absent `[...]` at the end of this alternative.
+    for _ in 0..rule.placeholder_count {
+        kept.push(GElem {
+            value: builder.placeholder(ctx),
+            meta: Meta::default(),
+            tag: GTag::None,
+        });
+    }
+    for _ in 0..nones_at(rule, rule.len as usize) {
+        kept.push(GElem {
+            value: builder.placeholder(ctx),
+            meta: Meta::default(),
+            tag: GTag::None,
+        });
+    }
+
+    // `Discard` sweep: after placeholders, before the node is built. Monomorphized
+    // away for the default (non-discarding) builder.
+    kept.retain(|e| !builder.is_discard(&e.value));
+
+    if rule.transparent {
+        // `_rule` / `__anon_*`: splice into the parent, no node built.
+        GSlot::Inline(kept)
+    } else if rule.expand1 && !rule.has_alias && kept.len() == 1 {
+        // `?rule` with a single child: propagate it unchanged. A lone `None`
+        // placeholder stays an inline of exactly one `None` (RC9/#289), so the parent
+        // splices one placeholder; a real single child collapses to a bare value.
+        let e = kept.pop().unwrap();
+        match e.tag {
+            GTag::None => GSlot::Inline(vec![e]),
+            _ => GSlot::Value(e),
+        }
+    } else {
+        let mut node_meta = node_meta_from_elems(&kept);
+        if data.propagate_positions {
+            container.widen_meta(&mut node_meta);
+        }
+        let mut values: Vec<B::Value> = kept.into_iter().map(|e| e.value).collect();
+        let value = builder.reduce(rule_idx, &mut values, &node_meta, ctx);
+        GSlot::Value(GElem {
+            value,
+            meta: node_meta,
+            tag: GTag::Tree,
+        })
+    }
+}
+
+/// The value-parametric parse loop — the `run` analog that drives an
+/// [`OutputBuilder`] instead of building the runtime's own tree. Mirrors `run`'s
+/// shift/reduce/accept loop exactly, so a semantic backend sees the same shaped
+/// reductions in the same order.
+fn run_into<'i, B: OutputBuilder<'i>>(
+    data: &GrammarData,
+    tokens: &[Token],
+    start_state: usize,
+    input: &'i str,
+    builder: &mut B,
+) -> Result<B::Value, String> {
+    let ctx = OutputContext { data };
+    let mut state_stack: Vec<usize> = vec![start_state];
+    let mut value_stack: Vec<GSlot<B::Value>> = Vec::new();
+    let mut i = 0usize;
+
+    loop {
+        let state = *state_stack.last().unwrap();
+        let token = &tokens[i];
+        match data.action_at(state, token.type_id) {
+            Some(Action::Shift(ns)) => {
+                i += 1;
+                state_stack.push(ns as usize);
+                let meta = meta_from_token(token);
+                let value = builder.token(token.clone(), input, &ctx);
+                value_stack.push(GSlot::Value(GElem {
+                    value,
+                    meta,
+                    tag: GTag::Token,
+                }));
+            }
+            Some(Action::Reduce(r)) => {
+                let rule = &data.rules[r as usize];
+                let len = rule.len as usize;
+                let child_slots: Vec<GSlot<B::Value>> =
+                    value_stack.split_off(value_stack.len() - len);
+                for _ in 0..len {
+                    state_stack.pop();
+                }
+                let value = shape_reduction(data, r as usize, child_slots, builder, &ctx);
+                let top = *state_stack.last().unwrap();
+                let nt_index = rule.origin - data.n_terminals;
+                let next = data.goto_at(top, nt_index).expect("missing goto entry");
+                state_stack.push(next as usize);
+                value_stack.push(value);
+            }
+            Some(Action::Accept) => {
+                return match value_stack.pop() {
+                    Some(GSlot::Value(e)) => Ok(e.value),
+                    // A top-level `?start` lone-`None` placeholder collapse
+                    // (`?start: [A]` on `""`) reaches accept as `Inline([None])`; its
+                    // single placeholder value is the result (the None-root, #289/#382).
+                    Some(GSlot::Inline(mut es)) if es.len() == 1 => Ok(es.pop().unwrap().value),
+                    _ => Err("accept with empty value stack".to_string()),
+                };
+            }
+            None => {
+                let expected: Vec<&str> = data.action[state]
+                    .iter()
+                    .map(|(t, _)| data.name_of(*t))
+                    .collect();
+                if token.type_id == 0 {
+                    return Err(format!(
+                        "Unexpected end of input at line {}, column {}. Expected one of: {:?}",
+                        token.line, token.column, expected
+                    ));
+                }
+                return Err(format!(
+                    "Unexpected token {:?} ({}) at line {}, column {}. Expected one of: {:?}",
+                    token.value, token.type_, token.line, token.column, expected
+                ));
+            }
+        }
+    }
+}
+
 /// A self-contained parser over a baked [`GrammarData`].
 pub struct Parser {
     data: &'static GrammarData,
@@ -784,6 +1163,32 @@ impl Parser {
         let tokens = lex(self.data, &self.scanner, text)?;
         let start_state = start_state_for(self.data, start)?;
         run(self.data, &tokens, start_state)
+    }
+
+    /// Parse `text` directly into an [`OutputBuilder`]'s values, without building the
+    /// runtime's own tree (issue #234, C9). The engine drives the builder during the
+    /// parse — a shifted terminal calls [`token`](OutputBuilder::token), a completed
+    /// reduction calls [`reduce`](OutputBuilder::reduce) over its already-shaped
+    /// children — the standalone mirror of `Lark::parse_into`. `parse()` is exactly
+    /// this with the built-in tree backend.
+    pub fn parse_into<'i, B: OutputBuilder<'i>>(
+        &self,
+        text: &'i str,
+        builder: &mut B,
+    ) -> Result<B::Value, String> {
+        self.parse_into_from(text, None, builder)
+    }
+
+    /// [`parse_into`](Self::parse_into) from an explicit start symbol.
+    pub fn parse_into_from<'i, B: OutputBuilder<'i>>(
+        &self,
+        text: &'i str,
+        start: Option<&str>,
+        builder: &mut B,
+    ) -> Result<B::Value, String> {
+        let tokens = lex(self.data, &self.scanner, text)?;
+        let start_state = start_state_for(self.data, start)?;
+        run_into(self.data, &tokens, start_state, text, builder)
     }
 }
 
@@ -910,4 +1315,6 @@ impl Default for Parser {
 }
 
 #[allow(unused_imports)]
-pub use parser::{Child, ParseTree, Parser, Token, Tree};
+pub use parser::{
+    Child, Meta, OutputBuilder, OutputContext, ParseTree, Parser, Token, Tree,
+};
