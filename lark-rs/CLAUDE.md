@@ -633,9 +633,11 @@ rule splicing), committing the ordered `{kind,name,value?}` event stream to
 each case through `Lark::parse_into` with an event-logging `OutputBuilder` and
 asserts a **byte-identical** stream over both lexers, XFAIL-gated
 (`event_stream_xfail.json`, `LARK_EVENT_STREAM_WRITE_XFAIL=1` to regenerate) under
-the ADR-0030 no-silent-skips discipline. Currently 848/848 case-configs match with
-an empty allow-list. The event stream is the lexer-independent parse post-order, so
-the oracle stores it once per case; the replay still drives both lexers, so a future
+the ADR-0030 no-silent-skips discipline: where Python rejected an input under a
+lexer it built the grammar under, lark-rs must reject it too (a more-permissive
+accept fails). Currently 528/528 case-configs (119 deduped grammars) agree with an
+empty allow-list. The event stream is the lexer-independent parse post-order, so the
+oracle stores it once per case; the replay still drives both lexers, so a future
 lexer-specific divergence is caught (and would be pinned per-config, never papered
 over). LALR + basic/contextual only, by nature (`transformer=` and `parse_into` are
 both LALR-only).

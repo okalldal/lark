@@ -31,10 +31,12 @@
 //!
 //! Gated by `event_stream_xfail.json`, exactly like the compliance banks: every
 //! known divergence is listed explicitly, the list only shrinks, and there are **no
-//! silent skips** — a case whose lark-rs stream differs from Python's (an extra,
-//! missing, mis-ordered, or mis-valued event) fails unless allow-listed. Set
-//! `LARK_EVENT_STREAM_WRITE_XFAIL=1` to regenerate the allow-list after an
-//! intentional change, then review the diff before committing.
+//! silent skips**. A case whose lark-rs stream differs from Python's (an extra,
+//! missing, mis-ordered, or mis-valued event) fails unless allow-listed — and where
+//! Python *rejected* an input under a lexer it built the grammar under (so no
+//! stream), lark-rs must reject it too: accepting it is a more-permissive
+//! divergence and fails just the same. Set `LARK_EVENT_STREAM_WRITE_XFAIL=1` to
+//! regenerate the allow-list after an intentional change, then review the diff.
 //!
 //! Scope: LALR + basic/contextual only — Python's `transformer=` and `parse_into`
 //! are both LALR-only (ADR-0029 fork 4), so this is symmetric, not a coverage gap.
@@ -206,31 +208,40 @@ fn test_transform_event_stream_bank() {
             let lark = try_build(grammar, entry_options(entry, lexer));
 
             for (ci, case) in cases.iter().enumerate() {
-                // Only replay configs whose Python embedded transform produced a
-                // stream for this input (a contextual grammar can reject an input
-                // the basic lexer mis-tokenizes — no stream, nothing to compare).
+                checked += 1;
+                let id = format!("{ri}:{config_key}:{ci}");
+                let input = case["input"].as_str().unwrap_or("");
+
+                let Some(lark) = &lark else {
+                    // Python built the grammar under this lexer; lark-rs could not.
+                    // A real divergence, not a silent skip.
+                    failures.insert(id);
+                    continue;
+                };
+
+                // `ok_configs` lists the configs whose embedded transform produced
+                // a stream for *this* input. Python built the grammar under
+                // `config_key` (it's in `configs`), so a config absent from
+                // `ok_configs` means Python *rejected* this input under this lexer
+                // (a contextual grammar can reject an input the basic lexer
+                // mis-tokenizes). That is a reject-parity obligation, not a skip:
+                // lark-rs must reject it too, else it is more-permissive (ADR-0030).
                 let ok_here = case["ok_configs"]
                     .as_array()
                     .map(|a| a.iter().any(|c| c.as_str() == Some(config_key)))
                     .unwrap_or(false);
-                if !ok_here {
-                    continue;
-                }
-                checked += 1;
 
-                let id = format!("{ri}:{config_key}:{ci}");
-                let Some(lark) = &lark else {
-                    // Python built + transformed this; lark-rs could not build the
-                    // grammar. A real divergence, not a silent skip.
-                    failures.insert(id);
-                    continue;
-                };
-                let input = case["input"].as_str().unwrap_or("");
-                match try_event_stream(lark, input) {
-                    Some(got) if &got == oracle_events(case, config_key) => {}
-                    _ => {
-                        failures.insert(id);
+                if ok_here {
+                    match try_event_stream(lark, input) {
+                        Some(got) if &got == oracle_events(case, config_key) => {}
+                        _ => {
+                            failures.insert(id);
+                        }
                     }
+                } else if try_event_stream(lark, input).is_some() {
+                    // Python rejected this input under this lexer, but lark-rs
+                    // accepted it — a more-permissive divergence.
+                    failures.insert(id);
                 }
             }
         }
@@ -251,13 +262,9 @@ fn test_transform_event_stream_bank() {
     );
 
     let passing = checked - failures.len();
-    let pct = if checked == 0 {
-        100.0
-    } else {
-        100.0 * passing as f64 / checked as f64
-    };
+    let pct = 100.0 * passing as f64 / checked as f64;
     eprintln!(
-        "event-stream differential: {passing}/{checked} case-configs byte-identical \
+        "event-stream differential: {passing}/{checked} case-configs agree \
          ({pct:.1}%); {} known-XFAIL",
         xfail.len()
     );

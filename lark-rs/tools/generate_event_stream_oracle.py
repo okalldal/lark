@@ -149,12 +149,12 @@ def config_event_streams(rec: dict, lexer: str, accepted: list[dict]) -> dict | 
     terminal_names = [t.name for t in probe.terminals]
 
     tracer, log = build_tracer(terminal_names)
-    try:
-        parser = Lark(rec["grammar"], transformer=tracer, **opts)
-    except Exception:
-        # An embedded-transformer build that the plain build accepted is
-        # unexpected; treat as "no config" rather than crashing the generator.
-        return None
+    # The plain build above already succeeded, so the embedded build must too —
+    # `transformer=` only adds callback wiring, no new grammar constraints. If it
+    # ever raises we let it propagate rather than silently drop the config: a
+    # dropped config would vanish from the oracle and the Rust side would skip it
+    # too (via `ok_configs`), hiding a real asymmetry between the two seams.
+    parser = Lark(rec["grammar"], transformer=tracer, **opts)
 
     streams: dict[str, list | None] = {}
     for case in accepted:
@@ -176,8 +176,26 @@ def config_event_streams(rec: dict, lexer: str, accepted: list[dict]) -> dict | 
 def generate() -> dict:
     bank = json.loads(BANK_PATH.read_text())
 
+    # The bank keys records by `(grammar, options, lexer)`, but this generator
+    # builds *both* lexers for every record, so the recorded `lexer` is
+    # irrelevant here: two records that share a grammar + non-lexer options would
+    # emit byte-identical entries (verified: such records also share their
+    # accepted-input sets). Dedup on the parse-affecting option tuple, keeping the
+    # first record's index, so each distinct grammar is checked once, not once per
+    # bank record — no double-counting and no doubled XFAIL ids.
+    def dedup_key(rec: dict):
+        return (
+            rec["grammar"],
+            json.dumps(rec["start"], sort_keys=True),
+            rec.get("maybe_placeholders", True),
+            rec.get("keep_all_tokens", False),
+            rec.get("strict", False),
+            rec.get("g_regex_flags", ""),
+        )
+
     entries = []
     divergences = 0
+    seen: set = set()
     for ri, rec in enumerate(bank):
         if rec.get("construct_error"):
             continue
@@ -186,6 +204,10 @@ def generate() -> dict:
             # Error-only records have no transform to trace (done-when: the
             # differential runs over the accepted subset only).
             continue
+        key = dedup_key(rec)
+        if key in seen:
+            continue
+        seen.add(key)
 
         # Per config: {input: [events] | None (rejected under this lexer)}.
         per_config: dict[str, dict] = {}
