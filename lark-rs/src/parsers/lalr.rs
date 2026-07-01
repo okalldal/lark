@@ -1070,15 +1070,14 @@ impl LalrParser {
     /// (the `parse_into(tree) == parse()` relative oracle over the compliance
     /// corpus). `input` is the whole source so a borrowing builder can slice spans;
     /// the tree backend ignores it.
-    pub(crate) fn run_into<'i, S, B>(
+    pub(crate) fn run_into<'i, B>(
         &self,
-        source: &mut S,
+        source: &mut dyn TokenSource,
         start: Option<&str>,
         builder: &mut B,
         input: &'i str,
     ) -> Result<B::Value, ParseError>
     where
-        S: TokenSource,
         B: OutputBuilder<'i>,
     {
         let ctx = OutputContext::new(&self.table.rules, &self.table.symbols);

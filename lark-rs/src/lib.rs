@@ -24,12 +24,12 @@ pub use lookaround::classify::{
 };
 pub use lookaround::lower::{GuardSpec, LookbehindGuard, LowerDecline, LoweredBranch};
 pub use parsers::{
-    basic_lexer_conf, lalr, EarleyParser, InteractiveParser, LexFailure, ParseTable, ParserConf,
-    RecoveryContext, TokenSource,
+    basic_lexer_conf, lalr, EarleyParser, InteractiveParser, LexFailure, OutputBuilder,
+    OutputContext, ParseTable, ParserConf, RecoveryContext, TokenSource,
 };
 pub use postlex::Indenter;
 pub use standalone::generate as generate_standalone;
-pub use tree::{Child, ParseTree, Token, Tree};
+pub use tree::{Child, Meta, ParseTree, Token, Tree};
 
 /// Main entry point — mirrors Python's `Lark(grammar, parser=..., lexer=...)`
 pub struct Lark {
@@ -78,6 +78,35 @@ impl Lark {
 
     pub fn parse_with_start(&self, text: &str, start: &str) -> Result<ParseTree, ParseError> {
         self.frontend.parse(text, Some(start))
+    }
+
+    /// Parse `input` directly into an [`OutputBuilder`]'s values, without building a
+    /// generic [`ParseTree`] (#232, C7). The engine drives the builder during the
+    /// parse — a shifted terminal calls [`token`](OutputBuilder::token), a completed
+    /// reduction calls [`reduce`](OutputBuilder::reduce) over its already-shaped
+    /// children — mirroring Python Lark's embedded transformer. `parse()` is exactly
+    /// this with the built-in tree backend.
+    ///
+    /// Supported on `parser='lalr'` with the basic or contextual lexer (ADR-0029
+    /// fork 4); Earley/CYK stay post-parse and every other configuration returns a
+    /// typed [`LarkError`]. A `SpanTree`/custom builder may borrow `&input`, tying
+    /// its values' lifetime to `input`.
+    pub fn parse_into<'i, B: OutputBuilder<'i>>(
+        &self,
+        input: &'i str,
+        builder: &mut B,
+    ) -> Result<B::Value, LarkError> {
+        self.frontend.parse_into(input, None, builder)
+    }
+
+    /// [`parse_into`](Self::parse_into) from an explicit start symbol.
+    pub fn parse_into_with_start<'i, B: OutputBuilder<'i>>(
+        &self,
+        input: &'i str,
+        start: &str,
+        builder: &mut B,
+    ) -> Result<B::Value, LarkError> {
+        self.frontend.parse_into(input, Some(start), builder)
     }
 
     /// Parse with built-in panic-mode error recovery (issues #43, #94).

@@ -12,9 +12,11 @@ pub use lalr::{build_lalr_table, LalrParser, ParseTable, RecoveryContext};
 pub use token_source::{
     BasicRecovering, Contextual, ContextualRecovering, LexFailure, PreLexed, TokenSource,
 };
-// OutputBuilder, Slot, TreeOutputBuilder (and their backward-compat aliases
-// NodeValue, TreeBuilder) are crate-internal — issue #231 defers the public
-// trait shape. Internal code imports via `super::tree_builder::*` directly.
+// The value-parametric semantic-output seam (#232, C7): `OutputBuilder` (the open
+// Rust trait, ADR-0029 fork 3) and `OutputContext` (id→name resolution) are public;
+// `Slot`/`TreeOutputBuilder`/`GSlot` and the aliases `NodeValue`/`TreeBuilder` stay
+// crate-internal (`super::tree_builder::*`).
+pub use tree_builder::{OutputBuilder, OutputContext};
 
 use crate::error::{GrammarError, LarkError, ParseError, RecoveredTree, RecoveryAction};
 use crate::grammar::intern::{SymbolId, SymbolTable};
@@ -157,6 +159,35 @@ trait ParserDriver: Send {
     ) -> Result<InteractiveParser<'_>, LarkError> {
         Err(interactive_unsupported())
     }
+
+    /// The value-parametric parse pieces (`parse_into`), exposed by the LALR +
+    /// basic/contextual drivers only; `None` everywhere else — Earley/CYK stay
+    /// post-parse (ADR-0029 fork 4) and the postlex LALR drivers are a follow-up
+    /// (like recovery/interactive were). See [`LalrInto`].
+    fn as_lalr_into(&self) -> Option<&dyn LalrInto> {
+        None
+    }
+}
+
+/// The value-parametric parse capability behind `parse_into`, implemented by the
+/// LALR basic/contextual drivers. Non-generic so it fits the `dyn ParserDriver`
+/// object: the generic builder is monomorphized in [`ParsingFrontend::parse_into`],
+/// which drives [`LalrParser::run_into`] over the source this yields.
+pub(crate) trait LalrInto {
+    fn parser(&self) -> &LalrParser;
+    /// The token source for `text` — the basic driver lexes eagerly, the contextual
+    /// driver lazily (parser-state-narrowed), exactly as their `parse` paths do.
+    fn make_source<'a>(&'a self, text: &'a str) -> Result<Box<dyn TokenSource + 'a>, ParseError>;
+}
+
+/// The typed refusal for `parse_into` on a configuration that doesn't support the
+/// during-parse seam (Earley/CYK/postlex). Mirrors [`recovery_unsupported`].
+fn parse_into_unsupported() -> LarkError {
+    LarkError::Grammar(GrammarError::Other {
+        msg: "parse_into (semantic output) requires parser='lalr' with the basic or \
+              contextual lexer"
+            .to_string(),
+    })
 }
 
 /// The typed refusal for a configuration without recovery support — shared by
@@ -293,6 +324,21 @@ impl ParserDriver for LalrBasic {
             text.to_string(),
         ))
     }
+
+    fn as_lalr_into(&self) -> Option<&dyn LalrInto> {
+        Some(self)
+    }
+}
+
+impl LalrInto for LalrBasic {
+    fn parser(&self) -> &LalrParser {
+        &self.parser
+    }
+
+    fn make_source<'a>(&'a self, text: &'a str) -> Result<Box<dyn TokenSource + 'a>, ParseError> {
+        // Eager whole-stream lex, exactly as `parse` does before driving the parser.
+        Ok(Box::new(PreLexed::new(self.lexer.lex(text)?)))
+    }
 }
 
 /// LALR over the contextual lexer (the default): the parser state narrows which
@@ -348,6 +394,22 @@ impl ParserDriver for LalrContextual {
             stack,
             text.to_string(),
         ))
+    }
+
+    fn as_lalr_into(&self) -> Option<&dyn LalrInto> {
+        Some(self)
+    }
+}
+
+impl LalrInto for LalrContextual {
+    fn parser(&self) -> &LalrParser {
+        &self.parser
+    }
+
+    fn make_source<'a>(&'a self, text: &'a str) -> Result<Box<dyn TokenSource + 'a>, ParseError> {
+        // Lazy, parser-state-narrowed lexing (no eager whole-stream lex), exactly as
+        // `parse_contextual` drives it.
+        Ok(Box::new(Contextual::new(text, &self.lexer)))
     }
 }
 
@@ -559,6 +621,27 @@ impl ParsingFrontend {
         start: Option<&str>,
     ) -> Result<InteractiveParser<'_>, LarkError> {
         self.driver.parse_interactive(text, start)
+    }
+
+    /// Parse `input` directly into a builder's values — the value-parametric
+    /// semantic-output seam (#232, C7). The engine drives the builder during the
+    /// parse (no intermediate generic tree), applying all tree shaping before each
+    /// `reduce`. LALR + basic/contextual only (ADR-0029 fork 4); every other
+    /// configuration returns a typed refusal.
+    pub fn parse_into<'i, B: OutputBuilder<'i>>(
+        &self,
+        input: &'i str,
+        start: Option<&str>,
+        builder: &mut B,
+    ) -> Result<B::Value, LarkError> {
+        let into = self
+            .driver
+            .as_lalr_into()
+            .ok_or_else(parse_into_unsupported)?;
+        let mut source = into.make_source(input).map_err(LarkError::Parse)?;
+        into.parser()
+            .run_into(source.as_mut(), start, builder, input)
+            .map_err(LarkError::Parse)
     }
 }
 

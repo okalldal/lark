@@ -95,17 +95,15 @@ pub(crate) type NodeValue = Slot;
 /// stays lazy and the engine hot path stays interned — "an array index per token,
 /// never a string hash." Holds no owned data.
 ///
-// TODO(#232, C7): consumed by the value-parametric `OutputBuilder` reshape landing
-// in this PR; `allow(dead_code)` until the trait methods take it.
-#[allow(dead_code)]
-pub(crate) struct OutputContext<'g> {
+/// Public so a user [`OutputBuilder`] can resolve ids to names; constructed only by
+/// the engine (`new` is crate-internal).
+pub struct OutputContext<'g> {
     rules: &'g [CompiledRule],
     symbols: &'g SymbolTable,
 }
 
-#[allow(dead_code)]
 impl<'g> OutputContext<'g> {
-    pub fn new(rules: &'g [CompiledRule], symbols: &'g SymbolTable) -> Self {
+    pub(crate) fn new(rules: &'g [CompiledRule], symbols: &'g SymbolTable) -> Self {
         OutputContext { rules, symbols }
     }
 
@@ -153,7 +151,7 @@ impl<'g> OutputContext<'g> {
 /// filtering, transparent/anon splicing, `expand1`, placeholder insertion — before
 /// calling [`reduce`](OutputBuilder::reduce), so the builder only ever sees the
 /// flat, already-shaped child list.
-pub(crate) trait OutputBuilder<'i> {
+pub trait OutputBuilder<'i> {
     /// The value carried on the parse stack (Yacc's semantic value).
     type Value;
 
