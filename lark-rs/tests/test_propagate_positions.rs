@@ -196,7 +196,7 @@ type SpanShape = (
     Option<u32>, // end_column
     Option<u32>, // start_pos
     Option<u32>, // end_pos
-    bool,          // empty
+    bool,        // empty
 );
 
 /// Load `(name, grammar, input)` for each `EMPTY_NULLABLE_CASE_NAMES` entry from the
