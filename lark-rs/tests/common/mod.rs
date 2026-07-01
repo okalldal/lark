@@ -434,3 +434,52 @@ fn assign(rust: &[Child], oracle: &[serde_json::Value], i: usize, used: &mut [bo
     }
     false
 }
+
+// ─── Structural parse-tree equality (positions ignored) ─────────────────────
+//
+// The reconstructor's metamorphic round-trip (`tests/test_reconstruct.rs` and
+// the bank sweep `tests/test_reconstruct_bank.rs`) compares two lark-rs trees
+// directly: node labels, child shapes, and token (type, value) pairs — the
+// same fields the oracle fixtures pin, with byte positions excluded because
+// reconstructed text has different offsets. One shared definition so the
+// curated suite and the bank sweep can never disagree on what "round-trip
+// preserved the tree" means.
+
+/// Iterative (worklist) comparison: parse trees are as deep as the input is
+/// nested, and callers run this on deliberately small stacks (#151 discipline).
+pub fn children_structural_eq(a: &[Child], b: &[Child]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut stack: Vec<(&Child, &Child)> = a.iter().zip(b).collect();
+    while let Some(pair) = stack.pop() {
+        match pair {
+            (Child::Tree(x), Child::Tree(y)) => {
+                if x.data != y.data || x.children.len() != y.children.len() {
+                    return false;
+                }
+                stack.extend(x.children.iter().zip(&y.children));
+            }
+            (Child::Token(x), Child::Token(y)) => {
+                if x.type_ != y.type_ || x.value != y.value {
+                    return false;
+                }
+            }
+            (Child::None, Child::None) => {}
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Structural equality of two parse results, ignoring positions/meta.
+pub fn parse_tree_structural_eq(a: &ParseTree, b: &ParseTree) -> bool {
+    match (a, b) {
+        (ParseTree::Tree(x), ParseTree::Tree(y)) => {
+            x.data == y.data && children_structural_eq(&x.children, &y.children)
+        }
+        (ParseTree::Token(x), ParseTree::Token(y)) => x.type_ == y.type_ && x.value == y.value,
+        (ParseTree::None, ParseTree::None) => true,
+        _ => false,
+    }
+}

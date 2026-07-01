@@ -52,27 +52,48 @@ rules over a tree-children alphabet, Earley matching, discarded-terminal
 write-back, `term_subs`, `insert_spaces`), so the architecture stays
 recognizable next to the reference implementation — but its behaviour is
 allowed to exceed Python's where the metamorphic gate proves the improvement.
-Three deliberate divergences, each caught-or-motivated by the gate:
+The deliberate divergences, each caught-or-motivated by the gate and pinned by
+`tests/test_reconstruct.rs` + the bank sweep:
 
-- **Bridge rules for every expand1 origin** (Python only bridges some): an
-  uncollapsed `?list: item+` node was unmatchable in Python's scheme; the bank
-  sweep found it.
-- **Duplicate-shape alternatives keep the writable, most-explicit variant**:
-  no non-literal discarded terminals if avoidable (`_WS? → ε` instead of an
-  error), then the most discarded literals (dropping a distinguishing `"B"`
-  re-parsed as a higher-priority sibling rule; the bank sweep found it).
+- **Bridge rules for every expand1 origin** (Python only bridges some): in
+  Python's scheme an *uncollapsed* `?list: item+` node is unmatchable — its
+  only recons rule is a unary helper reference, and no bridge lets a `list`
+  reference consume the surviving node.
+- **Multi-symbol expand1 rules also get a span-one global copy**: `?r: _x B`
+  collapses exactly when it kept one child (`_x` spliced empty), so the rule
+  must explain a collapsed *reference* too — constrained to a one-child span
+  so it can never swallow multi-child sequences a sibling alternative really
+  produced. Python's root-only routing makes such collapsed trees unmatchable.
+- **Alias rules are root-only in both directions**: never predicted for an
+  inner reference (a collapsed `?a: D` must not write a colliding
+  `x: D ";" -> a`'s `";"`), and preferred over global structural rules when
+  root-matching a surviving node (which was by definition produced by a
+  node-labeling rule).
+- **Duplicate-shape alternatives keep the *soundest* variant**: an unwritable
+  (non-literal) discarded terminal that is `%ignore`d may be dropped — that is
+  provably tree-neutral, the re-parse ignores it — but otherwise the MOST
+  discarded write-outs win. Dropping a distinguishing token can flip the
+  re-parse to a higher-priority sibling rule (`b.1: "A"+ "B"?` losing its
+  `"B"` re-parses as `a.2: "A"+`), and silently dropping a *required*
+  non-ignored `_WS` would corrupt the tree where Python fails loudly — so the
+  unwritable variant wins and errors typed (`NonLiteralTerminal`) unless
+  `term_subs` supplies it, matching Python's `NotImplementedError` posture.
 - **Separator insertion is grammar-aware**: the inserted separator is one an
-  `%ignore` terminal can actually absorb (`" "`, `"\n"`, or `"\t"`); a grammar
-  that ignores none of them gets exact concatenation. Python inserts `" "`
-  unconditionally, which can never re-parse in whitespace-significant
-  grammars — this one change took the bank sweep from 185/364 to 360/364.
+  `%ignore` terminal can actually absorb (`" "`, `"\n"`, `"\t"`, else an
+  `%ignore`d fixed-string terminal's own text); a grammar that ignores nothing
+  insertable gets exact concatenation. Python inserts `" "` unconditionally,
+  which can never re-parse in a grammar that does not ignore whitespace — the
+  failure mode of roughly half the bank before this rule. Fusion detection is
+  Unicode `XID_Continue` (the `unicode-ident` crate), Python's
+  `is_id_continue` semantics — combining marks count.
 
 ## Consequences
 
 - **Buys:** a serialization engine whose correctness is checked by CI over
   hundreds of real grammars without any new Python tooling; a reusable pattern
-  (metamorphic banks) for future oracle-less features; bug discovery pressure —
-  the sweep found two real matcher bugs before the first commit.
+  (metamorphic banks) for future oracle-less features; real bug-discovery
+  pressure (both matcher divergences above were caught by the sweep, not by
+  inspection).
 - **Costs / rules out:** no byte-stability guarantee — the output is *a*
   canonical text, not the input text, and its exact bytes may change as the
   dedup/derivation policy evolves (only the round-trip property is pinned).
