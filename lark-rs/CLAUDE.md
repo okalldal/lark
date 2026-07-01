@@ -622,6 +622,26 @@ Enforcement: `tests/test_oracle_coverage.rs` fails the build if a committed gram
 neither an oracle nor a `QUARANTINE` entry; CI (`.github/workflows/lark-rs.yml`) also
 regenerates all three oracle generators and fails if the committed JSON drifts.
 
+**Event-stream differential (the same bank as a `parse_into` net, #595 / #594).**
+`tools/generate_event_stream_oracle.py` reads the committed `compliance/bank.json`
+and, for every *accepted* case, runs a grammar-agnostic "log every callback"
+transformer **embedded** in Python Lark (per-terminal methods so token events fire
+symmetrically — sidestepping the #229 `__default_token__` embedded gap — plus a
+`__default__` rule tracer filtered to non-`_` names to match lark-rs's transparent-
+rule splicing), committing the ordered `{kind,name,value?}` event stream to
+`transformer/event_stream_bank.json`. `tests/test_transform_event_stream.rs` replays
+each case through `Lark::parse_into` with an event-logging `OutputBuilder` and
+asserts a **byte-identical** stream over both lexers, XFAIL-gated
+(`event_stream_xfail.json`, `LARK_EVENT_STREAM_WRITE_XFAIL=1` to regenerate) under
+the ADR-0030 no-silent-skips discipline: where Python rejected an input under a
+lexer it built the grammar under, lark-rs must reject it too (a more-permissive
+accept fails). Currently 528/528 case-configs (119 deduped grammars) agree with an
+empty allow-list. The event stream is the lexer-independent parse post-order, so the
+oracle stores it once per case; the replay still drives both lexers, so a future
+lexer-specific divergence is caught (and would be pinned per-config, never papered
+over). LALR + basic/contextual only, by nature (`transformer=` and `parse_into` are
+both LALR-only).
+
 ---
 
 ## Wild-Grammar Bank — Real-World Regression Net + Benchmarks

@@ -146,10 +146,14 @@ jobs:
           python3 tools/extract_lark_compliance.py
           python3 tools/generate_wild_oracles.py
           python3 tools/generate_transformer_oracles.py
+          # Reads the freshly-regenerated compliance/bank.json above, so it must
+          # run after extract_lark_compliance.py (#595).
+          python3 tools/generate_event_stream_oracle.py
           if ! git diff --quiet -- tests/fixtures/oracles; then
             echo "::error::Committed oracles are stale. Run tools/generate_oracles.py,"
             echo "tools/extract_lark_compliance.py, tools/generate_wild_oracles.py,"
-            echo "and tools/generate_transformer_oracles.py, then commit the changes."
+            echo "tools/generate_transformer_oracles.py, and"
+            echo "tools/generate_event_stream_oracle.py, then commit the changes."
             git --no-pager diff --stat -- tests/fixtures/oracles
             exit 1
           fi
