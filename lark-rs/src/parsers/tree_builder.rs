@@ -26,7 +26,7 @@
 //! (not re-exported from the public API); the public trait shape is deferred to
 //! issue #231.
 
-use crate::grammar::intern::CompiledRule;
+use crate::grammar::intern::{CompiledRule, SymbolId, SymbolTable};
 use crate::perf;
 use crate::tree::{Child, Meta, ParseTree, Token, Tree};
 
@@ -86,6 +86,51 @@ pub(crate) enum Slot {
 
 // Backward-compat alias: all internal code that used `NodeValue` keeps compiling.
 pub(crate) type NodeValue = Slot;
+
+// ─── OutputContext: interned-id → name resolution for builders ──────────────
+
+/// A cheap borrow of the metadata a builder needs to resolve an interned rule
+/// index / [`SymbolId`] back to the name world Python Lark dispatches on. Passed
+/// per-call to the [`OutputBuilder`] methods (ADR-0029 fork 6) so name resolution
+/// stays lazy and the engine hot path stays interned — "an array index per token,
+/// never a string hash." Holds no owned data.
+///
+// TODO(#232, C7): consumed by the value-parametric `OutputBuilder` reshape landing
+// in this PR; `allow(dead_code)` until the trait methods take it.
+#[allow(dead_code)]
+pub(crate) struct OutputContext<'g> {
+    rules: &'g [CompiledRule],
+    symbols: &'g SymbolTable,
+}
+
+#[allow(dead_code)]
+impl<'g> OutputContext<'g> {
+    pub fn new(rules: &'g [CompiledRule], symbols: &'g SymbolTable) -> Self {
+        OutputContext { rules, symbols }
+    }
+
+    /// The callback name Python's `create_callback` dispatches on for a reduction of
+    /// `rule_idx`: the rule's `-> alias`, else its origin/template name. This is
+    /// exactly the `tree_name` the loader already resolved (alias-else-origin,
+    /// template source folded in at lowering) — the same string `Tree::data`
+    /// carries, so a builder keyed by callback name matches Python without the
+    /// engine re-deriving anything.
+    pub fn callback_name(&self, rule_idx: usize) -> &'g str {
+        &self.rules[rule_idx].tree_name
+    }
+
+    /// The rule's explicit `-> alias`, if any; `callback_name` falls back to the
+    /// origin name when this is `None`.
+    pub fn rule_alias(&self, rule_idx: usize) -> Option<&'g str> {
+        self.rules[rule_idx].alias.as_deref()
+    }
+
+    /// The terminal type name for a shifted token's interned id (the `Token::type_`
+    /// world), e.g. `"NUMBER"`.
+    pub fn terminal_name(&self, terminal: SymbolId) -> &'g str {
+        self.symbols.name(terminal)
+    }
+}
 
 // ─── OutputBuilder trait ────────────────────────────────────────────────────
 
