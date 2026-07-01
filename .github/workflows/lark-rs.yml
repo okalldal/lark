@@ -105,6 +105,18 @@ jobs:
           --test test_lalr_table_scaling
           --test test_output_counters
 
+      # Zero-copy SpanTree backend gate (semantic-output C8, #233). The backend and
+      # its `Lark::parse_span` entry point live behind the experimental `span-tree`
+      # feature (ADR-0029 fork 3), so `cargo test --all` above never touches them;
+      # they must run explicitly. `perf-counters` is added so the same build also
+      # exercises the counter gate (`tree_nodes_built == 0` /
+      # `token_value_string_bytes == 0`) alongside the projection gates (span
+      # materialize == tree parse, incl. the whole compliance bank).
+      - name: SpanTree backend gate (span-tree + perf-counters)
+        run: >-
+          cargo test --features "span-tree perf-counters"
+          --test test_span_tree
+
       # python.lark LALR build gate (#79). The headline result of the EBNF-helper
       # dedup is that upstream python.lark's full LALR table now *builds* (without
       # sharing, its repeated `("," X)*` helpers collide as unresolvable R/R). The

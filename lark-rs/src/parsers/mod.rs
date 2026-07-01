@@ -2,6 +2,8 @@ pub mod cyk;
 pub mod earley;
 pub mod interactive;
 pub mod lalr;
+#[cfg(feature = "span-tree")]
+pub mod span_tree;
 pub mod token_source;
 pub mod tree_builder;
 
@@ -17,6 +19,12 @@ pub use token_source::{
 // `Slot`/`TreeOutputBuilder`/`GSlot` and the aliases `NodeValue`/`TreeBuilder` stay
 // crate-internal (`super::tree_builder::*`).
 pub use tree_builder::{OutputBuilder, OutputContext};
+// The zero-copy `SpanTree<'i>` backend (#233, C8): experimental / feature-gated
+// (ADR-0029 fork 3). `SpanNode`/`SpanBranch`/`SpanToken` are the borrowed
+// parse-tree types; `SpanTreeBuilder` is the `OutputBuilder` impl `Lark::parse_span`
+// drives.
+#[cfg(feature = "span-tree")]
+pub use span_tree::{SpanBranch, SpanNode, SpanToken, SpanTreeBuilder};
 
 use crate::error::{GrammarError, LarkError, ParseError, RecoveredTree, RecoveryAction};
 use crate::grammar::intern::{SymbolId, SymbolTable};
@@ -641,6 +649,40 @@ impl ParsingFrontend {
         let mut source = into.make_source(input).map_err(LarkError::Parse)?;
         into.parser()
             .run_into(source.as_mut(), start, builder, input)
+            .map_err(LarkError::Parse)
+    }
+
+    /// Parse `input` into a zero-copy [`SpanNode`] (#233, C8) — the borrowed-span
+    /// projection of [`parse_into`](Self::parse_into) with the built-in
+    /// [`SpanTreeBuilder`] backend. Token values borrow the input and labels borrow
+    /// the grammar (`'g` = the frontend's lifetime), so nothing owned is
+    /// materialized; [`SpanNode::materialize`] projects it back to the
+    /// tree-`parse()` output byte-identically. Same support boundary as
+    /// `parse_into` (LALR + basic/contextual; ADR-0029 fork 4), same typed refusal
+    /// otherwise.
+    ///
+    /// [`SpanNode`]: span_tree::SpanNode
+    /// [`SpanNode::materialize`]: span_tree::SpanNode::materialize
+    /// [`SpanTreeBuilder`]: span_tree::SpanTreeBuilder
+    #[cfg(feature = "span-tree")]
+    pub fn parse_span<'i, 'g>(
+        &'g self,
+        input: &'i str,
+        start: Option<&str>,
+    ) -> Result<span_tree::SpanNode<'i, 'g>, LarkError> {
+        let into = self
+            .driver
+            .as_lalr_into()
+            .ok_or_else(parse_into_unsupported)?;
+        let parser = into.parser();
+        // The builder borrows the grammar's interned tables directly (not via the
+        // per-call `OutputContext`), so the returned `SpanNode`'s label borrows are
+        // `'g` (tied to the grammar) and outlive this local builder.
+        let mut builder =
+            span_tree::SpanTreeBuilder::new(&parser.table.rules, &parser.table.symbols);
+        let mut source = into.make_source(input).map_err(LarkError::Parse)?;
+        parser
+            .run_into(source.as_mut(), start, &mut builder, input)
             .map_err(LarkError::Parse)
     }
 }
