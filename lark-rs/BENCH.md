@@ -574,7 +574,20 @@ oracle suite + compliance bank stayed green. The remaining lexer cost is now the
 abstraction" change (`Box<str>`/arena labels, zero-copy spans) that `CLAUDE.md`
 defers behind the `TreeBuilder` chokepoint until a profiler justifies it. It now
 does — but it is the change best made once Earley is a second consumer of that
-representation.
+representation. The opt-in `SpanTree` backend (C8/C8.1, #233/#582) is the first
+slice of it, and `examples/span_alloc.rs` is the re-runnable before/after:
+
+```bash
+cargo run --release --features "span-tree,perf-counters" --example span_alloc
+```
+
+On a 594 KB JSON (dev box), `parse_span()` drives the lexer/output/tree-node
+counters to `0` and removes **~41% of real heap allocations** (≈2.2 → 1.3
+allocs/byte) for **≈1.3× wall-clock**. Alloc *bytes* barely move (~3%): the removed
+allocations are many but tiny (token values, short labels); the byte *volume* is
+dominated by working buffers both paths share (parser stacks, the token `Vec`, the
+not-yet-reused per-node child `Vec` #583 tracks). That remaining volume is what the
+arena/`Tape` follow-ups (#242/#243) target.
 
 **Sequencing implication.** The single cheapest, highest-leverage, lowest-risk win
 was the lexer pair (1)+(2): it attacks the larger (~55%) half, is purely local to
