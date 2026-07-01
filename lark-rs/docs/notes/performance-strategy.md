@@ -60,8 +60,8 @@ labels interned — eliminating the allocation half wholesale, behind a falsifia
 | C3 #228 | `PythonTransformerOracleBuilder` (parity) | ✅ closed |
 | C4 #229 | Token-callback / `Discard` / shaping parity pins | ✅ closed |
 | C6 #231 | Public API shape decision | ✅ ADR-0029 |
-| **C5 #230** | **Deterministic output-shape perf counters** | 🟢 OPEN — ready now, auto-tier |
-| **C7 #232** | **Public `parse_into<B>` surface** | 🟠 OPEN — escalate-tier (architect merges) |
+| **C5 #230** | **Deterministic output-shape perf counters** | ✅ landed (#576) |
+| **C7 #232** | **Public `parse_into<B>` surface** | 🟠 in review — PR #579 (escalate-tier; architect merges) |
 | **C8 #233** | **Zero-tree `SpanTree<'i>` backend** | 🔵 OPEN — the perf win; blocked on C7, leans on C5 |
 
 Deferred/gated correctly: C8b #242 (event stream) + C8c #243 (JSON tape) — each

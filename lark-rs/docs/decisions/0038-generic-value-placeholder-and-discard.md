@@ -88,9 +88,17 @@ deferred:
   This matches Python: `maybe_placeholders` is resolved structurally during
   tree-building; `Discard` is a transformer-time value drop layered on top.
 
-This ordering is **oracle-gated the moment a semantic builder exists** (the C4/#229
-trace-oracle harness, extended with a `Discard` + `maybe_placeholders` fixture in
-C7b/beyond). Until then it changes no observable tree output, so no bank moves.
+This ordering is **oracle-gated the moment a *discarding* semantic builder drives
+`parse_into`**. Note the precise gap: the C1 fixtures already include the interaction
+cases (`discard_token_maybe_placeholders` / `…_absent`) and C7 (#232) replays them
+through `parse_into` — but with the **post-parse** `PythonTransformerOracleBuilder`,
+whose own drop logic (not `shape_reduction`'s `is_discard`) applies the discard. So the
+*adapter's* ordering is pinned against Python; `shape_reduction`'s `is_discard` +
+placeholder ordering (this §) is **not yet exercised**, because every current
+`parse_into` builder is non-discarding (`is_discard == false`). C7b closes this with a
+discarding semantic builder that returns discard values *during* the parse and compares
+its value+trace to those same fixtures. Until then it changes no observable tree output
+(no-op for `Value = Child`), so no bank moves.
 
 ### 3. `token()` input — refines ADR-0029 fork 5 (span-first) for byte-identical C7
 
