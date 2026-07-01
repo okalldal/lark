@@ -314,8 +314,10 @@ impl CompiledGrammar {
 
 /// The tree label for a (possibly template-instance) rule name: everything before
 /// the `{` that marks a template instantiation (`expr{0}` → `expr`). Ordinary
-/// names contain no `{`, so they pass through unchanged.
-fn template_base(name: &str) -> &str {
+/// names contain no `{`, so they pass through unchanged. `pub(crate)` because the
+/// reconstructor must invert this exact labeling convention (`reconstruct.rs`
+/// matches tree labels back to rule names) — one definition, no drift.
+pub(crate) fn template_base(name: &str) -> &str {
     name.split_once('{').map_or(name, |(base, _)| base)
 }
 

@@ -26,7 +26,17 @@
 //!   original text. `%ignore`d trivia is not recoverable; where two adjacent
 //!   emitted pieces would fuse into one identifier-like token, a separator the
 //!   grammar can ignore is inserted (Python's `insert_spaces` heuristic, made
-//!   grammar-aware: no `%ignore`able whitespace → no insertion).
+//!   grammar-aware: `%ignore`able whitespace, else an `%ignore`d fixed-string
+//!   terminal, else no insertion).
+//! - The round-trip property is **property-tested** (curated grammars + the
+//!   whole LALR compliance bank), not verified per call — a caller that needs
+//!   a hard guarantee should re-parse and compare, which is one call. The
+//!   known residue, shared with Python's reconstructor: fusion of adjacent
+//!   *non-identifier* pieces that maximal-munch into one longer terminal
+//!   (`"1" "." "5"` → `1.5` when `NUMBER` allows decimals), grammars whose
+//!   only `%ignore` is regex trivia (comments) so no separator exists, and a
+//!   canonical-variant choice among tree-indistinguishable alternatives that
+//!   a priority-tuned sibling rule can capture on re-parse (see ADR-0040).
 //! - A **discarded** terminal (filtered from the tree) can only be re-emitted
 //!   when its pattern is a fixed string. A discarded regex or `%declare`d
 //!   terminal needs a substitution via [`Reconstructor::with_term_subs`],
@@ -63,6 +73,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::rc::Rc;
 
+use crate::grammar::intern::template_base;
 use crate::grammar::symbol::Symbol;
 use crate::grammar::terminal::Pattern;
 use crate::grammar::Grammar;
@@ -155,6 +166,21 @@ struct ReconsRule {
     origin: SymId,
     expansion: Vec<RSym>,
     steps: Vec<WriteStep>,
+    /// Only complete over a span of exactly one child. Set on the *global*
+    /// copy of a multi-symbol expand1 rule: `?r: _x B` collapses exactly when
+    /// it kept one child (e.g. `_x` spliced empty), so a structural use of the
+    /// rule in a parent's child list is valid only over that one child — an
+    /// unconstrained copy could spuriously swallow multi-child sequences that
+    /// were really produced by a sibling alternative.
+    span_one: bool,
+    /// Never predict this rule for an inner non-terminal reference — it only
+    /// explains a node being matched as the root. Set on alias rules: an
+    /// aliased alternative always labels a surviving node, so expanding it
+    /// structurally inside a parent would write its discarded terminals for a
+    /// collapse that never happened (an alias sharing an expand1 origin's
+    /// name, `?a: D` beside `x: D ";" -> a`, must not write `";"` for a
+    /// collapsed `?a`).
+    no_predict: bool,
 }
 
 /// How a discarded terminal is written back out.
@@ -173,12 +199,11 @@ enum TermText {
 /// contract; construction copies what it needs, so the `Lark` borrow ends at
 /// `new`.
 pub struct Reconstructor {
-    /// Interned symbol names (terminal names, rule names, aliases).
+    /// Interned symbol names (terminal names, rule names, aliases). What a tree
+    /// node's `data` carries is the [`template_base`] of the name — template
+    /// instances `foo{N}` are labeled `foo` (Lark's `template_source`); the
+    /// matcher derives that with the same `intern.rs` helper that stamps it.
     names: Vec<String>,
-    /// `names[i]` with any template-instance suffix (`{N}`) stripped — what a
-    /// tree node's `data` carries for a template rule (Lark's `template_source`
-    /// labels the tree with the base name).
-    bases: Vec<String>,
     ids: HashMap<String, SymId>,
     /// Rules available in every match (transparent / expand1 / bridging rules).
     global_rules: Vec<Rc<ReconsRule>>,
@@ -187,6 +212,9 @@ pub struct Reconstructor {
     rules_for_root: HashMap<SymId, Vec<Rc<ReconsRule>>>,
     /// Write-out text per discarded-terminal name (term_subs already folded in).
     term_text: HashMap<SymId, TermText>,
+    /// `%ignore`d terminal ids: dropping one from a write-out is tree-neutral
+    /// (the re-parse ignores it), which the dedup cost policy relies on.
+    ignored: HashSet<SymId>,
     /// Per-root-name matcher cache (built lazily, like Python's parser cache).
     matchers: RefCell<HashMap<SymId, Rc<Matcher>>>,
     /// The separator inserted between pieces that would otherwise fuse into one
@@ -223,14 +251,18 @@ impl Reconstructor {
 
         let mut this = Reconstructor {
             names: Vec::new(),
-            bases: Vec::new(),
             ids: HashMap::new(),
             global_rules: Vec::new(),
             rules_for_root: HashMap::new(),
             term_text: HashMap::new(),
+            ignored: HashSet::new(),
             matchers: RefCell::new(HashMap::new()),
             separator: pick_separator(grammar),
         };
+        for name in &grammar.ignore {
+            let id = this.intern(name);
+            this.ignored.insert(id);
+        }
 
         // Resolve every terminal's write-out text up front; errors stay lazy
         // (only a derivation that actually *needs* a NonLiteral terminal fails).
@@ -291,14 +323,14 @@ impl Reconstructor {
         }
         let id = self.names.len() as SymId;
         self.names.push(name.to_string());
-        // A template instance `foo{3}` is labeled `foo` in the tree.
-        let base = match name.find('{') {
-            Some(i) => &name[..i],
-            None => name,
-        };
-        self.bases.push(base.to_string());
         self.ids.insert(name.to_string(), id);
         id
+    }
+
+    /// The tree label of interned symbol `id` — the [`template_base`] of its
+    /// name (`foo{3}` is labeled `foo` in the tree).
+    fn base(&self, id: SymId) -> &str {
+        template_base(&self.names[id as usize])
     }
 
     /// The inversion of tree-shaping, rule by rule — the port of Python's
@@ -329,12 +361,18 @@ impl Reconstructor {
                 }
             }
         }
+        // Transparency mirrors lowering's predicate (`intern.rs`): a `_`-prefixed
+        // rule that is ALSO a start symbol is never transparent — its nodes
+        // survive in the tree — so it must not be classified as structurally
+        // expanded here (else its surviving nodes are unmatchable).
+        let is_transparent_name =
+            |name: &str| name.starts_with('_') && !grammar.start.iter().any(|s| s == name);
         let nonterminals: HashSet<&str> = grammar
             .rules
             .iter()
             .map(|r| r.origin.name.as_str())
             .filter(|name| {
-                name.starts_with('_') || expand1s.contains(name) || aliases.contains_key(name)
+                is_transparent_name(name) || expand1s.contains(name) || aliases.contains_key(name)
             })
             .collect();
 
@@ -370,9 +408,14 @@ impl Reconstructor {
             }
 
             let origin_id = self.intern(&r.origin.name);
-            // Skip the degenerate self-recursive shape `x → x` (it matches
-            // nothing new and would only add derivational noise).
-            if r.alias.is_none() && expansion == [RSym::NonTerm(origin_id)] {
+            // Skip the degenerate self-recursive shape `x → x` — but only when
+            // the rule also *writes* nothing (steps exactly [Consume]): a rule
+            // like `x: x ";"` has the same matched expansion `[x]` yet must
+            // survive, or its discarded `";"` is silently lost on write-out.
+            if r.alias.is_none()
+                && expansion == [RSym::NonTerm(origin_id)]
+                && matches!(steps[..], [WriteStep::Consume])
+            {
                 continue;
             }
 
@@ -385,18 +428,44 @@ impl Reconstructor {
                 origin: sym_id,
                 expansion,
                 steps,
+                span_one: false,
+                no_predict: false,
             };
 
-            if expand1s.contains(sym_name.as_str()) && rule.expansion.len() != 1 {
-                // An expand1 node that did NOT collapse (≠1 matched children):
-                // only valid when that node is the match root.
+            if r.alias.is_some() {
+                // An aliased alternative always labels a *surviving* node with
+                // the alias (expand1 collapse and transparency both require
+                // alias.is_none()), so its rule only applies when that node is
+                // the match root — root-only AND never predicted for an inner
+                // reference. Otherwise a same-shaped alias rule shadows a
+                // colliding origin's real structural rules: `?a: D` beside
+                // `x: D ";" -> a` must not write x's `";"` when the collapsed
+                // `?a` derivation is meant.
+                for_root.entry(root_key).or_default().push(ReconsRule {
+                    no_predict: true,
+                    ..rule
+                });
+            } else if expand1s.contains(sym_name.as_str()) && rule.expansion.len() != 1 {
+                // A multi-symbol expand1 rule serves two match directions:
+                // *uncollapsed* (≠1 kept children ⇒ a surviving node) — the
+                // root-only copy — and *collapsed* (a nullable reference
+                // spliced empty, leaving exactly 1 kept child, e.g. `?r: _x B`
+                // with `_x` empty) — a global copy constrained to a one-child
+                // span, so it can never swallow multi-child sequences a
+                // sibling alternative really produced.
+                global.push(ReconsRule {
+                    span_one: true,
+                    expansion: rule.expansion.clone(),
+                    steps: rule.steps.clone(),
+                    ..rule
+                });
                 for_root.entry(root_key).or_default().push(rule);
                 // A reference to the expand1 origin may still meet a surviving
                 // node — bridge it once.
                 if bridged.insert(sym_id) {
                     global.push(bridge_rule(sym_id));
                 }
-            } else if sym_name.starts_with('_') || expand1s.contains(sym_name.as_str()) {
+            } else if is_transparent_name(&sym_name) || expand1s.contains(sym_name.as_str()) {
                 // Transparent rules and collapsing (unary) expand1 rules match
                 // structurally wherever their origin is referenced.
                 global.push(rule);
@@ -426,34 +495,25 @@ impl Reconstructor {
         // Aliased origins: a reference to the origin may meet a node labeled
         // with any of its aliases, or (for unaliased alternatives) the origin
         // name itself.
-        let mut alias_pairs: Vec<(SymId, SymId)> = Vec::new();
-        {
-            let mut origin_names: Vec<&str> = aliases.keys().copied().collect();
-            origin_names.sort_unstable(); // deterministic rule order
-            for origin in origin_names {
-                let origin_id = self.ids[origin];
-                for alias in &aliases[origin] {
-                    let alias_id = self.ids[*alias];
-                    alias_pairs.push((origin_id, alias_id));
-                }
-                alias_pairs.push((origin_id, origin_id));
+        let mut origin_names: Vec<&str> = aliases.keys().copied().collect();
+        origin_names.sort_unstable(); // deterministic rule order
+        for origin in origin_names {
+            let origin_id = self.ids[origin];
+            for &alias in &aliases[origin] {
+                global.push(bridge_rule_to(origin_id, self.ids[alias]));
             }
-        }
-        for (origin_id, target_id) in alias_pairs {
-            let mut rule = bridge_rule(origin_id);
-            rule.expansion = vec![RSym::Term(target_id)];
-            global.push(rule);
+            global.push(bridge_rule(origin_id));
         }
 
-        self.global_rules = dedup_and_sort(global, &self.term_text);
+        self.global_rules = dedup_and_sort(global, &self.term_text, &self.ignored);
         self.rules_for_root = for_root
             .into_iter()
-            .map(|(k, v)| (k, dedup_and_sort(v, &self.term_text)))
+            .map(|(k, v)| (k, dedup_and_sort(v, &self.term_text, &self.ignored)))
             .collect();
     }
 
     fn base_id(&mut self, id: SymId) -> SymId {
-        let base = self.bases[id as usize].clone();
+        let base = self.base(id).to_string();
         self.intern(&base)
     }
 
@@ -466,22 +526,33 @@ impl Reconstructor {
             return Rc::clone(m);
         }
         let mut rules: Vec<Rc<ReconsRule>> = self.global_rules.clone();
+        let global_len = rules.len();
         if let Some(extra) = self.rules_for_root.get(&root) {
             rules.extend(extra.iter().cloned());
         }
         let mut by_origin: HashMap<SymId, Vec<usize>> = HashMap::new();
         let mut root_candidates: Vec<usize> = Vec::new();
-        let root_base = &self.bases[root as usize];
+        let mut is_root_candidate: Vec<bool> = vec![false; rules.len()];
+        let root_base = self.base(root);
         for (i, r) in rules.iter().enumerate() {
-            by_origin.entry(r.origin).or_default().push(i);
-            if &self.bases[r.origin as usize] == root_base {
+            if !r.no_predict {
+                by_origin.entry(r.origin).or_default().push(i);
+            }
+            // Root candidates: everything routed to this root's list (`i >=
+            // global_len` — alias rules keep candidacy even though their origin
+            // base may differ from the label), plus base-matching global rules
+            // (the collapse-shaped structural explanations).
+            if i >= global_len || self.base(r.origin) == root_base {
                 root_candidates.push(i);
+                is_root_candidate[i] = true;
             }
         }
         let m = Rc::new(Matcher {
             rules,
             by_origin,
             root_candidates,
+            is_root_candidate,
+            global_len,
         });
         self.matchers.borrow_mut().insert(root, Rc::clone(&m));
         m
@@ -493,7 +564,7 @@ impl Reconstructor {
     fn child_matches(&self, c: &Child, t: SymId) -> bool {
         match c {
             Child::Token(tok) => tok.type_ == self.names[t as usize],
-            Child::Tree(tree) => tree.data == self.bases[t as usize],
+            Child::Tree(tree) => tree.data == self.base(t),
             Child::None => false,
         }
     }
@@ -517,145 +588,90 @@ impl Reconstructor {
     /// an *empty* matched expansion) work. First derivation found wins —
     /// any valid derivation reconstructs a tree-preserving text, and rule
     /// order (dedup + shortest-expansion-first) makes the choice deterministic.
+    ///
+    /// Standard Earley complexity: worst case O(n³) in a node's child count
+    /// (an ambiguous transparent rule), O(n) for the common flattened-EBNF
+    /// shape (`_p: arm | _p arm`). Accepted for this non-hot-path tool with no
+    /// perf-counter gate — reconstruction is per-tree tooling, not the parse
+    /// path; a gate rides the first perf claim, per BENCH.md.
     fn earley_match(&self, m: &Matcher, children: &[Child]) -> Option<Deriv> {
         let n = children.len();
-        // sets[i] = items whose progress reaches child position i.
-        let mut sets: Vec<Vec<Item>> = vec![Vec::new(); n + 1];
-        let mut seen: Vec<HashMap<(usize, usize, usize), usize>> = vec![HashMap::new(); n + 1];
-        // Per set: origin → first item completed with an empty span there.
-        let mut empty_done: Vec<HashMap<SymId, (usize, usize)>> = vec![HashMap::new(); n + 1];
-        // Per set: NT symbol → items in that set whose dot is before it.
-        let mut waiting: Vec<HashMap<SymId, Vec<usize>>> = vec![HashMap::new(); n + 1];
-
-        let add = |sets: &mut Vec<Vec<Item>>,
-                   seen: &mut Vec<HashMap<(usize, usize, usize), usize>>,
-                   waiting: &mut Vec<HashMap<SymId, Vec<usize>>>,
-                   set: usize,
-                   item: Item|
-         -> Option<usize> {
-            let key = (item.rule, item.dot, item.start);
-            if seen[set].contains_key(&key) {
-                return None; // keep the first backpointer — one derivation is enough
-            }
-            let idx = sets[set].len();
-            seen[set].insert(key, idx);
-            if let Some(RSym::NonTerm(x)) = m.rules[item.rule].expansion.get(item.dot) {
-                waiting[set].entry(*x).or_default().push(idx);
-            }
-            sets[set].push(item);
-            Some(idx)
-        };
+        let mut chart = Chart::new(n);
 
         for &r in &m.root_candidates {
-            add(
-                &mut sets,
-                &mut seen,
-                &mut waiting,
-                0,
-                Item {
-                    rule: r,
-                    dot: 0,
-                    start: 0,
-                    bp: None,
-                },
-            );
+            chart.add(m, 0, Item::fresh(r, 0));
         }
 
         for i in 0..=n {
             let mut cursor = 0;
-            while cursor < sets[i].len() {
-                let item = sets[i][cursor].clone();
+            while cursor < chart.sets[i].len() {
+                let item = chart.sets[i][cursor];
                 let idx = cursor;
                 cursor += 1;
-                let rule = &m.rules[item.rule];
-                match rule.expansion.get(item.dot) {
+                match m.rules[item.rule].expansion.get(item.dot) {
                     Some(&RSym::Term(t)) => {
                         if i < n && self.child_matches(&children[i], t) {
-                            add(
-                                &mut sets,
-                                &mut seen,
-                                &mut waiting,
-                                i + 1,
-                                Item {
-                                    rule: item.rule,
-                                    dot: item.dot + 1,
-                                    start: item.start,
-                                    bp: Some((i, idx, Cause::Scan)),
-                                },
-                            );
+                            chart.add(m, i + 1, item.advanced(i, idx, Cause::Scan));
                         }
                     }
                     Some(&RSym::NonTerm(x)) => {
                         // Predict.
                         if let Some(rs) = m.by_origin.get(&x) {
                             for &r in rs {
-                                add(
-                                    &mut sets,
-                                    &mut seen,
-                                    &mut waiting,
-                                    i,
-                                    Item {
-                                        rule: r,
-                                        dot: 0,
-                                        start: i,
-                                        bp: None,
-                                    },
-                                );
+                                chart.add(m, i, Item::fresh(r, i));
                             }
                         }
                         // ε-completion: X already completed empty in this set.
-                        if let Some(&(cset, cidx)) = empty_done[i].get(&x) {
-                            add(
-                                &mut sets,
-                                &mut seen,
-                                &mut waiting,
-                                i,
-                                Item {
-                                    rule: item.rule,
-                                    dot: item.dot + 1,
-                                    start: item.start,
-                                    bp: Some((i, idx, Cause::Complete(cset, cidx))),
-                                },
-                            );
+                        if let Some(&cidx) = chart.empty_done[i].get(&x) {
+                            chart.add(m, i, item.advanced(i, idx, Cause::Complete(i, cidx)));
                         }
                     }
                     None => {
-                        // Complete: advance items in set `start` waiting on origin.
-                        let origin = rule.origin;
-                        if item.start == i {
-                            empty_done[i].entry(origin).or_insert((i, idx));
+                        // A span-one rule (the global copy of a multi-symbol
+                        // expand1 rule) may only complete over exactly one child.
+                        if m.rules[item.rule].span_one && i - item.start != 1 {
+                            continue;
                         }
-                        let waiters: Vec<usize> = waiting[item.start]
-                            .get(&origin)
-                            .map(|v| v.clone())
-                            .unwrap_or_default();
-                        for widx in waiters {
-                            let w = sets[item.start][widx].clone();
-                            add(
-                                &mut sets,
-                                &mut seen,
-                                &mut waiting,
-                                i,
-                                Item {
-                                    rule: w.rule,
-                                    dot: w.dot + 1,
-                                    start: w.start,
-                                    bp: Some((item.start, widx, Cause::Complete(i, idx))),
-                                },
-                            );
+                        // Complete: advance items in set `start` waiting on origin.
+                        let origin = m.rules[item.rule].origin;
+                        if item.start == i {
+                            chart.empty_done[i].entry(origin).or_insert(idx);
+                        }
+                        // Index loop with re-lookup: when `start == i` the waiter
+                        // list can grow while we walk it (an add may append), and
+                        // processing the newcomers here is fine — `seen` dedups
+                        // against the ε-completion path that also covers them.
+                        let mut wi = 0;
+                        loop {
+                            let Some(&widx) = chart.waiting[item.start]
+                                .get(&origin)
+                                .and_then(|v| v.get(wi))
+                            else {
+                                break;
+                            };
+                            wi += 1;
+                            let w = chart.sets[item.start][widx];
+                            chart.add(m, i, w.advanced(item.start, widx, Cause::Complete(i, idx)));
                         }
                     }
                 }
             }
         }
 
-        // Accept: a root-candidate rule spanning the whole child list.
-        let accepted = sets[n].iter().position(|it| {
+        // Accept: a root-candidate rule spanning the whole child list. Prefer
+        // a root-list derivation (a node-producing rule) over a global
+        // structural one — a surviving node was produced by a node-producing
+        // rule, and the structural twin may write different discarded tokens.
+        let complete_candidate = |it: &Item| {
             it.start == 0
                 && it.dot == m.rules[it.rule].expansion.len()
-                && m.root_candidates.contains(&it.rule)
-        })?;
-        Some(extract_derivation(m, &sets, (n, accepted)))
+                && m.is_root_candidate[it.rule]
+        };
+        let accepted = chart.sets[n]
+            .iter()
+            .position(|it| complete_candidate(it) && it.rule >= m.global_len)
+            .or_else(|| chart.sets[n].iter().position(complete_candidate))?;
+        Some(extract_derivation(m, &chart.sets, (n, accepted)))
     }
 
     // ── Writing ─────────────────────────────────────────────────────────────
@@ -690,6 +706,8 @@ impl Reconstructor {
         };
 
         // Iterative walk: no native recursion to tree depth (#151 discipline).
+        // The top frame is advanced in place; a sub-node or sub-derivation is
+        // pushed on top of it and processed first (LIFO), suspending the walk.
         enum Frame<'t> {
             Node(&'t Tree),
             Walk {
@@ -699,33 +717,42 @@ impl Reconstructor {
                 children: &'t [Child],
             },
         }
+        fn walk_frame(d: Deriv, children: &[Child]) -> Frame<'_> {
+            Frame::Walk {
+                rule: d.rule,
+                step: 0,
+                elems: d.elems.into_iter(),
+                children,
+            }
+        }
         let mut stack: Vec<Frame> = vec![Frame::Node(root)];
-        while let Some(top) = stack.pop() {
+        while let Some(top) = stack.last_mut() {
+            // What to push on top of the (in-place advanced) current frame;
+            // staged so the mutable borrow of `stack` ends first.
+            let push: Frame;
             match top {
                 Frame::Node(t) => {
-                    let deriv = self.match_node(t)?;
-                    stack.push(Frame::Walk {
-                        rule: deriv.rule,
-                        step: 0,
-                        elems: deriv.elems.into_iter(),
-                        children: &t.children,
-                    });
+                    let t: &Tree = t;
+                    push = walk_frame(self.match_node(t)?, &t.children);
+                    stack.pop();
                 }
                 Frame::Walk {
                     rule,
                     step,
-                    mut elems,
+                    elems,
                     children,
                 } => {
-                    let Some(&s) = rule.steps.get(step) else {
-                        continue; // this rule application is fully written
+                    let children: &[Child] = children;
+                    let Some(&s) = rule.steps.get(*step) else {
+                        stack.pop(); // this rule application is fully written
+                        continue;
                     };
+                    *step += 1;
                     match s {
                         WriteStep::Discarded(tid) => {
                             match self.term_text.get(&tid) {
                                 Some(TermText::Literal(text)) => {
-                                    let text = text.clone();
-                                    emit(&text, &mut out, &mut prev_last);
+                                    emit(text, &mut out, &mut prev_last)
                                 }
                                 _ => {
                                     return Err(ReconstructError::NonLiteralTerminal {
@@ -733,60 +760,60 @@ impl Reconstructor {
                                     })
                                 }
                             }
-                            stack.push(Frame::Walk {
-                                rule,
-                                step: step + 1,
-                                elems,
-                                children,
-                            });
+                            continue;
                         }
                         WriteStep::Consume => {
                             let elem = elems
                                 .next()
                                 .expect("derivation elems align with Consume steps");
-                            stack.push(Frame::Walk {
-                                rule,
-                                step: step + 1,
-                                elems,
-                                children,
-                            });
                             match elem {
                                 Elem::Child(ci) => match &children[ci] {
-                                    Child::Token(tok) => emit(&tok.value, &mut out, &mut prev_last),
-                                    Child::Tree(sub) => stack.push(Frame::Node(sub)),
+                                    Child::Token(tok) => {
+                                        emit(&tok.value, &mut out, &mut prev_last);
+                                        continue;
+                                    }
+                                    Child::Tree(sub) => push = Frame::Node(sub),
                                     Child::None => return Err(ReconstructError::Placeholder),
                                 },
-                                Elem::Sub(d) => stack.push(Frame::Walk {
-                                    rule: d.rule,
-                                    step: 0,
-                                    elems: d.elems.into_iter(),
-                                    children,
-                                }),
+                                Elem::Sub(d) => push = walk_frame(*d, children),
                             }
                         }
                     }
                 }
             }
+            stack.push(push);
         }
         Ok(out)
     }
 }
 
-/// A synthesized unit rule `origin → tree-node(origin)`: a reference to an
-/// expand1/aliased origin meeting an actual surviving node consumes it whole.
-fn bridge_rule(origin: SymId) -> ReconsRule {
+/// A synthesized unit rule `origin → tree-node(target)`: a reference to an
+/// expand1/aliased origin meeting an actual surviving node (labeled with the
+/// origin itself, or one of its aliases) consumes it whole.
+fn bridge_rule_to(origin: SymId, target: SymId) -> ReconsRule {
     ReconsRule {
         origin,
-        expansion: vec![RSym::Term(origin)],
+        expansion: vec![RSym::Term(target)],
         steps: vec![WriteStep::Consume],
+        span_one: false,
+        no_predict: false,
     }
+}
+
+/// [`bridge_rule_to`] for the common self-labeled case.
+fn bridge_rule(origin: SymId) -> ReconsRule {
+    bridge_rule_to(origin, origin)
 }
 
 /// The separator text inserted between pieces that would otherwise fuse: the
 /// first of `" "`, `"\n"`, `"\t"` that some `%ignore`d terminal matches in
-/// full, so the inserted text vanishes on re-parse. `None` when the grammar
-/// cannot ignore any of them — inserting anything would *break* the re-parse,
-/// so exact concatenation is the only correct output there.
+/// full — or, failing those, the literal text of a fixed-string `%ignore`d
+/// terminal (`%ignore ","` makes `","` a valid separator) — so the inserted
+/// text always vanishes on re-parse. `None` when the grammar ignores nothing
+/// insertable: inserting anything would *break* the re-parse, so exact
+/// concatenation is the only available output there (and if the grammar
+/// `%ignore`s only regex trivia, e.g. comments, adjacent identifier-like
+/// tokens may still fuse — a documented residue class).
 fn pick_separator(grammar: &Grammar) -> Option<String> {
     let ignored: Vec<_> = grammar
         .terminals
@@ -798,45 +825,20 @@ fn pick_separator(grammar: &Grammar) -> Option<String> {
             return Some(cand.to_string());
         }
     }
-    None
+    ignored.iter().find_map(|t| match &t.pattern {
+        Pattern::Str(s) if !s.value.is_empty() => Some(s.value.clone()),
+        _ => None,
+    })
 }
 
-/// Best-effort probe: does terminal `t` match `text` in full? Used only to
-/// choose a separator, so a pattern the probe cannot compile is just "no".
+/// Best-effort probe: does terminal `t` match `text` in full? Compiles the
+/// same inline form the dynamic lexer uses ([`Pattern::to_inline_regex`], so
+/// flag handling cannot drift from the real lexer); a pattern the probe
+/// cannot compile is just "no" — this only ever *chooses* a separator.
 fn terminal_full_matches(t: &crate::grammar::terminal::TerminalDef, text: &str) -> bool {
-    use crate::grammar::terminal::flags;
-    match &t.pattern {
-        Pattern::Str(s) => {
-            if s.ci {
-                s.value.eq_ignore_ascii_case(text)
-            } else {
-                s.value == text
-            }
-        }
-        Pattern::Re(r) => {
-            let mut letters = String::new();
-            for (bit, ch) in [
-                (flags::IGNORECASE, 'i'),
-                (flags::MULTILINE, 'm'),
-                (flags::DOTALL, 's'),
-                (flags::VERBOSE, 'x'),
-            ] {
-                if r.flags & bit != 0 {
-                    letters.push(ch);
-                }
-            }
-            let wrapped = if letters.is_empty() {
-                format!("(?:{})", r.pattern)
-            } else {
-                format!("(?{}:{})", letters, r.pattern)
-            };
-            match regex::Regex::new(&wrapped) {
-                Ok(re) => re
-                    .find(text)
-                    .is_some_and(|m| m.start() == 0 && m.end() == text.len()),
-                Err(_) => false,
-            }
-        }
+    match regex::Regex::new(&format!("^(?:{})$", t.pattern.to_inline_regex())) {
+        Ok(re) => re.is_match(text),
+        Err(_) => false,
     }
 }
 
@@ -849,40 +851,55 @@ fn uses_placeholders(grammar: &Grammar) -> bool {
         .any(|r| r.options.placeholder_count > 0 || r.options.nones_before.iter().any(|&n| n > 0))
 }
 
-/// Deduplicate rules with an identical `(origin, expansion)` match shape:
-/// such alternatives produce indistinguishable nodes (same matched children),
-/// so the matcher only needs one. Among duplicates, keep the alternative that
-/// is (a) *writable* — the fewest non-literal discarded terminals, so
-/// `_WS? → ε` beats `_WS? → _WS` instead of erroring — and then (b) *most
-/// explicit* — the MOST discarded literal write-outs. The explicit variant
-/// reproduces the tokens the parser actually consumed to reach this
-/// alternative; dropping them can flip the re-parse to a different
-/// same-shaped rule (e.g. `b.1: "A"+ "B"?` losing its `"B"` re-parses as a
-/// higher-priority sibling `a.2: "A"+` — caught by the bank sweep). Ties keep
-/// grammar order. Finally sort shortest-expansion-first so the matcher
-/// prefers the least redundant derivation. The counterpart of Python's
-/// `_best_rules_from_group`.
+/// Deduplicate rules with an identical `(origin, expansion, span_one)` match
+/// shape: such alternatives produce indistinguishable nodes (same matched
+/// children), so the matcher only needs one. Among duplicates, keep the
+/// alternative that:
+///
+/// (a) avoids **safely droppable** unwritable terminals — a discarded
+///     non-literal terminal that is `%ignore`d (`x: A WS?` under
+///     `%ignore WS`): dropping it is provably tree-neutral, since the re-parse
+///     ignores it wherever it appears, so `→ ε` beats an error;
+/// (b) is otherwise **most explicit** — the MOST discarded write-outs. The
+///     explicit variant reproduces the tokens the parser actually consumed;
+///     dropping them can flip the re-parse to a different same-shaped rule
+///     (`b.1: "A"+ "B"?` losing its `"B"` re-parses as a higher-priority
+///     sibling `a.2: "A"+`). Crucially this also applies to *unwritable*
+///     non-ignored terminals (`b.1: "A" _WS?` with `_WS` outside `%ignore`):
+///     silently dropping `_WS` can corrupt the round-trip, so the variant
+///     that needs it wins and reconstruction fails **loudly** with
+///     [`ReconstructError::NonLiteralTerminal`] unless `term_subs` supplies
+///     it — exactly Python's `NotImplementedError` behavior.
+///
+/// Ties keep grammar order. Finally sort shortest-expansion-first so the
+/// matcher prefers the least redundant derivation. The counterpart of
+/// Python's `_best_rules_from_group`.
 fn dedup_and_sort(
     rules: Vec<ReconsRule>,
     term_text: &HashMap<SymId, TermText>,
+    ignored: &HashSet<SymId>,
 ) -> Vec<Rc<ReconsRule>> {
     let cost = |r: &ReconsRule| -> (usize, isize) {
-        let mut nonliteral = 0usize;
+        let mut droppable_unwritable = 0usize;
         let mut discarded = 0isize;
         for s in &r.steps {
             if let WriteStep::Discarded(tid) = s {
-                discarded += 1;
-                if !matches!(term_text.get(tid), Some(TermText::Literal(_))) {
-                    nonliteral += 1;
+                let unwritable = !matches!(term_text.get(tid), Some(TermText::Literal(_)));
+                if unwritable && ignored.contains(tid) {
+                    droppable_unwritable += 1;
+                } else {
+                    discarded += 1;
                 }
             }
         }
-        (nonliteral, -discarded)
+        (droppable_unwritable, -discarded)
     };
-    let mut best: HashMap<(SymId, Vec<RSym>), usize> = HashMap::new();
+    let mut best: HashMap<(SymId, Vec<RSym>, bool, bool), usize> = HashMap::new();
     let mut out: Vec<ReconsRule> = Vec::new();
     for r in rules {
-        let key = (r.origin, r.expansion.clone());
+        // Flags are part of the identity: a span-constrained or root-only
+        // (`no_predict`) rule is not interchangeable with its plain twin.
+        let key = (r.origin, r.expansion.clone(), r.span_one, r.no_predict);
         match best.get(&key) {
             None => {
                 best.insert(key, out.len());
@@ -899,31 +916,103 @@ fn dedup_and_sort(
     out.into_iter().map(Rc::new).collect()
 }
 
-/// Approximation of Python's `is_id_continue` (Unicode ID_CONTINUE): would two
-/// adjacent characters fuse into one identifier-like token? Alphanumerics plus
-/// `_` covers every case the metamorphic bank exercises; this is a spacing
-/// heuristic, not an oracle-bound behavior.
+/// Python Lark's `is_id_continue` (would two adjacent characters fuse into one
+/// identifier-like token?), realized as Unicode `XID_Continue` — the same
+/// category set (letters, digits, marks, connector punctuation) modulo a few
+/// normalization-unstable code points. Combining marks matter: `"a"` followed
+/// by `"\u{0303}b"` fuses without a separator.
 fn is_id_continue(c: char) -> bool {
-    c == '_' || c.is_alphanumeric()
+    unicode_ident::is_xid_continue(c)
 }
 
 // ─── Earley items and derivation extraction ─────────────────────────────────
 
 struct Matcher {
+    /// Global rules first (`[0, global_len)`), then this root's own rules.
     rules: Vec<Rc<ReconsRule>>,
-    /// Prediction index: exact origin id → rule indices.
+    /// Prediction index: exact origin id → rule indices (`no_predict` rules
+    /// excluded — they only explain the root node itself).
     by_origin: HashMap<SymId, Vec<usize>>,
-    /// Rules whose origin's base name equals the match root's.
+    /// Rules that can explain the root node: the root's own list, plus global
+    /// rules whose origin base matches the root label.
     root_candidates: Vec<usize>,
+    /// `root_candidates` as a per-rule mask, for the O(1) acceptance test.
+    is_root_candidate: Vec<bool>,
+    /// Boundary between global and root-list rules in `rules`. Acceptance
+    /// prefers a root-list derivation (a rule that actually *labels* nodes
+    /// with this name — alias / uncollapsed-expand1 / plain alternatives)
+    /// over a global structural one: a surviving node was by definition
+    /// produced by a node-producing rule.
+    global_len: usize,
 }
 
-#[derive(Clone)]
+/// The Earley chart: per-position item sets plus the indexes that grow with
+/// them. [`add`](Chart::add) keeps them all in sync — an item, its dedup key,
+/// and its waiting entry are only ever inserted together.
+struct Chart {
+    /// `sets[i]` = items whose progress reaches child position `i`.
+    sets: Vec<Vec<Item>>,
+    /// Per set: the `(rule, dot, start)` items already present. The first
+    /// insertion wins (its backpointer is kept) — one derivation is enough.
+    seen: Vec<HashSet<(usize, usize, usize)>>,
+    /// Per set `i`: origin → the first item completed with an empty span
+    /// (`start == i`) there, for the ε-completion check at prediction time.
+    empty_done: Vec<HashMap<SymId, usize>>,
+    /// Per set: NT symbol → items in that set whose dot is before it.
+    waiting: Vec<HashMap<SymId, Vec<usize>>>,
+}
+
+impl Chart {
+    fn new(n: usize) -> Self {
+        Chart {
+            sets: vec![Vec::new(); n + 1],
+            seen: vec![HashSet::new(); n + 1],
+            empty_done: vec![HashMap::new(); n + 1],
+            waiting: vec![HashMap::new(); n + 1],
+        }
+    }
+
+    fn add(&mut self, m: &Matcher, set: usize, item: Item) {
+        if !self.seen[set].insert((item.rule, item.dot, item.start)) {
+            return;
+        }
+        let idx = self.sets[set].len();
+        if let Some(RSym::NonTerm(x)) = m.rules[item.rule].expansion.get(item.dot) {
+            self.waiting[set].entry(*x).or_default().push(idx);
+        }
+        self.sets[set].push(item);
+    }
+}
+
+#[derive(Clone, Copy)]
 struct Item {
     rule: usize,
     dot: usize,
     start: usize,
     /// Predecessor (set, idx) + what advanced it. `None` at dot 0.
     bp: Option<(usize, usize, Cause)>,
+}
+
+impl Item {
+    /// A freshly predicted item: dot 0, no backpointer.
+    fn fresh(rule: usize, start: usize) -> Item {
+        Item {
+            rule,
+            dot: 0,
+            start,
+            bp: None,
+        }
+    }
+
+    /// This item advanced one symbol by `cause`, with `self` at `(set, idx)`
+    /// as the predecessor.
+    fn advanced(self, set: usize, idx: usize, cause: Cause) -> Item {
+        Item {
+            dot: self.dot + 1,
+            bp: Some((set, idx, cause)),
+            ..self
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

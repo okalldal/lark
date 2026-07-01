@@ -22,9 +22,11 @@
 //! - `reparse:{ri}:{ci}` — the reconstructed text failed to re-parse.
 //! - `tree:{ri}:{ci}` — it re-parsed to a structurally different tree.
 
+mod common;
+
 use lark_rs::grammar::terminal::flags;
 use lark_rs::reconstruct::{ReconstructError, Reconstructor};
-use lark_rs::{Child, Lark, LarkOptions, LexerType, ParseTree, ParserAlgorithm};
+use lark_rs::{Lark, LarkOptions, LexerType, ParseTree, ParserAlgorithm};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -102,42 +104,7 @@ fn try_parse(lark: &Lark, input: &str) -> Option<ParseTree> {
     }
 }
 
-// Structural equality ignoring positions (iterative — trees are input-deep).
-fn children_eq(a: &[Child], b: &[Child]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut stack: Vec<(&Child, &Child)> = a.iter().zip(b).collect();
-    while let Some(pair) = stack.pop() {
-        match pair {
-            (Child::Tree(x), Child::Tree(y)) => {
-                if x.data != y.data || x.children.len() != y.children.len() {
-                    return false;
-                }
-                stack.extend(x.children.iter().zip(&y.children));
-            }
-            (Child::Token(x), Child::Token(y)) => {
-                if x.type_ != y.type_ || x.value != y.value {
-                    return false;
-                }
-            }
-            (Child::None, Child::None) => {}
-            _ => return false,
-        }
-    }
-    true
-}
-
-fn parse_tree_eq(a: &ParseTree, b: &ParseTree) -> bool {
-    match (a, b) {
-        (ParseTree::Tree(x), ParseTree::Tree(y)) => {
-            x.data == y.data && children_eq(&x.children, &y.children)
-        }
-        (ParseTree::Token(x), ParseTree::Token(y)) => x.type_ == y.type_ && x.value == y.value,
-        (ParseTree::None, ParseTree::None) => true,
-        _ => false,
-    }
-}
+use common::parse_tree_structural_eq as parse_tree_eq;
 
 #[test]
 fn test_reconstruct_bank() {

@@ -75,6 +75,11 @@ regex-syntax = "0.8"
 indexmap = "2"
 thiserror = "1"
 smallvec = "1"
+# Unicode XID_Continue for the reconstructor's identifier-fusion separator
+# heuristic (Python Lark's `is_id_continue`): combining marks and connector
+# punctuation must count, or adjacent tokens fuse on re-parse. Already in the
+# build graph transitively; tiny, zero-dep, no_std.
+unicode-ident = "1"
 
 [dev-dependencies]
 pretty_assertions = "1"

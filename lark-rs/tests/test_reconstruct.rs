@@ -13,52 +13,11 @@
 //! helpers, templates, `%ignore`), plus the typed refusals. The whole-bank
 //! sweep lives in `tests/test_reconstruct_bank.rs`.
 
+mod common;
+
+use common::parse_tree_structural_eq as parse_tree_eq;
 use lark_rs::reconstruct::{ReconstructError, Reconstructor};
 use lark_rs::{Child, Lark, LarkOptions, LexerType, ParseTree, ParserAlgorithm};
-
-// ─── Structural tree equality (positions ignored) ───────────────────────────
-//
-// Reconstructed text has different byte offsets than the original, so the
-// round-trip compares tree *structure*: node labels, child shapes, and token
-// (type, value) pairs — exactly the fields the oracle fixtures pin.
-
-// Iterative (worklist) comparison: parse trees are as deep as the input is
-// nested, and the deep-tree test below runs on a small stack on purpose.
-fn children_eq(a: &[Child], b: &[Child]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut stack: Vec<(&Child, &Child)> = a.iter().zip(b).collect();
-    while let Some(pair) = stack.pop() {
-        match pair {
-            (Child::Tree(x), Child::Tree(y)) => {
-                if x.data != y.data || x.children.len() != y.children.len() {
-                    return false;
-                }
-                stack.extend(x.children.iter().zip(&y.children));
-            }
-            (Child::Token(x), Child::Token(y)) => {
-                if x.type_ != y.type_ || x.value != y.value {
-                    return false;
-                }
-            }
-            (Child::None, Child::None) => {}
-            _ => return false,
-        }
-    }
-    true
-}
-
-fn parse_tree_eq(a: &ParseTree, b: &ParseTree) -> bool {
-    match (a, b) {
-        (ParseTree::Tree(x), ParseTree::Tree(y)) => {
-            x.data == y.data && children_eq(&x.children, &y.children)
-        }
-        (ParseTree::Token(x), ParseTree::Token(y)) => x.type_ == y.type_ && x.value == y.value,
-        (ParseTree::None, ParseTree::None) => true,
-        _ => false,
-    }
-}
 
 // ─── Harness ─────────────────────────────────────────────────────────────────
 
@@ -422,4 +381,139 @@ fn long_flat_list_reconstructs() {
         .collect::<Vec<_>>()
         .join(", ");
     assert_round_trips(&lark, &[&input]);
+}
+
+// ─── Regressions found by the adversarial review of the initial engine ──────
+
+#[test]
+fn self_recursive_rule_with_discarded_tail() {
+    // `x: x ";"` has the matched expansion `[x]` — the same shape as the
+    // degenerate `x → x` — but its discarded `";"` must still be written.
+    // Skipping it (as Python's reconstructor does) loses every `";"`.
+    let lark = lalr(
+        "start: x\n\
+         x: x \";\" | NAME -> lbl\n\
+         NAME: /[a-z]+/\n\
+         %ignore \" \"\n",
+    );
+    let texts = assert_round_trips(&lark, &["a", "a ;", "a ; ;"]);
+    assert_eq!(texts, ["a", "a;", "a;;"]);
+}
+
+#[test]
+fn alias_sharing_an_expand1_origin_name() {
+    // `x: D ";" -> a` labels its node `a`, colliding with the `?a` origin.
+    // The alias rule must be root-only and never predicted for an inner
+    // reference: the collapsed `?a` derivation of "d" must not write x's ";",
+    // and the surviving `a`-labeled node of "d;" must keep it.
+    let lark = lalr(
+        "start: a | x\n\
+         ?a: D\n\
+         x: D \";\" -> a\n\
+         D: \"d\"\n",
+    );
+    let texts = assert_round_trips(&lark, &["d", "d;"]);
+    assert_eq!(texts, ["d", "d;"]);
+}
+
+#[test]
+fn underscore_start_rule_is_not_transparent() {
+    // Lowering never marks a start symbol transparent, even `_`-prefixed
+    // (`intern.rs`: `!is_start_origin`), so `_s` nodes survive in the tree and
+    // the reconstructor must match them as nodes, not expand them structurally.
+    let lark = Lark::new(
+        "start: _s \"!\"\n_s: NAME\nNAME: /[a-z]+/\n",
+        LarkOptions {
+            start: vec!["start".to_string(), "_s".to_string()],
+            ..Default::default()
+        },
+    )
+    .expect("grammar builds");
+    let tree = lark.parse_with_start("ab!", "start").unwrap();
+    let recons = Reconstructor::new(&lark).unwrap();
+    let text = recons.reconstruct(&tree).unwrap();
+    let tree2 = lark.parse_with_start(&text, "start").unwrap();
+    assert!(
+        parse_tree_eq(&tree, &tree2),
+        "round-trip must preserve the surviving `_s` node\n  text: {text:?}\n  \
+         original: {tree}\n  round-trip: {tree2}"
+    );
+}
+
+#[test]
+fn collapsed_expand1_with_multisymbol_rule() {
+    // `?r: _x B` collapses to a bare token when `_x` splices empty — the
+    // multi-symbol rule must still explain the collapsed reference (the
+    // span-one global copy), and the uncollapsed two-child node still works.
+    let lark = lalr(
+        "start: r \"!\"\n\
+         ?r: _x B\n\
+         _x: A |\n\
+         A: \"a\"\n\
+         B: \"b\"\n\
+         %ignore \" \"\n",
+    );
+    let texts = assert_round_trips(&lark, &["b !", "a b!"]);
+    assert_eq!(texts, ["b!", "a b!"]);
+}
+
+#[test]
+fn ignored_literal_is_a_valid_separator() {
+    // No ignorable whitespace, but `%ignore ","` — the comma itself is the
+    // insertable separator, so adjacent NAME tokens must not fuse.
+    let lark = lalr("start: NAME NAME\nNAME: /[a-z]+/\n%ignore \",\"\n");
+    let texts = assert_round_trips(&lark, &["a,b", "ab,,cd"]);
+    assert_eq!(texts, ["a,b", "ab,cd"]);
+}
+
+#[test]
+fn combining_mark_needs_a_separator() {
+    // U+0303 (combining tilde) is Unicode XID_Continue but not alphanumeric:
+    // "a" + "\u{0303}b" fuses into one NAME without a separator. Python's
+    // is_id_continue counts it (category Mn); ours must too.
+    let lark = lalr("start: NAME NAME\nNAME: /[a-z\\u0300-\\u036f]+/\n%ignore \" \"\n");
+    let texts = assert_round_trips(&lark, &["a \u{0303}b"]);
+    assert_eq!(texts, ["a \u{0303}b"]);
+}
+
+#[test]
+fn unwritable_nonignored_discarded_fails_loudly() {
+    // `b.1: "A" _WS?` beside `a.2: "A"`: silently dropping the unwritable
+    // `_WS` would emit "A", which re-parses as the higher-priority `a` — a
+    // corrupted round-trip. The most-explicit dedup keeps the `_WS` variant,
+    // so reconstruction errors loudly (Python's NotImplementedError) unless
+    // `term_subs` supplies the text.
+    let lark = Lark::new(
+        "start: b | a\nb.1: \"A\" _WS?\na.2: \"A\"\n_WS: / +/\n",
+        LarkOptions {
+            parser: ParserAlgorithm::Earley,
+            lexer: LexerType::Basic,
+            ..Default::default()
+        },
+    )
+    .expect("grammar builds");
+    let tree = lark.parse("A ").unwrap();
+
+    let plain = Reconstructor::new(&lark).unwrap();
+    assert_eq!(
+        plain.reconstruct(&tree),
+        Err(ReconstructError::NonLiteralTerminal {
+            name: "_WS".to_string()
+        })
+    );
+
+    let subs = Reconstructor::with_term_subs(&lark, [("_WS", " ")]).unwrap();
+    let text = subs.reconstruct(&tree).unwrap();
+    let tree2 = lark.parse(&text).unwrap();
+    assert!(parse_tree_eq(&tree, &tree2), "text: {text:?}");
+}
+
+#[test]
+fn ignored_nonliteral_optional_drops_safely() {
+    // The counterpart: when the unwritable optional terminal IS `%ignore`d,
+    // dropping it is provably tree-neutral (the re-parse ignores it), so the
+    // ε variant wins and no substitution is needed (#345-style grammar: an
+    // ignored terminal also referenced in a rule body).
+    let lark = lalr("start: A _WS? B\nA: \"a\"\nB: \"b\"\n_WS: / +/\n%ignore _WS\n");
+    assert_round_trips(&lark, &["ab", "a   b"]);
 }
