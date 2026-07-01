@@ -1672,33 +1672,46 @@ mod tests {
 
     /// C9 headline gate: replay every C1 transformer fixture through the standalone
     /// runtime's `parse_into` seam and assert the value **and** trace equal the
-    /// Python (embedded-transformer) oracle. Standalone is LALR + basic-lexer only,
-    /// so a fixture whose grammar the basic lexer cannot bake is skipped (its C3
-    /// oracle was captured under the contextual lexer); the survivors are the same
-    /// action space C1/C3 pins in-process.
+    /// Python (embedded-transformer) oracle. Standalone is LALR + basic-lexer only.
+    /// Every fixture whose `lalr_basic` oracle status is `"ok"` (Python built, parsed,
+    /// and transformed it under the basic lexer) MUST bake, parse, and match here —
+    /// a bake/parse/mismatch is a HARD FAILURE, never a skip (see the coverage assert
+    /// below). The only legitimate skip is a `status != "ok"` config, which carries
+    /// no value/trace to compare — a data property of the oracle, not a standalone
+    /// failure.
     #[test]
     fn standalone_semantic_output_matches_transformer_oracle() {
-        let text = match std::fs::read_to_string(transformer_dir().join("cases.json")) {
-            Ok(t) => t,
-            Err(_) => {
-                eprintln!("transformer cases.json not found — run generate_transformer_oracles.py");
-                return;
-            }
-        };
+        // The transformer oracle is committed and kept fresh under CI oracle-freshness,
+        // so a missing/unreadable cases.json is a HARD FAILURE, never a silent pass.
+        let cases_path = transformer_dir().join("cases.json");
+        let text = std::fs::read_to_string(&cases_path).unwrap_or_else(|e| {
+            panic!(
+                "transformer cases.json unreadable at {} ({e}) — the committed oracle \
+                 must exist; run generate_transformer_oracles.py",
+                cases_path.display()
+            )
+        });
         let data: Value = serde_json::from_str(&text).expect("valid transformer fixture JSON");
         let cases = data["cases"].as_array().expect("cases array");
 
         let mut checked = 0usize;
-        let mut skipped: Vec<String> = Vec::new();
+        // `expected` = the number of fixtures whose lalr_basic config is "ok" (i.e.
+        // carries a value/trace to compare). Only those are comparable through the
+        // standalone seam; every one of them MUST run — see the coverage assert below.
+        let mut expected = 0usize;
+        let mut non_comparable: Vec<String> = Vec::new();
         for case in cases {
             let name = case["name"].as_str().unwrap();
             let grammar = case["grammar"].as_str().unwrap();
             let cfg = &case["configs"]["lalr_basic"];
-            // Only status="ok" configs carry a value/trace to compare against.
+            // Only status="ok" configs carry a value/trace to compare against. A
+            // non-ok config is a data property of the oracle (nothing to compare),
+            // not a standalone failure — that is the ONLY legitimate skip here.
             if cfg["status"].as_str() != Some("ok") {
-                skipped.push(format!("{name} (config not ok)"));
+                non_comparable.push(format!("{name} (config status != ok)"));
                 continue;
             }
+            expected += 1;
 
             let popts = &case["parser_options"];
             let opts = LarkOptions {
@@ -1710,16 +1723,12 @@ mod tests {
                 ..Default::default()
             };
 
-            // Skip a fixture the basic-lexer standalone backend cannot bake (its
-            // oracle needs the contextual lexer). This is a lexer-capability skip,
-            // not a semantic one — the surviving set still covers the C1 action space.
-            let baked = match catch_unwind(AssertUnwindSafe(|| bake(grammar, &opts))) {
-                Ok(Ok(b)) => b,
-                _ => {
-                    skipped.push(format!("{name} (basic-lexer bake failed)"));
-                    continue;
-                }
-            };
+            // For an "ok" fixture a bake Err or panic is a genuine regression the
+            // gate MUST surface — not a skip. (The oracle recorded this grammar as
+            // parseable under lalr_basic, so the standalone basic-lexer backend must
+            // bake it.)
+            let baked = bake(grammar, &opts)
+                .unwrap_or_else(|e| panic!("{name}: standalone bake failed: {e}"));
             let leaked = leak_grammar_data(&baked);
             let parser = Parser::from_data(leaked);
 
@@ -1757,14 +1766,21 @@ mod tests {
         }
 
         eprintln!(
-            "standalone semantic output: {checked} fixtures matched the Python \
-             transformer oracle; {} skipped ({})",
-            skipped.len(),
-            skipped.join(", ")
+            "standalone semantic output: {checked}/{expected} ok fixtures matched the \
+             Python transformer oracle; {} non-comparable (status != ok) [{}]",
+            non_comparable.len(),
+            non_comparable.join(", ")
         );
         assert!(
-            checked > 0,
-            "no transformer fixtures were exercised through the standalone seam"
+            expected > 0,
+            "no ok transformer fixtures to exercise through the standalone seam"
+        );
+        // Exact coverage: every ok fixture must have been driven through parse_into
+        // and asserted. A skip that silently dropped an ok fixture would show up here.
+        assert_eq!(
+            checked, expected,
+            "not every ok transformer fixture ran through the standalone seam \
+             ({checked} checked != {expected} expected)"
         );
     }
 }
