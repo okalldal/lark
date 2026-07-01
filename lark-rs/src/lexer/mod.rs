@@ -102,7 +102,7 @@ fn record_scan_skip(pos: usize, match_start: Option<usize>) {
 /// charge [`crate::perf::add_lexer_token_value_bytes`]. `Owned` is the default
 /// `parse()`/`parse_into` path and is byte-identical to before.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TokenValueMode {
+pub(crate) enum TokenValueMode {
     /// Materialize `Token.value` as an owned `String` (default; counts the alloc).
     Owned,
     /// Emit a value-less span token — no `value` allocation, no lexer counter charge.
@@ -435,7 +435,7 @@ impl BasicLexer {
     /// basic lexer; the borrowed text is recovered from `input` in the span builder.
     /// Byte-for-byte the same token stream as [`Lexer::lex`] except for the empty
     /// `value` field (identical `type_id`/`type_`/positions).
-    pub fn lex_span(&self, text: &str) -> Result<Vec<Token>, ParseError> {
+    pub(crate) fn lex_span(&self, text: &str) -> Result<Vec<Token>, ParseError> {
         self.lex_with_mode(text, TokenValueMode::Span)
     }
 
@@ -677,7 +677,7 @@ impl ContextualLexer {
     /// current parser state. `mode` selects owned vs. value-less span tokens (C8.1
     /// #582); [`Self::next_token`] is the owned default, [`Self::next_token_span`] the
     /// span-emitting entry point.
-    pub fn next_token_with_mode(
+    pub(crate) fn next_token_with_mode(
         &self,
         text: &str,
         pos: usize,
@@ -736,7 +736,7 @@ impl ContextualLexer {
     /// `Token.value`, no owned-value allocation, no lexer counter charge). The
     /// borrowed text is recovered from the parse `input` in the span builder. Byte-for-byte
     /// the same token as [`Self::next_token`] except for the empty `value`.
-    pub fn next_token_span(
+    pub(crate) fn next_token_span(
         &self,
         text: &str,
         pos: usize,
