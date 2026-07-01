@@ -1695,6 +1695,96 @@ fn rc_extend_interior_origin_prepends_in_resolve_order() {
     );
 }
 
+/// #574 — an explicit rule PRIORITY written on a `%extend` directive (`%extend X.N: …`)
+/// must be **discarded**, exactly as Python Lark's `_extend` discards the extend tree's
+/// own `options` (`load_grammar.py` ~1142–1160). The prepended alternative compiles under
+/// the *target* rule's priority, never the extend's `.N`. This is the priority sibling of
+/// #561 (which discards the extend's `!`/`?` MODIFIERS): #574 is pre-existing — the
+/// imported-interior-origin branch of `stage_rule_directive` seeded the staged `Plain`
+/// rule via the `..r` struct-spread, which carried `r.priority` (the extend's own `.N`),
+/// where the same-grammar branch (which splices onto the existing RawRule) never did.
+///
+/// The divergence is observable only when the leaked `.N` would change an Earley `resolve`
+/// winner. `w: python__name | alt` is ambiguous on input `"9"`: the imported interior
+/// origin `python__name` derives it via the PREPENDED extend alternative `Z` (`"9"` — the
+/// original `python__NAME`/`MATCH`/`CASE` arms can't match a digit, and both competing arms
+/// consume the SAME terminal `Z`, so there is no lexer tiebreak), and the sibling `alt.50`
+/// derives it via that same `Z`. Python discards the extend's `.100`, so `python__name`'s
+/// prepended arm keeps the target priority 0 and the sibling `alt` (priority 50) wins the
+/// resolve. Pre-fix, lark-rs leaked priority 100 onto the prepended arm, which then beat
+/// `alt` (100 > 50) and wrongly resolved `w` to `python__name` — a resolve divergence the
+/// named-terminal banks do not currently sample.
+///
+/// Both `%extend` paths are pinned into agreement with each other and the oracle: the
+/// imported-interior-origin branch (the fix site) AND the same-grammar branch (already
+/// correct — it splices onto the existing RawRule and never carries the extend's priority).
+#[test]
+fn rc574_extend_discards_own_rule_priority_differential() {
+    // Imported-interior-origin branch (the fix site). `{ext}` is the extend's priority tag.
+    let imported = |ext: &str| {
+        format!(
+            "start: w\nw: python__name | alt\nalt.50: Z\nZ: \"9\"\n\
+             %import python (decorator)\ndummy: decorator\n\
+             %extend python__name{ext}: Z\n%ignore \" \"\n"
+        )
+    };
+    let win_imported = |ext: &str| {
+        build(
+            &imported(ext),
+            ParserAlgorithm::Earley,
+            LexerType::Auto,
+            false,
+        )
+        .unwrap_or_else(|e| {
+            panic!("#574 imported {ext:?}: Python builds this; lark-rs rejected: {e:?}")
+        })
+        .parse("9")
+        .unwrap_or_else(|e| panic!("#574 imported {ext:?}: parse '9' failed: {e:?}"))
+        .to_string()
+    };
+    // Python Lark 1.3.1 oracle (earley/resolve, maybe_placeholders=false): `alt` (priority
+    // 50) wins in BOTH cases — the extend's `.100` is discarded, so `python__name`'s
+    // prepended arm stays at the target priority 0.
+    let alt_wins = "Tree(start, [Tree(w, [Tree(alt, [Token(Z, \"9\")])])])";
+    assert_eq!(
+        win_imported(""),
+        alt_wins,
+        "#574 baseline: with no explicit extend priority, alt (prio 50) wins the resolve"
+    );
+    assert_eq!(
+        win_imported(".100"),
+        alt_wins,
+        "#574: `%extend python__name.100` must DISCARD the .100 — alt (prio 50) still wins, \
+         exactly as Python; a leaked priority 100 flips the winner to python__name (the bug)"
+    );
+
+    // Same-grammar branch parity: `%extend r.100: …` likewise discards the priority (the
+    // branch merges into the existing RawRule, keeping `r`'s own priority 0), so `alt` wins.
+    let same = |ext: &str| {
+        format!(
+            "start: w\nw: r | alt\nr: OTHER\nalt.50: MATCH9\nMATCH9: \"9\"\nOTHER: \"z\"\n{ext}"
+        )
+    };
+    let win_same = |ext: &str| {
+        build(&same(ext), ParserAlgorithm::Earley, LexerType::Auto, false)
+            .unwrap_or_else(|e| panic!("#574 same-grammar {ext:?}: build failed: {e:?}"))
+            .parse("9")
+            .unwrap_or_else(|e| panic!("#574 same-grammar {ext:?}: parse '9' failed: {e:?}"))
+            .to_string()
+    };
+    let sg_alt_wins = "Tree(start, [Tree(w, [Tree(alt, [Token(MATCH9, \"9\")])])])";
+    assert_eq!(
+        win_same(""),
+        sg_alt_wins,
+        "#574 same-grammar baseline: alt (prio 50) wins"
+    );
+    assert_eq!(
+        win_same("%extend r.100: MATCH9\n"),
+        sg_alt_wins,
+        "#574 same-grammar: `%extend r.100` must also discard the .100 — alt (prio 50) wins"
+    );
+}
+
 /// #505 — the `%extend`-of-imported-interior-origin prepend must hold for a body with
 /// *many* (≥1000) alternatives. The original implementation realized the prepend by
 /// bumping every pre-existing imported alternative's `rule.order` by a **fixed**
