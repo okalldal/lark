@@ -104,6 +104,36 @@
 //!   (`tests/test_lalr_table_scaling.rs`) is the deterministic gate — the
 //!   parse-table analog of the Earley/CYK/lexer scaling gates, paid at build,
 //!   never wall-clock.
+//!
+//! A ninth group of counters backs the **output-shape** gate (semantic-output C5,
+//! #230). They make the "the fast path builds the right *shape* of output" claim
+//! falsifiable without wall-clock (ADR-0007): they count what the shared
+//! [`TreeOutputBuilder`](crate::parsers) materializes as it shapes each reduction,
+//! so a future tree-bypassing semantic backend (C7/C8) can be held to *building
+//! fewer nodes* by the same deterministic discipline.
+//!
+//! * [`tree_nodes_built`] — every `Tree` node the builder materializes
+//!   (`TreeOutputBuilder::build_node`). The default tree output has
+//!   `tree_nodes_built > 0`; a future zero-tree span backend (C8) must drive it to
+//!   `0` for the same parse — the eventual gate the C5 infrastructure is laid for.
+//! * [`token_value_string_bytes`] — the total byte length of every token *value*
+//!   the builder materializes into the output (`TreeOutputBuilder::build_token`).
+//!   The default builder copies each kept token's value string, so this scales with
+//!   the kept-token payload; the span backend (C8) that keeps offsets instead of
+//!   owned strings drives it to `0` (the `token_value_string_bytes == 0` gate #230
+//!   defers to C8).
+//! * [`semantic_reduce_calls`] — one per `TreeOutputBuilder::assemble` call, i.e.
+//!   one per rule reduction the engine shapes into a value through `assemble`. The
+//!   LALR and CYK reducers (and the Earley *explicit* walk's `DerivsNext`) all route
+//!   each reduction through `assemble`, so for a known **LALR/CYK** input this equals
+//!   the parser's user-rule reduction count (the augmented `$root` accept does *not*
+//!   route through `assemble`, so it is not counted). The Earley *resolve* walk
+//!   shapes via `TreeOutputBuilder::shape`/`shape_with_container` directly (it never
+//!   calls `assemble`), so this counter does **not** track Earley-resolve reductions
+//!   — unlike [`tree_nodes_built`]/[`token_value_string_bytes`], which live in
+//!   `build_node`/`build_token` and are engine-agnostic. It is the denominator that
+//!   makes the per-reduction output-build cost a flat envelope on the LALR/CYK paths
+//!   (`tests/test_output_counters.rs`, an LALR gate).
 
 #[cfg(feature = "perf-counters")]
 mod imp {
@@ -120,6 +150,9 @@ mod imp {
     static DENSE_BUILD_BYTES: AtomicU64 = AtomicU64::new(0);
     static EXPANSION_ALTS: AtomicU64 = AtomicU64::new(0);
     static PARSE_TABLE_ACTION_CELLS: AtomicU64 = AtomicU64::new(0);
+    static TREE_NODES_BUILT: AtomicU64 = AtomicU64::new(0);
+    static TOKEN_VALUE_STRING_BYTES: AtomicU64 = AtomicU64::new(0);
+    static SEMANTIC_REDUCE_CALLS: AtomicU64 = AtomicU64::new(0);
     static LEO_DISABLED: AtomicBool = AtomicBool::new(false);
 
     #[inline]
@@ -226,6 +259,32 @@ mod imp {
         PARSE_TABLE_ACTION_CELLS.fetch_add(n, Ordering::Relaxed);
     }
 
+    /// Count one `Tree` node materialized by `TreeOutputBuilder::build_node` — the
+    /// output-shape size metric (semantic-output C5, #230). The default tree output
+    /// has this `> 0`; a future zero-tree span backend (C8) must drive it to `0`.
+    #[inline]
+    pub fn add_tree_node_built() {
+        TREE_NODES_BUILT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Count the byte length of one token value materialized into the output by
+    /// `TreeOutputBuilder::build_token` (semantic-output C5, #230). Scales with the
+    /// kept-token payload of the parse; the span backend (C8) drives it to `0`.
+    #[inline]
+    pub fn add_token_value_string_bytes(n: u64) {
+        TOKEN_VALUE_STRING_BYTES.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Count one `TreeOutputBuilder::assemble` call — one rule reduction shaped into
+    /// a value (semantic-output C5, #230). For a known **LALR/CYK** input this equals
+    /// the parser's user-rule reduction count (the augmented `$root` accept does not
+    /// route through `assemble`). The Earley resolve walk shapes via `shape`, not
+    /// `assemble`, so it does not increment this — see the module-level doc.
+    #[inline]
+    pub fn add_semantic_reduce_call() {
+        SEMANTIC_REDUCE_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Zero every counter. Call before the workload you want to measure.
     pub fn reset() {
         COMPLETER_SCAN_STEPS.store(0, Ordering::Relaxed);
@@ -239,6 +298,9 @@ mod imp {
         DENSE_BUILD_BYTES.store(0, Ordering::Relaxed);
         EXPANSION_ALTS.store(0, Ordering::Relaxed);
         PARSE_TABLE_ACTION_CELLS.store(0, Ordering::Relaxed);
+        TREE_NODES_BUILT.store(0, Ordering::Relaxed);
+        TOKEN_VALUE_STRING_BYTES.store(0, Ordering::Relaxed);
+        SEMANTIC_REDUCE_CALLS.store(0, Ordering::Relaxed);
     }
 
     pub fn completer_scan_steps() -> u64 {
@@ -283,6 +345,18 @@ mod imp {
 
     pub fn parse_table_action_cells() -> u64 {
         PARSE_TABLE_ACTION_CELLS.load(Ordering::Relaxed)
+    }
+
+    pub fn tree_nodes_built() -> u64 {
+        TREE_NODES_BUILT.load(Ordering::Relaxed)
+    }
+
+    pub fn token_value_string_bytes() -> u64 {
+        TOKEN_VALUE_STRING_BYTES.load(Ordering::Relaxed)
+    }
+
+    pub fn semantic_reduce_calls() -> u64 {
+        SEMANTIC_REDUCE_CALLS.load(Ordering::Relaxed)
     }
 
     /// Turn the Joop-Leo optimization off (`true`) or on (`false`). Lets a
@@ -338,6 +412,15 @@ mod imp {
     #[inline]
     pub fn add_parse_table_action_cells(_n: u64) {}
 
+    #[inline]
+    pub fn add_tree_node_built() {}
+
+    #[inline]
+    pub fn add_token_value_string_bytes(_n: u64) {}
+
+    #[inline]
+    pub fn add_semantic_reduce_call() {}
+
     pub fn reset() {}
 
     pub fn completer_scan_steps() -> u64 {
@@ -381,6 +464,18 @@ mod imp {
     }
 
     pub fn parse_table_action_cells() -> u64 {
+        0
+    }
+
+    pub fn tree_nodes_built() -> u64 {
+        0
+    }
+
+    pub fn token_value_string_bytes() -> u64 {
+        0
+    }
+
+    pub fn semantic_reduce_calls() -> u64 {
         0
     }
 

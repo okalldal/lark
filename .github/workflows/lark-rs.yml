@@ -92,6 +92,9 @@ jobs:
       #                                    determinization-blowup tripwire)
       #   * test_lalr_table_scaling      — LALR ParseTable density: O(filled) not
       #                                    O(states×terminals) (#367)
+      #   * test_output_counters         — output-shape counters: TreeOutputBuilder
+      #                                    builds trees + reduce count (semantic-output
+      #                                    C5, #230)
       - name: Scaling gates (perf-counters)
         run: >-
           cargo test --features perf-counters
@@ -100,6 +103,7 @@ jobs:
           --test test_lexer_scaling
           --test test_lexer_dfa_build_scaling
           --test test_lalr_table_scaling
+          --test test_output_counters
 
       # python.lark LALR build gate (#79). The headline result of the EBNF-helper
       # dedup is that upstream python.lark's full LALR table now *builds* (without
