@@ -346,6 +346,17 @@ import mangling, forest enumeration, eager determinization) untouched by the pri
 - **Test:** `h4_12_dense_dfa_build_is_subexponential` (now passing, no `#[ignore]`) plus the
   `counted-repeat` sweep in `test_lexer_dfa_build_scaling.rs` (both need
   `--features perf-counters`).
+- **Follow-up FIXED — guard bodies (#568).** The main-engine fix left the **guard-body**
+  dense DFAs (`lexer/guard.rs::build_anchored_dfa` / `build_anchored_all_dfa`) ungated — an
+  asymmetry with `build_partitioned_dfa`. A guard body is carried verbatim into an anchored
+  DFA and a *leading* lookahead body may be unbounded (`classify.rs` `LeadingBoundary`), so
+  `T: /(?![01]*1[01]{N})[01]+/` drives the identical `2^(N+1)` blow-up through the guard DFA
+  (repro measured: N=8 = 39 KiB, N=12 = 623 KiB, N=16 = 9.9 MiB, N=20 = 159 MiB). `guard.rs`
+  now builds each body through `build_guard_dfa`, sharing the same `DENSE_PER_SOURCE_BUDGET`
+  and lazy/hybrid fallback (`GuardDfa::Dense` / `GuardDfa::Hybrid`). Latent, not a live
+  regression (guard bodies are structurally small in practice), but the completeness gap is
+  now closed and the asymmetry removed. **Test:** `h4_12_guard_body_dense_dfa_is_subexponential`
+  + the `guard-body-repeat` sweep in `test_lexer_dfa_build_scaling.rs` (ADR-0037 follow-up).
 
 ---
 

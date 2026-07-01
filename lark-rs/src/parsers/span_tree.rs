@@ -16,16 +16,20 @@
 //!     [`build_node`](super::tree_builder::TreeOutputBuilder), so
 //!     [`perf::tree_nodes_built`] stays `0`.
 //!
-//! **Scope — this is the output half, not a zero-copy *pipeline*.** The lexer still
-//! allocates each [`Token`]'s owned `value: String` upstream (both basic and
-//! contextual paths do), and the shared `run_into` seam still clones it per shift;
-//! `SpanTreeBuilder::token` then borrows the equivalent slice out of `input` and
-//! lets that upstream `String` drop. So `token_value_string_bytes == 0` proves *the
-//! output tree copies no token values*, **not** *the parse allocates no token
-//! strings*. Eliminating the lexer's per-token allocation (a span-emitting lexer
-//! path) is the next slice — issue #582 (C8.1) — and this backend is the seam it
-//! plugs into. Likewise the per-reduction child `Vec` is still allocated (bounded,
-//! but not reused); the reuse gate #233 asks for is split to #583 (C8.2).
+//! **Scope — output *and* lexer halves; the child `Vec` reuse is still open.** As of
+//! C8.1 (#582) the lexer no longer allocates a `Token.value: String` on the span
+//! path: `Lark::parse_span` drives a **span-emitting** token source
+//! (`make_span_source`) whose tokens carry positions but an empty `value`
+//! (`crate::perf::lexer_token_value_bytes == 0`), and `SpanTreeBuilder::token`
+//! recovers each value as an `&input` slice through the char→byte cursor. The
+//! `run_into` seam still `clone()`s the (now value-less) token per shift — an empty
+//! `String` clone, no heap traffic. So both `token_value_string_bytes` (output copy)
+//! **and** `lexer_token_value_bytes` (upstream alloc) are `0` on the span path,
+//! separately gated so "the pipeline allocated no token strings" is a counter result
+//! (ADR-0007). The default `parse()`/`parse_into` owned path is unchanged
+//! (byte-identical, `lexer_token_value_bytes > 0`). Still open: the per-reduction
+//! child `Vec` is allocated (bounded, but not reused) — the reuse gate #233 asks for
+//! is split to #583 (C8.2).
 //!
 //! This ships under ADR-0026's **relative oracle** (it is beyond-oracle in
 //! *representation*, not behaviour): [`SpanNode::materialize`] projects a

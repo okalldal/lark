@@ -91,6 +91,40 @@ fn record_scan_skip(pos: usize, match_start: Option<usize>) {
     crate::perf::add_lexer_scan_steps(skip + 1);
 }
 
+/// Whether a lexing call materializes an owned `Token.value: String` or emits a
+/// value-less span token (C8.1 #582).
+///
+/// The span-emitting path (`parse_span`) borrows the token's text out of the parse
+/// `input` in [`SpanTreeBuilder::token`](crate::parsers::SpanTreeBuilder) via the
+/// token's char positions, so the lexer's owned `value` copy is pure waste there —
+/// [`TokenValueMode::Span`] skips the `value.to_string()` allocation entirely
+/// (leaving `Token.value` empty) and, unlike [`TokenValueMode::Owned`], does not
+/// charge [`crate::perf::add_lexer_token_value_bytes`]. `Owned` is the default
+/// `parse()`/`parse_into` path and is byte-identical to before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TokenValueMode {
+    /// Materialize `Token.value` as an owned `String` (default; counts the alloc).
+    Owned,
+    /// Emit a value-less span token — no `value` allocation, no lexer counter charge.
+    Span,
+}
+
+/// Build the `Token.value` string for a matched terminal under `mode`. In
+/// [`TokenValueMode::Owned`] this is `value.to_string()` and its byte length is
+/// charged to the lexer-side counter (C8.1 #582); in [`TokenValueMode::Span`] it is
+/// an empty (non-allocating) `String` and nothing is charged — the value is
+/// recovered as an `&input` slice downstream.
+#[inline]
+fn token_value(value: &str, mode: TokenValueMode) -> String {
+    match mode {
+        TokenValueMode::Owned => {
+            crate::perf::add_lexer_token_value_bytes(value.len() as u64);
+            value.to_string()
+        }
+        TokenValueMode::Span => String::new(),
+    }
+}
+
 // ─── Configuration ────────────────────────────────────────────────────────────
 
 /// Which engine backs the per-position match (`match_at`). Selects between
@@ -302,7 +336,13 @@ impl BasicLexer {
     /// Build a [`Token`] for a matched terminal `id`/`value` starting at `start`,
     /// advancing `cur` past it. Returns `None` when the matched terminal is an
     /// `%ignore` type (it still advances the cursor, but produces no token).
-    fn make_token(&self, cur: &mut LexCursor, id: SymbolId, value: &str) -> Option<Token> {
+    fn make_token(
+        &self,
+        cur: &mut LexCursor,
+        id: SymbolId,
+        value: &str,
+        mode: TokenValueMode,
+    ) -> Option<Token> {
         // `start_pos`/`end_pos` are **character** indices (Python parity, #278) —
         // `cur.char_pos`, not the byte offset `cur.pos`.
         let start_pos = cur.char_pos;
@@ -315,7 +355,7 @@ impl BasicLexer {
         Some(Token {
             type_id: id,
             type_: self.names[&id].clone(),
-            value: value.to_string(),
+            value: token_value(value, mode),
             line: start_line,
             column: start_col,
             end_line: cur.line,
@@ -368,7 +408,7 @@ impl BasicLexer {
                 Ok(Token {
                     type_id: id,
                     type_: self.names[&id].clone(),
-                    value: value.to_string(),
+                    value: token_value(value, TokenValueMode::Owned),
                     line: start_line,
                     column: start_col,
                     end_line: cur.line,
@@ -387,17 +427,26 @@ impl BasicLexer {
     pub fn is_ignored(&self, id: SymbolId) -> bool {
         self.ignore.contains(&id)
     }
-}
 
-impl Lexer for BasicLexer {
-    fn lex(&self, text: &str) -> Result<Vec<Token>, ParseError> {
+    /// The span-emitting analog of [`Lexer::lex`]: eager whole-stream lexing that
+    /// builds **value-less** tokens (C8.1 #582) — the token positions still carry the
+    /// span, but `Token.value` is empty and the lexer allocates no owned value string
+    /// (`crate::perf::lexer_token_value_bytes` stays 0). Used by `parse_span` over the
+    /// basic lexer; the borrowed text is recovered from `input` in the span builder.
+    /// Byte-for-byte the same token stream as [`Lexer::lex`] except for the empty
+    /// `value` field (identical `type_id`/`type_`/positions).
+    pub(crate) fn lex_span(&self, text: &str) -> Result<Vec<Token>, ParseError> {
+        self.lex_with_mode(text, TokenValueMode::Span)
+    }
+
+    fn lex_with_mode(&self, text: &str, mode: TokenValueMode) -> Result<Vec<Token>, ParseError> {
         let mut tokens = Vec::new();
         let mut cur = LexCursor::new();
 
         while cur.pos < text.len() {
             match self.scanner.match_at(text, cur.pos) {
                 Some((id, value)) => {
-                    if let Some(tok) = self.make_token(&mut cur, id, value) {
+                    if let Some(tok) = self.make_token(&mut cur, id, value, mode) {
                         tokens.push(tok);
                     }
                 }
@@ -417,6 +466,14 @@ impl Lexer for BasicLexer {
         // `$END` carries the char index, not the byte offset (#278).
         tokens.push(Token::end().with_position(cur.line, cur.col, cur.char_pos, cur.char_pos));
         Ok(tokens)
+    }
+}
+
+impl Lexer for BasicLexer {
+    fn lex(&self, text: &str) -> Result<Vec<Token>, ParseError> {
+        // The default owned-value path (byte-identical to before): each token
+        // materializes its `value: String` and charges the lexer-side counter.
+        self.lex_with_mode(text, TokenValueMode::Owned)
     }
 }
 
@@ -590,6 +647,7 @@ impl ContextualLexer {
         char_pos: usize,
         line: usize,
         col: usize,
+        mode: TokenValueMode,
     ) -> Token {
         let (mut end_line, mut end_column) = (line, col);
         let mut nchars = 0usize;
@@ -605,7 +663,7 @@ impl ContextualLexer {
         Token {
             type_id: id,
             type_: self.names[&id].clone(),
-            value: value.to_string(),
+            value: token_value(value, mode),
             line,
             column: col,
             end_line,
@@ -616,8 +674,10 @@ impl ContextualLexer {
     }
 
     /// Lex the next token at byte offset `pos` / character index `char_pos` given the
-    /// current parser state.
-    pub fn next_token(
+    /// current parser state. `mode` selects owned vs. value-less span tokens (C8.1
+    /// #582); [`Self::next_token`] is the owned default, [`Self::next_token_span`] the
+    /// span-emitting entry point.
+    pub(crate) fn next_token_with_mode(
         &self,
         text: &str,
         pos: usize,
@@ -625,6 +685,7 @@ impl ContextualLexer {
         state: usize,
         line: usize,
         col: usize,
+        mode: TokenValueMode,
     ) -> Result<Option<Token>, ParseError> {
         let scanner = match self
             .state_to_scanner
@@ -638,7 +699,7 @@ impl ContextualLexer {
         };
 
         if let Some((id, value)) = scanner.match_at(text, pos) {
-            return Ok(Some(self.build_token(id, value, char_pos, line, col)));
+            return Ok(Some(self.build_token(id, value, char_pos, line, col, mode)));
         }
 
         if pos >= text.len() {
@@ -655,6 +716,36 @@ impl ContextualLexer {
             pos,
             expected: "valid token for this state".to_string(),
         })
+    }
+
+    /// The owned-value default path (byte-identical to before): materializes
+    /// `Token.value` and charges the lexer-side value counter.
+    pub fn next_token(
+        &self,
+        text: &str,
+        pos: usize,
+        char_pos: usize,
+        state: usize,
+        line: usize,
+        col: usize,
+    ) -> Result<Option<Token>, ParseError> {
+        self.next_token_with_mode(text, pos, char_pos, state, line, col, TokenValueMode::Owned)
+    }
+
+    /// The span-emitting path (C8.1 #582): builds a **value-less** token (empty
+    /// `Token.value`, no owned-value allocation, no lexer counter charge). The
+    /// borrowed text is recovered from the parse `input` in the span builder. Byte-for-byte
+    /// the same token as [`Self::next_token`] except for the empty `value`.
+    pub(crate) fn next_token_span(
+        &self,
+        text: &str,
+        pos: usize,
+        char_pos: usize,
+        state: usize,
+        line: usize,
+        col: usize,
+    ) -> Result<Option<Token>, ParseError> {
+        self.next_token_with_mode(text, pos, char_pos, state, line, col, TokenValueMode::Span)
     }
 
     /// Match the next token at `pos` against the **root** (full) terminal set —
@@ -677,9 +768,9 @@ impl ContextualLexer {
         let scanner = self
             .root
             .get_or_build(&self.terminals, self.global_flags, self.backend);
-        scanner
-            .match_at(text, pos)
-            .map(|(id, value)| self.build_token(id, value, char_pos, line, col))
+        scanner.match_at(text, pos).map(|(id, value)| {
+            self.build_token(id, value, char_pos, line, col, TokenValueMode::Owned)
+        })
     }
 }
 
@@ -726,5 +817,29 @@ impl<'a> LexerState<'a> {
             self.char_pos += 1;
         }
         self.pos += n;
+    }
+
+    /// Advance past the next `nchars` characters, walking the consumed text so byte
+    /// `pos` and line/col stay in sync. The value-length-independent analog of
+    /// [`advance_by`](Self::advance_by): a span-emitting lexer path (C8.1 #582) builds
+    /// value-less tokens whose byte length is unavailable from `Token.value`, so the
+    /// [`TokenSource`](crate::parsers::TokenSource) advances by the token's char count
+    /// (`end_pos - start_pos`) instead. Identical net effect to `advance_by(value.len())`
+    /// for an owned token, since a token spans exactly `end_pos - start_pos` characters.
+    pub fn advance_by_chars(&mut self, nchars: usize) {
+        for _ in 0..nchars {
+            let ch = match self.text[self.pos..].chars().next() {
+                Some(ch) => ch,
+                None => break,
+            };
+            if ch == '\n' {
+                self.line += 1;
+                self.col = 1;
+            } else {
+                self.col += 1;
+            }
+            self.char_pos += 1;
+            self.pos += ch.len_utf8();
+        }
     }
 }

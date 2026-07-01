@@ -632,7 +632,11 @@ impl GuardedEngine {
 /// N=8, ≈156 KiB at N=10 — measured) and the dense size doubles per +1 in N. The
 /// over-budget terminal still builds and lexes via the hybrid DFA (byte-identical
 /// matches), so oracle parity is preserved; only the eager determinization is skipped.
-const DENSE_PER_SOURCE_BUDGET: usize = 64 * 1024;
+///
+/// Shared with [`guard`](super::guard): a guard body (`(?=S)` / `(?<=S)`) is likewise a
+/// single dense-determinized source and is bounded by this same budget (issue #568), so
+/// the two build sites cannot drift on where "too big to determinize eagerly" sits.
+pub(super) const DENSE_PER_SOURCE_BUDGET: usize = 64 * 1024;
 
 /// Compile `srcs` to one Thompson NFA (`build_many`, `PatternID` = index), then
 /// determinize one anchored dense DFA under `match_kind`, **with no size limit**. The

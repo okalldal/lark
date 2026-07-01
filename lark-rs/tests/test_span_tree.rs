@@ -436,10 +436,11 @@ ITEM: "a"
 
             let nodes = perf::tree_nodes_built();
             let bytes = perf::token_value_string_bytes();
+            let lexer_bytes = perf::lexer_token_value_bytes();
             let reduces = perf::semantic_reduce_calls();
             eprintln!(
                 "n={n}: tree_nodes_built={nodes}, token_value_string_bytes={bytes}, \
-                 semantic_reduce_calls={reduces}"
+                 lexer_token_value_bytes={lexer_bytes}, semantic_reduce_calls={reduces}"
             );
 
             // ── The two C8 gates the issue body defers to this backend. ──────────
@@ -452,6 +453,16 @@ ITEM: "a"
                 bytes, 0,
                 "the span backend must copy NO token value bytes (n={n}); values \
                  borrow the input, so token_value_string_bytes stays 0"
+            );
+            // ── The C8.1 (#582) gate: the *lexer* allocates no owned token value on
+            //    the span path. This is the upstream half `token_value_string_bytes`
+            //    (output) could not see — the span-emitting lexer path emits
+            //    value-less tokens, so the lexer counter is 0 too. ────────────────
+            assert_eq!(
+                lexer_bytes, 0,
+                "the span-emitting lexer path must allocate NO owned Token.value \
+                 (n={n}); lexer_token_value_bytes counts the upstream `value.to_string()` \
+                 the span path skips"
             );
             // ── …while still shaping exactly one reduction per parser reduction. ──
             assert_eq!(
@@ -472,6 +483,49 @@ ITEM: "a"
                 }
             }
             assert_eq!(leaves, n, "span tree keeps n={n} ITEM leaves");
+        }
+
+        // ── The C8.1 discriminator: the lexer counter is a real result, not
+        //    vacuously 0. The owned `parse()` path over the same grammar has
+        //    lexer_token_value_bytes > 0 (it materializes each token's value in the
+        //    lexer), while the span path drives it to 0 — on BOTH the eager basic
+        //    (PreLexed) and lazy contextual lexers. This is the "distinguish LEXER
+        //    from OUTPUT token-value allocation" clause of #582.
+        //
+        //    Folded into this one test on purpose: the `perf` counters are
+        //    process-global atomics, so a second parallel `#[test]` mutating them
+        //    would corrupt the reads (same rationale as the scaling gates).
+        for lexer in [LexerType::Basic, LexerType::Contextual] {
+            let parser = Lark::new(
+                LIST_GRAMMAR,
+                LarkOptions {
+                    parser: ParserAlgorithm::Lalr,
+                    lexer: lexer.clone(),
+                    start: vec!["start".to_string()],
+                    ..Default::default()
+                },
+            )
+            .expect("list grammar builds");
+            let input = "a a a a a a a a"; // 8 one-byte ITEM tokens
+
+            // Owned path: the lexer materializes each kept token's value string.
+            perf::reset();
+            let _ = parser.parse(input).expect("parse ok");
+            let owned_lexer_bytes = perf::lexer_token_value_bytes();
+            assert!(
+                owned_lexer_bytes > 0,
+                "the owned parse() path must allocate lexer token values \
+                 (lexer={lexer:?}); got {owned_lexer_bytes}"
+            );
+
+            // Span path: value-less tokens — the lexer counter is 0.
+            perf::reset();
+            let _ = parser.parse_span(input).expect("span parse ok");
+            assert_eq!(
+                perf::lexer_token_value_bytes(),
+                0,
+                "the span path must allocate no lexer token values (lexer={lexer:?})"
+            );
         }
     }
 }

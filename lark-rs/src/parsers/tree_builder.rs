@@ -703,6 +703,18 @@ pub(crate) fn shape_reduction<'i, B: OutputBuilder<'i>>(
     // Output-shape counter (#230): one reduction shaped, matching `assemble`.
     perf::add_semantic_reduce_call();
 
+    // Child-buffer counter (#583/C8.2): this reduction allocates a fresh, owned child
+    // buffer (`kept` below) for its shaped children — bounded (O(children), never
+    // super-linear) but *not reused*, so the "bounded child-buffer reuse" line of
+    // #233 is currently satisfied only in its *bounded* half. One tick **per
+    // reduction** (a per-node unit, not a raw allocator count — the node-building
+    // branch's `values` vec and the placeholder `Inline` vec are intra-reduction
+    // scratch, deliberately not separately charged, because the reuse frontier is
+    // per-node). On a known LALR/`parse_into` input this equals the reduction count
+    // (flat per node); a future pooling/arena strategy (#242/#243) drives it *below*
+    // the node count. See `tests/test_child_vec_scaling.rs`.
+    perf::add_child_vec_alloc();
+
     // Flatten to the kept child list (drop per-position filtered punctuation, splice
     // transparent inlines, insert `nones_before` placeholders), accumulating the
     // pre-filter container span exactly as `assemble` does.
