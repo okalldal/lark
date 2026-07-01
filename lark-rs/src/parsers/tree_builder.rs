@@ -141,20 +141,65 @@ impl<'g> OutputContext<'g> {
 /// only with the flat, already-shaped children. The builder's job is to wrap
 /// those children into its `Value` type.
 ///
-/// This trait is **internal** — it is not part of the public API. The public
-/// trait shape (for user-facing semantic actions) is deferred to issue #231.
-pub(crate) trait OutputBuilder {
-    /// The value type this builder produces for a non-terminal node.
-    /// For the default tree builder, this is `Child`.
+/// The public trait shape is ADR-0029 (resolved) + ADR-0038 (the generic-`Value`
+/// placeholder / `Discard` / `token`-input edges). The engine funnels every LALR
+/// reduction through this seam; [`TreeOutputBuilder`] is the default `Value = Child`
+/// backend. `Lark::parse_into` drives an arbitrary builder; `parse()` is the tree
+/// backend. Earley/CYK stay post-parse (ADR-0029 fork 4) and keep the concrete
+/// tree-shaping path below.
+///
+/// `'i` ties a borrowing builder's `Value` to the parse `input` (owned backends
+/// like the tree ignore it). The engine performs *all* tree shaping — punctuation
+/// filtering, transparent/anon splicing, `expand1`, placeholder insertion — before
+/// calling [`reduce`](OutputBuilder::reduce), so the builder only ever sees the
+/// flat, already-shaped child list.
+pub(crate) trait OutputBuilder<'i> {
+    /// The value carried on the parse stack (Yacc's semantic value).
     type Value;
 
-    /// Build a tree node from a rule's tree name and its flat children.
-    ///
-    /// Called when a rule reduces to a normal (non-transparent, non-expand1) node.
-    fn build_node(&self, tree_name: &str, children: Vec<Child>) -> Self::Value;
+    /// A shifted terminal. The engine hands the lexer's token record (interned
+    /// `type_id`, `span`, precomputed positions, and — in this C7 intermediate —
+    /// the owned value; ADR-0038 §3) plus the whole `input`, so a span backend can
+    /// borrow `&input[token.start_pos..token.end_pos]`. `ctx` resolves the interned
+    /// terminal id to its Python-side name when the builder needs it. Runs for
+    /// *every* shifted terminal — the parse stack always needs a value (this is
+    /// engine token materialization, lower-level than Python's *visible* terminal
+    /// callback; see RFC §5).
+    fn token(&mut self, token: Token, input: &'i str, ctx: &OutputContext) -> Self::Value;
 
-    /// Build a token value from a shifted terminal.
-    fn build_token(&self, token: Token) -> Self::Value;
+    /// A completed reduction of `rule` over its already-shaped `children` (filtered,
+    /// transparent-spliced, placeholders inserted — the engine did all shaping).
+    /// `meta` is the node's engine-computed span/position (subsumes
+    /// `propagate_positions`); it is the single source of truth, so no backend
+    /// recomputes positions and none can diverge. `ctx.callback_name(rule)` resolves
+    /// the name Python's `create_callback` dispatches on (alias → template → origin).
+    fn reduce(
+        &mut self,
+        rule: usize,
+        children: &mut Vec<Self::Value>,
+        meta: &Meta,
+        ctx: &OutputContext,
+    ) -> Self::Value;
+
+    /// The value for an absent `maybe_placeholders` optional (`[...]`). Python Lark
+    /// inserts a literal `None` child; a builder maps that to its own "absent"
+    /// value. Default: unreachable unless the grammar uses `maybe_placeholders` — a
+    /// builder used with such a grammar MUST override this (ADR-0038 §1).
+    fn placeholder(&mut self, _ctx: &OutputContext) -> Self::Value {
+        panic!(
+            "OutputBuilder::placeholder called: this builder was used with a \
+             maybe_placeholders grammar but does not implement placeholder()"
+        );
+    }
+
+    /// Discard hook (Python's `Discard` sentinel). Default: nothing discards, so the
+    /// engine skips the check entirely and non-discarding builders pay zero
+    /// (ADR-0029 fork 1). The engine drops discarded children *after* placeholder
+    /// insertion (ADR-0038 §2).
+    #[inline]
+    fn is_discard(&self, _value: &Self::Value) -> bool {
+        false
+    }
 }
 
 // ─── TreeOutputBuilder: the default implementation ──────────────────────────
@@ -179,9 +224,13 @@ pub(crate) struct TreeOutputBuilder<'g> {
     propagate_positions: bool,
 }
 
-impl<'g> OutputBuilder for TreeOutputBuilder<'g> {
-    type Value = Child;
-
+impl<'g> TreeOutputBuilder<'g> {
+    /// Build a tree node from a rule's tree name and its flat children. Inherent
+    /// (not the trait `reduce`) because the concrete tree-shaping path
+    /// ([`assemble`](Self::assemble)/[`shape`](Self::shape)) — still driven by
+    /// LALR-recovery, Earley, and CYK — computes the node `meta` from the children
+    /// via `Tree::new`, whereas the value-parametric [`OutputBuilder::reduce`] is
+    /// handed the engine-computed `meta`.
     fn build_node(&self, tree_name: &str, children: Vec<Child>) -> Child {
         // Output-shape counter (#230): one `Tree` node materialized. A future
         // tree-bypassing span backend (C8) builds none of these.
@@ -189,12 +238,49 @@ impl<'g> OutputBuilder for TreeOutputBuilder<'g> {
         Child::Tree(Tree::new(tree_name.to_string(), children))
     }
 
+    /// Build a token value from a shifted terminal (inherent — the concrete path's
+    /// analog of [`OutputBuilder::token`]).
     fn build_token(&self, token: Token) -> Child {
         // Output-shape counter (#230): the owned token value bytes this backend
         // copies into the output. The span backend (C8) keeps offsets, not strings,
         // and drives this to 0.
         perf::add_token_value_string_bytes(token.value.len() as u64);
         Child::Token(token)
+    }
+}
+
+impl<'i, 'g> OutputBuilder<'i> for TreeOutputBuilder<'g> {
+    type Value = Child;
+
+    fn token(&mut self, token: Token, _input: &'i str, _ctx: &OutputContext) -> Child {
+        // Output-shape counter (#230): owned value bytes copied into the tree.
+        perf::add_token_value_string_bytes(token.value.len() as u64);
+        Child::Token(token)
+    }
+
+    fn reduce(
+        &mut self,
+        rule: usize,
+        children: &mut Vec<Child>,
+        meta: &Meta,
+        ctx: &OutputContext,
+    ) -> Child {
+        // Output-shape counter (#230): one `Tree` node materialized.
+        perf::add_tree_node_built();
+        let children = std::mem::take(children);
+        // The engine already computed `meta` (the single source of truth), so use it
+        // directly rather than re-deriving from children as `Tree::new` would — that
+        // is what keeps this backend byte-identical to the concrete path under
+        // `propagate_positions` without a second, drift-prone computation.
+        Child::Tree(Tree {
+            data: ctx.callback_name(rule).to_string(),
+            children,
+            meta: meta.clone(),
+        })
+    }
+
+    fn placeholder(&mut self, _ctx: &OutputContext) -> Child {
+        Child::None
     }
 }
 
