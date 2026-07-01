@@ -303,10 +303,22 @@ child `Vec` is bounded but **not reused** (the reuse ratio is exactly `1`). An
 owned-per-node representation like `SpanBranch` inherently cannot reuse the buffer it
 retains, so a genuine reuse win (`child_vec_allocs < node count`) needs the arena/`Tape`
 backend, not `SpanTree`; this counter is exactly the gate that would show it. Actual
-pooling therefore rides the arena work (C8b #242 / C8c #243), not C8.2. Other deferred
-follow-ups stay gated: C8b #242
-(event stream) + C8c #243 (JSON tape), each `needs-decision` on a concrete consumer; C9
-#234 (standalone); C10 #244 (bindings `OutputMode` taxonomy).
+pooling therefore rides the arena work (C8c #243), not C8.2.
+
+**C8b #242 (event-stream backend) is landed — internal, no public API (ADR-0039).**
+The architect named the **embedded transformer** (`Lark(..., transformer=T)`) as its
+consumer, resolving the ADR-0029 `needs-decision` tripwire: it is the one event-stream
+consumer with a Python oracle. The event-sink `OutputBuilder` (folds `token`/`reduce`
+events into a value, no owned `Tree`/`Token`) is realized on the existing seam and gated
+two ways — **semantic** parity (value + ordered callback trace over the bank vs the Python
+embedded-transformer oracle, `tests/test_transformer_oracle.rs`, incl. the RFC §5
+`__default_token__` divergence #229) and the **zero-tree perf** proof
+(`tests/test_transform_counters.rs`: `tree_nodes_built == 0` / `token_value_string_bytes
+== 0` on the event path across a size sweep + both lexers, with the default `parse()` tree
+backend as the `> 0` positive control). A *public* transformer / `OutputMode` surface stays
+the separate escalate-tier call (C10 #244). Other deferred follow-ups stay gated: C8c #243
+(JSON tape), `needs-decision` on a concrete consumer; C9 #234 (standalone); C10 #244
+(bindings `OutputMode` taxonomy).
 
 Phase 4 distribution (#46–#50) follows after Phase 3 is substantially complete.
 

@@ -98,6 +98,9 @@ jobs:
       #   * test_child_vec_scaling       — child-buffer boundedness: one bounded child
       #                                    Vec per reduction, flat per node (semantic-
       #                                    output C8.2, #583)
+      #   * test_transform_counters      — embedded-transformer event path builds no
+      #                                    generic tree (tree_nodes_built == 0;
+      #                                    semantic-output C8b, #242)
       - name: Scaling gates (perf-counters)
         run: >-
           cargo test --features perf-counters
@@ -108,6 +111,7 @@ jobs:
           --test test_lalr_table_scaling
           --test test_output_counters
           --test test_child_vec_scaling
+          --test test_transform_counters
 
       # Zero-copy SpanTree backend gate (semantic-output C8, #233). The backend and
       # its `Lark::parse_span` entry point live behind the experimental `span-tree`
