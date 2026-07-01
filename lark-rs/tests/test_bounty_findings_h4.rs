@@ -975,6 +975,86 @@ fn h4_12_dense_dfa_build_is_subexponential() {
     );
 }
 
+/// #568 (follow-up of H4-12/#349). The guard-body analog: the same `.*a.{N}` dense-DFA
+/// blow-up, but reached through a **leading negative-lookahead guard body** rather than a
+/// main-engine terminal. `T: /(?![01]*1[01]{N})[01]+/` carries the body `[01]*1[01]{N}`
+/// verbatim into `lexer/guard.rs::build_anchored_dfa` (a leading lookahead body may be
+/// unbounded, so `classify.rs` admits it), which — pre-fix — determinized eagerly under no
+/// `dfa_size_limit`, blowing to `2^(N+1)` states exactly as the main engine did before
+/// ADR-0037 (measured: N=8 = 39 KiB, N=12 = 623 KiB, N=16 = 9.9 MiB, N=20 = 159 MiB). The
+/// #568 fix extends the ADR-0037 bounded-build + lazy/hybrid fallback to the guard DFA, so
+/// `dense_build_bytes` stays flat across N and the guard still evaluates byte-identically
+/// (Python `re` accepts these inputs — a resource pathology, not a behavioral divergence).
+#[cfg(feature = "perf-counters")]
+#[test]
+fn h4_12_guard_body_dense_dfa_is_subexponential() {
+    use lark_rs::perf;
+
+    // Build the guard-body terminal at increasing N and record the eager-determinization
+    // heap size. Pre-fix the guard DFA doubled per +1 in N; post-fix the over-budget body
+    // falls back to the lazy DFA, so the dense counter stays flat.
+    let measure = |n: usize| -> Option<u64> {
+        let g = format!("start: T\nT: /(?![01]*1[01]{{{n}}})[01]+/\n");
+        let mut o = opts(ParserAlgorithm::Lalr, LexerType::Basic);
+        o.start = vec!["start".to_string()];
+        perf::reset();
+        let lark = Lark::new(&g, o).ok()?;
+        // An all-zeros run can never match the guard body (`[01]*1…` needs a `1`), so the
+        // negative lookahead holds and the terminal lexes — a valid input under any N.
+        let input = "0".repeat(n + 6);
+        let parsed = lark.parse(&input);
+        assert!(
+            parsed.is_ok(),
+            "#568: the hybrid-fallback GUARD body must still LEX byte-identically (Python \
+             accepts {input:?} — the negative lookahead holds on an all-zeros run); the \
+             fallback preserves oracle parity"
+        );
+        Some(perf::dense_build_bytes())
+    };
+
+    // Byte-identical discrimination through the HYBRID path (the anchoring proof). At
+    // N=12 the guard body is over-budget, so the lazy DFA runs — it must still evaluate the
+    // anchored negative lookahead correctly, not always-accept. Python `re` (oracle):
+    // `zeros` matches the base (guard holds — the body needs a `1`), `ones` does NOT (the
+    // body `[01]*1[01]{12}` matches, so `(?!…)` fails). Same verdicts at N=2 (dense).
+    let discriminates = |n: usize| -> (bool, bool) {
+        let g = format!("start: T\nT: /(?![01]*1[01]{{{n}}})[01]+/\n");
+        let mut o = opts(ParserAlgorithm::Lalr, LexerType::Basic);
+        o.start = vec!["start".to_string()];
+        let lark = Lark::new(&g, o).expect("#568: builds");
+        (
+            lark.parse(&"0".repeat(20)).is_ok(), // guard holds → lexes
+            lark.parse(&"1".repeat(20)).is_ok(), // guard fails → no lex
+        )
+    };
+    assert_eq!(
+        discriminates(12),
+        (true, false),
+        "#568: the over-budget HYBRID guard body must discriminate byte-identically to \
+         Python (accept all-zeros, reject `1`×20) — proves the lazy DFA honors the anchored \
+         negative lookahead, not always-accept"
+    );
+    assert_eq!(
+        discriminates(12),
+        discriminates(2),
+        "#568: the hybrid (N=12) and dense (N=2) guard paths must agree on both inputs"
+    );
+
+    let bytes = |n: usize| measure(n).expect("#568: the grammar still builds after the fix");
+    let (b4, b12) = (bytes(4), bytes(12));
+    // Post-fix the over-budget guard body is lazy, so its eager contribution collapses to
+    // ~0 — `dense_build_bytes` is flat-or-shrinking across N, never the exponential climb.
+    // Pre-fix b12/b4 was ≈225× (622924 / 2764); assert well under 8×, which the hybrid
+    // fallback satisfies by construction.
+    assert!(
+        b12 <= b4.saturating_mul(8),
+        "#568: guard-body determinized DFA size is exponential in the assertion's counted \
+         repeat (bytes N=4 = {b4}, N=12 = {b12}; ratio {:.1}× ≫ linear) — the guard dense \
+         build is not bounded by the hybrid fallback",
+        b12 as f64 / b4.max(1) as f64
+    );
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // #343 adjacent import/alias shapes — closure mangle vs the per-module alias map.
 //
