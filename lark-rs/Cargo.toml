@@ -91,6 +91,7 @@ fancy-regex = "0.18"
 # lowered terminal's byte-equivalence classes and state count off a dense DFA to
 # derive a complete (Myhill-Nerode-bounded) enumeration alphabet and length bound.
 regex-automata = "0.4"
+mimalloc = "0.1.52"
 
 [[example]]
 name = "json_parser"

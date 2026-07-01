@@ -20,6 +20,13 @@ use lark_rs::{Ambiguity, Lark, LarkOptions, LexerType, ParserAlgorithm};
 use std::hint::black_box;
 use std::time::{Duration, Instant};
 
+// PERF SPIKE (2026-07-01): opt-in allocator swap to quantify how much of the
+// allocation-bound profile is glibc malloc itself:
+//   RUSTFLAGS="--cfg spike_mimalloc" cargo bench --bench parse
+#[cfg(spike_mimalloc)]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 const JSON_GRAMMAR: &str = r#"
     ?start: value
     ?value: object
