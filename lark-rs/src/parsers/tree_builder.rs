@@ -542,3 +542,251 @@ impl ContainerSpan {
 // core three files (earley.rs, cyk.rs, lalr.rs) that references it by name
 // keeps compiling without a rename. This alias is crate-internal only.
 pub(crate) type TreeBuilder<'g> = TreeOutputBuilder<'g>;
+
+// ─── Value-parametric shaping (the `parse_into` seam, #232 C7) ──────────────────
+//
+// The generic analog of [`TreeOutputBuilder::assemble`] + [`shape_with_container`]:
+// the *same* tree-shaping rules (per-position punctuation filtering, transparent /
+// anon splicing, `expand1`, `maybe_placeholders`, `propagate_positions` container
+// widening), but over an [`OutputBuilder`]'s opaque `Value` instead of `Child`. The
+// engine tracks each value's `Meta` + [`GTag`] on the stack (never inspecting the
+// value), so a semantic/span backend never materializes a generic tree.
+//
+// This parallels the concrete `assemble`/`shape` above; the two are kept
+// byte-identical for `Value = Child` by the `parse_into(tree) == parse()` relative
+// oracle over the full compliance corpus, and the ADR-0015 follow-up to fold them
+// onto one definition rides the C7 PR. Earley/CYK stay on the concrete path
+// (post-parse, ADR-0029 fork 4).
+
+/// Origin tag for a generic stack value — the shaping decisions the opaque
+/// `Value` can't answer: which `child_*` position rule applies for meta, whether an
+/// `expand1` lone child is a `None` placeholder, and the root ParseTree variant.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GTag {
+    Token,
+    Tree,
+    None,
+}
+
+/// One value on the generic parse stack: the builder value plus the engine-tracked
+/// `meta` and `tag`, kept beside the value so shaping never inspects it.
+pub(crate) struct GElem<V> {
+    pub value: V,
+    pub meta: Meta,
+    pub tag: GTag,
+}
+
+/// The generic stack currency (the `Value`-parametric analog of [`Slot`]): a single
+/// value, or the children of a transparent rule to splice into the parent.
+pub(crate) enum GSlot<V> {
+    Value(GElem<V>),
+    Inline(Vec<GElem<V>>),
+}
+
+/// The `Meta` a shifted token contributes (all fields present, unguarded — the raw
+/// form `ContainerSpan::observe_token` uses; the `child_*` guards below re-apply the
+/// `> 0` line/column rules).
+pub(crate) fn meta_from_token(t: &Token) -> Meta {
+    Meta {
+        line: Some(t.line),
+        column: Some(t.column),
+        end_line: Some(t.end_line),
+        end_column: Some(t.end_column),
+        start_pos: Some(t.start_pos),
+        end_pos: Some(t.end_pos),
+        empty: false,
+    }
+}
+
+// Tag-aware mirrors of `tree.rs`'s `child_*` position helpers, so
+// `node_meta_from_elems` reproduces `Meta::from_children` byte-for-byte over
+// `(Meta, GTag)` pairs (Token guards `> 0` on line/column; Tree reads meta directly;
+// None contributes nothing).
+fn gc_line(m: &Meta, tag: GTag) -> Option<usize> {
+    match tag {
+        GTag::Token => m.line.filter(|&l| l > 0),
+        GTag::Tree => m.line,
+        GTag::None => Option::None,
+    }
+}
+fn gc_column(m: &Meta, tag: GTag) -> Option<usize> {
+    match tag {
+        GTag::Token => m.column.filter(|&c| c > 0),
+        GTag::Tree => m.column,
+        GTag::None => Option::None,
+    }
+}
+fn gc_start(m: &Meta, tag: GTag) -> Option<usize> {
+    match tag {
+        GTag::None => Option::None,
+        _ => m.start_pos,
+    }
+}
+fn gc_end_line(m: &Meta, tag: GTag) -> Option<usize> {
+    match tag {
+        GTag::Token => m.end_line.filter(|&l| l > 0),
+        GTag::Tree => m.end_line,
+        GTag::None => Option::None,
+    }
+}
+fn gc_end_column(m: &Meta, tag: GTag) -> Option<usize> {
+    match tag {
+        GTag::Token => m.end_column.filter(|&c| c > 0),
+        GTag::Tree => m.end_column,
+        GTag::None => Option::None,
+    }
+}
+fn gc_end(m: &Meta, tag: GTag) -> Option<usize> {
+    match tag {
+        GTag::None => Option::None,
+        _ => m.end_pos,
+    }
+}
+
+/// The `Meta` a node builds from its (post-filter, placeholder-inclusive) children —
+/// the exact contract of [`Meta::from_children`], reproduced over `GElem`s so the
+/// engine (not the opaque value) is the single source of a node's span.
+fn node_meta_from_elems<V>(elems: &[GElem<V>]) -> Meta {
+    let mut meta = Meta::default();
+    for e in elems {
+        if let Some(line) = gc_line(&e.meta, e.tag) {
+            meta.line = Some(line);
+            meta.column = gc_column(&e.meta, e.tag);
+            meta.start_pos = gc_start(&e.meta, e.tag);
+            break;
+        }
+    }
+    for e in elems.iter().rev() {
+        if let Some(line) = gc_end_line(&e.meta, e.tag) {
+            meta.end_line = Some(line);
+            meta.end_column = gc_end_column(&e.meta, e.tag);
+            meta.end_pos = gc_end(&e.meta, e.tag);
+            break;
+        }
+    }
+    meta.empty = meta.line.is_none();
+    meta
+}
+
+impl ContainerSpan {
+    /// Observe a generic pre-filter child (the `GElem` analog of `observe_child`):
+    /// a token contributes unconditionally, a subtree only if positioned + non-empty,
+    /// a placeholder never.
+    fn observe_gelem<V>(&mut self, e: &GElem<V>) {
+        match e.tag {
+            GTag::Token => self.observe(e.meta.clone()),
+            GTag::Tree => self.observe_meta(&e.meta),
+            GTag::None => {}
+        }
+    }
+}
+
+#[inline]
+fn keep_token_pos(rule: &CompiledRule, pos: usize) -> bool {
+    rule.options.keep_all_tokens || !rule.filter_pos.get(pos).copied().unwrap_or(false)
+}
+
+#[inline]
+fn nones_at_gap(rule: &CompiledRule, gap: usize) -> usize {
+    rule.options.nones_before.get(gap).copied().unwrap_or(0)
+}
+
+/// Shape one reduction of `rule` over its child stack slots into the parent value —
+/// the value-parametric mirror of `assemble` + `shape_with_container`. `builder`
+/// mints token/node/placeholder values; the engine owns every shaping decision.
+pub(crate) fn shape_reduction<'i, B: OutputBuilder<'i>>(
+    rule_idx: usize,
+    rule: &CompiledRule,
+    child_slots: Vec<GSlot<B::Value>>,
+    builder: &mut B,
+    ctx: &OutputContext,
+    propagate: bool,
+) -> GSlot<B::Value> {
+    // Output-shape counter (#230): one reduction shaped, matching `assemble`.
+    perf::add_semantic_reduce_call();
+
+    // Flatten to the kept child list (drop per-position filtered punctuation, splice
+    // transparent inlines, insert `nones_before` placeholders), accumulating the
+    // pre-filter container span exactly as `assemble` does.
+    let mut kept: Vec<GElem<B::Value>> = Vec::new();
+    let mut container = ContainerSpan::new();
+    let placeholder = |builder: &mut B| GElem {
+        value: builder.placeholder(ctx),
+        meta: Meta::default(),
+        tag: GTag::None,
+    };
+    for (i, slot) in child_slots.into_iter().enumerate() {
+        for _ in 0..nones_at_gap(rule, i) {
+            kept.push(placeholder(builder));
+        }
+        match slot {
+            GSlot::Value(e) => {
+                if propagate {
+                    container.observe_gelem(&e);
+                }
+                let filtered = e.tag == GTag::Token && !keep_token_pos(rule, i);
+                if !filtered {
+                    kept.push(e);
+                }
+            }
+            GSlot::Inline(cs) => {
+                if propagate {
+                    for c in &cs {
+                        container.observe_gelem(c);
+                    }
+                }
+                kept.extend(cs);
+            }
+        }
+    }
+    // Trailing placeholders: an empty `[...]`'s widest-alternative count, plus a
+    // distributed absent `[...]` at the end of this alternative.
+    for _ in 0..rule.options.placeholder_count {
+        kept.push(placeholder(builder));
+    }
+    for _ in 0..nones_at_gap(rule, rule.expansion.len()) {
+        kept.push(placeholder(builder));
+    }
+
+    // `Discard` sweep (ADR-0038 §2): after placeholders, before the node is built.
+    // Monomorphized away for the default (non-discarding) builder.
+    kept.retain(|e| !builder.is_discard(&e.value));
+
+    if rule.transparent {
+        // `_rule` / `__anon_*`: splice into the parent, no node built.
+        GSlot::Inline(kept)
+    } else if rule.options.expand1 && rule.alias.is_none() && kept.len() == 1 {
+        // `?rule` with a single child: propagate it unchanged. A lone `None`
+        // placeholder stays an inline of exactly one `None` (RC9/#289), so the parent
+        // splices one placeholder; a real single child collapses to a bare value.
+        let e = kept.pop().unwrap();
+        match e.tag {
+            GTag::None => GSlot::Inline(vec![e]),
+            _ => GSlot::Value(e),
+        }
+    } else {
+        let mut node_meta = node_meta_from_elems(&kept);
+        if propagate {
+            container.widen_meta(&mut node_meta);
+        }
+        let mut values: Vec<B::Value> = kept.into_iter().map(|e| e.value).collect();
+        let value = builder.reduce(rule_idx, &mut values, &node_meta, ctx);
+        GSlot::Value(GElem {
+            value,
+            meta: node_meta,
+            tag: GTag::Tree,
+        })
+    }
+}
+
+/// The final parse value off the generic stack at ACCEPT. Mirrors
+/// [`root_slot_to_parse_tree`]: a normal root value, or a `?start` lone-`None`
+/// collapse (`Inline([None])`) whose single placeholder value is the result. Any
+/// other `Inline` shape is structurally impossible at a start root.
+pub(crate) fn accept_value<V>(slot: GSlot<V>) -> Result<V, ()> {
+    match slot {
+        GSlot::Value(e) => Ok(e.value),
+        GSlot::Inline(mut es) if es.len() == 1 => Ok(es.pop().unwrap().value),
+        GSlot::Inline(_) => Err(()),
+    }
+}
