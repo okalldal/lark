@@ -943,11 +943,30 @@ impl GrammarCompiler {
                     } else {
                         String::new()
                     };
+                    // The extend's own rule *priority* (`%extend X.N: …`) is likewise
+                    // discarded (#574): Python's `_extend` splices the new alternative
+                    // into the target's existing definition, so it inherits the *target*
+                    // rule's priority, not the extend directive's `.N`. The `..r` spread
+                    // below would otherwise carry `r.priority` (the extend's `.N`) into the
+                    // staged `Plain` definition → `compile_rule`'s per-alternative priority,
+                    // splitting one origin's alternatives across two priorities where Python
+                    // keeps them uniform — an Earley `resolve` / LALR conflict divergence
+                    // whenever the `.N` would out- or under-rank the target's own priority.
+                    // All of one rule's alternatives share its priority, so read it off the
+                    // snapshot (mirrors `target_keep_all`); the same-grammar branch above
+                    // splices onto the existing RawRule and likewise never adopts the
+                    // extend's priority. The empty-`preexisting` fallback keeps `r.priority`
+                    // (no target to inherit; unreachable in practice — the target pre-exists
+                    // in `self.rules` on this branch).
+                    let target_priority = preexisting
+                        .first()
+                        .map_or(r.priority, |x| x.options.priority);
                     self.pending_interior_extends
                         .push((r.name.clone(), preexisting));
                     rule_items.push(RawRule {
                         directive: Directive::Plain,
                         modifiers: staged_modifiers,
+                        priority: target_priority,
                         ..r
                     });
                 }
