@@ -95,6 +95,9 @@ jobs:
       #   * test_output_counters         — output-shape counters: TreeOutputBuilder
       #                                    builds trees + reduce count (semantic-output
       #                                    C5, #230)
+      #   * test_child_vec_scaling       — child-buffer boundedness: one bounded child
+      #                                    Vec per reduction, flat per node (semantic-
+      #                                    output C8.2, #583)
       - name: Scaling gates (perf-counters)
         run: >-
           cargo test --features perf-counters
@@ -104,6 +107,7 @@ jobs:
           --test test_lexer_dfa_build_scaling
           --test test_lalr_table_scaling
           --test test_output_counters
+          --test test_child_vec_scaling
 
       # Zero-copy SpanTree backend gate (semantic-output C8, #233). The backend and
       # its `Lark::parse_span` entry point live behind the experimental `span-tree`

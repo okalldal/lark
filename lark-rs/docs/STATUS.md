@@ -278,7 +278,7 @@ materialize == tree `parse()` over the arith/JSON/`maybe_placeholders`/shaping g
 deterministic counters (`tree_nodes_built == 0`, `token_value_string_bytes == 0`, one
 `semantic_reduce_call` per reduction).
 
-**Scope — output + lexer halves landed (C8, C8.1); child-buffer reuse still open.**
+**Scope — output + lexer halves landed (C8, C8.1); child-buffer *counter + gate* landed (C8.2), reuse still deferred.**
 C8 was the *output-representation* win (`token_value_string_bytes == 0`: the result tree
 copies no token values). **C8.1 (#582)** then closed the *lexer* half — the headline
 ADR-0011 allocation win: `Lark::parse_span` drives a **span-emitting** token source
@@ -291,9 +291,20 @@ value string (no heap traffic). The relative oracle (span `materialize()` == tre
 `parse()` over the whole compliance bank) and the non-ASCII char→byte pin stay green, and
 default `parse()` is byte-identical (owned path unchanged). The token positions carry the
 byte length independently of `value`, so the token sources advance by char-span
-(`advance_by_chars`) rather than `value.len()`. Still split out: the *bounded
-child-buffer reuse* counter + gate (**C8.2, #583**; today's per-reduction child `Vec` is
-bounded but neither reused nor gated). Other deferred follow-ups stay gated: C8b #242
+(`advance_by_chars`) rather than `value.len()`. **C8.2 (#583)** then closed the last #233
+done-when line — *bounded child-buffer reuse* — in its honest, falsifiable form: a
+deterministic `child_vec_allocs` counter (`perf.rs`, `perf-counters` feature, zero
+overhead otherwise) charged once per reduction `shape_reduction` shapes (the reduction's
+owned child buffer — a per-node unit), plus a boundedness gate (`tests/test_child_vec_scaling.rs`) asserting
+`child_vec_allocs == semantic_reduce_calls == 2n+1` across a size sweep — **flat per
+node**, linear in output shape, no super-linear blowup (the output-shape analog of the
+Earley/CYK scaling nets). This documents the *current* state honestly: the per-reduction
+child `Vec` is bounded but **not reused** (the reuse ratio is exactly `1`). An
+owned-per-node representation like `SpanBranch` inherently cannot reuse the buffer it
+retains, so a genuine reuse win (`child_vec_allocs < node count`) needs the arena/`Tape`
+backend, not `SpanTree`; this counter is exactly the gate that would show it. Actual
+pooling therefore rides the arena work (C8b #242 / C8c #243), not C8.2. Other deferred
+follow-ups stay gated: C8b #242
 (event stream) + C8c #243 (JSON tape), each `needs-decision` on a concrete consumer; C9
 #234 (standalone); C10 #244 (bindings `OutputMode` taxonomy).
 

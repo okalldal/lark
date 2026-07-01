@@ -143,6 +143,33 @@
 //!   `build_node`/`build_token` and are engine-agnostic. It is the denominator that
 //!   makes the per-reduction output-build cost a flat envelope on the LALR/CYK paths
 //!   (`tests/test_output_counters.rs`, an LALR gate).
+//! * [`child_vec_allocs`] — one child-buffer allocation charged **per reduction**
+//!   the `parse_into` path shapes (`shape_reduction`, #583/C8.2). It tracks the
+//!   *reduction's* fresh, owned child buffer — the `kept` `Vec` every reduction
+//!   allocates to hold its shaped children — as the unit of the "bounded child-buffer
+//!   reuse" claim; it is a per-node tick, **not** a raw allocator count (a
+//!   node-building reduction also allocates a second `values` buffer and a
+//!   placeholder path may allocate an `Inline` vec — those intra-reduction buffers
+//!   are deliberately *not* separately ticked, because the reuse frontier #233/#242
+//!   targets is per-*node*, not per-scratch-vec). The honest close-out of #233's last
+//!   done-when line ("bounded child-buffer reuse"): C8 shipped the `SpanTree` output
+//!   backend but each reduction still allocates a **fresh** owned child buffer —
+//!   bounded (O(children) per node, no super-linear blowup), but neither reused nor
+//!   counter-gated, so the claim was unproven. This counter makes the *current*
+//!   bounded-but-not-reused state a deterministic result: on a known LALR/`parse_into`
+//!   input it equals the parser's user-rule reduction count (one tick per
+//!   `shape_reduction` call), so it scales **flat per node** with the output shape and
+//!   never super-linearly. Its per-reduction denominator is [`semantic_reduce_calls`]:
+//!   `child_vec_allocs / semantic_reduce_calls == 1` is the boundedness envelope the
+//!   gate (`tests/test_child_vec_scaling.rs`) asserts. An owned-per-node
+//!   representation like today's `SpanBranch` inherently cannot reuse the buffer it
+//!   retains, so a genuine reuse win (allocations `<` node count) needs the
+//!   arena/`Tape` backend (#242/#243), not `SpanTree` — this counter is the gate a
+//!   future pooling/arena strategy would drive *below* the reduction count. It lives
+//!   on the value-parametric `shape_reduction` seam, so it is engine-scoped to the
+//!   LALR `run_into` / `parse_into` path (Earley/CYK stay on the concrete
+//!   `assemble`/`shape` path and do not increment it), exactly like
+//!   [`semantic_reduce_calls`]'s LALR/CYK scoping.
 
 #[cfg(feature = "perf-counters")]
 mod imp {
@@ -163,6 +190,7 @@ mod imp {
     static TOKEN_VALUE_STRING_BYTES: AtomicU64 = AtomicU64::new(0);
     static LEXER_TOKEN_VALUE_BYTES: AtomicU64 = AtomicU64::new(0);
     static SEMANTIC_REDUCE_CALLS: AtomicU64 = AtomicU64::new(0);
+    static CHILD_VEC_ALLOCS: AtomicU64 = AtomicU64::new(0);
     static LEO_DISABLED: AtomicBool = AtomicBool::new(false);
 
     #[inline]
@@ -305,6 +333,18 @@ mod imp {
         SEMANTIC_REDUCE_CALLS.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Charge one child-buffer allocation **per reduction** the `parse_into` path
+    /// shapes (`shape_reduction`, #583/C8.2) — the reduction's owned child buffer, a
+    /// per-node tick, not a raw allocator count (intra-reduction scratch vecs are not
+    /// separately charged; see the module doc). For a known LALR/`parse_into` input
+    /// this equals the user-rule reduction count (one tick per reduction), so it stays
+    /// flat per node with the output shape; a future pooling/arena reuse strategy
+    /// drives it *below* the node count. Gated in `tests/test_child_vec_scaling.rs`.
+    #[inline]
+    pub fn add_child_vec_alloc() {
+        CHILD_VEC_ALLOCS.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Zero every counter. Call before the workload you want to measure.
     pub fn reset() {
         COMPLETER_SCAN_STEPS.store(0, Ordering::Relaxed);
@@ -322,6 +362,7 @@ mod imp {
         TOKEN_VALUE_STRING_BYTES.store(0, Ordering::Relaxed);
         LEXER_TOKEN_VALUE_BYTES.store(0, Ordering::Relaxed);
         SEMANTIC_REDUCE_CALLS.store(0, Ordering::Relaxed);
+        CHILD_VEC_ALLOCS.store(0, Ordering::Relaxed);
     }
 
     pub fn completer_scan_steps() -> u64 {
@@ -382,6 +423,10 @@ mod imp {
 
     pub fn semantic_reduce_calls() -> u64 {
         SEMANTIC_REDUCE_CALLS.load(Ordering::Relaxed)
+    }
+
+    pub fn child_vec_allocs() -> u64 {
+        CHILD_VEC_ALLOCS.load(Ordering::Relaxed)
     }
 
     /// Turn the Joop-Leo optimization off (`true`) or on (`false`). Lets a
@@ -449,6 +494,9 @@ mod imp {
     #[inline]
     pub fn add_semantic_reduce_call() {}
 
+    #[inline]
+    pub fn add_child_vec_alloc() {}
+
     pub fn reset() {}
 
     pub fn completer_scan_steps() -> u64 {
@@ -508,6 +556,10 @@ mod imp {
     }
 
     pub fn semantic_reduce_calls() -> u64 {
+        0
+    }
+
+    pub fn child_vec_allocs() -> u64 {
         0
     }
 
