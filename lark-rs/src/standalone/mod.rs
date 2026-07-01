@@ -348,7 +348,7 @@ pub fn generate(grammar_src: &str, options: &LarkOptions) -> Result<String, Lark
     // surface, so the file works both compiled directly (crate root) and `include!`d
     // into another module.
     out.push_str(
-        "}\n\n#[allow(unused_imports)]\npub use parser::{Child, ParseTree, Parser, Token, Tree};\n",
+        "}\n\n#[allow(unused_imports)]\npub use parser::{\n    Child, Meta, OutputBuilder, OutputContext, ParseTree, Parser, Token, Tree,\n};\n",
     );
     Ok(out)
 }
@@ -1290,6 +1290,497 @@ mod tests {
                 .map(|s| format!("  - {s}"))
                 .collect::<Vec<_>>()
                 .join("\n")
+        );
+    }
+
+    // ─── #234 (C9): semantic output through the standalone runtime seam ─────────
+    //
+    // The standalone runtime grew a value-parametric `OutputBuilder` seam
+    // (`runtime::parse_into`, the mirror of `Lark::parse_into` / the in-process
+    // `shape_reduction`), so a generated standalone parser can drive a semantic
+    // backend that never materializes the runtime's own tree — the C9 done-when.
+    //
+    // Oracle: the **Python transformer** value + trace, captured by
+    // `tools/generate_transformer_oracles.py` into
+    // `tests/fixtures/oracles/transformer/cases.json` (C1). We compare against each
+    // config's **post-parse** `value`/`trace` (not the `embedded` block), exactly as
+    // the in-process `parse_into` gate does (`test_transformer_oracle.rs`'s
+    // `check_case_config_embedded` — C7b): the standalone `parse_into` shaping is the
+    // same-engine mirror of `Lark::parse_into`, which applies `Discard` uniformly
+    // (dropping it from *every* callback's result — the engine sweep) and fires
+    // `__default_token__`, matching Python's post-parse `.transform(tree)`. Python's
+    // *embedded* path leaves a rule-callback `Discard` sentinel in place and skips
+    // `__default_token__` — a Python-lark quirk our engine deliberately does not
+    // reproduce (ADR-0038 §2; the same choice the in-process seam made). Standalone
+    // is LALR + basic-lexer only, so we run the `lalr_basic` config and skip any
+    // fixture whose grammar the basic lexer cannot bake (e.g. `unless_keyword_retype`,
+    // which needs the contextual lexer); the survivors are the same action space
+    // C1/C3 exercises in-process.
+    //
+    // This is a *differential* against the same Python oracle the in-process C3/C7
+    // gate uses — not a hand-written expectation — so a divergence in the baked
+    // shaping (filtering / expand1 / transparent / placeholders / Discard) fails
+    // loudly. The transformer backend below is baked-runtime-only (it implements the
+    // runtime's `OutputBuilder`, not the crate's), so it exercises the actual seam a
+    // generated parser ships.
+
+    use super::runtime::{Meta as RtMeta, OutputBuilder, OutputContext, Token as RtToken};
+
+    /// A transformed semantic value, mirroring `_serialize_value` in the generator
+    /// (and the crate-side `TransformValue::to_json`) so a runtime value's JSON is
+    /// directly comparable to the fixture's Python value JSON.
+    #[derive(Clone, Debug)]
+    enum TVal {
+        Null,
+        Bool(bool),
+        Int(i64),
+        Float(f64),
+        Str(String),
+        Tok { token_type: String, value: String },
+        List(Vec<TVal>),
+        Dict(Vec<(String, TVal)>),
+        Tree { data: String, children: Vec<TVal> },
+    }
+
+    impl TVal {
+        fn to_json(&self) -> Value {
+            match self {
+                TVal::Null => Value::Null,
+                TVal::Bool(b) => Value::Bool(*b),
+                TVal::Int(i) => Value::from(*i),
+                TVal::Float(f) => Value::from(*f),
+                TVal::Str(s) => Value::from(s.clone()),
+                TVal::Tok { token_type, value } => serde_json::json!({
+                    "type": "token", "token_type": token_type, "value": value,
+                }),
+                TVal::List(items) => Value::Array(items.iter().map(TVal::to_json).collect()),
+                TVal::Dict(entries) => {
+                    let mut map = serde_json::Map::new();
+                    for (k, v) in entries {
+                        map.insert(k.clone(), v.to_json());
+                    }
+                    Value::Object(map)
+                }
+                TVal::Tree { data, children } => serde_json::json!({
+                    "type": "tree", "data": data,
+                    "children": children.iter().map(TVal::to_json).collect::<Vec<_>>(),
+                }),
+            }
+        }
+
+        /// Python's `str(value)` for the values the str-joining specs apply it to.
+        fn py_str(&self) -> String {
+            match self {
+                TVal::Null => "None".to_string(),
+                TVal::Bool(true) => "True".to_string(),
+                TVal::Bool(false) => "False".to_string(),
+                TVal::Int(i) => i.to_string(),
+                TVal::Float(f) => py_float_str(*f),
+                TVal::Str(s) => s.clone(),
+                TVal::Tok { value, .. } => value.clone(),
+                other => format!("{other:?}"),
+            }
+        }
+    }
+
+    fn py_float_str(f: f64) -> String {
+        if f.is_finite() && f == f.trunc() && f.abs() < 1e16 {
+            format!("{f:.1}")
+        } else {
+            format!("{f}")
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    enum Maybe {
+        Keep(TVal),
+        Discard,
+    }
+
+    #[derive(Clone, Debug)]
+    struct SpecAction {
+        kind: String,
+        value: Option<Value>,
+        sep: Option<String>,
+        key: Option<String>,
+    }
+
+    impl SpecAction {
+        fn from_json(spec: &Value) -> SpecAction {
+            let obj = spec.as_object().expect("action spec is an object");
+            SpecAction {
+                kind: obj["action"].as_str().expect("action.kind").to_string(),
+                value: obj.get("value").cloned(),
+                sep: obj.get("sep").and_then(|v| v.as_str()).map(str::to_string),
+                key: obj.get("key").and_then(|v| v.as_str()).map(str::to_string),
+            }
+        }
+    }
+
+    fn literal(v: &Value) -> TVal {
+        match v {
+            Value::Null => TVal::Null,
+            Value::Bool(b) => TVal::Bool(*b),
+            Value::Number(n) => n
+                .as_i64()
+                .map(TVal::Int)
+                .unwrap_or_else(|| TVal::Float(n.as_f64().unwrap())),
+            Value::String(s) => TVal::Str(s.clone()),
+            Value::Array(a) => TVal::List(a.iter().map(literal).collect()),
+            Value::Object(o) => {
+                TVal::Dict(o.iter().map(|(k, v)| (k.clone(), literal(v))).collect())
+            }
+        }
+    }
+
+    #[derive(Clone, Debug, PartialEq)]
+    struct TraceEntry {
+        kind: String,
+        name: String,
+    }
+
+    fn apply_rule_action(action: &SpecAction, data: &str, children: Vec<TVal>) -> Maybe {
+        match action.kind.as_str() {
+            "identity" => Maybe::Keep(TVal::Tree {
+                data: data.to_string(),
+                children,
+            }),
+            "return_value" => Maybe::Keep(literal(action.value.as_ref().expect("value"))),
+            "sum_children" => Maybe::Keep(reduce_numeric(&children, Num::Int(0), Num::add)),
+            "product_children" => Maybe::Keep(reduce_numeric(&children, Num::Int(1), Num::mul)),
+            "join_children" => {
+                let sep = action.sep.as_deref().unwrap_or("");
+                Maybe::Keep(TVal::Str(
+                    children
+                        .iter()
+                        .map(TVal::py_str)
+                        .collect::<Vec<_>>()
+                        .join(sep),
+                ))
+            }
+            "concat_children" => Maybe::Keep(TVal::Str(
+                children
+                    .iter()
+                    .map(TVal::py_str)
+                    .collect::<Vec<_>>()
+                    .concat(),
+            )),
+            "first_child" => Maybe::Keep(children.into_iter().next().unwrap_or(TVal::Null)),
+            "wrap_list" => Maybe::Keep(TVal::List(children)),
+            "wrap_dict" => Maybe::Keep(TVal::Dict(vec![(
+                action.key.clone().expect("key"),
+                TVal::List(children),
+            )])),
+            "discard" => Maybe::Discard,
+            other => panic!("unknown rule action: {other}"),
+        }
+    }
+
+    fn apply_token_action(action: &SpecAction, ty: &str, text: &str) -> Maybe {
+        match action.kind.as_str() {
+            "identity" => Maybe::Keep(TVal::Tok {
+                token_type: ty.to_string(),
+                value: text.to_string(),
+            }),
+            "int_value" => Maybe::Keep(TVal::Int(text.parse().expect("int"))),
+            "float_value" => Maybe::Keep(TVal::Float(text.parse().expect("float"))),
+            "upper" => Maybe::Keep(TVal::Str(text.to_uppercase())),
+            "lower" => Maybe::Keep(TVal::Str(text.to_lowercase())),
+            "prefix" => {
+                let p = action
+                    .value
+                    .as_ref()
+                    .and_then(|v| v.as_str())
+                    .expect("prefix value");
+                Maybe::Keep(TVal::Str(format!("{p}{text}")))
+            }
+            "stringify" => Maybe::Keep(TVal::Str(text.to_string())),
+            "return_value" => Maybe::Keep(literal(action.value.as_ref().expect("value"))),
+            "discard" => Maybe::Discard,
+            other => panic!("unknown token action: {other}"),
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum Num {
+        Int(i64),
+        Float(f64),
+    }
+    impl Num {
+        fn add(self, o: Num) -> Num {
+            match (self, o) {
+                (Num::Int(a), Num::Int(b)) => Num::Int(a + b),
+                (a, b) => Num::Float(a.f() + b.f()),
+            }
+        }
+        fn mul(self, o: Num) -> Num {
+            match (self, o) {
+                (Num::Int(a), Num::Int(b)) => Num::Int(a * b),
+                (a, b) => Num::Float(a.f() * b.f()),
+            }
+        }
+        fn f(self) -> f64 {
+            match self {
+                Num::Int(i) => i as f64,
+                Num::Float(f) => f,
+            }
+        }
+        fn into_val(self) -> TVal {
+            match self {
+                Num::Int(i) => TVal::Int(i),
+                Num::Float(f) => TVal::Float(f),
+            }
+        }
+    }
+    fn reduce_numeric(children: &[TVal], init: Num, op: impl Fn(Num, Num) -> Num) -> TVal {
+        let mut acc = init;
+        for c in children {
+            acc = op(
+                acc,
+                match c {
+                    TVal::Int(i) => Num::Int(*i),
+                    TVal::Float(f) => Num::Float(*f),
+                    other => panic!("expected numeric child, got {other:?}"),
+                },
+            );
+        }
+        acc.into_val()
+    }
+
+    /// A Python-`Transformer`-shaped semantic backend, driven **during the parse**
+    /// through the standalone runtime's `OutputBuilder` seam. Keyed by callback name
+    /// (rule alias/origin — the `tree_name` the engine resolves) and terminal name.
+    struct RtTransformBuilder {
+        rule_actions: std::collections::HashMap<String, SpecAction>,
+        token_actions: std::collections::HashMap<String, SpecAction>,
+        default_rule: Option<SpecAction>,
+        default_token: Option<SpecAction>,
+        visit_tokens: bool,
+        trace: Vec<TraceEntry>,
+    }
+
+    impl RtTransformBuilder {
+        fn from_case(case: &Value) -> RtTransformBuilder {
+            let parse_map = |field: &str| {
+                case[field]
+                    .as_object()
+                    .expect("action map")
+                    .iter()
+                    .map(|(k, v)| (k.clone(), SpecAction::from_json(v)))
+                    .collect()
+            };
+            let parse_default = |field: &str| {
+                let v = &case[field];
+                (!v.is_null()).then(|| SpecAction::from_json(v))
+            };
+            RtTransformBuilder {
+                rule_actions: parse_map("rule_actions"),
+                token_actions: parse_map("token_actions"),
+                default_rule: parse_default("default_rule"),
+                default_token: parse_default("default_token"),
+                visit_tokens: case["visit_tokens"].as_bool().unwrap_or(true),
+                trace: Vec::new(),
+            }
+        }
+    }
+
+    impl<'i> OutputBuilder<'i> for RtTransformBuilder {
+        type Value = Maybe;
+
+        fn token(&mut self, token: RtToken, _input: &'i str, _ctx: &OutputContext) -> Maybe {
+            let tok_val = TVal::Tok {
+                token_type: token.type_.clone(),
+                value: token.value.clone(),
+            };
+            if !self.visit_tokens {
+                return Maybe::Keep(tok_val);
+            }
+            if let Some(a) = self.token_actions.get(&token.type_).cloned() {
+                self.trace.push(TraceEntry {
+                    kind: "token".to_string(),
+                    name: token.type_.clone(),
+                });
+                apply_token_action(&a, &token.type_, &token.value)
+            } else if let Some(a) = self.default_token.clone() {
+                self.trace.push(TraceEntry {
+                    kind: "default_token".to_string(),
+                    name: token.type_.clone(),
+                });
+                apply_token_action(&a, &token.type_, &token.value)
+            } else {
+                // Engine token materialization with no visible callback (RFC §5).
+                Maybe::Keep(tok_val)
+            }
+        }
+
+        fn reduce(
+            &mut self,
+            rule_idx: usize,
+            children: &mut Vec<Maybe>,
+            _meta: &RtMeta,
+            ctx: &OutputContext,
+        ) -> Maybe {
+            // The engine already dropped `is_discard` children, so every survivor is
+            // Keep.
+            let values: Vec<TVal> = std::mem::take(children)
+                .into_iter()
+                .map(|m| match m {
+                    Maybe::Keep(v) => v,
+                    Maybe::Discard => unreachable!("engine drops discarded children before reduce"),
+                })
+                .collect();
+            let name = ctx.callback_name(rule_idx);
+            if let Some(a) = self.rule_actions.get(name).cloned() {
+                self.trace.push(TraceEntry {
+                    kind: "rule".to_string(),
+                    name: name.to_string(),
+                });
+                apply_rule_action(&a, name, values)
+            } else if let Some(a) = self.default_rule.clone() {
+                self.trace.push(TraceEntry {
+                    kind: "default_rule".to_string(),
+                    name: name.to_string(),
+                });
+                apply_rule_action(&a, name, values)
+            } else {
+                Maybe::Keep(TVal::Tree {
+                    data: name.to_string(),
+                    children: values,
+                })
+            }
+        }
+
+        fn is_discard(&self, value: &Maybe) -> bool {
+            matches!(value, Maybe::Discard)
+        }
+
+        fn placeholder(&mut self, _ctx: &OutputContext) -> Maybe {
+            Maybe::Keep(TVal::Null)
+        }
+    }
+
+    fn maybe_to_json(m: &Maybe) -> Value {
+        match m {
+            Maybe::Keep(v) => v.to_json(),
+            Maybe::Discard => Value::Null,
+        }
+    }
+
+    fn transformer_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/oracles/transformer")
+    }
+
+    /// C9 headline gate: replay every C1 transformer fixture through the standalone
+    /// runtime's `parse_into` seam and assert the value **and** trace equal the
+    /// Python (embedded-transformer) oracle. Standalone is LALR + basic-lexer only.
+    /// Every fixture whose `lalr_basic` oracle status is `"ok"` (Python built, parsed,
+    /// and transformed it under the basic lexer) MUST bake, parse, and match here —
+    /// a bake/parse/mismatch is a HARD FAILURE, never a skip (see the coverage assert
+    /// below). The only legitimate skip is a `status != "ok"` config, which carries
+    /// no value/trace to compare — a data property of the oracle, not a standalone
+    /// failure.
+    #[test]
+    fn standalone_semantic_output_matches_transformer_oracle() {
+        // The transformer oracle is committed and kept fresh under CI oracle-freshness,
+        // so a missing/unreadable cases.json is a HARD FAILURE, never a silent pass.
+        let cases_path = transformer_dir().join("cases.json");
+        let text = std::fs::read_to_string(&cases_path).unwrap_or_else(|e| {
+            panic!(
+                "transformer cases.json unreadable at {} ({e}) — the committed oracle \
+                 must exist; run generate_transformer_oracles.py",
+                cases_path.display()
+            )
+        });
+        let data: Value = serde_json::from_str(&text).expect("valid transformer fixture JSON");
+        let cases = data["cases"].as_array().expect("cases array");
+
+        let mut checked = 0usize;
+        // `expected` = the number of fixtures whose lalr_basic config is "ok" (i.e.
+        // carries a value/trace to compare). Only those are comparable through the
+        // standalone seam; every one of them MUST run — see the coverage assert below.
+        let mut expected = 0usize;
+        let mut non_comparable: Vec<String> = Vec::new();
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let grammar = case["grammar"].as_str().unwrap();
+            let cfg = &case["configs"]["lalr_basic"];
+            // Only status="ok" configs carry a value/trace to compare against. A
+            // non-ok config is a data property of the oracle (nothing to compare),
+            // not a standalone failure — that is the ONLY legitimate skip here.
+            if cfg["status"].as_str() != Some("ok") {
+                non_comparable.push(format!("{name} (config status != ok)"));
+                continue;
+            }
+            expected += 1;
+
+            let popts = &case["parser_options"];
+            let opts = LarkOptions {
+                parser: ParserAlgorithm::Lalr,
+                lexer: crate::LexerType::Basic,
+                start: vec!["start".to_string()],
+                keep_all_tokens: popts["keep_all_tokens"].as_bool().unwrap_or(false),
+                maybe_placeholders: popts["maybe_placeholders"].as_bool().unwrap_or(false),
+                ..Default::default()
+            };
+
+            // For an "ok" fixture a bake Err or panic is a genuine regression the
+            // gate MUST surface — not a skip. (The oracle recorded this grammar as
+            // parseable under lalr_basic, so the standalone basic-lexer backend must
+            // bake it.)
+            let baked = bake(grammar, &opts)
+                .unwrap_or_else(|e| panic!("{name}: standalone bake failed: {e}"));
+            let leaked = leak_grammar_data(&baked);
+            let parser = Parser::from_data(leaked);
+
+            let input = case["input"].as_str().unwrap();
+            let mut builder = RtTransformBuilder::from_case(case);
+            let root = match parser.parse_into(input, &mut builder) {
+                Ok(r) => r,
+                Err(e) => panic!("{name}: standalone parse_into failed: {e}"),
+            };
+
+            // Value parity vs the Python transformer oracle (post-parse semantics —
+            // the standalone `parse_into` contract, see the module note above).
+            let got_value = maybe_to_json(&root);
+            let want_value = &cfg["value"];
+            assert_eq!(
+                &got_value, want_value,
+                "{name}: standalone semantic VALUE != Python transformer oracle"
+            );
+
+            // Trace parity (ordered visible callbacks).
+            let got_trace = Value::Array(
+                builder
+                    .trace
+                    .iter()
+                    .map(|e| serde_json::json!({"kind": e.kind, "name": e.name}))
+                    .collect(),
+            );
+            let want_trace = &cfg["trace"];
+            assert_eq!(
+                &got_trace, want_trace,
+                "{name}: standalone semantic TRACE != Python transformer oracle"
+            );
+
+            checked += 1;
+        }
+
+        eprintln!(
+            "standalone semantic output: {checked}/{expected} ok fixtures matched the \
+             Python transformer oracle; {} non-comparable (status != ok) [{}]",
+            non_comparable.len(),
+            non_comparable.join(", ")
+        );
+        assert!(
+            expected > 0,
+            "no ok transformer fixtures to exercise through the standalone seam"
+        );
+        // Exact coverage: every ok fixture must have been driven through parse_into
+        // and asserted. A skip that silently dropped an ok fixture would show up here.
+        assert_eq!(
+            checked, expected,
+            "not every ok transformer fixture ran through the standalone seam \
+             ({checked} checked != {expected} expected)"
         );
     }
 }
