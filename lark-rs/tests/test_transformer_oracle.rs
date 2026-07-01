@@ -688,7 +688,10 @@ mod transformer {
 
 // ── Backend harness ──────────────────────────────────────────────────────────
 
-use lark_rs::{Lark, LarkOptions, LexerType, ParserAlgorithm};
+use lark_rs::{
+    Child, Lark, LarkOptions, LexerType, Meta, OutputBuilder, OutputContext, ParseTree,
+    ParserAlgorithm, Token, Tree,
+};
 use transformer::PythonTransformerOracleBuilder;
 
 /// The (config_key, lexer) pairs every fixture is generated for. One source of
@@ -742,8 +745,15 @@ fn check_case_config(case: &Value, config_key: &str, lexer: LexerType) -> Result
     let input = case["input"].as_str().unwrap();
     let tree = lark.parse(input).map_err(|e| format!("parse error: {e}"))?;
 
+    compare_transform(case, cfg, &tree)
+}
+
+/// Compare the transformer backend's value + trace over an already-built `tree`
+/// against the committed fixture. Shared by the `parse()` and `parse_into` drivers
+/// so the two cannot drift in what they assert.
+fn compare_transform(case: &Value, cfg: &Value, tree: &ParseTree) -> Result<(), String> {
     let builder = PythonTransformerOracleBuilder::from_case(case);
-    let (value, trace) = builder.transform(&tree);
+    let (value, trace) = builder.transform(tree);
 
     // Value parity.
     let got_value = value.to_json();
@@ -764,6 +774,67 @@ fn check_case_config(case: &Value, config_key: &str, lexer: LexerType) -> Result
     }
 
     Ok(())
+}
+
+/// As [`check_case_config`], but obtains the shaped tree through the **public
+/// `parse_into` seam** (a user-written tree-rebuilding [`OutputBuilder`]) rather than
+/// `parse()` — validating the transformer fixtures through the public API path
+/// (#232 C7 done-when), which also exercises [`OutputContext::callback_name`] for the
+/// rule-name world the transformer dispatches on.
+fn check_case_config_via_parse_into(
+    case: &Value,
+    config_key: &str,
+    lexer: LexerType,
+) -> Result<(), String> {
+    let cfg = &case["configs"][config_key];
+    if cfg["status"].as_str().unwrap() != "ok" {
+        return Ok(());
+    }
+    let lark = build_lark(case, lexer)?;
+    let input = case["input"].as_str().unwrap();
+    let child = lark
+        .parse_into(input, &mut PublicTree)
+        .map_err(|e| format!("parse_into error: {e}"))?;
+    compare_transform(case, cfg, &child_to_parse_tree(child))
+}
+
+/// A user-facing tree-rebuilding builder over the public [`OutputBuilder`] seam — the
+/// same shaping decisions the engine drives, materialized back into the public
+/// [`Child`]/[`Tree`]/[`Token`] types (rule labels resolved via `ctx`).
+struct PublicTree;
+
+impl<'i> OutputBuilder<'i> for PublicTree {
+    type Value = Child;
+
+    fn token(&mut self, token: Token, _input: &'i str, _ctx: &OutputContext) -> Child {
+        Child::Token(token)
+    }
+
+    fn reduce(
+        &mut self,
+        rule: usize,
+        children: &mut Vec<Child>,
+        meta: &Meta,
+        ctx: &OutputContext,
+    ) -> Child {
+        Child::Tree(Tree {
+            data: ctx.callback_name(rule).to_string(),
+            children: std::mem::take(children),
+            meta: meta.clone(),
+        })
+    }
+
+    fn placeholder(&mut self, _ctx: &OutputContext) -> Child {
+        Child::None
+    }
+}
+
+fn child_to_parse_tree(c: Child) -> ParseTree {
+    match c {
+        Child::Tree(t) => ParseTree::Tree(t),
+        Child::Token(t) => ParseTree::Token(t),
+        Child::None => ParseTree::None,
+    }
 }
 
 // ── Tests ───────────────────────────────────────────────────────────────────
@@ -1010,6 +1081,29 @@ fn test_transformer_backend_value_and_trace_parity() {
         for (config_key, lexer) in &CONFIGS {
             if let Err(e) = check_case_config(case, config_key, lexer.clone()) {
                 panic!("case {name}:{config_key} failed parity:\n{e}");
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked > 0, "no fixture configs were checked");
+}
+
+/// C7 (#232) done-when: the **same** value + trace fixtures, but with the shaped tree
+/// obtained through the public `Lark::parse_into` seam instead of `parse()`. Proves
+/// the transformer oracle holds through the public API path — a user `OutputBuilder`
+/// drives the same shaping and resolves the same callback names — not only the
+/// internal tree backend.
+#[test]
+fn test_transformer_parity_through_parse_into() {
+    let data = load_transformer_cases();
+    let cases = data["cases"].as_array().unwrap();
+
+    let mut checked = 0usize;
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        for (config_key, lexer) in &CONFIGS {
+            if let Err(e) = check_case_config_via_parse_into(case, config_key, lexer.clone()) {
+                panic!("case {name}:{config_key} failed parity through parse_into:\n{e}");
             }
             checked += 1;
         }
