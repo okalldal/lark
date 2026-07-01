@@ -86,3 +86,27 @@ per source.
 Enforced by `lexer/dfa.rs::build_partitioned_dfa` +
 `tests/test_bounty_findings_h4.rs::h4_12_dense_dfa_build_is_subexponential` +
 `tests/test_lexer_dfa_build_scaling.rs` (counted-repeat sweep).
+
+## Follow-up: guard bodies (issue #568)
+
+The same bounded-build + hybrid-fallback contract was **extended to guard-body dense
+DFAs** (`lexer/guard.rs::build_anchored_dfa` / `build_anchored_all_dfa`). A guard body
+`S` in `(?=S)` / `(?!S)` / `(?<=S)` / `(?<!S)` is carried **verbatim** into an anchored
+DFA (`GuardSpec::set` / `LookbehindGuard::set` are `body.to_source()`, with no width
+bound), and a *leading* lookahead body may be unbounded (`classify.rs` admits
+`(?![01]*1[01]{N})…` — `LeadingBoundary`), so the `2^(N+1)` blow-up is reachable through
+a guard body exactly as it was through a main-engine terminal. This was **not a live
+regression** but a completeness gap: it was ungated where `build_partitioned_dfa` was
+gated (the asymmetry #568 flagged). It was grounded by a repro — the guard-body sweep in
+`test_lexer_dfa_build_scaling.rs` measured N=8 = 39 KiB, N=12 = 623 KiB, N=16 = 9.9 MiB,
+N=20 = 159 MiB before the fix.
+
+`guard.rs` now builds each body through `build_guard_dfa`, which probes the single source
+under the **same** `DENSE_PER_SOURCE_BUDGET` (now `pub(super)`, shared so the two build
+sites cannot drift) and routes a genuine `is_size_limit_exceeded()` overflow to a
+`GuardDfa::Hybrid` (lazy) DFA — otherwise `GuardDfa::Dense`. Non-size errors still surface
+as a real `InvalidRegex` for that exact body (never rerouted), so the hybrid path never
+accepts a body the eager path would reject. The guard is a *single* source, so no
+partition machinery is needed; the enum simply picks dense-or-lazy per body. Enforced by
+`h4_12_guard_body_dense_dfa_is_subexponential` + the `guard-body-repeat` sweep in
+`test_lexer_dfa_build_scaling.rs`.
