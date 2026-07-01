@@ -5,6 +5,7 @@ pub mod lookaround;
 pub mod parsers;
 pub mod perf;
 pub mod postlex;
+pub mod reconstruct;
 pub mod standalone;
 pub mod tree;
 
@@ -30,6 +31,7 @@ pub use parsers::{
 #[cfg(feature = "span-tree")]
 pub use parsers::{SpanBranch, SpanNode, SpanToken, SpanTreeBuilder};
 pub use postlex::Indenter;
+pub use reconstruct::{ReconstructError, Reconstructor};
 pub use standalone::generate as generate_standalone;
 pub use tree::{Child, Meta, ParseTree, Token, Tree};
 
