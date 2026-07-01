@@ -213,8 +213,9 @@ fn validate_config_result(result: &Value, path: &str, expect_embedded: bool) {
 // rather than presenting a Rust-ergonomic API, because the oracle it must match
 // is Python's. It is test-only and touches no public API.
 mod transformer {
-    use lark_rs::{Child, ParseTree, Token, Tree};
+    use lark_rs::{Child, Meta, OutputBuilder, OutputContext, ParseTree, Token, Tree};
     use serde_json::{json, Map, Value};
+    use std::collections::HashMap;
 
     /// A transformed semantic value. Its [`to_json`](TransformValue::to_json)
     /// mirrors the generator's `_serialize_value`, so a Rust value's JSON is
@@ -304,7 +305,7 @@ mod transformer {
     /// The Discard sentinel — Python Lark's `lark.visitors.Discard`. A token or
     /// rule callback returning it is removed from its parent's child list.
     #[derive(Clone, Debug)]
-    enum Maybe {
+    pub enum Maybe {
         Keep(TransformValue),
         Discard,
     }
@@ -682,6 +683,154 @@ mod transformer {
             format!("{f:.1}")
         } else {
             format!("{f}")
+        }
+    }
+
+    // ── C7b: the same transformer, but as a *during-parse* OutputBuilder ─────────
+    //
+    // The post-parse `PythonTransformerOracleBuilder` above applies `Discard` by
+    // dropping values while walking the finished tree — it never exercises the
+    // engine's `shape_reduction` `is_discard` path. This builder returns `Maybe`
+    // *values* during `parse_into`, so a `Discard` result flows back to the engine,
+    // which drops it after placeholder insertion (ADR-0038 §2). That is the only way
+    // to pin the `Discard` + `maybe_placeholders` *ordering* the engine actually runs.
+    //
+    // The shift/reduce order of an LALR parse is DFS post-order — the same order the
+    // post-parse walk visits nodes — so the visible-callback trace matches the
+    // fixtures. (The one RFC §5 divergence, `__default_token__` firing for a filtered
+    // punctuation token the post-parse walk never sees, is absent from the fixtures
+    // this builder drives: none set `default_token`.)
+
+    /// A `Transformer` spec driven *through* `parse_into` (value carried on the parse
+    /// stack is [`Maybe`], so `is_discard` runs in the engine).
+    pub struct EmbeddedTransformBuilder {
+        rule_actions: HashMap<String, Action>,
+        token_actions: HashMap<String, Action>,
+        default_rule: Option<Action>,
+        default_token: Option<Action>,
+        visit_tokens: bool,
+        trace: Vec<TraceEntry>,
+    }
+
+    impl EmbeddedTransformBuilder {
+        pub fn from_case(case: &Value) -> EmbeddedTransformBuilder {
+            let parse_map = |field: &str| {
+                case[field]
+                    .as_object()
+                    .expect("action map")
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Action::from_json(v)))
+                    .collect()
+            };
+            let parse_default = |field: &str| {
+                let v = &case[field];
+                if v.is_null() {
+                    None
+                } else {
+                    Some(Action::from_json(v))
+                }
+            };
+            EmbeddedTransformBuilder {
+                rule_actions: parse_map("rule_actions"),
+                token_actions: parse_map("token_actions"),
+                default_rule: parse_default("default_rule"),
+                default_token: parse_default("default_token"),
+                visit_tokens: case["visit_tokens"].as_bool().unwrap_or(true),
+                trace: Vec::new(),
+            }
+        }
+
+        pub fn take_trace(&mut self) -> Vec<TraceEntry> {
+            std::mem::take(&mut self.trace)
+        }
+    }
+
+    impl<'i> OutputBuilder<'i> for EmbeddedTransformBuilder {
+        type Value = Maybe;
+
+        fn token(&mut self, token: Token, _input: &'i str, _ctx: &OutputContext) -> Maybe {
+            // RFC §5: a *visible* callback only for a terminal the spec defines a
+            // method for; otherwise the terminal materializes silently. Keyed by the
+            // token's `type_` (its terminal name), exactly as the post-parse adapter.
+            let token_value = TransformValue::Token {
+                token_type: token.type_.clone(),
+                value: token.value.clone(),
+            };
+            if !self.visit_tokens {
+                return Maybe::Keep(token_value);
+            }
+            if let Some(action) = self.token_actions.get(&token.type_).cloned() {
+                self.trace.push(TraceEntry {
+                    kind: "token".to_string(),
+                    name: token.type_.clone(),
+                });
+                apply_token_action(&action, &token)
+            } else if let Some(action) = self.default_token.clone() {
+                self.trace.push(TraceEntry {
+                    kind: "default_token".to_string(),
+                    name: token.type_.clone(),
+                });
+                apply_token_action(&action, &token)
+            } else {
+                Maybe::Keep(token_value)
+            }
+        }
+
+        fn reduce(
+            &mut self,
+            rule: usize,
+            children: &mut Vec<Maybe>,
+            _meta: &Meta,
+            ctx: &OutputContext,
+        ) -> Maybe {
+            // The engine already dropped `is_discard` children (ADR-0038 §2), so every
+            // surviving child is `Keep` — collect their transformed values.
+            let values: Vec<TransformValue> = std::mem::take(children)
+                .into_iter()
+                .map(|m| match m {
+                    Maybe::Keep(v) => v,
+                    Maybe::Discard => {
+                        unreachable!("engine drops discarded children before reduce")
+                    }
+                })
+                .collect();
+            let name = ctx.callback_name(rule);
+            if let Some(action) = self.rule_actions.get(name).cloned() {
+                self.trace.push(TraceEntry {
+                    kind: "rule".to_string(),
+                    name: name.to_string(),
+                });
+                apply_rule_action(&action, name, values)
+            } else if let Some(action) = self.default_rule.clone() {
+                self.trace.push(TraceEntry {
+                    kind: "default_rule".to_string(),
+                    name: name.to_string(),
+                });
+                apply_rule_action(&action, name, values)
+            } else {
+                Maybe::Keep(TransformValue::Tree {
+                    data: name.to_string(),
+                    children: values,
+                })
+            }
+        }
+
+        fn is_discard(&self, value: &Maybe) -> bool {
+            matches!(value, Maybe::Discard)
+        }
+
+        fn placeholder(&mut self, _ctx: &OutputContext) -> Maybe {
+            // A `maybe_placeholders` `None` child — Python keeps a literal `None`.
+            Maybe::Keep(TransformValue::Null)
+        }
+    }
+
+    /// The JSON of a root [`Maybe`], mirroring `transform`'s root handling: a
+    /// `Discard` at the root renders as Null (it never happens in the C1 fixtures).
+    pub fn maybe_to_value_json(m: &Maybe) -> Value {
+        match m {
+            Maybe::Keep(v) => v.to_json(),
+            Maybe::Discard => Value::Null,
         }
     }
 }
@@ -1109,6 +1258,88 @@ fn test_transformer_parity_through_parse_into() {
         }
     }
     assert!(checked > 0, "no fixture configs were checked");
+}
+
+/// As [`check_case_config`], but drives the transformer as a **during-parse**
+/// `OutputBuilder` through `parse_into`, so a `Discard` result flows back to the
+/// engine and `shape_reduction`'s `is_discard` + placeholder ordering (ADR-0038 §2)
+/// is the code under test — the path no other test exercises (every other
+/// `parse_into` builder is non-discarding).
+fn check_case_config_embedded(
+    case: &Value,
+    config_key: &str,
+    lexer: LexerType,
+) -> Result<(), String> {
+    let cfg = &case["configs"][config_key];
+    if cfg["status"].as_str().unwrap() != "ok" {
+        return Ok(());
+    }
+    let lark = build_lark(case, lexer)?;
+    let input = case["input"].as_str().unwrap();
+
+    let mut builder = transformer::EmbeddedTransformBuilder::from_case(case);
+    let root = lark
+        .parse_into(input, &mut builder)
+        .map_err(|e| format!("parse_into error: {e}"))?;
+
+    let got_value = transformer::maybe_to_value_json(&root);
+    let want_value = &cfg["value"];
+    if &got_value != want_value {
+        return Err(format!(
+            "VALUE mismatch (embedded):\n  got:  {got_value}\n  want: {want_value}"
+        ));
+    }
+
+    let got_trace = Value::Array(
+        builder
+            .take_trace()
+            .iter()
+            .map(transformer::TraceEntry::to_json)
+            .collect(),
+    );
+    let want_trace = &cfg["trace"];
+    if &got_trace != want_trace {
+        return Err(format!(
+            "TRACE mismatch (embedded):\n  got:  {got_trace}\n  want: {want_trace}"
+        ));
+    }
+
+    Ok(())
+}
+
+/// C7b: the embedded (during-parse) transformer must reproduce every fixture's value
+/// **and** trace through `parse_into` — proving `Discard` is applied by the engine
+/// (`is_discard`), placeholders survive it, and the ordering matches Python. This is
+/// the gate ADR-0038 §2 named as "not yet exercised" after C7.
+#[test]
+fn test_transformer_embedded_discard_through_parse_into() {
+    let data = load_transformer_cases();
+    let cases = data["cases"].as_array().unwrap();
+
+    let mut checked = 0usize;
+    let mut discard_or_placeholder = 0usize;
+    for case in cases {
+        let name = case["name"].as_str().unwrap();
+        let spec = format!("{}{}", case["rule_actions"], case["token_actions"]);
+        let exercises_discard = spec.contains("discard")
+            || case["parser_options"]["maybe_placeholders"]
+                .as_bool()
+                .unwrap_or(false);
+        for (config_key, lexer) in &CONFIGS {
+            if let Err(e) = check_case_config_embedded(case, config_key, lexer.clone()) {
+                panic!("case {name}:{config_key} failed embedded parity:\n{e}");
+            }
+            checked += 1;
+            if exercises_discard {
+                discard_or_placeholder += 1;
+            }
+        }
+    }
+    assert!(checked > 0, "no fixture configs were checked");
+    assert!(
+        discard_or_placeholder > 0,
+        "no discard / maybe_placeholders fixture exercised the is_discard path"
+    );
 }
 
 /// Pin RFC §5: a kept terminal with **no** spec method must be materialized
