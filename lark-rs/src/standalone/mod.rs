@@ -1053,24 +1053,24 @@ mod tests {
     fn assert_meta_eq(oracle: &crate::tree::Tree, mine: &super::runtime::Tree, input: &str) {
         assert_eq!(oracle.data, mine.data, "{input:?}: node name");
         let (o, m) = (&oracle.meta, &mine.meta);
-        assert_eq!(o.line, m.line, "{input:?} {}: line", oracle.data);
-        assert_eq!(o.column, m.column, "{input:?} {}: column", oracle.data);
+        assert_eq!(o.line, m.line.map(|v| v as u32), "{input:?} {}: line", oracle.data);
+        assert_eq!(o.column, m.column.map(|v| v as u32), "{input:?} {}: column", oracle.data);
         assert_eq!(
-            o.end_line, m.end_line,
+            o.end_line, m.end_line.map(|v| v as u32),
             "{input:?} {}: end_line",
             oracle.data
         );
         assert_eq!(
-            o.end_column, m.end_column,
+            o.end_column, m.end_column.map(|v| v as u32),
             "{input:?} {}: end_column",
             oracle.data
         );
         assert_eq!(
-            o.start_pos, m.start_pos,
+            o.start_pos, m.start_pos.map(|v| v as u32),
             "{input:?} {}: start_pos",
             oracle.data
         );
-        assert_eq!(o.end_pos, m.end_pos, "{input:?} {}: end_pos", oracle.data);
+        assert_eq!(o.end_pos, m.end_pos.map(|v| v as u32), "{input:?} {}: end_pos", oracle.data);
         assert_eq!(o.empty, m.empty, "{input:?} {}: empty", oracle.data);
         assert_eq!(
             oracle.children.len(),
@@ -1086,25 +1086,25 @@ mod tests {
                 (crate::tree::Child::Token(ot), super::runtime::Child::Token(mt)) => {
                     // Token spans must agree too (the meta widening reads them).
                     assert_eq!(ot.value, mt.value, "{input:?}: token value");
-                    assert_eq!(ot.line, mt.line, "{input:?} {}: token line", ot.value);
-                    assert_eq!(ot.column, mt.column, "{input:?} {}: token column", ot.value);
+                    assert_eq!(ot.line, mt.line as u32, "{input:?} {}: token line", ot.value);
+                    assert_eq!(ot.column, mt.column as u32, "{input:?} {}: token column", ot.value);
                     assert_eq!(
-                        ot.end_line, mt.end_line,
+                        ot.end_line, mt.end_line as u32,
                         "{input:?} {}: token end_line",
                         ot.value
                     );
                     assert_eq!(
-                        ot.end_column, mt.end_column,
+                        ot.end_column, mt.end_column as u32,
                         "{input:?} {}: token end_column",
                         ot.value
                     );
                     assert_eq!(
-                        ot.start_pos, mt.start_pos,
+                        ot.start_pos, mt.start_pos as u32,
                         "{input:?} {}: token start_pos",
                         ot.value
                     );
                     assert_eq!(
-                        ot.end_pos, mt.end_pos,
+                        ot.end_pos, mt.end_pos as u32,
                         "{input:?} {}: token end_pos",
                         ot.value
                     );

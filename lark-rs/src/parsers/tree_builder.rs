@@ -600,41 +600,41 @@ pub(crate) fn meta_from_token(t: &Token) -> Meta {
 // `node_meta_from_elems` reproduces `Meta::from_children` byte-for-byte over
 // `(Meta, GTag)` pairs (Token guards `> 0` on line/column; Tree reads meta directly;
 // None contributes nothing).
-fn gc_line(m: &Meta, tag: GTag) -> Option<usize> {
+fn gc_line(m: &Meta, tag: GTag) -> Option<u32> {
     match tag {
         GTag::Token => m.line.filter(|&l| l > 0),
         GTag::Tree => m.line,
         GTag::None => Option::None,
     }
 }
-fn gc_column(m: &Meta, tag: GTag) -> Option<usize> {
+fn gc_column(m: &Meta, tag: GTag) -> Option<u32> {
     match tag {
         GTag::Token => m.column.filter(|&c| c > 0),
         GTag::Tree => m.column,
         GTag::None => Option::None,
     }
 }
-fn gc_start(m: &Meta, tag: GTag) -> Option<usize> {
+fn gc_start(m: &Meta, tag: GTag) -> Option<u32> {
     match tag {
         GTag::None => Option::None,
         _ => m.start_pos,
     }
 }
-fn gc_end_line(m: &Meta, tag: GTag) -> Option<usize> {
+fn gc_end_line(m: &Meta, tag: GTag) -> Option<u32> {
     match tag {
         GTag::Token => m.end_line.filter(|&l| l > 0),
         GTag::Tree => m.end_line,
         GTag::None => Option::None,
     }
 }
-fn gc_end_column(m: &Meta, tag: GTag) -> Option<usize> {
+fn gc_end_column(m: &Meta, tag: GTag) -> Option<u32> {
     match tag {
         GTag::Token => m.end_column.filter(|&c| c > 0),
         GTag::Tree => m.end_column,
         GTag::None => Option::None,
     }
 }
-fn gc_end(m: &Meta, tag: GTag) -> Option<usize> {
+fn gc_end(m: &Meta, tag: GTag) -> Option<u32> {
     match tag {
         GTag::None => Option::None,
         _ => m.end_pos,
@@ -695,7 +695,11 @@ fn nones_at_gap(rule: &CompiledRule, gap: usize) -> usize {
 pub(crate) fn shape_reduction<'i, B: OutputBuilder<'i>>(
     rule_idx: usize,
     rule: &CompiledRule,
-    child_slots: Vec<GSlot<B::Value>>,
+    // The engine's value stack: this reduction consumes its last `len` slots in
+    // place (perf spike 2026-07-01 — no per-reduction `drain().collect()`
+    // intermediate `Vec`).
+    value_stack: &mut Vec<GSlot<B::Value>>,
+    len: usize,
     builder: &mut B,
     ctx: &OutputContext,
     propagate: bool,
@@ -725,7 +729,8 @@ pub(crate) fn shape_reduction<'i, B: OutputBuilder<'i>>(
         meta: Meta::default(),
         tag: GTag::None,
     };
-    for (i, slot) in child_slots.into_iter().enumerate() {
+    let drain_start = value_stack.len() - len;
+    for (i, slot) in value_stack.drain(drain_start..).enumerate() {
         for _ in 0..nones_at_gap(rule, i) {
             kept.push(placeholder(builder));
         }

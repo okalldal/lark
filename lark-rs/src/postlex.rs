@@ -26,12 +26,12 @@ use crate::tree::Token;
 /// "where the last one was" for the end-of-stream DEDENT flush.
 #[derive(Clone, Copy)]
 struct Pos {
-    line: usize,
-    column: usize,
-    end_line: usize,
-    end_column: usize,
-    start_pos: usize,
-    end_pos: usize,
+    line: u32,
+    column: u32,
+    end_line: u32,
+    end_column: u32,
+    start_pos: u32,
+    end_pos: u32,
 }
 
 impl Pos {

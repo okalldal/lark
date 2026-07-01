@@ -303,8 +303,8 @@ fn match_meta(tree: &Tree, oracle_meta: &serde_json::Value) -> Result<(), String
     if m.empty {
         return Err("got positionless (empty) meta, oracle has a span".to_string());
     }
-    let chk = |field: &str, got: Option<usize>| -> Result<(), String> {
-        let exp = oracle_meta[field].as_u64().map(|v| v as usize);
+    let chk = |field: &str, got: Option<u32>| -> Result<(), String> {
+        let exp = oracle_meta[field].as_u64().map(|v| v as u32);
         if got != exp {
             return Err(format!("{field}: got {got:?}, expected {exp:?}"));
         }

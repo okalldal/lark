@@ -15,12 +15,15 @@ pub struct Token {
     pub type_: String,
     /// The matched text.
     pub value: String,
-    pub line: usize,
-    pub column: usize,
-    pub end_line: usize,
-    pub end_column: usize,
-    pub start_pos: usize,
-    pub end_pos: usize,
+    // Positions are u32 (input files are < 4 GiB): halves the position payload
+    // of every Token/Meta moved through the parser's value stack (perf spike
+    // 2026-07-01 — the stack element shrank 264 → 168 bytes).
+    pub line: u32,
+    pub column: u32,
+    pub end_line: u32,
+    pub end_column: u32,
+    pub start_pos: u32,
+    pub end_pos: u32,
 }
 
 impl Token {
@@ -46,12 +49,12 @@ impl Token {
     }
 
     pub fn with_position(mut self, line: usize, col: usize, start: usize, end: usize) -> Self {
-        self.line = line;
-        self.column = col;
-        self.end_line = line; // updated by lexer for multi-line tokens
-        self.end_column = col + (end - start);
-        self.start_pos = start;
-        self.end_pos = end;
+        self.line = line as u32;
+        self.column = col as u32;
+        self.end_line = line as u32; // updated by lexer for multi-line tokens
+        self.end_column = (col + (end - start)) as u32;
+        self.start_pos = start as u32;
+        self.end_pos = end as u32;
         self
     }
 }
@@ -65,12 +68,12 @@ impl fmt::Display for Token {
 /// Source position metadata attached to a `Tree` node.
 #[derive(Debug, Clone, Default)]
 pub struct Meta {
-    pub line: Option<usize>,
-    pub column: Option<usize>,
-    pub end_line: Option<usize>,
-    pub end_column: Option<usize>,
-    pub start_pos: Option<usize>,
-    pub end_pos: Option<usize>,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+    pub end_line: Option<u32>,
+    pub end_column: Option<u32>,
+    pub start_pos: Option<u32>,
+    pub end_pos: Option<u32>,
     /// True when the rule produced zero tokens (empty match).
     pub empty: bool,
 }
@@ -109,42 +112,42 @@ impl Meta {
     }
 }
 
-fn child_line(c: &Child) -> Option<usize> {
+fn child_line(c: &Child) -> Option<u32> {
     match c {
         Child::Token(t) if t.line > 0 => Some(t.line),
         Child::Tree(t) => t.meta.line,
         _ => None,
     }
 }
-fn child_column(c: &Child) -> Option<usize> {
+fn child_column(c: &Child) -> Option<u32> {
     match c {
         Child::Token(t) if t.column > 0 => Some(t.column),
         Child::Tree(t) => t.meta.column,
         _ => None,
     }
 }
-fn child_start(c: &Child) -> Option<usize> {
+fn child_start(c: &Child) -> Option<u32> {
     match c {
         Child::Token(t) => Some(t.start_pos),
         Child::Tree(t) => t.meta.start_pos,
         Child::None => None,
     }
 }
-fn child_end_line(c: &Child) -> Option<usize> {
+fn child_end_line(c: &Child) -> Option<u32> {
     match c {
         Child::Token(t) if t.end_line > 0 => Some(t.end_line),
         Child::Tree(t) => t.meta.end_line,
         _ => None,
     }
 }
-fn child_end_column(c: &Child) -> Option<usize> {
+fn child_end_column(c: &Child) -> Option<u32> {
     match c {
         Child::Token(t) if t.end_column > 0 => Some(t.end_column),
         Child::Tree(t) => t.meta.end_column,
         _ => None,
     }
 }
-fn child_end(c: &Child) -> Option<usize> {
+fn child_end(c: &Child) -> Option<u32> {
     match c {
         Child::Token(t) => Some(t.end_pos),
         Child::Tree(t) => t.meta.end_pos,

@@ -181,16 +181,16 @@ impl EarleyParser {
             type_id: term,
             type_: matcher.name(term).to_string(),
             value: value.to_string(),
-            line: lines[i],
-            column: cols[i],
-            end_line: lines[end_step],
-            end_column: cols[end_step],
+            line: lines[i] as u32,
+            column: cols[i] as u32,
+            end_line: lines[end_step] as u32,
+            end_column: cols[end_step] as u32,
             // `start_pos`/`end_pos` are **character** indices (Python parity, #278).
             // Columns here are indexed by character step, so the step index *is* the
             // char index — `i` and `end_step`, not the byte offsets
             // `boundaries[i]`/`boundaries[end_step]`.
-            start_pos: i,
-            end_pos: end_step,
+            start_pos: i as u32,
+            end_pos: end_step as u32,
         };
 
         // 1) Match each scan-set item's predicted terminal here. A hit is *delayed*

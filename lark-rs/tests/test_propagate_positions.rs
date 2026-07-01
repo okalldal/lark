@@ -190,12 +190,12 @@ const EMPTY_NULLABLE_CASE_NAMES: &[&str] = &[
 /// the offsets correct now fails the cross-engine net instead of slipping through.
 type SpanShape = (
     String,
-    Option<usize>, // line
-    Option<usize>, // column
-    Option<usize>, // end_line
-    Option<usize>, // end_column
-    Option<usize>, // start_pos
-    Option<usize>, // end_pos
+    Option<u32>, // line
+    Option<u32>, // column
+    Option<u32>, // end_line
+    Option<u32>, // end_column
+    Option<u32>, // start_pos
+    Option<u32>, // end_pos
     bool,          // empty
 );
 
