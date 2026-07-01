@@ -95,6 +95,20 @@ fn grammar_with_counted_repeat(n: usize) -> String {
     format!("start: T+\nT: /[01]*1[01]{{{n}}}/\n")
 }
 
+/// A single terminal whose **leading negative-lookahead guard body** is the classic
+/// `.*a.{N}` family (`/(?![01]*1[01]{N})[01]+/`), so the exponential-in-N determinization
+/// blow-up lands in the *guard* DFA (`lexer/guard.rs::build_anchored_dfa`) rather than the
+/// main combined engine (#568, the guard-body analog of H4-12). The guard body
+/// `[01]*1[01]{N}` is carried verbatim into the anchored guard DFA — a leading lookahead
+/// body may be unbounded, so `classify.rs` admits it. Pre-fix the guard build was ungated
+/// and doubled per +1 in N (N=8 = 39 KiB, N=12 = 623 KiB, N=20 = 159 MiB — measured); the
+/// #568 bounded-build + hybrid fallback routes the over-budget body to a lazy DFA, so
+/// `dense_build_bytes` must stay *flat* across N, exactly like the main-engine Sweep 3.
+#[cfg(feature = "perf-counters")]
+fn grammar_with_guard_body_repeat(n: usize) -> String {
+    format!("start: T+\nT: /(?![01]*1[01]{{{n}}})[01]+/\n")
+}
+
 /// Build the `DfaScanner`-backed basic lexer for `grammar`, returning the
 /// `dense_build_bytes` counted during the build (the scanner determinizes its dense
 /// DFAs in `BasicLexer::new`).
@@ -154,6 +168,20 @@ fn dense_dfa_build_cost_is_flat() {
         "counted-repeat",
         &[4usize, 6, 8, 10, 12, 16],
         grammar_with_counted_repeat,
+    );
+
+    // Sweep 4 — flat per N for a USER **guard-body** counted-repeat (#568). Same `.*a.{N}`
+    // exponential, but the blow-up now lands in `lexer/guard.rs::build_anchored_dfa` (a
+    // leading `(?![01]*1[01]{N})` guard body) instead of the main combined engine. Pre-fix
+    // that guard build was ungated and doubled per +1 in N (N=8 = 39 KiB … N=20 = 159 MiB,
+    // measured); the #568 bounded-build + hybrid fallback routes the over-budget body to a
+    // lazy DFA, so the *total* dense build stays flat (bounded by the same 64 KiB per-source
+    // budget). This is the surface Sweep 3 did NOT cover — it swept only the main-engine
+    // terminal path, never a guard body.
+    assert_bounded_flat(
+        "guard-body-repeat",
+        &[4usize, 6, 8, 10, 12, 16],
+        grammar_with_guard_body_repeat,
     );
 }
 
