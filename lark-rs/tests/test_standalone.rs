@@ -163,6 +163,81 @@ fn arithmetic_fixture_is_fresh() {
     );
 }
 
+/// #234 (C9): a **generated** standalone parser can drive a semantic backend
+/// through its baked `OutputBuilder` seam (`Parser::parse_into`) — the seam is part
+/// of the generated file's public surface, so a downstream consumer can implement a
+/// builder with no dependency on lark-rs. Here an arithmetic evaluator over the
+/// committed `arithmetic.rs` fixture computes an `i64` directly, materializing no
+/// `Tree`. The oracle is arithmetic itself (a closed-form expected value per input),
+/// and the byte-for-byte value/trace parity against the Python transformer oracle is
+/// pinned by `standalone_semantic_output_matches_transformer_oracle` in
+/// `src/standalone/mod.rs` (which can reach the runtime seam without codegen).
+#[test]
+fn generated_standalone_drives_semantic_builder() {
+    use gen_arithmetic::{Meta, OutputBuilder, OutputContext, Token};
+
+    // A semantic backend that *evaluates* the arithmetic expression during the parse,
+    // carrying an `i64` on the stack instead of building a tree. Rule dispatch is by
+    // the callback name the engine resolves (the `-> add`/`mul`/… aliases and the
+    // expand1-collapsed origins), exactly the name world a Python transformer keys on.
+    struct Eval;
+    impl<'i> OutputBuilder<'i> for Eval {
+        type Value = i64;
+        fn token(&mut self, token: Token, _input: &'i str, _ctx: &OutputContext) -> i64 {
+            // NUMBER evaluates to its integer; NAME is not exercised by the inputs
+            // below (it has no numeric value), so treat a non-numeric token as 0.
+            token.value.parse::<i64>().unwrap_or(0)
+        }
+        fn reduce(
+            &mut self,
+            rule: usize,
+            children: &mut Vec<i64>,
+            _meta: &Meta,
+            ctx: &OutputContext,
+        ) -> i64 {
+            match ctx.callback_name(rule) {
+                "add" => children[0] + children[1],
+                "sub" => children[0] - children[1],
+                "mul" => children[0] * children[1],
+                "div" => children[0] / children[1],
+                "pos" => children[0],
+                "neg" => -children[0],
+                // `start`/`atom`/parenthesized `expr` collapse via expand1 to a
+                // single child; any surviving wrapper just forwards it.
+                _ => children.first().copied().unwrap_or(0),
+            }
+        }
+    }
+
+    let parser = gen_arithmetic::Parser::new();
+    // (input, expected value). Each is ordinary integer arithmetic with the grammar's
+    // precedence — the oracle is the closed-form result.
+    let cases: &[(&str, i64)] = &[
+        ("1", 1),
+        ("1+2", 3),
+        ("1 + 2 * 3", 7),
+        ("(1 + 2) * 3", 9),
+        ("-5", -5),
+        ("-(1 + 2)", -3),
+        ("1 - 2 - 3", -4),
+        ("2 * 3 / 4", 1),
+        ("+7", 7),
+    ];
+    for (input, expected) in cases {
+        let got = parser
+            .parse_into(input, &mut Eval)
+            .unwrap_or_else(|e| panic!("standalone parse_into failed on {input:?}: {e}"));
+        assert_eq!(got, *expected, "semantic eval mismatch on {input:?}");
+    }
+
+    // The tree path stays available and byte-identical — the semantic seam is purely
+    // additive (guards against parse_into cannibalizing the default parse()).
+    assert!(
+        matches!(parser.parse("7"), Ok(gen_arithmetic::ParseTree::Token(_))),
+        "the default tree parse() must still return the expand1-collapsed bare Token"
+    );
+}
+
 /// Unsupported configurations are rejected with a clear error rather than emitting
 /// a broken parser.
 #[test]
