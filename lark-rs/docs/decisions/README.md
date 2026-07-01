@@ -59,6 +59,7 @@ Authoring a new ADR as `Accepted` is a Definition-of-Done failure (see
 | [0035](0035-freeze-python-re-dialect-parity.md) | Freeze Python `re` terminal-dialect parity work + defer the dialect-mode architecture until a user-needs signal (the `frozen` label; #416 is explicitly not frozen) | Accepted |
 | [0036](0036-pyo3-token-is-a-str.md) | PyO3 `Token` IS-A `str`, realised in pure Python under `abi3` (PyO3 can't subclass `str` with `abi3`); engine becomes the `lark_rs._lark_rs` submodule, `Token`/`Meta` are Python types the Rust core constructs (#416); public binding surface → escalate-tier | Accepted |
 | [0037](0037-dfa-hybrid-fallback-for-over-budget-terminals.md) | Over-budget terminals fall back to a lazy/hybrid DFA sub-engine instead of the eager dense union (the `.*a.{N}` determinizer blow-up, #349); byte-identical matches, flat build cost, grammar still builds | Accepted |
+| [0038](0038-generic-value-placeholder-and-discard.md) | Generic `OutputBuilder::Value` needs a `placeholder(ctx) -> Value` method (`maybe_placeholders` `None`) and a `Discard`-after-placeholders drop order (C7, #232); refines fork-5 so `token()` carries lexer positions + owned value for byte-identical C7; both no-ops for `Value = Child` | Proposed |
 
 ## ADRs going forward — the governance audit trail
 

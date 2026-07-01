@@ -25,14 +25,17 @@ use crate::error::{GrammarError, ParseError, RecoveryAction};
 use crate::grammar::analysis::GrammarAnalysis;
 use crate::grammar::intern::{CompiledGrammar, CompiledRule, SymbolId, SymbolTable};
 use crate::lexer::{BasicLexer, ContextualLexer};
-use crate::tree::{ParseTree, Token};
+use crate::tree::{Child, ParseTree, Token};
 
 use super::token_source::{
     postlex_basic_recovering_source, postlex_contextual_recovering_source,
     postlex_contextual_source, Contextual, ContextualRecovering, LexFailure, PreLexed, SourceError,
     TokenSource,
 };
-use super::tree_builder::{Slot, TreeOutputBuilder};
+use super::tree_builder::{
+    accept_value, meta_from_token, shape_reduction, GElem, GSlot, GTag, OutputBuilder,
+    OutputContext, Slot, TreeOutputBuilder,
+};
 
 // ─── Parse table ─────────────────────────────────────────────────────────────
 
@@ -1035,28 +1038,116 @@ impl LalrParser {
     /// sources the next token and reacts to what the feed did, so the batch driver,
     /// the recovering driver, and the interactive parser (#168) share one definition
     /// of the state machine.
+    /// The batch (non-recovering) LALR parse to the default tree. Delegates to the
+    /// value-parametric [`run_into`](Self::run_into) with the [`TreeOutputBuilder`],
+    /// so `parse()` and `parse_into` share one drive loop (ADR-0029 fork 2) and the
+    /// full compliance/oracle/wild banks gate the generic path byte-identically.
+    /// `input` is unused by the tree backend (it materializes owned strings), so `""`
+    /// is passed; a span backend receives the real source via `parse_into`.
     fn run<S: TokenSource>(
         &self,
         source: &mut S,
         start: Option<&str>,
     ) -> Result<ParseTree, ParseError> {
-        let mut stack = ParserStack::new(self.initial_state(start)?);
+        let mut builder = TreeOutputBuilder::with_propagate_positions(
+            &self.table.rules,
+            self.table.propagate_positions,
+        );
+        let child = self.run_into(source, start, &mut builder, "")?;
+        Ok(match child {
+            Child::Tree(t) => ParseTree::Tree(t),
+            Child::Token(t) => ParseTree::Token(t),
+            Child::None => ParseTree::None,
+        })
+    }
+
+    /// Value-parametric parse (the `Lark::parse_into` seam, #232 C7). Drives an
+    /// arbitrary [`OutputBuilder`] through the same ACTION/GOTO tables and the same
+    /// tree-shaping rules as [`run`](Self::run), but over a stack of `B::Value`, so a
+    /// semantic/span backend never builds a generic tree. LALR + basic/contextual
+    /// only (ADR-0029 fork 4); recovery/interactive stay on the concrete
+    /// [`ParserStack`]. With `B = TreeOutputBuilder` this is byte-identical to `run`
+    /// (the `parse_into(tree) == parse()` relative oracle over the compliance
+    /// corpus). `input` is the whole source so a borrowing builder can slice spans;
+    /// the tree backend ignores it.
+    pub(crate) fn run_into<'i, B>(
+        &self,
+        source: &mut dyn TokenSource,
+        start: Option<&str>,
+        builder: &mut B,
+        input: &'i str,
+    ) -> Result<B::Value, ParseError>
+    where
+        B: OutputBuilder<'i>,
+    {
+        let ctx = OutputContext::new(&self.table.rules, &self.table.symbols);
+        let mut state_stack: Vec<usize> = vec![self.initial_state(start)?];
+        let mut value_stack: Vec<GSlot<B::Value>> = Vec::new();
 
         loop {
-            let token = match source.peek(stack.position()) {
+            let state = *state_stack.last().unwrap();
+            let token = match source.peek(state) {
                 Ok(tok) => tok,
-                Err(SourceError::Lex(failure)) => {
-                    return Err(self.lex_failure(stack.position(), failure))
-                }
-                // A postlex transform (the indenter) already produced a full error.
+                Err(SourceError::Lex(failure)) => return Err(self.lex_failure(state, failure)),
                 Err(SourceError::Postlex(e)) => return Err(e),
             };
 
-            match stack.feed_token(&self.table, &token) {
-                Feed::Shifted => source.advance(),
-                Feed::Accepted(tree) => return Ok(tree),
-                Feed::Error(e) => return Err(e),
-                Feed::NoAction => return Err(self.unexpected(stack.position(), &token)),
+            // REDUCE as many times as the token dictates, then SHIFT / ACCEPT / error
+            // — the inlined analog of `ParserStack::feed_token` over the generic stack.
+            loop {
+                let state = *state_stack.last().unwrap();
+                match self.table.action_at(state, token.type_id) {
+                    Some(Action::Shift(next_state)) => {
+                        let meta = meta_from_token(&token);
+                        let value = builder.token(token.clone(), input, &ctx);
+                        state_stack.push(next_state);
+                        value_stack.push(GSlot::Value(GElem {
+                            value,
+                            meta,
+                            tag: GTag::Token,
+                        }));
+                        source.advance();
+                        break;
+                    }
+                    Some(Action::Reduce(rule_idx)) => {
+                        let rule = &self.table.rules[rule_idx];
+                        let len = rule.expansion.len();
+                        let child_slots: Vec<GSlot<B::Value>> =
+                            value_stack.drain(value_stack.len() - len..).collect();
+                        for _ in 0..len {
+                            state_stack.pop();
+                        }
+                        let shaped = shape_reduction(
+                            rule_idx,
+                            rule,
+                            child_slots,
+                            builder,
+                            &ctx,
+                            self.table.propagate_positions,
+                        );
+                        let top = *state_stack.last().unwrap();
+                        let nt_index = (rule.origin.index() - self.table.n_terminals) as u32;
+                        let next = self.table.goto_at(top, nt_index).ok_or_else(|| {
+                            ParseError::UnexpectedToken {
+                                token: token.value.clone(),
+                                token_type: self.table.symbols.name(rule.origin).to_string(),
+                                line: token.line,
+                                col: token.column,
+                                expected: vec![self.table.symbols.name(rule.origin).to_string()],
+                            }
+                        })?;
+                        state_stack.push(next as usize);
+                        value_stack.push(shaped);
+                    }
+                    Some(Action::Accept) => {
+                        return value_stack
+                            .pop()
+                            .ok_or(())
+                            .and_then(accept_value)
+                            .map_err(|_| ParseError::unexpected_eof(0, 0, vec![]));
+                    }
+                    None => return Err(self.unexpected(state, &token)),
+                }
             }
         }
     }
