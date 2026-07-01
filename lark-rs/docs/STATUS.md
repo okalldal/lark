@@ -278,17 +278,24 @@ materialize == tree `parse()` over the arith/JSON/`maybe_placeholders`/shaping g
 deterministic counters (`tree_nodes_built == 0`, `token_value_string_bytes == 0`, one
 `semantic_reduce_call` per reduction).
 
-**Scope — output half, not a zero-copy pipeline.** C8 is the *output-representation*
-win: `token_value_string_bytes == 0` means the result tree copies no token values, **not**
-that the parse avoided allocating them. The lexer still allocates each `Token.value: String`
-upstream (and `run_into` clones it per shift); the span builder borrows from `input` and
-drops it. So two of #233's aims are split into honest follow-ups rather than claimed here:
-the lexer-side allocation elimination (a span-emitting lexer path — **C8.1, #582**, where
-the headline allocation win actually lands) and the *bounded child-buffer reuse* counter +
-gate (**C8.2, #583**; today's per-reduction child `Vec` is bounded but neither reused nor
-gated). Other deferred follow-ups stay gated: C8b #242 (event stream) + C8c #243 (JSON
-tape), each `needs-decision` on a concrete consumer; C9 #234 (standalone); C10 #244
-(bindings `OutputMode` taxonomy).
+**Scope — output + lexer halves landed (C8, C8.1); child-buffer reuse still open.**
+C8 was the *output-representation* win (`token_value_string_bytes == 0`: the result tree
+copies no token values). **C8.1 (#582)** then closed the *lexer* half — the headline
+ADR-0011 allocation win: `Lark::parse_span` drives a **span-emitting** token source
+(`make_span_source` → value-less tokens, both the eager basic/`PreLexed` and lazy
+contextual paths), so the lexer allocates no `Token.value: String` on the span path. A
+new lexer-side counter `lexer_token_value_bytes` is gated to `0` on the span path and
+`> 0` on the owned `parse()` path, so LEXER vs OUTPUT token-value allocation are
+*separately* falsifiable (ADR-0007); the `run_into` clone-per-shift now clones an empty
+value string (no heap traffic). The relative oracle (span `materialize()` == tree
+`parse()` over the whole compliance bank) and the non-ASCII char→byte pin stay green, and
+default `parse()` is byte-identical (owned path unchanged). The token positions carry the
+byte length independently of `value`, so the token sources advance by char-span
+(`advance_by_chars`) rather than `value.len()`. Still split out: the *bounded
+child-buffer reuse* counter + gate (**C8.2, #583**; today's per-reduction child `Vec` is
+bounded but neither reused nor gated). Other deferred follow-ups stay gated: C8b #242
+(event stream) + C8c #243 (JSON tape), each `needs-decision` on a concrete consumer; C9
+#234 (standalone); C10 #244 (bindings `OutputMode` taxonomy).
 
 Phase 4 distribution (#46–#50) follows after Phase 3 is substantially complete.
 

@@ -122,6 +122,15 @@
 //!   the kept-token payload; the span backend (C8) that keeps offsets instead of
 //!   owned strings drives it to `0` (the `token_value_string_bytes == 0` gate #230
 //!   defers to C8).
+//! * [`lexer_token_value_bytes`] — the total byte length of every token *value* the
+//!   **lexer** materializes into an owned `Token.value: String` (the `value.to_string()`
+//!   sites in `lexer/mod.rs`). This is the *upstream* allocation, distinct from
+//!   [`token_value_string_bytes`] (which counts the *output* copy): the C8 output
+//!   backend drove the output counter to 0 while the lexer kept allocating, so the
+//!   two must be separable to prove "the pipeline allocated no token strings" as a
+//!   counter result (C8.1 #582, ADR-0007). The span-emitting lexer path (`parse_span`)
+//!   builds value-less tokens and drives this to `0`; the default `parse()` /
+//!   `parse_into` owned path keeps it `> 0`. Gated in `tests/test_span_tree.rs`.
 //! * [`semantic_reduce_calls`] — one per `TreeOutputBuilder::assemble` call, i.e.
 //!   one per rule reduction the engine shapes into a value through `assemble`. The
 //!   LALR and CYK reducers (and the Earley *explicit* walk's `DerivsNext`) all route
@@ -152,6 +161,7 @@ mod imp {
     static PARSE_TABLE_ACTION_CELLS: AtomicU64 = AtomicU64::new(0);
     static TREE_NODES_BUILT: AtomicU64 = AtomicU64::new(0);
     static TOKEN_VALUE_STRING_BYTES: AtomicU64 = AtomicU64::new(0);
+    static LEXER_TOKEN_VALUE_BYTES: AtomicU64 = AtomicU64::new(0);
     static SEMANTIC_REDUCE_CALLS: AtomicU64 = AtomicU64::new(0);
     static LEO_DISABLED: AtomicBool = AtomicBool::new(false);
 
@@ -275,6 +285,16 @@ mod imp {
         TOKEN_VALUE_STRING_BYTES.fetch_add(n, Ordering::Relaxed);
     }
 
+    /// Count the byte length of one token value the **lexer** materializes into an
+    /// owned `Token.value: String` (the `value.to_string()` sites in `lexer/mod.rs`) —
+    /// the upstream allocation, distinct from the output copy `token_value_string_bytes`
+    /// counts (C8.1 #582). The span-emitting lexer path builds value-less tokens and
+    /// leaves this at `0`.
+    #[inline]
+    pub fn add_lexer_token_value_bytes(n: u64) {
+        LEXER_TOKEN_VALUE_BYTES.fetch_add(n, Ordering::Relaxed);
+    }
+
     /// Count one `TreeOutputBuilder::assemble` call — one rule reduction shaped into
     /// a value (semantic-output C5, #230). For a known **LALR/CYK** input this equals
     /// the parser's user-rule reduction count (the augmented `$root` accept does not
@@ -300,6 +320,7 @@ mod imp {
         PARSE_TABLE_ACTION_CELLS.store(0, Ordering::Relaxed);
         TREE_NODES_BUILT.store(0, Ordering::Relaxed);
         TOKEN_VALUE_STRING_BYTES.store(0, Ordering::Relaxed);
+        LEXER_TOKEN_VALUE_BYTES.store(0, Ordering::Relaxed);
         SEMANTIC_REDUCE_CALLS.store(0, Ordering::Relaxed);
     }
 
@@ -353,6 +374,10 @@ mod imp {
 
     pub fn token_value_string_bytes() -> u64 {
         TOKEN_VALUE_STRING_BYTES.load(Ordering::Relaxed)
+    }
+
+    pub fn lexer_token_value_bytes() -> u64 {
+        LEXER_TOKEN_VALUE_BYTES.load(Ordering::Relaxed)
     }
 
     pub fn semantic_reduce_calls() -> u64 {
@@ -419,6 +444,9 @@ mod imp {
     pub fn add_token_value_string_bytes(_n: u64) {}
 
     #[inline]
+    pub fn add_lexer_token_value_bytes(_n: u64) {}
+
+    #[inline]
     pub fn add_semantic_reduce_call() {}
 
     pub fn reset() {}
@@ -472,6 +500,10 @@ mod imp {
     }
 
     pub fn token_value_string_bytes() -> u64 {
+        0
+    }
+
+    pub fn lexer_token_value_bytes() -> u64 {
         0
     }
 

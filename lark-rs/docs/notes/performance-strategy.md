@@ -62,7 +62,8 @@ labels interned — eliminating the allocation half wholesale, behind a falsifia
 | C6 #231 | Public API shape decision | ✅ ADR-0029 |
 | **C5 #230** | **Deterministic output-shape perf counters** | ✅ landed (#576) |
 | **C7 #232** | **Public `parse_into<B>` surface** | ✅ landed (`f1a0b68`, PRs #579/#580) |
-| **C8 #233** | **Zero-tree `SpanTree<'i>` *output* backend** | ✅ landed — `Lark::parse_span` behind the experimental `span-tree` feature; projection gate (span materialize == tree `parse()`, incl. whole compliance bank + non-ASCII pin) + counters (`tree_nodes_built == 0`, `token_value_string_bytes == 0`, one `semantic_reduce_call`/reduction) green (`tests/test_span_tree.rs`). **Output half only** — the lexer still allocates `Token.value` upstream; that (C8.1 #582) is where the allocation win lands, and bounded child-buffer reuse (C8.2 #583) is split out |
+| **C8 #233** | **Zero-tree `SpanTree<'i>` *output* backend** | ✅ landed — `Lark::parse_span` behind the experimental `span-tree` feature; projection gate (span materialize == tree `parse()`, incl. whole compliance bank + non-ASCII pin) + counters (`tree_nodes_built == 0`, `token_value_string_bytes == 0`, one `semantic_reduce_call`/reduction) green (`tests/test_span_tree.rs`) |
+| **C8.1 #582** | **Span-emitting lexer path (no `Token.value` alloc)** | ✅ landed — `parse_span` drives a value-less token source (`make_span_source`, both lexers); new `lexer_token_value_bytes` counter gated to `0` on the span path, `> 0` on owned `parse()` (LEXER vs OUTPUT alloc separately falsifiable, ADR-0007). Relative oracle + non-ASCII pin stay green; default `parse()` byte-identical. This is where the headline ADR-0011 allocation win lands. Bounded child-buffer reuse (C8.2 #583) still split out |
 
 Deferred/gated correctly: C8b #242 (event stream) + C8c #243 (JSON tape) — each
 `needs-decision`, blocked on naming a real consumer; C9 #234 (standalone); C10 #244

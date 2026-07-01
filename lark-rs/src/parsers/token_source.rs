@@ -16,9 +16,18 @@
 
 use crate::error::ParseError;
 use crate::grammar::intern::SymbolId;
-use crate::lexer::{BasicLexer, ContextualLexer, LexerState};
+use crate::lexer::{BasicLexer, ContextualLexer, LexerState, TokenValueMode};
 use crate::postlex::{Indenter, IndenterStream};
 use crate::tree::Token;
+
+/// The number of characters a token spans (`end_pos - start_pos`, both char indices,
+/// #278). Used to advance the lexer cursor independently of `Token.value`, so a
+/// span-emitting (value-less) token advances the same distance an owned one would
+/// (C8.1 #582).
+#[inline]
+fn token_char_len(tok: &Token) -> usize {
+    tok.end_pos - tok.start_pos
+}
 
 /// The token source could not tokenize the input at the current position.
 ///
@@ -128,14 +137,29 @@ pub struct Contextual<'a> {
     lexer: &'a ContextualLexer,
     state: LexerState<'a>,
     current: Option<Token>,
+    /// Owned vs. span (value-less) token emission (C8.1 #582). `parse_span` uses
+    /// [`Self::new_span`] so the lexer allocates no owned `Token.value`.
+    mode: TokenValueMode,
 }
 
 impl<'a> Contextual<'a> {
     pub fn new(text: &'a str, lexer: &'a ContextualLexer) -> Self {
+        Contextual::with_mode(text, lexer, TokenValueMode::Owned)
+    }
+
+    /// A span-emitting contextual source (C8.1 #582): lexes value-less tokens so the
+    /// lexer allocates no owned `Token.value` on the `parse_span` path. Positions are
+    /// unchanged; the span builder recovers each value as an `&input` slice.
+    pub fn new_span(text: &'a str, lexer: &'a ContextualLexer) -> Self {
+        Contextual::with_mode(text, lexer, TokenValueMode::Span)
+    }
+
+    fn with_mode(text: &'a str, lexer: &'a ContextualLexer, mode: TokenValueMode) -> Self {
         Contextual {
             lexer,
             state: LexerState::new(text),
             current: None,
+            mode,
         }
     }
 
@@ -164,18 +188,31 @@ impl<'a> Contextual<'a> {
                     self.state.char_pos,
                 ));
             }
-            let matched = self.lexer.next_token(
-                self.state.text,
-                self.state.pos,
-                self.state.char_pos,
-                parser_state,
-                self.state.line,
-                self.state.col,
-            );
+            let matched = match self.mode {
+                TokenValueMode::Owned => self.lexer.next_token(
+                    self.state.text,
+                    self.state.pos,
+                    self.state.char_pos,
+                    parser_state,
+                    self.state.line,
+                    self.state.col,
+                ),
+                // Span (value-less) emission — no owned `Token.value` allocation.
+                TokenValueMode::Span => self.lexer.next_token_span(
+                    self.state.text,
+                    self.state.pos,
+                    self.state.char_pos,
+                    parser_state,
+                    self.state.line,
+                    self.state.col,
+                ),
+            };
             match matched {
                 // Ignored terminal (whitespace, comment): consume and keep going.
+                // Advance by the token's char span, not `value.len()` — a span token
+                // carries no value bytes (C8.1 #582).
                 Ok(Some(tok)) if self.lexer.is_ignored(tok.type_id) => {
-                    self.state.advance_by(tok.value.len());
+                    self.state.advance_by_chars(token_char_len(&tok));
                 }
                 Ok(Some(tok)) => return Ok(tok),
                 // No scanner for this state, or no terminal valid here: fall back to
@@ -221,7 +258,9 @@ impl<'a> TokenSource for Contextual<'a> {
 
     fn advance(&mut self) {
         if let Some(tok) = self.current.take() {
-            self.state.advance_by(tok.value.len());
+            // Advance by the token's char span (`end_pos - start_pos`), not
+            // `value.len()`: a span token (C8.1 #582) carries no value bytes.
+            self.state.advance_by_chars(token_char_len(&tok));
         }
     }
 }

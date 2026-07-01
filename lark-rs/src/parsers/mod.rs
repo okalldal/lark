@@ -186,6 +186,23 @@ pub(crate) trait LalrInto {
     /// The token source for `text` — the basic driver lexes eagerly, the contextual
     /// driver lazily (parser-state-narrowed), exactly as their `parse` paths do.
     fn make_source<'a>(&'a self, text: &'a str) -> Result<Box<dyn TokenSource + 'a>, ParseError>;
+
+    /// The **span-emitting** token source for `text` (C8.1 #582): identical token
+    /// stream to [`make_source`](Self::make_source) but with **value-less** tokens —
+    /// the lexer allocates no owned `Token.value: String`, so a span parse pays no
+    /// per-token lexer allocation (`crate::perf::lexer_token_value_bytes` stays 0).
+    /// Only `parse_span` drives this; `parse_into` with an owned builder keeps the
+    /// owned source. Default: the owned source (correct but not zero-alloc), so a
+    /// backend that forgets to override still parses.
+    // `parse_span` is the sole caller and is `span-tree`-gated; without the feature
+    // this method is (correctly) unused.
+    #[cfg_attr(not(feature = "span-tree"), allow(dead_code))]
+    fn make_span_source<'a>(
+        &'a self,
+        text: &'a str,
+    ) -> Result<Box<dyn TokenSource + 'a>, ParseError> {
+        self.make_source(text)
+    }
 }
 
 /// The typed refusal for `parse_into` on a configuration that doesn't support the
@@ -347,6 +364,15 @@ impl LalrInto for LalrBasic {
         // Eager whole-stream lex, exactly as `parse` does before driving the parser.
         Ok(Box::new(PreLexed::new(self.lexer.lex(text)?)))
     }
+
+    fn make_span_source<'a>(
+        &'a self,
+        text: &'a str,
+    ) -> Result<Box<dyn TokenSource + 'a>, ParseError> {
+        // Eager whole-stream lex into **value-less** tokens (C8.1 #582): same stream,
+        // no owned `Token.value` allocation.
+        Ok(Box::new(PreLexed::new(self.lexer.lex_span(text)?)))
+    }
 }
 
 /// LALR over the contextual lexer (the default): the parser state narrows which
@@ -418,6 +444,15 @@ impl LalrInto for LalrContextual {
         // Lazy, parser-state-narrowed lexing (no eager whole-stream lex), exactly as
         // `parse_contextual` drives it.
         Ok(Box::new(Contextual::new(text, &self.lexer)))
+    }
+
+    fn make_span_source<'a>(
+        &'a self,
+        text: &'a str,
+    ) -> Result<Box<dyn TokenSource + 'a>, ParseError> {
+        // Lazy contextual lexing into **value-less** tokens (C8.1 #582): same
+        // parser-state-narrowed stream, no owned `Token.value` allocation.
+        Ok(Box::new(Contextual::new_span(text, &self.lexer)))
     }
 }
 
@@ -680,7 +715,9 @@ impl ParsingFrontend {
         // `'g` (tied to the grammar) and outlive this local builder.
         let mut builder =
             span_tree::SpanTreeBuilder::new(&parser.table.rules, &parser.table.symbols);
-        let mut source = into.make_source(input).map_err(LarkError::Parse)?;
+        // The span-emitting source lexes value-less tokens (C8.1 #582): no owned
+        // `Token.value` allocation, so the whole span pipeline copies no token bytes.
+        let mut source = into.make_span_source(input).map_err(LarkError::Parse)?;
         parser
             .run_into(source.as_mut(), start, &mut builder, input)
             .map_err(LarkError::Parse)
